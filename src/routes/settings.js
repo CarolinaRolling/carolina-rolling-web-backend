@@ -546,3 +546,47 @@ async function sendScheduleEmail() {
 // Export the sendScheduleEmail function for cron job
 module.exports = router;
 module.exports.sendScheduleEmail = sendScheduleEmail;
+
+// GET /api/settings/:key - Get a general setting by key
+router.get('/:key', async (req, res, next) => {
+  try {
+    const setting = await AppSettings.findOne({
+      where: { key: req.params.key }
+    });
+
+    if (!setting) {
+      return res.status(404).json({ error: { message: 'Setting not found' } });
+    }
+
+    res.json({ data: setting });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// PUT /api/settings/:key - Update a general setting
+router.put('/:key', async (req, res, next) => {
+  try {
+    const { value } = req.body;
+
+    if (value === undefined) {
+      return res.status(400).json({ error: { message: 'Value is required' } });
+    }
+
+    const [setting, created] = await AppSettings.findOrCreate({
+      where: { key: req.params.key },
+      defaults: { value }
+    });
+
+    if (!created) {
+      await setting.update({ value });
+    }
+
+    res.json({ 
+      data: setting,
+      message: created ? 'Setting created' : 'Setting updated'
+    });
+  } catch (error) {
+    next(error);
+  }
+});

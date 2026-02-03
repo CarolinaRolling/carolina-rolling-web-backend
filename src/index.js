@@ -4,11 +4,17 @@ const cors = require('cors');
 const path = require('path');
 const cloudinary = require('cloudinary').v2;
 const cron = require('node-cron');
-const { sequelize, Shipment, ShipmentPhoto, ShipmentDocument, User, AppSettings } = require('./models');
+const { sequelize, Shipment, ShipmentPhoto, ShipmentDocument, User, AppSettings, WorkOrder } = require('./models');
 const shipmentRoutes = require('./routes/shipments');
 const settingsRoutes = require('./routes/settings');
 const { sendScheduleEmail } = require('./routes/settings');
 const inboundRoutes = require('./routes/inbound');
+const workordersRoutes = require('./routes/workorders');
+const estimatesRoutes = require('./routes/estimates');
+const backupRoutes = require('./routes/backup');
+const drNumbersRoutes = require('./routes/dr-numbers');
+const emailRoutes = require('./routes/email');
+const { sendDailyEmail } = require('./routes/email');
 const { router: authRoutes, initializeAdmin } = require('./routes/auth');
 const { Op } = require('sequelize');
 
@@ -51,6 +57,11 @@ app.use('/api/auth', authRoutes);
 app.use('/api/shipments', shipmentRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/inbound', inboundRoutes);
+app.use('/api/workorders', workordersRoutes);
+app.use('/api/estimates', estimatesRoutes);
+app.use('/api/backup', backupRoutes);
+app.use('/api/dr-numbers', drNumbersRoutes);
+app.use('/api/email', emailRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -178,6 +189,33 @@ async function startServer() {
     });
     
     console.log('Daily schedule email cron job configured for 6:00 AM Pacific');
+    
+    // NEW: Daily summary emails at 5:00 AM and 2:30 PM Eastern
+    cron.schedule('0 5 * * *', async () => {
+      console.log('Running 5:00 AM daily summary email...');
+      try {
+        const result = await sendDailyEmail();
+        console.log('5:00 AM daily summary result:', result);
+      } catch (error) {
+        console.error('Failed to send 5:00 AM daily summary:', error);
+      }
+    }, {
+      timezone: 'America/New_York'
+    });
+    
+    cron.schedule('30 14 * * *', async () => {
+      console.log('Running 2:30 PM daily summary email...');
+      try {
+        const result = await sendDailyEmail();
+        console.log('2:30 PM daily summary result:', result);
+      } catch (error) {
+        console.error('Failed to send 2:30 PM daily summary:', error);
+      }
+    }, {
+      timezone: 'America/New_York'
+    });
+    
+    console.log('Daily summary emails configured for 5:00 AM and 2:30 PM Eastern');
 
     app.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);

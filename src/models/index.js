@@ -315,7 +315,11 @@ const InboundOrder = sequelize.define('InboundOrder', {
   },
   supplierName: {
     type: DataTypes.STRING,
-    allowNull: false
+    allowNull: true
+  },
+  supplier: {
+    type: DataTypes.STRING,
+    allowNull: true
   },
   purchaseOrderNumber: {
     type: DataTypes.STRING,
@@ -328,9 +332,880 @@ const InboundOrder = sequelize.define('InboundOrder', {
   clientName: {
     type: DataTypes.STRING,
     allowNull: false
+  },
+  // Link to estimate if created from material order
+  estimateId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
+  estimateNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  expectedCost: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: true
+  },
+  status: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    defaultValue: 'pending'
+  },
+  notes: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  expectedDate: {
+    type: DataTypes.DATEONLY,
+    allowNull: true
+  },
+  receivedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
   }
 }, {
   tableName: 'inbound_orders',
+  timestamps: true
+});
+
+// WorkOrder Model - for client work orders with parts
+const WorkOrder = sequelize.define('WorkOrder', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  orderNumber: {
+    type: DataTypes.STRING,
+    unique: true,
+    allowNull: false
+  },
+  drNumber: {
+    type: DataTypes.INTEGER,
+    unique: true,
+    allowNull: true
+  },
+  clientName: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  clientPurchaseOrderNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  contactName: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  contactPhone: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  contactEmail: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  status: {
+    type: DataTypes.ENUM('draft', 'received', 'in_progress', 'completed', 'shipped', 'archived'),
+    defaultValue: 'draft'
+  },
+  notes: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  receivedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  receivedBy: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  requestedDueDate: {
+    type: DataTypes.DATEONLY,
+    allowNull: true
+  },
+  promisedDate: {
+    type: DataTypes.DATEONLY,
+    allowNull: true
+  },
+  completedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  shippedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  archivedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  pickedUpAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  pickedUpBy: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  signatureData: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  // Location for inventory tracking
+  storageLocation: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  // Pricing from estimate (only visible in web interface)
+  estimateId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: {
+      model: 'estimates',
+      key: 'id'
+    }
+  },
+  estimateNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  estimateTotal: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: true
+  },
+  // Material status tracking
+  allMaterialReceived: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  pendingInboundCount: {
+    type: DataTypes.INTEGER,
+    defaultValue: 0
+  }
+}, {
+  tableName: 'work_orders',
+  timestamps: true
+});
+
+// WorkOrderPart Model - individual parts within a work order
+const WorkOrderPart = sequelize.define('WorkOrderPart', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  workOrderId: {
+    type: DataTypes.UUID,
+    allowNull: false,
+    references: {
+      model: 'work_orders',
+      key: 'id'
+    }
+  },
+  partNumber: {
+    type: DataTypes.INTEGER,
+    allowNull: false
+  },
+  partType: {
+    type: DataTypes.ENUM('plate_roll', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'channel_roll', 'flat_bar', 'other'),
+    allowNull: false
+  },
+  clientPartNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  heatNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  quantity: {
+    type: DataTypes.INTEGER,
+    defaultValue: 1
+  },
+  // Dimensions
+  material: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  thickness: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  width: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  length: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  outerDiameter: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  innerDiameter: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  wallThickness: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  // Rolling specifications
+  rollType: {
+    type: DataTypes.ENUM('easy_way', 'hard_way'),
+    allowNull: true
+  },
+  radius: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  diameter: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  arcLength: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  arcDegrees: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  // Section-specific
+  sectionSize: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  flangeOut: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  // Status
+  status: {
+    type: DataTypes.ENUM('pending', 'in_progress', 'completed'),
+    defaultValue: 'pending'
+  },
+  completedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  completedBy: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  // Notes and special instructions
+  specialInstructions: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  operatorNotes: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  // Material tracking
+  materialSource: {
+    type: DataTypes.STRING,
+    defaultValue: 'we_order'
+  },
+  materialReceived: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  materialReceivedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  awaitingInboundId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
+  awaitingPONumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  supplierName: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  materialDescription: {
+    type: DataTypes.STRING,
+    allowNull: true
+  }
+}, {
+  tableName: 'work_order_parts',
+  timestamps: true
+});
+
+// WorkOrderPartFile Model - files attached to parts (PDFs, STEP files)
+const WorkOrderPartFile = sequelize.define('WorkOrderPartFile', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  workOrderPartId: {
+    type: DataTypes.UUID,
+    allowNull: false,
+    references: {
+      model: 'work_order_parts',
+      key: 'id'
+    }
+  },
+  fileType: {
+    type: DataTypes.ENUM('pdf_print', 'step_file', 'other'),
+    allowNull: false
+  },
+  filename: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  originalName: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  mimeType: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  size: {
+    type: DataTypes.INTEGER,
+    allowNull: true
+  },
+  url: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  cloudinaryId: {
+    type: DataTypes.STRING,
+    allowNull: true
+  }
+}, {
+  tableName: 'work_order_part_files',
+  timestamps: true
+});
+
+// WorkOrder associations
+WorkOrder.hasMany(WorkOrderPart, {
+  foreignKey: 'workOrderId',
+  as: 'parts',
+  onDelete: 'CASCADE'
+});
+WorkOrderPart.belongsTo(WorkOrder, {
+  foreignKey: 'workOrderId',
+  as: 'workOrder'
+});
+
+// WorkOrderPart file associations
+WorkOrderPart.hasMany(WorkOrderPartFile, {
+  foreignKey: 'workOrderPartId',
+  as: 'files',
+  onDelete: 'CASCADE'
+});
+WorkOrderPartFile.belongsTo(WorkOrderPart, {
+  foreignKey: 'workOrderPartId',
+  as: 'part'
+});
+
+// Estimate Model - for client estimates/quotes
+const Estimate = sequelize.define('Estimate', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  estimateNumber: {
+    type: DataTypes.STRING,
+    unique: true,
+    allowNull: false
+  },
+  clientName: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  contactName: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  contactEmail: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  contactPhone: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  projectDescription: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  status: {
+    type: DataTypes.ENUM('draft', 'sent', 'accepted', 'declined', 'archived'),
+    defaultValue: 'draft'
+  },
+  // Trucking (estimate-level, not per part)
+  truckingDescription: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  truckingCost: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0
+  },
+  // Totals
+  partsSubtotal: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0
+  },
+  taxRate: {
+    type: DataTypes.DECIMAL(5, 2),
+    defaultValue: 7.0
+  },
+  taxAmount: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0
+  },
+  grandTotal: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0
+  },
+  // Custom tax
+  useCustomTax: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  customTaxReason: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  // Tax exempt (resale certificate)
+  taxExempt: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  taxExemptReason: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  taxExemptCertNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  // Notes
+  notes: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  internalNotes: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  // Dates
+  validUntil: {
+    type: DataTypes.DATEONLY,
+    allowNull: true
+  },
+  sentAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  acceptedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  archivedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  // Link to work order if converted
+  workOrderId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: {
+      model: 'work_orders',
+      key: 'id'
+    }
+  },
+  drNumber: {
+    type: DataTypes.INTEGER,
+    allowNull: true
+  },
+  // Track if all materials are customer supplied
+  allCustomerSupplied: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  }
+}, {
+  tableName: 'estimates',
+  timestamps: true
+});
+
+// EstimatePart Model - parts within an estimate (replaces EstimateLineItem)
+const EstimatePart = sequelize.define('EstimatePart', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  estimateId: {
+    type: DataTypes.UUID,
+    allowNull: false,
+    references: {
+      model: 'estimates',
+      key: 'id'
+    }
+  },
+  partNumber: {
+    type: DataTypes.INTEGER,
+    allowNull: false
+  },
+  partType: {
+    type: DataTypes.ENUM('plate_roll', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'channel_roll', 'flat_bar', 'other'),
+    allowNull: false
+  },
+  clientPartNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  heatNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  quantity: {
+    type: DataTypes.INTEGER,
+    defaultValue: 1
+  },
+  // Material info
+  materialDescription: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  supplierName: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  materialUnitCost: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0
+  },
+  materialMarkupPercent: {
+    type: DataTypes.DECIMAL(5, 2),
+    defaultValue: 20
+  },
+  materialTotal: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0
+  },
+  // Service costs
+  rollingCost: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0
+  },
+  otherServicesCost: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0
+  },
+  otherServicesMarkupPercent: {
+    type: DataTypes.DECIMAL(5, 2),
+    defaultValue: 15
+  },
+  otherServicesTotal: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0
+  },
+  // Part total
+  partTotal: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0
+  },
+  // Rolling specifications
+  material: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  thickness: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  width: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  length: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  outerDiameter: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  wallThickness: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  sectionSize: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  rollType: {
+    type: DataTypes.ENUM('easy_way', 'hard_way'),
+    allowNull: true
+  },
+  radius: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  diameter: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  arcDegrees: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  flangeOut: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  specialInstructions: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  // Material ordering tracking
+  materialOrdered: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  materialPurchaseOrderNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  materialOrderedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  // Material source - we order vs customer supplied
+  materialSource: {
+    type: DataTypes.ENUM('we_order', 'customer_supplied'),
+    defaultValue: 'we_order'
+  },
+  materialReceived: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  materialReceivedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  inboundOrderId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  }
+}, {
+  tableName: 'estimate_parts',
+  timestamps: true
+});
+
+// EstimateFile Model - files attached to estimates (DXF, STEP, PDF)
+const EstimateFile = sequelize.define('EstimateFile', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  estimateId: {
+    type: DataTypes.UUID,
+    allowNull: false,
+    references: {
+      model: 'estimates',
+      key: 'id'
+    }
+  },
+  filename: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  originalName: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  mimeType: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  size: {
+    type: DataTypes.INTEGER,
+    allowNull: true
+  },
+  url: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  cloudinaryId: {
+    type: DataTypes.STRING,
+    allowNull: true
+  }
+}, {
+  tableName: 'estimate_files',
+  timestamps: true
+});
+
+// Estimate associations
+Estimate.hasMany(EstimatePart, {
+  foreignKey: 'estimateId',
+  as: 'parts',
+  onDelete: 'CASCADE'
+});
+EstimatePart.belongsTo(Estimate, {
+  foreignKey: 'estimateId',
+  as: 'estimate'
+});
+
+Estimate.hasMany(EstimateFile, {
+  foreignKey: 'estimateId',
+  as: 'files',
+  onDelete: 'CASCADE'
+});
+EstimateFile.belongsTo(Estimate, {
+  foreignKey: 'estimateId',
+  as: 'estimate'
+});
+
+Estimate.belongsTo(WorkOrder, {
+  foreignKey: 'workOrderId',
+  as: 'workOrder'
+});
+
+// DR Number Model - tracks delivery receipt numbers
+const DRNumber = sequelize.define('DRNumber', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  drNumber: {
+    type: DataTypes.INTEGER,
+    unique: true,
+    allowNull: false
+  },
+  status: {
+    type: DataTypes.ENUM('active', 'void'),
+    defaultValue: 'active'
+  },
+  workOrderId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'work_orders', key: 'id' }
+  },
+  estimateId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'estimates', key: 'id' }
+  },
+  clientName: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  voidedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  voidedBy: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  voidReason: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  }
+}, {
+  tableName: 'dr_numbers',
+  timestamps: true
+});
+
+// Email Log Model
+const EmailLog = sequelize.define('EmailLog', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  emailType: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  recipient: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  subject: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  content: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  sentAt: {
+    type: DataTypes.DATE,
+    allowNull: false
+  },
+  status: {
+    type: DataTypes.STRING,
+    defaultValue: 'sent'
+  }
+}, {
+  tableName: 'email_logs',
+  timestamps: true
+});
+
+// Daily Activity Model - for tracking changes for daily email summaries
+const DailyActivity = sequelize.define('DailyActivity', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  activityType: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  resourceType: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  resourceId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
+  resourceNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  clientName: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  description: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  details: {
+    type: DataTypes.JSONB,
+    allowNull: true
+  },
+  includedInEmail: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  emailSentAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  }
+}, {
+  tableName: 'daily_activities',
   timestamps: true
 });
 
@@ -342,5 +1217,14 @@ module.exports = {
   ShipmentPhoto,
   ShipmentDocument,
   AppSettings,
-  InboundOrder
+  InboundOrder,
+  WorkOrder,
+  WorkOrderPart,
+  WorkOrderPartFile,
+  Estimate,
+  EstimatePart,
+  EstimateFile,
+  DRNumber,
+  EmailLog,
+  DailyActivity
 };

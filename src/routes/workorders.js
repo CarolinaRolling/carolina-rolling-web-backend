@@ -357,6 +357,13 @@ router.put('/:id', async (req, res, next) => {
 
     // Helper to check if value was provided (including empty string)
     const getValue = (newVal, oldVal) => newVal !== undefined ? newVal : oldVal;
+    
+    // Helper for date fields - convert empty string to null
+    const getDateValue = (newVal, oldVal) => {
+      if (newVal === undefined) return oldVal;
+      if (newVal === '' || newVal === null) return null;
+      return newVal;
+    };
 
     // Handle status transitions
     const updates = {
@@ -369,8 +376,8 @@ router.put('/:id', async (req, res, next) => {
       contactEmail: getValue(contactEmail, workOrder.contactEmail),
       notes: getValue(notes, workOrder.notes),
       receivedBy: getValue(receivedBy, workOrder.receivedBy),
-      requestedDueDate: getValue(requestedDueDate, workOrder.requestedDueDate),
-      promisedDate: getValue(promisedDate, workOrder.promisedDate)
+      requestedDueDate: getDateValue(requestedDueDate, workOrder.requestedDueDate),
+      promisedDate: getDateValue(promisedDate, workOrder.promisedDate)
     };
 
     if (status) {
@@ -1152,3 +1159,4 @@ router.delete('/:id/documents/:documentId', async (req, res, next) => {
 });
 
 module.exports = router;
+

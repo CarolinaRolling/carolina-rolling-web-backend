@@ -1159,4 +1159,3 @@ router.delete('/:id/documents/:documentId', async (req, res, next) => {
 });
 
 module.exports = router;
-

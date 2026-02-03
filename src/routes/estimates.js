@@ -5,7 +5,7 @@ const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const cloudinary = require('cloudinary').v2;
 const { Op } = require('sequelize');
-const { Estimate, EstimatePart, EstimateFile, WorkOrder, WorkOrderPart, InboundOrder, AppSettings, DRNumber, DailyActivity, sequelize } = require('../models');
+const { Estimate, EstimatePart, EstimatePartFile, EstimateFile, WorkOrder, WorkOrderPart, WorkOrderPartFile, InboundOrder, AppSettings, DRNumber, DailyActivity, sequelize } = require('../models');
 
 const router = express.Router();
 
@@ -163,7 +163,12 @@ router.get('/:id', async (req, res, next) => {
   try {
     const estimate = await Estimate.findByPk(req.params.id, {
       include: [
-        { model: EstimatePart, as: 'parts', order: [['partNumber', 'ASC']] },
+        { 
+          model: EstimatePart, 
+          as: 'parts', 
+          order: [['partNumber', 'ASC']],
+          include: [{ model: EstimatePartFile, as: 'files' }]
+        },
         { model: EstimateFile, as: 'files' }
       ]
     });
@@ -339,13 +344,22 @@ router.delete('/:id', async (req, res, next) => {
 
 // ============= PARTS =============
 
+// Helper to convert empty strings to null for numeric fields
+const cleanNumericFields = (data) => {
+  const numericFields = ['materialUnitCost', 'materialMarkupPercent', 'materialTotal', 
+    'rollingCost', 'otherServicesCost', 'otherServicesMarkupPercent', 'otherServicesTotal', 'partTotal'];
+  const cleaned = { ...data };
+  numericFields.forEach(field => {
+    if (cleaned[field] === '' || cleaned[field] === null || cleaned[field] === undefined) {
+      cleaned[field] = 0;
+    }
+  });
+  return cleaned;
+};
+
 // POST /api/estimates/:id/parts - Add part
 router.post('/:id/parts', async (req, res, next) => {
   try {
-    console.log('=== ADD PART REQUEST ===');
-    console.log('Estimate ID:', req.params.id);
-    console.log('Body:', JSON.stringify(req.body, null, 2));
-    
     const estimate = await Estimate.findByPk(req.params.id);
 
     if (!estimate) {
@@ -354,20 +368,17 @@ router.post('/:id/parts', async (req, res, next) => {
 
     const existingParts = await EstimatePart.count({ where: { estimateId: estimate.id } });
     
-    const partData = {
+    const partData = cleanNumericFields({
       estimateId: estimate.id,
       partNumber: existingParts + 1,
       ...req.body
-    };
+    });
 
     // Calculate part totals
     const totals = calculatePartTotals(partData);
     Object.assign(partData, totals);
-
-    console.log('Creating part with data:', JSON.stringify(partData, null, 2));
     
     const part = await EstimatePart.create(partData);
-    console.log('Part created:', part.id);
 
     // Recalculate estimate totals
     const allParts = await EstimatePart.findAll({ where: { estimateId: estimate.id } });
@@ -379,9 +390,6 @@ router.post('/:id/parts', async (req, res, next) => {
       message: 'Part added'
     });
   } catch (error) {
-    console.log('=== ADD PART ERROR ===');
-    console.log('Error:', error.message);
-    if (error.parent) console.log('DB Error:', error.parent.message);
     next(error);
   }
 });
@@ -397,7 +405,7 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Part not found' } });
     }
 
-    const updates = { ...req.body };
+    const updates = cleanNumericFields({ ...req.body });
     
     // Calculate part totals
     const mergedPart = { ...part.toJSON(), ...updates };
@@ -452,6 +460,105 @@ router.delete('/:id/parts/:partId', async (req, res, next) => {
     await estimate.update(estimateTotals);
 
     res.json({ message: 'Part deleted' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ============= PART FILES =============
+
+// GET /api/estimates/:id/parts/:partId/files - Get files for a specific part
+router.get('/:id/parts/:partId/files', async (req, res, next) => {
+  try {
+    const part = await EstimatePart.findOne({
+      where: { id: req.params.partId, estimateId: req.params.id }
+    });
+
+    if (!part) {
+      return res.status(404).json({ error: { message: 'Part not found' } });
+    }
+
+    const files = await EstimatePartFile.findAll({
+      where: { partId: part.id },
+      order: [['createdAt', 'DESC']]
+    });
+
+    res.json({ data: files });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/estimates/:id/parts/:partId/files - Upload file to a specific part
+router.post('/:id/parts/:partId/files', upload.single('file'), async (req, res, next) => {
+  try {
+    const part = await EstimatePart.findOne({
+      where: { id: req.params.partId, estimateId: req.params.id }
+    });
+
+    if (!part) {
+      return res.status(404).json({ error: { message: 'Part not found' } });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ error: { message: 'No file uploaded' } });
+    }
+
+    // Upload to Cloudinary
+    const result = await cloudinary.uploader.upload(req.file.path, {
+      folder: 'estimate-part-files',
+      resource_type: 'auto'
+    });
+
+    // Clean up local file
+    fs.unlinkSync(req.file.path);
+
+    // Determine file type from request or default to 'other'
+    const fileType = req.body.fileType || 'other';
+
+    // Create file record
+    const partFile = await EstimatePartFile.create({
+      partId: part.id,
+      filename: req.file.filename,
+      originalName: req.file.originalname,
+      mimeType: req.file.mimetype,
+      size: req.file.size,
+      url: result.secure_url,
+      cloudinaryId: result.public_id,
+      fileType: fileType
+    });
+
+    res.status(201).json({
+      data: partFile,
+      message: 'File uploaded'
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// DELETE /api/estimates/:id/parts/:partId/files/:fileId - Delete a part file
+router.delete('/:id/parts/:partId/files/:fileId', async (req, res, next) => {
+  try {
+    const file = await EstimatePartFile.findOne({
+      where: { id: req.params.fileId, partId: req.params.partId }
+    });
+
+    if (!file) {
+      return res.status(404).json({ error: { message: 'File not found' } });
+    }
+
+    // Delete from Cloudinary
+    if (file.cloudinaryId) {
+      try {
+        await cloudinary.uploader.destroy(file.cloudinaryId);
+      } catch (err) {
+        console.error('Failed to delete from Cloudinary:', err);
+      }
+    }
+
+    await file.destroy();
+    res.json({ message: 'File deleted' });
   } catch (error) {
     next(error);
   }
@@ -1311,6 +1418,203 @@ router.get('/:id/pdf', async (req, res, next) => {
 
   } catch (error) {
     console.error('PDF generation error:', error);
+    next(error);
+  }
+});
+
+// ============= CONVERT TO WORK ORDER =============
+
+// POST /api/estimates/:id/convert-to-workorder - Convert estimate to work order
+router.post('/:id/convert-to-workorder', async (req, res, next) => {
+  const transaction = await sequelize.transaction();
+  
+  try {
+    const estimate = await Estimate.findByPk(req.params.id, {
+      include: [
+        { model: EstimatePart, as: 'parts', include: [{ model: EstimatePartFile, as: 'files' }] },
+        { model: EstimateFile, as: 'files' }
+      ]
+    });
+
+    if (!estimate) {
+      await transaction.rollback();
+      return res.status(404).json({ error: { message: 'Estimate not found' } });
+    }
+
+    if (estimate.status === 'converted') {
+      await transaction.rollback();
+      return res.status(400).json({ error: { message: 'Estimate has already been converted to a work order' } });
+    }
+
+    const { clientPurchaseOrderNumber, requestedDueDate, promisedDate, notes } = req.body;
+
+    // Get next DR number
+    const maxDR = await DRNumber.max('drNumber') || 2950;
+    const nextDRNumber = maxDR + 1;
+
+    // Create DR number record
+    const drRecord = await DRNumber.create({
+      drNumber: nextDRNumber,
+      status: 'active'
+    }, { transaction });
+
+    // Create work order from estimate
+    const workOrder = await WorkOrder.create({
+      drNumber: nextDRNumber,
+      clientName: estimate.clientName,
+      contactName: estimate.contactName,
+      contactPhone: estimate.contactPhone,
+      contactEmail: estimate.contactEmail,
+      clientPurchaseOrderNumber: clientPurchaseOrderNumber || null,
+      notes: notes || estimate.notes,
+      status: 'draft',
+      estimateId: estimate.id,
+      estimateNumber: estimate.estimateNumber,
+      estimateTotal: estimate.grandTotal,
+      requestedDueDate: requestedDueDate || null,
+      promisedDate: promisedDate || null
+    }, { transaction });
+
+    // Update DR record with work order ID
+    await drRecord.update({ workOrderId: workOrder.id }, { transaction });
+
+    // Track parts that need material ordered
+    const partsNeedingMaterial = [];
+
+    // Create work order parts from estimate parts
+    for (const estimatePart of estimate.parts) {
+      const workOrderPart = await WorkOrderPart.create({
+        workOrderId: workOrder.id,
+        partNumber: estimatePart.partNumber,
+        partType: estimatePart.partType,
+        clientPartNumber: estimatePart.clientPartNumber,
+        heatNumber: estimatePart.heatNumber,
+        quantity: estimatePart.quantity,
+        materialDescription: estimatePart.materialDescription,
+        material: estimatePart.material,
+        thickness: estimatePart.thickness,
+        width: estimatePart.width,
+        length: estimatePart.length,
+        outerDiameter: estimatePart.outerDiameter,
+        wallThickness: estimatePart.wallThickness,
+        sectionSize: estimatePart.sectionSize,
+        rollType: estimatePart.rollType,
+        radius: estimatePart.radius,
+        diameter: estimatePart.diameter,
+        arcDegrees: estimatePart.arcDegrees,
+        flangeOut: estimatePart.flangeOut,
+        specialInstructions: estimatePart.specialInstructions,
+        status: 'pending',
+        // Track which estimate part this came from
+        estimatePartId: estimatePart.id
+      }, { transaction });
+
+      // Copy part files to work order part files
+      if (estimatePart.files && estimatePart.files.length > 0) {
+        for (const file of estimatePart.files) {
+          await WorkOrderPartFile.create({
+            partId: workOrderPart.id,
+            filename: file.filename,
+            originalName: file.originalName,
+            mimeType: file.mimeType,
+            size: file.size,
+            url: file.url,
+            cloudinaryId: file.cloudinaryId,
+            fileType: file.fileType
+          }, { transaction });
+        }
+      }
+
+      // Track parts that need material ordered (We Order)
+      if (estimatePart.materialSource === 'we_order' && !estimatePart.materialOrdered) {
+        partsNeedingMaterial.push({
+          estimatePart,
+          workOrderPart
+        });
+      }
+    }
+
+    // Create inbound orders for parts needing material
+    const createdInboundOrders = [];
+    
+    if (partsNeedingMaterial.length > 0) {
+      // Group by supplier
+      const supplierGroups = {};
+      partsNeedingMaterial.forEach(({ estimatePart, workOrderPart }) => {
+        const supplier = estimatePart.supplierName || 'Unknown Supplier';
+        if (!supplierGroups[supplier]) {
+          supplierGroups[supplier] = [];
+        }
+        supplierGroups[supplier].push({ estimatePart, workOrderPart });
+      });
+
+      const suppliers = Object.keys(supplierGroups).sort();
+
+      for (const supplier of suppliers) {
+        const parts = supplierGroups[supplier];
+        
+        // Build description from parts
+        const materialDescriptions = parts.map(({ estimatePart }) => 
+          `Part ${estimatePart.partNumber}: ${estimatePart.materialDescription || estimatePart.partType} (Qty: ${estimatePart.quantity})`
+        ).join('\n');
+
+        // Create inbound order
+        const inboundOrder = await InboundOrder.create({
+          supplier: supplier,
+          materialDescription: materialDescriptions,
+          expectedDate: null,
+          poNumber: null, // Can be filled in later
+          status: 'pending',
+          workOrderId: workOrder.id,
+          notes: `Material for ${estimate.clientName} - DR#${nextDRNumber}\nEstimate: ${estimate.estimateNumber}`
+        }, { transaction });
+
+        createdInboundOrders.push(inboundOrder);
+
+        // Update estimate parts to mark as ordered and link to inbound order
+        for (const { estimatePart, workOrderPart } of parts) {
+          await estimatePart.update({
+            inboundOrderId: inboundOrder.id
+          }, { transaction });
+        }
+      }
+    }
+
+    // Update estimate status
+    await estimate.update({
+      status: 'converted',
+      workOrderId: workOrder.id
+    }, { transaction });
+
+    await transaction.commit();
+
+    // Log activity
+    await logActivity(
+      'created',
+      'work_order',
+      workOrder.id,
+      `DR-${nextDRNumber}`,
+      estimate.clientName,
+      `Work order created from estimate ${estimate.estimateNumber}`,
+      { estimateNumber: estimate.estimateNumber, partsCount: estimate.parts.length }
+    );
+
+    // Fetch complete work order
+    const completeWorkOrder = await WorkOrder.findByPk(workOrder.id, {
+      include: [{ model: WorkOrderPart, as: 'parts' }]
+    });
+
+    res.status(201).json({
+      data: {
+        workOrder: completeWorkOrder,
+        inboundOrders: createdInboundOrders
+      },
+      message: `Work order DR-${nextDRNumber} created successfully` + 
+        (createdInboundOrders.length > 0 ? `. ${createdInboundOrders.length} inbound order(s) created for material.` : '')
+    });
+  } catch (error) {
+    await transaction.rollback();
+    console.error('Convert to work order error:', error);
     next(error);
   }
 });

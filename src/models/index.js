@@ -1079,6 +1079,54 @@ const EstimatePart = sequelize.define('EstimatePart', {
   timestamps: true
 });
 
+// EstimatePartFile Model - files attached to specific parts (drawings, prints, PDFs)
+const EstimatePartFile = sequelize.define('EstimatePartFile', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  partId: {
+    type: DataTypes.UUID,
+    allowNull: false,
+    references: {
+      model: 'estimate_parts',
+      key: 'id'
+    }
+  },
+  filename: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  originalName: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  mimeType: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  size: {
+    type: DataTypes.INTEGER,
+    allowNull: true
+  },
+  url: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  cloudinaryId: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  fileType: {
+    type: DataTypes.ENUM('drawing', 'print', 'specification', 'other'),
+    defaultValue: 'other'
+  }
+}, {
+  tableName: 'estimate_part_files',
+  timestamps: true
+});
+
 // EstimateFile Model - files attached to estimates (DXF, STEP, PDF)
 const EstimateFile = sequelize.define('EstimateFile', {
   id: {
@@ -1147,6 +1195,17 @@ EstimateFile.belongsTo(Estimate, {
 Estimate.belongsTo(WorkOrder, {
   foreignKey: 'workOrderId',
   as: 'workOrder'
+});
+
+// EstimatePartFile associations
+EstimatePart.hasMany(EstimatePartFile, {
+  foreignKey: 'partId',
+  as: 'files',
+  onDelete: 'CASCADE'
+});
+EstimatePartFile.belongsTo(EstimatePart, {
+  foreignKey: 'partId',
+  as: 'part'
 });
 
 // DR Number Model - tracks delivery receipt numbers
@@ -1295,6 +1354,7 @@ module.exports = {
   WorkOrderDocument,
   Estimate,
   EstimatePart,
+  EstimatePartFile,
   EstimateFile,
   DRNumber,
   EmailLog,

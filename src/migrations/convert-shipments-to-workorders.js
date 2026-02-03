@@ -102,7 +102,7 @@ async function migrate() {
         partType: 'other',
         quantity: shipment.quantity || 1,
         materialDescription: shipment.description || 'Converted from shipment',
-        clientPartNumber: shipment.partNumbers || null,
+        clientPartNumber: Array.isArray(shipment.partNumbers) ? shipment.partNumbers.join(', ') : (shipment.partNumbers || null),
         materialReceived: true,
         status: woStatus === 'completed' ? 'completed' : 'in_progress'
       });
@@ -136,4 +136,3 @@ migrate()
     console.error('Migration failed:', error);
     process.exit(1);
   });
-

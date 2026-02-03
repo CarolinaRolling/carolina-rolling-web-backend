@@ -153,26 +153,6 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-// GET /api/shipments/:id - Get shipment by ID
-router.get('/:id', async (req, res, next) => {
-  try {
-    const shipment = await Shipment.findByPk(req.params.id, {
-      include: [
-        { model: ShipmentPhoto, as: 'photos' },
-        { model: ShipmentDocument, as: 'documents' }
-      ]
-    });
-
-    if (!shipment) {
-      return res.status(404).json({ error: { message: 'Shipment not found' } });
-    }
-
-    res.json({ data: transformShipment(shipment) });
-  } catch (error) {
-    next(error);
-  }
-});
-
 // GET /api/shipments/qr/:qrCode - Get shipment by QR code
 router.get('/qr/:qrCode', async (req, res, next) => {
   try {
@@ -207,6 +187,26 @@ router.get('/workorder/:workOrderId', async (req, res, next) => {
 
     if (!shipment) {
       return res.status(404).json({ error: { message: 'No shipment found for this work order' } });
+    }
+
+    res.json({ data: transformShipment(shipment) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/shipments/:id - Get shipment by ID (must be AFTER specific routes)
+router.get('/:id', async (req, res, next) => {
+  try {
+    const shipment = await Shipment.findByPk(req.params.id, {
+      include: [
+        { model: ShipmentPhoto, as: 'photos' },
+        { model: ShipmentDocument, as: 'documents' }
+      ]
+    });
+
+    if (!shipment) {
+      return res.status(404).json({ error: { message: 'Shipment not found' } });
     }
 
     res.json({ data: transformShipment(shipment) });

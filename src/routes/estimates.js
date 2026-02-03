@@ -181,9 +181,6 @@ router.get('/:id', async (req, res, next) => {
 // POST /api/estimates - Create new estimate
 router.post('/', async (req, res, next) => {
   try {
-    console.log('Received part data:', JSON.stringify(req.body, null, 2));  // ADD THIS LINE
-    
-    const estimate = await Estimate.findByPk(req.params.id);
     const {
       clientName,
       contactName,

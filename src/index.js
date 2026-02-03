@@ -13,6 +13,7 @@ const workordersRoutes = require('./routes/workorders');
 const estimatesRoutes = require('./routes/estimates');
 const backupRoutes = require('./routes/backup');
 const drNumbersRoutes = require('./routes/dr-numbers');
+const poNumbersRoutes = require('./routes/po-numbers');
 const emailRoutes = require('./routes/email');
 const { sendDailyEmail } = require('./routes/email');
 const { router: authRoutes, initializeAdmin } = require('./routes/auth');
@@ -61,6 +62,7 @@ app.use('/api/workorders', workordersRoutes);
 app.use('/api/estimates', estimatesRoutes);
 app.use('/api/backup', backupRoutes);
 app.use('/api/dr-numbers', drNumbersRoutes);
+app.use('/api/po-numbers', poNumbersRoutes);
 app.use('/api/email', emailRoutes);
 
 // Error handling middleware

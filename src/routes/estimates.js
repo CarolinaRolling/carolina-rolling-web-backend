@@ -5,7 +5,7 @@ const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const cloudinary = require('cloudinary').v2;
 const { Op } = require('sequelize');
-const { Estimate, EstimatePart, EstimatePartFile, EstimateFile, WorkOrder, WorkOrderPart, WorkOrderPartFile, InboundOrder, AppSettings, DRNumber, DailyActivity, sequelize } = require('../models');
+const { Estimate, EstimatePart, EstimatePartFile, EstimateFile, WorkOrder, WorkOrderPart, WorkOrderPartFile, InboundOrder, AppSettings, DRNumber, PONumber, DailyActivity, sequelize } = require('../models');
 
 const router = express.Router();
 
@@ -1446,7 +1446,7 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
       return res.status(400).json({ error: { message: 'Estimate has already been converted to a work order' } });
     }
 
-    const { clientPurchaseOrderNumber, requestedDueDate, promisedDate, notes } = req.body;
+    const { clientPurchaseOrderNumber, requestedDueDate, promisedDate, notes, supplierPOs } = req.body;
 
     // Get next DR number
     const maxDR = await DRNumber.max('drNumber') || 2950;
@@ -1458,8 +1458,17 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
       status: 'active'
     }, { transaction });
 
+    // Generate order number
+    const date = new Date();
+    const year = date.getFullYear().toString().slice(-2);
+    const month = (date.getMonth() + 1).toString().padStart(2, '0');
+    const day = date.getDate().toString().padStart(2, '0');
+    const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+    const orderNumber = `WO-${year}${month}${day}-${random}`;
+
     // Create work order from estimate
     const workOrder = await WorkOrder.create({
+      orderNumber,
       drNumber: nextDRNumber,
       clientName: estimate.clientName,
       contactName: estimate.contactName,
@@ -1558,18 +1567,52 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
           `Part ${estimatePart.partNumber}: ${estimatePart.materialDescription || estimatePart.partType} (Qty: ${estimatePart.quantity})`
         ).join('\n');
 
+        // Get PO number for this supplier
+        const poNumber = supplierPOs?.[supplier];
+        let poNumberFormatted = null;
+        
+        // Create PO number record if provided
+        if (poNumber) {
+          await PONumber.create({
+            poNumber: poNumber,
+            status: 'active',
+            supplier: supplier,
+            workOrderId: workOrder.id,
+            estimateId: estimate.id,
+            clientName: estimate.clientName,
+            description: materialDescriptions
+          }, { transaction });
+          
+          poNumberFormatted = `PO${poNumber}`;
+          
+          // Update next PO number setting
+          const nextPO = Math.max(...Object.values(supplierPOs)) + 1;
+          await AppSettings.upsert({
+            key: 'next_po_number',
+            value: { nextNumber: nextPO }
+          }, { transaction });
+        }
+
         // Create inbound order
         const inboundOrder = await InboundOrder.create({
           supplier: supplier,
           materialDescription: materialDescriptions,
           expectedDate: null,
-          poNumber: null, // Can be filled in later
+          poNumber: poNumberFormatted,
           status: 'pending',
           workOrderId: workOrder.id,
           notes: `Material for ${estimate.clientName} - DR#${nextDRNumber}\nEstimate: ${estimate.estimateNumber}`
         }, { transaction });
 
         createdInboundOrders.push(inboundOrder);
+
+        // Update PO record with inbound order ID
+        if (poNumber) {
+          await PONumber.update(
+            { inboundOrderId: inboundOrder.id },
+            { where: { poNumber: poNumber }, transaction }
+          );
+        }
 
         // Update estimate parts to mark as ordered and link to inbound order
         for (const { estimatePart, workOrderPart } of parts) {

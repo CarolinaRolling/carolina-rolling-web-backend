@@ -1255,6 +1255,66 @@ const DRNumber = sequelize.define('DRNumber', {
   timestamps: true
 });
 
+// PO Number Model - tracks purchase order numbers for material ordering
+const PONumber = sequelize.define('PONumber', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  poNumber: {
+    type: DataTypes.INTEGER,
+    unique: true,
+    allowNull: false
+  },
+  status: {
+    type: DataTypes.ENUM('active', 'void'),
+    defaultValue: 'active'
+  },
+  supplier: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  workOrderId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'work_orders', key: 'id' }
+  },
+  estimateId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'estimates', key: 'id' }
+  },
+  inboundOrderId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'inbound_orders', key: 'id' }
+  },
+  clientName: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  description: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  voidedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  voidedBy: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  voidReason: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  }
+}, {
+  tableName: 'po_numbers',
+  timestamps: true
+});
+
 // Email Log Model
 const EmailLog = sequelize.define('EmailLog', {
   id: {
@@ -1357,6 +1417,7 @@ module.exports = {
   EstimatePartFile,
   EstimateFile,
   DRNumber,
+  PONumber,
   EmailLog,
   DailyActivity
 };

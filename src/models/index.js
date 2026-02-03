@@ -695,6 +695,54 @@ const WorkOrderPartFile = sequelize.define('WorkOrderPartFile', {
   timestamps: true
 });
 
+// WorkOrderDocument Model - for order-level documents (POs, supplier docs, etc.)
+const WorkOrderDocument = sequelize.define('WorkOrderDocument', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  workOrderId: {
+    type: DataTypes.UUID,
+    allowNull: false,
+    references: {
+      model: 'work_orders',
+      key: 'id'
+    }
+  },
+  originalName: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  mimeType: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  size: {
+    type: DataTypes.INTEGER,
+    allowNull: true
+  },
+  url: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  cloudinaryId: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  documentType: {
+    type: DataTypes.STRING,
+    allowNull: true // 'customer_po', 'supplier_quote', 'drawing', 'other'
+  },
+  description: {
+    type: DataTypes.STRING,
+    allowNull: true
+  }
+}, {
+  tableName: 'work_order_documents',
+  timestamps: true
+});
+
 // WorkOrder associations
 WorkOrder.hasMany(WorkOrderPart, {
   foreignKey: 'workOrderId',
@@ -702,6 +750,17 @@ WorkOrder.hasMany(WorkOrderPart, {
   onDelete: 'CASCADE'
 });
 WorkOrderPart.belongsTo(WorkOrder, {
+  foreignKey: 'workOrderId',
+  as: 'workOrder'
+});
+
+// WorkOrder document associations
+WorkOrder.hasMany(WorkOrderDocument, {
+  foreignKey: 'workOrderId',
+  as: 'documents',
+  onDelete: 'CASCADE'
+});
+WorkOrderDocument.belongsTo(WorkOrder, {
   foreignKey: 'workOrderId',
   as: 'workOrder'
 });
@@ -1229,6 +1288,7 @@ module.exports = {
   WorkOrder,
   WorkOrderPart,
   WorkOrderPartFile,
+  WorkOrderDocument,
   Estimate,
   EstimatePart,
   EstimateFile,

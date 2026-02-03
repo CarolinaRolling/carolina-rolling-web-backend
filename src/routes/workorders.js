@@ -5,7 +5,7 @@ const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const cloudinary = require('cloudinary').v2;
 const { Op } = require('sequelize');
-const { WorkOrder, WorkOrderPart, WorkOrderPartFile, DailyActivity, DRNumber, sequelize } = require('../models');
+const { WorkOrder, WorkOrderPart, WorkOrderPartFile, WorkOrderDocument, DailyActivity, DRNumber, sequelize } = require('../models');
 
 const router = express.Router();
 
@@ -146,15 +146,21 @@ router.get('/:id', async (req, res, next) => {
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     if (uuidRegex.test(idParam)) {
       workOrder = await WorkOrder.findByPk(idParam, {
-        include: [{
-          model: WorkOrderPart,
-          as: 'parts',
-          include: [{
-            model: WorkOrderPartFile,
-            as: 'files'
-          }],
-          order: [['partNumber', 'ASC']]
-        }]
+        include: [
+          {
+            model: WorkOrderPart,
+            as: 'parts',
+            include: [{
+              model: WorkOrderPartFile,
+              as: 'files'
+            }],
+            order: [['partNumber', 'ASC']]
+          },
+          {
+            model: WorkOrderDocument,
+            as: 'documents'
+          }
+        ]
       });
     } else {
       // Try to find by orderNumber or drNumber
@@ -162,15 +168,21 @@ router.get('/:id', async (req, res, next) => {
         where: idParam.startsWith('DR-') 
           ? { drNumber: parseInt(idParam.replace('DR-', '')) }
           : { orderNumber: idParam },
-        include: [{
-          model: WorkOrderPart,
-          as: 'parts',
-          include: [{
-            model: WorkOrderPartFile,
-            as: 'files'
-          }],
-          order: [['partNumber', 'ASC']]
-        }]
+        include: [
+          {
+            model: WorkOrderPart,
+            as: 'parts',
+            include: [{
+              model: WorkOrderPartFile,
+              as: 'files'
+            }],
+            order: [['partNumber', 'ASC']]
+          },
+          {
+            model: WorkOrderDocument,
+            as: 'documents'
+          }
+        ]
       });
     }
 
@@ -329,6 +341,8 @@ router.put('/:id', async (req, res, next) => {
     const {
       clientName,
       clientPurchaseOrderNumber,
+      jobNumber,
+      storageLocation,
       contactName,
       contactPhone,
       contactEmail,
@@ -341,17 +355,22 @@ router.put('/:id', async (req, res, next) => {
       signatureData
     } = req.body;
 
+    // Helper to check if value was provided (including empty string)
+    const getValue = (newVal, oldVal) => newVal !== undefined ? newVal : oldVal;
+
     // Handle status transitions
     const updates = {
-      clientName: clientName ?? workOrder.clientName,
-      clientPurchaseOrderNumber: clientPurchaseOrderNumber ?? workOrder.clientPurchaseOrderNumber,
-      contactName: contactName ?? workOrder.contactName,
-      contactPhone: contactPhone ?? workOrder.contactPhone,
-      contactEmail: contactEmail ?? workOrder.contactEmail,
-      notes: notes ?? workOrder.notes,
-      receivedBy: receivedBy ?? workOrder.receivedBy,
-      requestedDueDate: requestedDueDate !== undefined ? requestedDueDate : workOrder.requestedDueDate,
-      promisedDate: promisedDate !== undefined ? promisedDate : workOrder.promisedDate
+      clientName: getValue(clientName, workOrder.clientName),
+      clientPurchaseOrderNumber: getValue(clientPurchaseOrderNumber, workOrder.clientPurchaseOrderNumber),
+      jobNumber: getValue(jobNumber, workOrder.jobNumber),
+      storageLocation: getValue(storageLocation, workOrder.storageLocation),
+      contactName: getValue(contactName, workOrder.contactName),
+      contactPhone: getValue(contactPhone, workOrder.contactPhone),
+      contactEmail: getValue(contactEmail, workOrder.contactEmail),
+      notes: getValue(notes, workOrder.notes),
+      receivedBy: getValue(receivedBy, workOrder.receivedBy),
+      requestedDueDate: getValue(requestedDueDate, workOrder.requestedDueDate),
+      promisedDate: getValue(promisedDate, workOrder.promisedDate)
     };
 
     if (status) {
@@ -989,6 +1008,144 @@ router.post('/:id/duplicate-to-estimate', async (req, res, next) => {
       data: estimateData,
       message: `Ready to create estimate from ${workOrder.drNumber ? `DR-${workOrder.drNumber}` : workOrder.orderNumber}`
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ==================== WORK ORDER DOCUMENTS ====================
+
+// Configure multer for document uploads
+const documentUpload = multer({
+  storage,
+  limits: {
+    fileSize: 25 * 1024 * 1024 // 25MB for documents
+  },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = [
+      'application/pdf',
+      'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    ];
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Invalid file type. PDF, images, and Word documents are allowed.'));
+    }
+  }
+});
+
+// POST /api/workorders/:id/documents - Upload documents to work order
+router.post('/:id/documents', documentUpload.array('documents', 10), async (req, res, next) => {
+  try {
+    const workOrder = await WorkOrder.findByPk(req.params.id);
+    if (!workOrder) {
+      return res.status(404).json({ error: { message: 'Work order not found' } });
+    }
+
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: { message: 'No files uploaded' } });
+    }
+
+    const documents = [];
+    for (const file of req.files) {
+      try {
+        // Upload to Cloudinary
+        const result = await cloudinary.uploader.upload(file.path, {
+          folder: `work-orders/${workOrder.id}/documents`,
+          resource_type: 'auto',
+          access_mode: 'authenticated'
+        });
+
+        // Create document record
+        const document = await WorkOrderDocument.create({
+          workOrderId: workOrder.id,
+          originalName: file.originalname,
+          mimeType: file.mimetype,
+          size: file.size,
+          url: result.secure_url,
+          cloudinaryId: result.public_id
+        });
+
+        documents.push(document);
+
+        // Clean up temp file
+        fs.unlinkSync(file.path);
+      } catch (uploadError) {
+        console.error('Document upload error:', uploadError);
+        if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+      }
+    }
+
+    res.status(201).json({
+      data: documents,
+      message: `${documents.length} document(s) uploaded successfully`
+    });
+  } catch (error) {
+    // Clean up any remaining temp files
+    if (req.files) {
+      req.files.forEach(file => {
+        if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+      });
+    }
+    next(error);
+  }
+});
+
+// GET /api/workorders/:id/documents/:documentId/signed-url - Get signed URL for document
+router.get('/:id/documents/:documentId/signed-url', async (req, res, next) => {
+  try {
+    const document = await WorkOrderDocument.findOne({
+      where: { 
+        id: req.params.documentId,
+        workOrderId: req.params.id
+      }
+    });
+
+    if (!document) {
+      return res.status(404).json({ error: { message: 'Document not found' } });
+    }
+
+    // Generate signed URL (valid for 1 hour)
+    const signedUrl = cloudinary.url(document.cloudinaryId, {
+      sign_url: true,
+      type: 'authenticated',
+      expires_at: Math.floor(Date.now() / 1000) + 3600
+    });
+
+    res.json({ data: { url: signedUrl || document.url } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// DELETE /api/workorders/:id/documents/:documentId - Delete document
+router.delete('/:id/documents/:documentId', async (req, res, next) => {
+  try {
+    const document = await WorkOrderDocument.findOne({
+      where: { 
+        id: req.params.documentId,
+        workOrderId: req.params.id
+      }
+    });
+
+    if (!document) {
+      return res.status(404).json({ error: { message: 'Document not found' } });
+    }
+
+    // Delete from Cloudinary
+    if (document.cloudinaryId) {
+      try {
+        await cloudinary.uploader.destroy(document.cloudinaryId, { resource_type: 'raw' });
+      } catch (e) {
+        console.error('Failed to delete from Cloudinary:', e);
+      }
+    }
+
+    await document.destroy();
+
+    res.json({ message: 'Document deleted successfully' });
   } catch (error) {
     next(error);
   }

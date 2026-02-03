@@ -401,6 +401,10 @@ const WorkOrder = sequelize.define('WorkOrder', {
     type: DataTypes.STRING,
     allowNull: true
   },
+  jobNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
   contactName: {
     type: DataTypes.STRING,
     allowNull: true

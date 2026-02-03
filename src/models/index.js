@@ -169,6 +169,14 @@ const Shipment = sequelize.define('Shipment', {
   promisedDate: {
     type: DataTypes.DATEONLY,
     allowNull: true
+  },
+  workOrderId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: {
+      model: 'work_orders',
+      key: 'id'
+    }
   }
 }, {
   tableName: 'shipments',

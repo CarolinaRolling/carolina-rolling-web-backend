@@ -165,15 +165,21 @@ router.post('/', async (req, res, next) => {
   try {
     const {
       clientName,
+      clientPO,
       clientPurchaseOrderNumber,
+      jobNumber,
       contactName,
       contactPhone,
       contactEmail,
+      projectDescription,
       notes,
+      storageLocation,
       receivedBy,
       requestedDueDate,
       promisedDate,
-      status = 'draft'
+      status = 'received',
+      shipmentIds = [],
+      assignDRNumber = false
     } = req.body;
 
     if (!clientName) {
@@ -182,37 +188,106 @@ router.post('/', async (req, res, next) => {
 
     const orderNumber = generateOrderNumber();
 
-    const workOrder = await WorkOrder.create({
-      orderNumber,
-      clientName,
-      clientPurchaseOrderNumber,
-      contactName,
-      contactPhone,
-      contactEmail,
-      notes,
-      receivedBy,
-      receivedAt: status === 'received' ? new Date() : null,
-      requestedDueDate: requestedDueDate || null,
-      promisedDate: promisedDate || null,
-      status
-    });
+    // Start transaction
+    const transaction = await sequelize.transaction();
+    
+    try {
+      // Create work order
+      const workOrder = await WorkOrder.create({
+        orderNumber,
+        clientName,
+        clientPO: clientPO || clientPurchaseOrderNumber,
+        jobNumber,
+        contactName,
+        contactPhone,
+        contactEmail,
+        projectDescription,
+        notes,
+        storageLocation,
+        receivedBy,
+        receivedAt: new Date(),
+        requestedDueDate: requestedDueDate || null,
+        promisedDate: promisedDate || null,
+        status,
+        allMaterialReceived: true
+      }, { transaction });
 
-    // Reload with parts association
-    const createdOrder = await WorkOrder.findByPk(workOrder.id, {
-      include: [{
-        model: WorkOrderPart,
-        as: 'parts',
+      // Assign DR number if requested
+      let drNumber = null;
+      if (assignDRNumber) {
+        // Get next DR number
+        const maxDR = await DRNumber.findOne({
+          order: [['drNumber', 'DESC']],
+          transaction
+        });
+        drNumber = (maxDR?.drNumber || 0) + 1;
+        
+        // Also check work orders table
+        const maxWODR = await WorkOrder.max('drNumber', { transaction });
+        if (maxWODR && maxWODR >= drNumber) {
+          drNumber = maxWODR + 1;
+        }
+
+        // Update work order with DR number
+        await workOrder.update({ drNumber }, { transaction });
+
+        // Record DR number assignment
+        await DRNumber.create({
+          drNumber,
+          workOrderId: workOrder.id,
+          clientName,
+          assignedAt: new Date(),
+          assignedBy: req.user?.username || 'system'
+        }, { transaction });
+
+        // Log activity
+        await logActivity(
+          'dr_assigned',
+          'work_order',
+          workOrder.id,
+          `DR-${drNumber}`,
+          clientName,
+          `DR number assigned to new work order`,
+          { orderNumber }
+        );
+      }
+
+      // Link shipments if provided
+      if (shipmentIds && shipmentIds.length > 0) {
+        const { Shipment } = require('../models');
+        await Shipment.update(
+          { workOrderId: workOrder.id },
+          { 
+            where: { id: shipmentIds },
+            transaction
+          }
+        );
+      }
+
+      await transaction.commit();
+
+      // Reload with associations
+      const createdOrder = await WorkOrder.findByPk(workOrder.id, {
         include: [{
-          model: WorkOrderPartFile,
-          as: 'files'
+          model: WorkOrderPart,
+          as: 'parts',
+          include: [{
+            model: WorkOrderPartFile,
+            as: 'files'
+          }]
         }]
-      }]
-    });
+      });
 
-    res.status(201).json({
-      data: createdOrder,
-      message: 'Work order created successfully'
-    });
+      res.status(201).json({
+        data: createdOrder,
+        message: drNumber 
+          ? `Work order created with DR-${drNumber}`
+          : 'Work order created successfully'
+      });
+    } catch (err) {
+      await transaction.rollback();
+      throw err;
+    }
   } catch (error) {
     next(error);
   }

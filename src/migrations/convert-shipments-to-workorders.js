@@ -96,13 +96,20 @@ async function migrate() {
       });
       
       // Create a default part from shipment info
+      // Truncate description if too long for varchar(255)
+      let materialDesc = shipment.description || 'Converted from shipment';
+      if (materialDesc.length > 250) {
+        materialDesc = materialDesc.substring(0, 247) + '...';
+      }
+      
       await WorkOrderPart.create({
         workOrderId: workOrder.id,
         partNumber: 1,
         partType: 'other',
         quantity: shipment.quantity || 1,
-        materialDescription: shipment.description || 'Converted from shipment',
-        clientPartNumber: Array.isArray(shipment.partNumbers) ? shipment.partNumbers.join(', ') : (shipment.partNumbers || null),
+        materialDescription: materialDesc,
+        clientPartNumber: Array.isArray(shipment.partNumbers) ? shipment.partNumbers.join(', ').substring(0, 250) : (shipment.partNumbers ? String(shipment.partNumbers).substring(0, 250) : null),
+        specialInstructions: shipment.description && shipment.description.length > 250 ? shipment.description : null,
         materialReceived: true,
         status: woStatus === 'completed' ? 'completed' : 'in_progress'
       });
@@ -136,4 +143,3 @@ migrate()
     console.error('Migration failed:', error);
     process.exit(1);
   });
-

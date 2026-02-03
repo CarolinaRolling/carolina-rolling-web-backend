@@ -47,13 +47,13 @@ async function migrate() {
     let skipped = 0;
     
     for (const shipment of shipments) {
-      // Check if work order already exists for this shipment
+      // Check if work order already exists for this shipment (by qrCode or id)
       const existingWO = await WorkOrder.findOne({
-        where: { orderNumber: shipment.orderNumber }
+        where: { orderNumber: shipment.qrCode || shipment.id }
       });
       
       if (existingWO) {
-        console.log(`  Skipping ${shipment.orderNumber} - work order already exists`);
+        console.log(`  Skipping ${shipment.qrCode || shipment.id} - work order already exists`);
         skipped++;
         continue;
       }
@@ -68,23 +68,20 @@ async function migrate() {
         woStatus = 'pending';
       }
       
-      // Create work order
+      // Create work order using correct shipment fields
       const workOrder = await WorkOrder.create({
-        orderNumber: shipment.orderNumber,
+        orderNumber: shipment.qrCode || `WO-${shipment.id.substring(0, 8)}`,
         drNumber: nextDRNumber,
-        clientName: shipment.clientName,
-        clientPO: shipment.poNumber || null,
-        contactName: shipment.contactName || null,
-        contactEmail: shipment.contactEmail || null,
-        contactPhone: shipment.contactPhone || null,
+        clientName: shipment.clientName || 'Unknown Client',
+        clientPO: shipment.clientPurchaseOrderNumber || null,
+        jobNumber: shipment.jobNumber || null,
         projectDescription: shipment.description || null,
         status: woStatus,
-        priority: shipment.priority || 'normal',
-        storageLocation: shipment.storageLocation || null,
-        promisedDate: shipment.promisedDate || null,
+        priority: 'normal',
+        storageLocation: shipment.location || null,
+        promisedDate: shipment.promisedDate || shipment.requestedDueDate || null,
         notes: shipment.notes || null,
-        internalNotes: shipment.internalNotes || null,
-        allMaterialReceived: true, // Assume material is received for existing shipments
+        allMaterialReceived: true,
         createdAt: shipment.createdAt,
         updatedAt: shipment.updatedAt
       });
@@ -93,25 +90,24 @@ async function migrate() {
       await DRNumber.create({
         drNumber: nextDRNumber,
         workOrderId: workOrder.id,
-        clientName: shipment.clientName,
-        assignedAt: shipment.createdAt,
+        clientName: shipment.clientName || 'Unknown Client',
+        assignedAt: shipment.createdAt || new Date(),
         assignedBy: 'migration'
       });
       
       // Create a default part from shipment info
-      if (shipment.description || shipment.material) {
-        await WorkOrderPart.create({
-          workOrderId: workOrder.id,
-          partNumber: 1,
-          partType: 'other',
-          quantity: shipment.quantity || 1,
-          materialDescription: shipment.material || shipment.description || 'Converted from shipment',
-          materialReceived: true,
-          status: woStatus === 'completed' ? 'completed' : 'in_progress'
-        });
-      }
+      await WorkOrderPart.create({
+        workOrderId: workOrder.id,
+        partNumber: 1,
+        partType: 'other',
+        quantity: shipment.quantity || 1,
+        materialDescription: shipment.description || 'Converted from shipment',
+        clientPartNumber: shipment.partNumbers || null,
+        materialReceived: true,
+        status: woStatus === 'completed' ? 'completed' : 'in_progress'
+      });
       
-      console.log(`  ✓ Converted: ${shipment.orderNumber} → DR-${nextDRNumber} (${shipment.clientName})`);
+      console.log(`  ✓ Converted: ${shipment.qrCode || shipment.id} → DR-${nextDRNumber} (${shipment.clientName || 'Unknown'})`);
       
       nextDRNumber++;
       converted++;
@@ -140,3 +136,4 @@ migrate()
     console.error('Migration failed:', error);
     process.exit(1);
   });
+

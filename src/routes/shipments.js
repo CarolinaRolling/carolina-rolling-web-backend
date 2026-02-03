@@ -194,6 +194,27 @@ router.get('/qr/:qrCode', async (req, res, next) => {
   }
 });
 
+// GET /api/shipments/workorder/:workOrderId - Get shipment by work order ID
+router.get('/workorder/:workOrderId', async (req, res, next) => {
+  try {
+    const shipment = await Shipment.findOne({
+      where: { workOrderId: req.params.workOrderId },
+      include: [
+        { model: ShipmentPhoto, as: 'photos' },
+        { model: ShipmentDocument, as: 'documents' }
+      ]
+    });
+
+    if (!shipment) {
+      return res.status(404).json({ error: { message: 'No shipment found for this work order' } });
+    }
+
+    res.json({ data: transformShipment(shipment) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // POST /api/shipments - Create new shipment
 router.post('/', async (req, res, next) => {
   try {
@@ -208,58 +229,136 @@ router.post('/', async (req, res, next) => {
       notes,
       receivedBy,
       requestedDueDate,
-      promisedDate
+      promisedDate,
+      createWorkOrder,
+      assignDRNumber
     } = req.body;
 
     if (!clientName) {
       return res.status(400).json({ error: { message: 'Client name is required' } });
     }
 
-    const qrCode = generateQRCode();
+    const { WorkOrder, DRNumber, sequelize } = require('../models');
+    const transaction = await sequelize.transaction();
 
-    const shipment = await Shipment.create({
-      qrCode,
-      clientName,
-      jobNumber,
-      clientPurchaseOrderNumber,
-      description,
-      partNumbers: partNumbers || [],
-      quantity: quantity || 1,
-      location,
-      notes,
-      receivedBy,
-      requestedDueDate: requestedDueDate || null,
-      promisedDate: promisedDate || null,
-      receivedAt: new Date()
-    });
-
-    // Reload with photos association
-    const createdShipment = await Shipment.findByPk(shipment.id, {
-      include: [
-        { model: ShipmentPhoto, as: 'photos' },
-        { model: ShipmentDocument, as: 'documents' }
-      ]
-    });
-
-    // Send email notification
     try {
-      await sendNewShipmentEmail(createdShipment);
-    } catch (emailError) {
-      console.error('Failed to send email notification:', emailError);
-      // Don't fail the request if email fails
-    }
+      const qrCode = generateQRCode();
 
-    res.status(201).json({ 
-      data: transformShipment(createdShipment),
-      message: 'Shipment created successfully'
-    });
+      // Create shipment
+      const shipment = await Shipment.create({
+        qrCode,
+        clientName,
+        jobNumber,
+        clientPurchaseOrderNumber,
+        description,
+        partNumbers: partNumbers || [],
+        quantity: quantity || 1,
+        location,
+        notes,
+        receivedBy,
+        requestedDueDate: requestedDueDate || null,
+        promisedDate: promisedDate || null,
+        receivedAt: new Date()
+      }, { transaction });
+
+      let workOrder = null;
+
+      // Create linked work order if requested
+      if (createWorkOrder) {
+        // Generate work order number
+        const date = new Date();
+        const year = date.getFullYear().toString().slice(-2);
+        const month = (date.getMonth() + 1).toString().padStart(2, '0');
+        const day = date.getDate().toString().padStart(2, '0');
+        const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+        const orderNumber = `WO-${year}${month}${day}-${random}`;
+
+        workOrder = await WorkOrder.create({
+          orderNumber,
+          clientName,
+          clientPurchaseOrderNumber,
+          jobNumber,
+          storageLocation: location,
+          receivedBy,
+          receivedAt: new Date(),
+          requestedDueDate: requestedDueDate || null,
+          promisedDate: promisedDate || null,
+          status: 'received',
+          allMaterialReceived: true
+        }, { transaction });
+
+        // Link shipment to work order
+        await shipment.update({ workOrderId: workOrder.id }, { transaction });
+
+        // Assign DR number if requested
+        if (assignDRNumber) {
+          // Get next DR number
+          const maxDR = await DRNumber.findOne({
+            order: [['drNumber', 'DESC']],
+            transaction
+          });
+          let drNumber = (maxDR?.drNumber || 0) + 1;
+
+          // Also check work orders table
+          const maxWODR = await WorkOrder.max('drNumber', { transaction });
+          if (maxWODR && maxWODR >= drNumber) {
+            drNumber = maxWODR + 1;
+          }
+
+          // Update work order with DR number
+          await workOrder.update({ drNumber }, { transaction });
+
+          // Record DR number assignment
+          await DRNumber.create({
+            drNumber,
+            workOrderId: workOrder.id,
+            clientName,
+            assignedAt: new Date(),
+            assignedBy: receivedBy || 'system'
+          }, { transaction });
+        }
+
+        // Reload work order
+        workOrder = await WorkOrder.findByPk(workOrder.id, { transaction });
+      }
+
+      await transaction.commit();
+
+      // Reload shipment with associations
+      const createdShipment = await Shipment.findByPk(shipment.id, {
+        include: [
+          { model: ShipmentPhoto, as: 'photos' },
+          { model: ShipmentDocument, as: 'documents' }
+        ]
+      });
+
+      // Send email notification
+      try {
+        await sendNewShipmentEmail(createdShipment, workOrder);
+      } catch (emailError) {
+        console.error('Failed to send email notification:', emailError);
+      }
+
+      res.status(201).json({ 
+        data: {
+          shipment: transformShipment(createdShipment),
+          workOrder: workOrder ? workOrder.toJSON() : null
+        },
+        message: workOrder 
+          ? `Shipment and work order DR-${workOrder.drNumber} created`
+          : 'Shipment created successfully'
+      });
+    } catch (err) {
+      await transaction.rollback();
+      throw err;
+    }
   } catch (error) {
     next(error);
   }
 });
 
 // Helper function to send email notification for new shipment
-async function sendNewShipmentEmail(shipment) {
+async function sendNewShipmentEmail(shipment, workOrder = null) {
   // Get notification email from settings
   const emailSetting = await AppSettings.findOne({
     where: { key: 'notification_email' }
@@ -283,10 +382,17 @@ async function sendNewShipmentEmail(shipment) {
     }
   });
   
+  const drNumberHtml = workOrder?.drNumber ? `
+      <tr>
+        <td style="padding: 8px; border: 1px solid #ddd; font-weight: bold; background: #e3f2fd;">DR Number</td>
+        <td style="padding: 8px; border: 1px solid #ddd; font-weight: bold; color: #1976d2; background: #e3f2fd;">DR-${workOrder.drNumber}</td>
+      </tr>` : '';
+  
   const emailHtml = `
-    <h2>New Shipment Received</h2>
-    <p>A new shipment has been added to the inventory system.</p>
+    <h2>New Material Received</h2>
+    <p>New material has been received and logged in the inventory system.</p>
     <table style="border-collapse: collapse; width: 100%; max-width: 500px;">
+      ${drNumberHtml}
       <tr>
         <td style="padding: 8px; border: 1px solid #ddd; font-weight: bold;">QR Code</td>
         <td style="padding: 8px; border: 1px solid #ddd;">${shipment.qrCode}</td>

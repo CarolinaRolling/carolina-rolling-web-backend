@@ -138,17 +138,41 @@ router.get('/', async (req, res, next) => {
 // GET /api/workorders/:id - Get work order by ID
 router.get('/:id', async (req, res, next) => {
   try {
-    const workOrder = await WorkOrder.findByPk(req.params.id, {
-      include: [{
-        model: WorkOrderPart,
-        as: 'parts',
+    // Support both UUID and orderNumber
+    const idParam = req.params.id;
+    let workOrder;
+    
+    // Check if it's a UUID format
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (uuidRegex.test(idParam)) {
+      workOrder = await WorkOrder.findByPk(idParam, {
         include: [{
-          model: WorkOrderPartFile,
-          as: 'files'
-        }],
-        order: [['partNumber', 'ASC']]
-      }]
-    });
+          model: WorkOrderPart,
+          as: 'parts',
+          include: [{
+            model: WorkOrderPartFile,
+            as: 'files'
+          }],
+          order: [['partNumber', 'ASC']]
+        }]
+      });
+    } else {
+      // Try to find by orderNumber or drNumber
+      workOrder = await WorkOrder.findOne({
+        where: idParam.startsWith('DR-') 
+          ? { drNumber: parseInt(idParam.replace('DR-', '')) }
+          : { orderNumber: idParam },
+        include: [{
+          model: WorkOrderPart,
+          as: 'parts',
+          include: [{
+            model: WorkOrderPartFile,
+            as: 'files'
+          }],
+          order: [['partNumber', 'ASC']]
+        }]
+      });
+    }
 
     if (!workOrder) {
       return res.status(404).json({ error: { message: 'Work order not found' } });
@@ -373,16 +397,39 @@ router.put('/:id', async (req, res, next) => {
 // DELETE /api/workorders/:id - Delete work order
 router.delete('/:id', async (req, res, next) => {
   try {
-    const workOrder = await WorkOrder.findByPk(req.params.id, {
-      include: [{
-        model: WorkOrderPart,
-        as: 'parts',
+    // Support both UUID and orderNumber
+    const idParam = req.params.id;
+    let workOrder;
+    
+    // Check if it's a UUID format
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (uuidRegex.test(idParam)) {
+      workOrder = await WorkOrder.findByPk(idParam, {
         include: [{
-          model: WorkOrderPartFile,
-          as: 'files'
+          model: WorkOrderPart,
+          as: 'parts',
+          include: [{
+            model: WorkOrderPartFile,
+            as: 'files'
+          }]
         }]
-      }]
-    });
+      });
+    } else {
+      // Try to find by orderNumber or drNumber
+      workOrder = await WorkOrder.findOne({
+        where: idParam.startsWith('DR-') 
+          ? { drNumber: parseInt(idParam.replace('DR-', '')) }
+          : { orderNumber: idParam },
+        include: [{
+          model: WorkOrderPart,
+          as: 'parts',
+          include: [{
+            model: WorkOrderPartFile,
+            as: 'files'
+          }]
+        }]
+      });
+    }
 
     if (!workOrder) {
       return res.status(404).json({ error: { message: 'Work order not found' } });

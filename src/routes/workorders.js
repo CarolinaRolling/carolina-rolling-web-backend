@@ -196,7 +196,7 @@ router.post('/', async (req, res, next) => {
       const workOrder = await WorkOrder.create({
         orderNumber,
         clientName,
-        clientPO: clientPO || clientPurchaseOrderNumber,
+        clientPurchaseOrderNumber: clientPO || clientPurchaseOrderNumber,
         jobNumber,
         contactName,
         contactPhone,
@@ -389,8 +389,8 @@ router.delete('/:id', async (req, res, next) => {
     }
 
     // Delete files from Cloudinary
-    for (const part of workOrder.parts) {
-      for (const file of part.files) {
+    for (const part of workOrder.parts || []) {
+      for (const file of part.files || []) {
         if (file.cloudinaryId) {
           try {
             await cloudinary.uploader.destroy(file.cloudinaryId, { resource_type: 'raw' });
@@ -401,10 +401,22 @@ router.delete('/:id', async (req, res, next) => {
       }
     }
 
+    // Delete associated DR number record
+    await DRNumber.destroy({
+      where: { workOrderId: workOrder.id }
+    });
+
+    // Delete associated parts and files (cascade should handle this, but be explicit)
+    for (const part of workOrder.parts || []) {
+      await WorkOrderPartFile.destroy({ where: { workOrderPartId: part.id } });
+    }
+    await WorkOrderPart.destroy({ where: { workOrderId: workOrder.id } });
+
     await workOrder.destroy();
 
     res.json({ message: 'Work order deleted successfully' });
   } catch (error) {
+    console.error('Delete work order error:', error);
     next(error);
   }
 });

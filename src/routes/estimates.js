@@ -342,6 +342,10 @@ router.delete('/:id', async (req, res, next) => {
 // POST /api/estimates/:id/parts - Add part
 router.post('/:id/parts', async (req, res, next) => {
   try {
+    console.log('=== ADD PART REQUEST ===');
+    console.log('Estimate ID:', req.params.id);
+    console.log('Body:', JSON.stringify(req.body, null, 2));
+    
     const estimate = await Estimate.findByPk(req.params.id);
 
     if (!estimate) {
@@ -360,7 +364,10 @@ router.post('/:id/parts', async (req, res, next) => {
     const totals = calculatePartTotals(partData);
     Object.assign(partData, totals);
 
+    console.log('Creating part with data:', JSON.stringify(partData, null, 2));
+    
     const part = await EstimatePart.create(partData);
+    console.log('Part created:', part.id);
 
     // Recalculate estimate totals
     const allParts = await EstimatePart.findAll({ where: { estimateId: estimate.id } });
@@ -372,6 +379,9 @@ router.post('/:id/parts', async (req, res, next) => {
       message: 'Part added'
     });
   } catch (error) {
+    console.log('=== ADD PART ERROR ===');
+    console.log('Error:', error.message);
+    if (error.parent) console.log('DB Error:', error.parent.message);
     next(error);
   }
 });

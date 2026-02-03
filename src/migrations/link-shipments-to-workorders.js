@@ -30,9 +30,9 @@ async function linkShipmentsToWorkOrders() {
 
     console.log(`Found ${shipments.length} unlinked shipments`);
 
-    // Get all work orders
+    // Get all work orders (without jobNumber since it might not exist)
     const [workOrders] = await sequelize.query(`
-      SELECT id, "clientName", "clientPurchaseOrderNumber", "jobNumber", "orderNumber", "drNumber", "createdAt"
+      SELECT id, "clientName", "clientPurchaseOrderNumber", "orderNumber", "drNumber", "createdAt"
       FROM work_orders
       ORDER BY "createdAt" DESC
     `);
@@ -53,15 +53,7 @@ async function linkShipmentsToWorkOrders() {
         );
       }
 
-      // Strategy 2: Match by client name AND job number
-      if (!matchedWorkOrder && shipment.jobNumber) {
-        matchedWorkOrder = workOrders.find(wo => 
-          wo.clientName?.toLowerCase() === shipment.clientName?.toLowerCase() &&
-          wo.jobNumber?.toLowerCase() === shipment.jobNumber?.toLowerCase()
-        );
-      }
-
-      // Strategy 3: Match by client name only (if only one work order for that client)
+      // Strategy 2: Match by client name only (if only one work order for that client)
       if (!matchedWorkOrder) {
         const clientWorkOrders = workOrders.filter(wo => 
           wo.clientName?.toLowerCase() === shipment.clientName?.toLowerCase()
@@ -71,7 +63,7 @@ async function linkShipmentsToWorkOrders() {
         }
       }
 
-      // Strategy 4: Match by QR code pattern in order number
+      // Strategy 3: Match by QR code pattern in order number
       if (!matchedWorkOrder && shipment.qrCode) {
         matchedWorkOrder = workOrders.find(wo => 
           wo.orderNumber?.includes(shipment.qrCode) || 

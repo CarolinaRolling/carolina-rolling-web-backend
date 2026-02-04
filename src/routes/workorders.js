@@ -499,6 +499,9 @@ router.delete('/:id', async (req, res, next) => {
 // POST /api/workorders/:id/parts - Add a part to work order
 router.post('/:id/parts', async (req, res, next) => {
   try {
+    console.log('Adding part to work order:', req.params.id);
+    console.log('Part data:', JSON.stringify(req.body, null, 2));
+    
     const workOrder = await WorkOrder.findByPk(req.params.id);
 
     if (!workOrder) {
@@ -598,7 +601,8 @@ router.post('/:id/parts', async (req, res, next) => {
       message: 'Part added successfully'
     });
   } catch (error) {
-    next(error);
+    console.error('Add work order part error:', error);
+    res.status(500).json({ error: { message: error.message || 'Failed to add part' } });
   }
 });
 
@@ -1293,9 +1297,9 @@ router.post('/:id/order-material', async (req, res, next) => {
 
       // Create inbound order
       const inboundOrder = await InboundOrder.create({
-        poNumber: poNumberFormatted,
+        purchaseOrderNumber: poNumberFormatted,
         supplier: supplier,
-        materialDescription: materialDescriptions,
+        description: materialDescriptions,
         clientName: workOrder.clientName,
         workOrderId: workOrder.id,
         status: 'pending',

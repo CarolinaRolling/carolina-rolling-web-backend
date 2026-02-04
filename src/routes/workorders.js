@@ -682,6 +682,10 @@ router.post('/:id/parts', async (req, res, next) => {
       return res.status(400).json({ error: { message: 'Part type is required' } });
     }
 
+    console.log('Creating part with supplierName:', supplierName);
+    console.log('Creating part with materialSource:', materialSource);
+    console.log('Creating part with materialDescription:', materialDescription);
+
     const part = await WorkOrderPart.create({
       workOrderId: workOrder.id,
       partNumber,
@@ -706,8 +710,8 @@ router.post('/:id/parts', async (req, res, next) => {
       specialInstructions,
       // Material source fields
       materialSource: materialSource || 'customer',
-      supplierName,
-      materialDescription,
+      supplierName: supplierName || null,
+      materialDescription: materialDescription || null,
       // Pricing fields - use cleaned values
       laborRate: cleanedData.laborRate,
       laborHours: cleanedData.laborHours,
@@ -718,6 +722,8 @@ router.post('/:id/parts', async (req, res, next) => {
       otherCharges: cleanedData.otherCharges,
       partTotal: cleanedData.partTotal
     });
+
+    console.log('Created part:', part.id, 'supplierName:', part.supplierName);
 
     // Reload with files
     const createdPart = await WorkOrderPart.findByPk(part.id, {

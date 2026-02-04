@@ -283,4 +283,34 @@ router.get('/voided', async (req, res, next) => {
   }
 });
 
+// DELETE /api/po-numbers/:id - Delete a PO number
+router.delete('/:id', async (req, res, next) => {
+  try {
+    const poEntry = await PONumber.findByPk(req.params.id);
+    
+    if (!poEntry) {
+      return res.status(404).json({ error: { message: 'PO number not found' } });
+    }
+
+    // Clear references in work order parts
+    const { WorkOrderPart } = require('../models');
+    await WorkOrderPart.update(
+      { materialPurchaseOrderNumber: null, materialOrdered: false, inboundOrderId: null },
+      { where: { materialPurchaseOrderNumber: `PO${poEntry.poNumber}` } }
+    );
+
+    // Delete associated inbound order if exists
+    if (poEntry.inboundOrderId) {
+      await InboundOrder.destroy({ where: { id: poEntry.inboundOrderId } });
+    }
+
+    await poEntry.destroy();
+
+    res.json({ message: `PO${poEntry.poNumber} deleted` });
+  } catch (error) {
+    console.error('Delete PO error:', error);
+    next(error);
+  }
+});
+
 module.exports = router;

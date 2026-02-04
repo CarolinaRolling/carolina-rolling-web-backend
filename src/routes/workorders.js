@@ -1588,4 +1588,80 @@ router.post('/:id/order-material', async (req, res, next) => {
   }
 });
 
+// ============= ESTIMATE LINKING =============
+
+// GET /api/workorders/linkable-estimates - Search for estimates that can be linked
+router.get('/linkable-estimates/search', async (req, res, next) => {
+  try {
+    const { EstimateLinkService } = require('../services/EstimateLinkService');
+    const models = require('../models');
+    const linkService = new (require('../services/EstimateLinkService'))(models);
+    
+    const estimates = await linkService.searchLinkableEstimates(req.query.q);
+    
+    res.json({
+      data: estimates.map(est => ({
+        id: est.id,
+        estimateNumber: est.estimateNumber,
+        clientName: est.clientName,
+        contactName: est.contactName,
+        projectDescription: est.projectDescription,
+        status: est.status,
+        grandTotal: est.grandTotal,
+        partCount: est.parts?.length || 0,
+        createdAt: est.createdAt
+      }))
+    });
+  } catch (error) {
+    console.error('Search linkable estimates error:', error);
+    next(error);
+  }
+});
+
+// POST /api/workorders/:id/link-estimate - Link an estimate to this work order
+router.post('/:id/link-estimate', async (req, res, next) => {
+  try {
+    const models = require('../models');
+    const linkService = new (require('../services/EstimateLinkService'))(models);
+    
+    const { estimateId } = req.body;
+    
+    if (!estimateId) {
+      return res.status(400).json({ error: { message: 'estimateId is required' } });
+    }
+
+    const result = await linkService.linkEstimateToWorkOrder(req.params.id, estimateId);
+    
+    res.json({
+      data: result.workOrder,
+      message: result.message,
+      partsCopied: result.partsCopied
+    });
+  } catch (error) {
+    console.error('Link estimate error:', error);
+    if (error.message.includes('not found') || error.message.includes('already linked')) {
+      return res.status(400).json({ error: { message: error.message } });
+    }
+    next(error);
+  }
+});
+
+// POST /api/workorders/:id/unlink-estimate - Unlink an estimate from this work order
+router.post('/:id/unlink-estimate', async (req, res, next) => {
+  try {
+    const models = require('../models');
+    const linkService = new (require('../services/EstimateLinkService'))(models);
+    
+    const result = await linkService.unlinkEstimate(req.params.id);
+    
+    res.json(result);
+  } catch (error) {
+    console.error('Unlink estimate error:', error);
+    if (error.message.includes('No estimate linked')) {
+      return res.status(400).json({ error: { message: error.message } });
+    }
+    next(error);
+  }
+});
+
 module.exports = router;

@@ -77,18 +77,30 @@ function generateEstimateNumber() {
 function calculatePartTotals(part) {
   const qty = parseInt(part.quantity) || 1;
   
-  // For customer supplied material, material cost is 0
-  const isCustomerSupplied = part.materialSource === 'customer_supplied';
-  const materialUnitCost = isCustomerSupplied ? 0 : (parseFloat(part.materialUnitCost) || 0);
-  const materialMarkup = isCustomerSupplied ? 0 : (parseFloat(part.materialMarkupPercent) || 0);
+  // Material costs - only if we supply material
+  const weSupplyMaterial = part.weSupplyMaterial === true || part.weSupplyMaterial === 'true';
+  const materialUnitCost = weSupplyMaterial ? (parseFloat(part.materialUnitCost) || 0) : 0;
+  const materialMarkup = weSupplyMaterial ? (parseFloat(part.materialMarkupPercent) || 0) : 0;
   const materialTotal = materialUnitCost * qty * (1 + materialMarkup / 100);
 
+  // Rolling cost (always required)
   const rollingCost = parseFloat(part.rollingCost) || 0;
+  
+  // Additional Services
+  const drillingCost = part.serviceDrilling ? (parseFloat(part.serviceDrillingCost) || 0) : 0;
+  const cuttingCost = part.serviceCutting ? (parseFloat(part.serviceCuttingCost) || 0) : 0;
+  const fittingCost = part.serviceFitting ? (parseFloat(part.serviceFittingCost) || 0) : 0;
+  const weldingCost = part.serviceWelding ? (parseFloat(part.serviceWeldingCost) || 0) : 0;
+  
+  // Legacy other services (keep for backward compatibility)
   const otherServicesCost = parseFloat(part.otherServicesCost) || 0;
   const otherServicesMarkup = parseFloat(part.otherServicesMarkupPercent) || 15;
   const otherServicesTotal = otherServicesCost * (1 + otherServicesMarkup / 100);
 
-  const partTotal = materialTotal + rollingCost + otherServicesTotal;
+  // Total additional services
+  const additionalServicesTotal = drillingCost + cuttingCost + fittingCost + weldingCost;
+
+  const partTotal = materialTotal + rollingCost + otherServicesTotal + additionalServicesTotal;
 
   return {
     materialTotal: materialTotal.toFixed(2),
@@ -346,8 +358,11 @@ router.delete('/:id', async (req, res, next) => {
 
 // Helper to convert empty strings to null for numeric fields
 const cleanNumericFields = (data) => {
-  const numericFields = ['materialUnitCost', 'materialMarkupPercent', 'materialTotal', 
-    'rollingCost', 'otherServicesCost', 'otherServicesMarkupPercent', 'otherServicesTotal', 'partTotal'];
+  const numericFields = [
+    'materialUnitCost', 'materialMarkupPercent', 'materialTotal', 
+    'rollingCost', 'otherServicesCost', 'otherServicesMarkupPercent', 'otherServicesTotal', 'partTotal',
+    'serviceDrillingCost', 'serviceCuttingCost', 'serviceFittingCost', 'serviceWeldingCost', 'serviceWeldingPercent'
+  ];
   const cleaned = { ...data };
   numericFields.forEach(field => {
     if (cleaned[field] === '' || cleaned[field] === null || cleaned[field] === undefined) {

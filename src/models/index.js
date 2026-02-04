@@ -1118,6 +1118,64 @@ const EstimatePart = sequelize.define('EstimatePart', {
     type: DataTypes.TEXT,
     allowNull: true
   },
+  // We supply material flag
+  weSupplyMaterial: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  // Additional Services
+  serviceDrilling: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  serviceDrillingCost: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0
+  },
+  serviceDrillingVendor: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  serviceCutting: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  serviceCuttingCost: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0
+  },
+  serviceCuttingVendor: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  serviceFitting: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  serviceFittingCost: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0
+  },
+  serviceFittingVendor: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  serviceWelding: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  serviceWeldingCost: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0
+  },
+  serviceWeldingVendor: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  serviceWeldingPercent: {
+    type: DataTypes.INTEGER,
+    defaultValue: 100  // 100% welding by default
+  },
   // Material ordering tracking
   materialOrdered: {
     type: DataTypes.BOOLEAN,

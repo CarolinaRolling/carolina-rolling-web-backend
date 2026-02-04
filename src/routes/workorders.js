@@ -9,6 +9,20 @@ const { WorkOrder, WorkOrderPart, WorkOrderPartFile, WorkOrderDocument, DailyAct
 
 const router = express.Router();
 
+// Helper to clean numeric fields - convert empty strings to null
+function cleanNumericFields(data, fields) {
+  const cleaned = { ...data };
+  fields.forEach(field => {
+    if (cleaned[field] === '' || cleaned[field] === undefined) {
+      cleaned[field] = null;
+    } else if (cleaned[field] !== null) {
+      const num = parseFloat(cleaned[field]);
+      cleaned[field] = isNaN(num) ? null : num;
+    }
+  });
+  return cleaned;
+}
+
 // Helper to log activity for daily email
 async function logActivity(type, resourceType, resourceId, resourceNumber, clientName, description, details = {}) {
   try {
@@ -512,6 +526,11 @@ router.post('/:id/parts', async (req, res, next) => {
     const existingParts = await WorkOrderPart.count({ where: { workOrderId: workOrder.id } });
     const partNumber = existingParts + 1;
 
+    // Clean numeric fields - convert empty strings to null
+    const numericFields = ['laborRate', 'laborHours', 'laborTotal', 'materialUnitCost', 
+                          'materialTotal', 'setupCharge', 'otherCharges', 'partTotal'];
+    const cleanedData = cleanNumericFields(req.body, numericFields);
+
     const {
       partType,
       clientPartNumber,
@@ -535,16 +554,7 @@ router.post('/:id/parts', async (req, res, next) => {
       // Material source fields
       materialSource,
       supplierName,
-      materialDescription,
-      // Pricing fields
-      laborRate,
-      laborHours,
-      laborTotal,
-      materialUnitCost,
-      materialTotal,
-      setupCharge,
-      otherCharges,
-      partTotal
+      materialDescription
     } = req.body;
 
     if (!partType) {
@@ -577,15 +587,15 @@ router.post('/:id/parts', async (req, res, next) => {
       materialSource: materialSource || 'customer',
       supplierName,
       materialDescription,
-      // Pricing fields
-      laborRate,
-      laborHours,
-      laborTotal,
-      materialUnitCost,
-      materialTotal,
-      setupCharge,
-      otherCharges,
-      partTotal
+      // Pricing fields - use cleaned values
+      laborRate: cleanedData.laborRate,
+      laborHours: cleanedData.laborHours,
+      laborTotal: cleanedData.laborTotal,
+      materialUnitCost: cleanedData.materialUnitCost,
+      materialTotal: cleanedData.materialTotal,
+      setupCharge: cleanedData.setupCharge,
+      otherCharges: cleanedData.otherCharges,
+      partTotal: cleanedData.partTotal
     });
 
     // Reload with files
@@ -620,6 +630,11 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Part not found' } });
     }
 
+    // Clean numeric fields - convert empty strings to null
+    const numericFields = ['laborRate', 'laborHours', 'laborTotal', 'materialUnitCost', 
+                          'materialTotal', 'setupCharge', 'otherCharges', 'partTotal'];
+    const cleanedData = cleanNumericFields(req.body, numericFields);
+
     const {
       partType,
       clientPartNumber,
@@ -646,16 +661,7 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
       // Material source fields
       materialSource,
       supplierName,
-      materialDescription,
-      // Pricing fields
-      laborRate,
-      laborHours,
-      laborTotal,
-      materialUnitCost,
-      materialTotal,
-      setupCharge,
-      otherCharges,
-      partTotal
+      materialDescription
     } = req.body;
 
     const updates = {};
@@ -685,15 +691,15 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     if (supplierName !== undefined) updates.supplierName = supplierName;
     if (materialDescription !== undefined) updates.materialDescription = materialDescription;
     
-    // Pricing fields
-    if (laborRate !== undefined) updates.laborRate = laborRate;
-    if (laborHours !== undefined) updates.laborHours = laborHours;
-    if (laborTotal !== undefined) updates.laborTotal = laborTotal;
-    if (materialUnitCost !== undefined) updates.materialUnitCost = materialUnitCost;
-    if (materialTotal !== undefined) updates.materialTotal = materialTotal;
-    if (setupCharge !== undefined) updates.setupCharge = setupCharge;
-    if (otherCharges !== undefined) updates.otherCharges = otherCharges;
-    if (partTotal !== undefined) updates.partTotal = partTotal;
+    // Pricing fields - use cleaned values
+    if (cleanedData.laborRate !== undefined) updates.laborRate = cleanedData.laborRate;
+    if (cleanedData.laborHours !== undefined) updates.laborHours = cleanedData.laborHours;
+    if (cleanedData.laborTotal !== undefined) updates.laborTotal = cleanedData.laborTotal;
+    if (cleanedData.materialUnitCost !== undefined) updates.materialUnitCost = cleanedData.materialUnitCost;
+    if (cleanedData.materialTotal !== undefined) updates.materialTotal = cleanedData.materialTotal;
+    if (cleanedData.setupCharge !== undefined) updates.setupCharge = cleanedData.setupCharge;
+    if (cleanedData.otherCharges !== undefined) updates.otherCharges = cleanedData.otherCharges;
+    if (cleanedData.partTotal !== undefined) updates.partTotal = cleanedData.partTotal;
     
     if (status !== undefined) {
       updates.status = status;

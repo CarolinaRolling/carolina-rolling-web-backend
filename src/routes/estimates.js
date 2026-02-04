@@ -1615,7 +1615,8 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
         status: 'pending',
         // Copy supplier info for material ordering
         supplierName: estimatePart.supplierName,
-        materialSource: estimatePart.materialSource,
+        // Set materialSource based on weSupplyMaterial flag
+        materialSource: estimatePart.weSupplyMaterial ? 'we_order' : 'customer',
         // Copy pricing fields
         laborRate: estimatePart.laborRate,
         laborHours: estimatePart.laborHours,

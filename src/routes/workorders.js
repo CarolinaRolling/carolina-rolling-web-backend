@@ -5,7 +5,7 @@ const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const cloudinary = require('cloudinary').v2;
 const { Op } = require('sequelize');
-const { WorkOrder, WorkOrderPart, WorkOrderPartFile, WorkOrderDocument, DailyActivity, DRNumber, InboundOrder, PONumber, AppSettings, sequelize } = require('../models');
+const { WorkOrder, WorkOrderPart, WorkOrderPartFile, WorkOrderDocument, DailyActivity, DRNumber, InboundOrder, PONumber, AppSettings, Estimate, sequelize } = require('../models');
 
 const router = express.Router();
 
@@ -555,14 +555,10 @@ router.delete('/:id', async (req, res, next) => {
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     if (uuidRegex.test(idParam)) {
       workOrder = await WorkOrder.findByPk(idParam, {
-        include: [{
-          model: WorkOrderPart,
-          as: 'parts',
-          include: [{
-            model: WorkOrderPartFile,
-            as: 'files'
-          }]
-        }]
+        include: [
+          { model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] },
+          { model: WorkOrderDocument, as: 'documents' }
+        ]
       });
     } else {
       // Try to find by orderNumber or drNumber
@@ -570,14 +566,10 @@ router.delete('/:id', async (req, res, next) => {
         where: idParam.startsWith('DR-') 
           ? { drNumber: parseInt(idParam.replace('DR-', '')) }
           : { orderNumber: idParam },
-        include: [{
-          model: WorkOrderPart,
-          as: 'parts',
-          include: [{
-            model: WorkOrderPartFile,
-            as: 'files'
-          }]
-        }]
+        include: [
+          { model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] },
+          { model: WorkOrderDocument, as: 'documents' }
+        ]
       });
     }
 
@@ -598,12 +590,31 @@ router.delete('/:id', async (req, res, next) => {
       }
     }
 
-    // Delete associated DR number record
-    await DRNumber.destroy({
-      where: { workOrderId: workOrder.id }
-    });
+    // Delete documents from Cloudinary
+    for (const doc of workOrder.documents || []) {
+      if (doc.cloudinaryId) {
+        try {
+          await cloudinary.uploader.destroy(doc.cloudinaryId, { resource_type: 'raw' });
+        } catch (e) {
+          console.error('Failed to delete document from Cloudinary:', e);
+        }
+      }
+    }
 
-    // Delete associated parts and files (cascade should handle this, but be explicit)
+    // Clear foreign key references
+    await DRNumber.update({ workOrderId: null }, { where: { workOrderId: workOrder.id } });
+    await PONumber.update({ workOrderId: null }, { where: { workOrderId: workOrder.id } });
+    
+    // Update estimate to allow re-conversion
+    await Estimate.update(
+      { workOrderId: null, status: 'accepted' }, 
+      { where: { workOrderId: workOrder.id } }
+    );
+
+    // Delete documents
+    await WorkOrderDocument.destroy({ where: { workOrderId: workOrder.id } });
+
+    // Delete associated parts and files
     for (const part of workOrder.parts || []) {
       await WorkOrderPartFile.destroy({ where: { workOrderPartId: part.id } });
     }

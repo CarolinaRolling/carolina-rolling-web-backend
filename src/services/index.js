@@ -5,6 +5,7 @@ const WorkOrderService = require('./WorkOrderService');
 const WorkOrderPartService = require('./WorkOrderPartService');
 const PONumberService = require('./PONumberService');
 const InboundOrderService = require('./InboundOrderService');
+const MaterialOrderService = require('./MaterialOrderService');
 
 // Factory function to create services with models
 function createServices(models) {
@@ -12,7 +13,8 @@ function createServices(models) {
     workOrderService: new WorkOrderService(models),
     workOrderPartService: new WorkOrderPartService(models),
     poNumberService: new PONumberService(models),
-    inboundOrderService: new InboundOrderService(models)
+    inboundOrderService: new InboundOrderService(models),
+    materialOrderService: new MaterialOrderService(models)
   };
 }
 
@@ -21,5 +23,6 @@ module.exports = {
   WorkOrderPartService,
   PONumberService,
   InboundOrderService,
+  MaterialOrderService,
   createServices
 };

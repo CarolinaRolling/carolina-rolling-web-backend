@@ -127,6 +127,41 @@ function calculateEstimateTotals(parts, truckingCost, taxRate, taxExempt = false
   };
 }
 
+// GET /api/estimates/check-orphaned - Find estimates that point to non-existent work orders (MUST BE BEFORE /:id routes)
+router.get('/check-orphaned', async (req, res, next) => {
+  try {
+    const estimates = await Estimate.findAll({
+      where: {
+        workOrderId: { [Op.ne]: null }
+      }
+    });
+    
+    const orphaned = [];
+    for (const estimate of estimates) {
+      const workOrder = await WorkOrder.findByPk(estimate.workOrderId);
+      if (!workOrder) {
+        orphaned.push({
+          estimateId: estimate.id,
+          estimateNumber: estimate.estimateNumber,
+          clientName: estimate.clientName,
+          workOrderId: estimate.workOrderId,
+          status: estimate.status
+        });
+      }
+    }
+    
+    res.json({ 
+      data: orphaned,
+      count: orphaned.length,
+      message: orphaned.length > 0 
+        ? `Found ${orphaned.length} estimate(s) pointing to non-existent work orders`
+        : 'No orphaned estimates found'
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // GET /api/estimates - Get all estimates
 router.get('/', async (req, res, next) => {
   try {
@@ -1643,6 +1678,46 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
     await transaction.rollback();
     console.error('Convert to work order error:', error);
     res.status(500).json({ error: { message: error.message || 'Failed to convert estimate' } });
+  }
+});
+
+// POST /api/estimates/:id/reset-conversion - Reset an estimate's conversion status (admin use)
+router.post('/:id/reset-conversion', async (req, res, next) => {
+  try {
+    const estimate = await Estimate.findByPk(req.params.id);
+    
+    if (!estimate) {
+      return res.status(404).json({ error: { message: 'Estimate not found' } });
+    }
+    
+    // Check if the linked work order actually exists
+    let workOrderExists = false;
+    if (estimate.workOrderId) {
+      const workOrder = await WorkOrder.findByPk(estimate.workOrderId);
+      workOrderExists = !!workOrder;
+    }
+    
+    if (workOrderExists) {
+      return res.status(400).json({ 
+        error: { 
+          message: 'Work order exists. Cannot reset. Delete the work order first or view it.',
+          workOrderId: estimate.workOrderId
+        } 
+      });
+    }
+    
+    // Reset the estimate
+    await estimate.update({
+      workOrderId: null,
+      status: 'accepted' // Set back to accepted so it can be converted again
+    });
+    
+    res.json({ 
+      data: estimate,
+      message: 'Estimate conversion reset. You can now convert it again.' 
+    });
+  } catch (error) {
+    next(error);
   }
 });
 

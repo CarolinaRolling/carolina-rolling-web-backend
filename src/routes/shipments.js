@@ -477,7 +477,7 @@ router.put('/:id', async (req, res, next) => {
 
     const allowedFields = [
       'clientName', 'jobNumber', 'clientPurchaseOrderNumber', 'description', 'partNumbers', 'quantity',
-      'status', 'location', 'notes', 'receivedBy', 'requestedDueDate', 'promisedDate'
+      'status', 'location', 'notes', 'receivedBy', 'requestedDueDate', 'promisedDate', 'pickedUpBy'
     ];
 
     const updates = {};

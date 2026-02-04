@@ -1489,7 +1489,7 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
       return res.status(400).json({ error: { message: 'Estimate has already been converted to a work order' } });
     }
 
-    const { clientPurchaseOrderNumber, requestedDueDate, promisedDate, notes, supplierPOs } = req.body;
+    const { clientPurchaseOrderNumber, requestedDueDate, promisedDate, notes } = req.body;
 
     // Get next DR number
     const maxDR = await DRNumber.max('drNumber') || 2950;
@@ -1530,9 +1530,6 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
     // Update DR record with work order ID
     await drRecord.update({ workOrderId: workOrder.id }, { transaction });
 
-    // Track parts that need material ordered
-    const partsNeedingMaterial = [];
-
     // Create work order parts from estimate parts
     for (const estimatePart of estimate.parts) {
       const workOrderPart = await WorkOrderPart.create({
@@ -1557,15 +1554,16 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
         flangeOut: estimatePart.flangeOut,
         specialInstructions: estimatePart.specialInstructions,
         status: 'pending',
-        // Track which estimate part this came from
-        estimatePartId: estimatePart.id
+        // Copy supplier info for material ordering
+        supplierName: estimatePart.supplierName,
+        materialSource: estimatePart.materialSource
       }, { transaction });
 
       // Copy part files to work order part files
       if (estimatePart.files && estimatePart.files.length > 0) {
         for (const file of estimatePart.files) {
           await WorkOrderPartFile.create({
-            partId: workOrderPart.id,
+            workOrderPartId: workOrderPart.id,
             filename: file.filename,
             originalName: file.originalName,
             mimeType: file.mimeType,
@@ -1573,110 +1571,6 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
             url: file.url,
             cloudinaryId: file.cloudinaryId,
             fileType: file.fileType
-          }, { transaction });
-        }
-      }
-
-      // Track parts that need material ordered (We Order)
-      if (estimatePart.materialSource === 'we_order' && !estimatePart.materialOrdered) {
-        partsNeedingMaterial.push({
-          estimatePart,
-          workOrderPart
-        });
-      }
-    }
-
-    // Create inbound orders for parts needing material
-    const createdInboundOrders = [];
-    
-    if (partsNeedingMaterial.length > 0) {
-      // Group by supplier
-      const supplierGroups = {};
-      partsNeedingMaterial.forEach(({ estimatePart, workOrderPart }) => {
-        const supplier = estimatePart.supplierName || 'Unknown Supplier';
-        if (!supplierGroups[supplier]) {
-          supplierGroups[supplier] = [];
-        }
-        supplierGroups[supplier].push({ estimatePart, workOrderPart });
-      });
-
-      const suppliers = Object.keys(supplierGroups).sort();
-
-      for (const supplier of suppliers) {
-        const parts = supplierGroups[supplier];
-        
-        // Build description from parts
-        const materialDescriptions = parts.map(({ estimatePart }) => 
-          `Part ${estimatePart.partNumber}: ${estimatePart.materialDescription || estimatePart.partType} (Qty: ${estimatePart.quantity})`
-        ).join('\n');
-
-        // Get PO number for this supplier
-        const poNumber = supplierPOs?.[supplier];
-        let poNumberFormatted = null;
-        
-        // Create PO number record if provided
-        if (poNumber) {
-          try {
-            // Check if PO number already exists
-            const existingPO = await PONumber.findOne({ where: { poNumber: poNumber }, transaction });
-            if (!existingPO) {
-              await PONumber.create({
-                poNumber: poNumber,
-                status: 'active',
-                supplier: supplier,
-                workOrderId: workOrder.id,
-                estimateId: estimate.id,
-                clientName: estimate.clientName,
-                description: materialDescriptions
-              }, { transaction });
-            }
-            
-            poNumberFormatted = `PO${poNumber}`;
-            
-            // Update next PO number setting
-            const maxPO = Math.max(...Object.values(supplierPOs).filter(v => typeof v === 'number'));
-            if (maxPO && !isNaN(maxPO)) {
-              await AppSettings.upsert({
-                key: 'next_po_number',
-                value: { nextNumber: maxPO + 1 }
-              }, { transaction });
-            }
-          } catch (poError) {
-            console.error('PO number creation error:', poError.message);
-            // Continue without PO number if there's an error
-            poNumberFormatted = null;
-          }
-        }
-
-        // Create inbound order
-        const inboundOrder = await InboundOrder.create({
-          supplier: supplier,
-          materialDescription: materialDescriptions,
-          expectedDate: null,
-          poNumber: poNumberFormatted,
-          status: 'pending',
-          workOrderId: workOrder.id,
-          notes: `Material for ${estimate.clientName} - DR#${nextDRNumber}\nEstimate: ${estimate.estimateNumber}`
-        }, { transaction });
-
-        createdInboundOrders.push(inboundOrder);
-
-        // Update PO record with inbound order ID
-        if (poNumber && poNumberFormatted) {
-          try {
-            await PONumber.update(
-              { inboundOrderId: inboundOrder.id },
-              { where: { poNumber: poNumber }, transaction }
-            );
-          } catch (updateError) {
-            console.error('PO update error:', updateError.message);
-          }
-        }
-
-        // Update estimate parts to mark as ordered and link to inbound order
-        for (const { estimatePart, workOrderPart } of parts) {
-          await estimatePart.update({
-            inboundOrderId: inboundOrder.id
           }, { transaction });
         }
       }

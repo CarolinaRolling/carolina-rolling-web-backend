@@ -417,22 +417,6 @@ router.delete('/:id', async (req, res, next) => {
 
 // ============= PARTS =============
 
-// Helper to convert empty strings to null for numeric fields
-const cleanNumericFields = (data) => {
-  const numericFields = [
-    'materialUnitCost', 'materialMarkupPercent', 'materialTotal', 
-    'rollingCost', 'otherServicesCost', 'otherServicesMarkupPercent', 'otherServicesTotal', 'partTotal',
-    'serviceDrillingCost', 'serviceCuttingCost', 'serviceFittingCost', 'serviceWeldingCost', 'serviceWeldingPercent'
-  ];
-  const cleaned = { ...data };
-  numericFields.forEach(field => {
-    if (cleaned[field] === '' || cleaned[field] === null || cleaned[field] === undefined) {
-      cleaned[field] = 0;
-    }
-  });
-  return cleaned;
-};
-
 // POST /api/estimates/:id/parts - Add part
 router.post('/:id/parts', async (req, res, next) => {
   try {

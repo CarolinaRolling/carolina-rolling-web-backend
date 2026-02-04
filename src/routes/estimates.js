@@ -1526,7 +1526,14 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
       estimateNumber: estimate.estimateNumber,
       estimateTotal: estimate.grandTotal,
       requestedDueDate: requestedDueDate || null,
-      promisedDate: promisedDate || null
+      promisedDate: promisedDate || null,
+      // Copy order-level pricing
+      truckingDescription: estimate.truckingDescription,
+      truckingCost: estimate.truckingCost,
+      taxRate: estimate.taxRate,
+      taxAmount: estimate.taxAmount,
+      subtotal: estimate.subtotal,
+      grandTotal: estimate.grandTotal
     }, { transaction });
 
     // Update DR record with work order ID
@@ -1558,7 +1565,16 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
         status: 'pending',
         // Copy supplier info for material ordering
         supplierName: estimatePart.supplierName,
-        materialSource: estimatePart.materialSource
+        materialSource: estimatePart.materialSource,
+        // Copy pricing fields
+        laborRate: estimatePart.laborRate,
+        laborHours: estimatePart.laborHours,
+        laborTotal: estimatePart.laborTotal,
+        materialUnitCost: estimatePart.materialUnitCost,
+        materialTotal: estimatePart.materialTotal,
+        setupCharge: estimatePart.setupCharge,
+        otherCharges: estimatePart.otherCharges,
+        partTotal: estimatePart.partTotal
       }, { transaction });
 
       // Copy part files to work order part files

@@ -495,6 +495,31 @@ const WorkOrder = sequelize.define('WorkOrder', {
   pendingInboundCount: {
     type: DataTypes.INTEGER,
     defaultValue: 0
+  },
+  // Order-level pricing
+  truckingDescription: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  truckingCost: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: true
+  },
+  taxRate: {
+    type: DataTypes.DECIMAL(5, 4),
+    allowNull: true
+  },
+  taxAmount: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: true
+  },
+  subtotal: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: true
+  },
+  grandTotal: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: true
   }
 }, {
   tableName: 'work_orders',
@@ -660,6 +685,39 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
   },
   inboundOrderId: {
     type: DataTypes.UUID,
+    allowNull: true
+  },
+  // Pricing fields
+  laborRate: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: true
+  },
+  laborHours: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: true
+  },
+  laborTotal: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: true
+  },
+  materialUnitCost: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: true
+  },
+  materialTotal: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: true
+  },
+  setupCharge: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: true
+  },
+  otherCharges: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: true
+  },
+  partTotal: {
+    type: DataTypes.DECIMAL(10, 2),
     allowNull: true
   }
 }, {

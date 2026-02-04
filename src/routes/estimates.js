@@ -1573,24 +1573,36 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
         
         // Create PO number record if provided
         if (poNumber) {
-          await PONumber.create({
-            poNumber: poNumber,
-            status: 'active',
-            supplier: supplier,
-            workOrderId: workOrder.id,
-            estimateId: estimate.id,
-            clientName: estimate.clientName,
-            description: materialDescriptions
-          }, { transaction });
-          
-          poNumberFormatted = `PO${poNumber}`;
-          
-          // Update next PO number setting
-          const nextPO = Math.max(...Object.values(supplierPOs)) + 1;
-          await AppSettings.upsert({
-            key: 'next_po_number',
-            value: { nextNumber: nextPO }
-          }, { transaction });
+          try {
+            // Check if PO number already exists
+            const existingPO = await PONumber.findOne({ where: { poNumber: poNumber }, transaction });
+            if (!existingPO) {
+              await PONumber.create({
+                poNumber: poNumber,
+                status: 'active',
+                supplier: supplier,
+                workOrderId: workOrder.id,
+                estimateId: estimate.id,
+                clientName: estimate.clientName,
+                description: materialDescriptions
+              }, { transaction });
+            }
+            
+            poNumberFormatted = `PO${poNumber}`;
+            
+            // Update next PO number setting
+            const maxPO = Math.max(...Object.values(supplierPOs).filter(v => typeof v === 'number'));
+            if (maxPO && !isNaN(maxPO)) {
+              await AppSettings.upsert({
+                key: 'next_po_number',
+                value: { nextNumber: maxPO + 1 }
+              }, { transaction });
+            }
+          } catch (poError) {
+            console.error('PO number creation error:', poError.message);
+            // Continue without PO number if there's an error
+            poNumberFormatted = null;
+          }
         }
 
         // Create inbound order
@@ -1607,11 +1619,15 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
         createdInboundOrders.push(inboundOrder);
 
         // Update PO record with inbound order ID
-        if (poNumber) {
-          await PONumber.update(
-            { inboundOrderId: inboundOrder.id },
-            { where: { poNumber: poNumber }, transaction }
-          );
+        if (poNumber && poNumberFormatted) {
+          try {
+            await PONumber.update(
+              { inboundOrderId: inboundOrder.id },
+              { where: { poNumber: poNumber }, transaction }
+            );
+          } catch (updateError) {
+            console.error('PO update error:', updateError.message);
+          }
         }
 
         // Update estimate parts to mark as ordered and link to inbound order

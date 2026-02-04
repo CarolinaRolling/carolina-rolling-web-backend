@@ -418,8 +418,8 @@ const WorkOrder = sequelize.define('WorkOrder', {
     allowNull: true
   },
   status: {
-    type: DataTypes.ENUM('draft', 'received', 'in_progress', 'completed', 'shipped', 'archived'),
-    defaultValue: 'draft'
+    type: DataTypes.ENUM('quoted', 'work_order_generated', 'waiting_for_materials', 'received', 'processing', 'stored', 'shipped', 'archived'),
+    defaultValue: 'received'
   },
   notes: {
     type: DataTypes.TEXT,
@@ -506,7 +506,7 @@ const WorkOrder = sequelize.define('WorkOrder', {
     allowNull: true
   },
   taxRate: {
-    type: DataTypes.DECIMAL(5, 4),
+    type: DataTypes.DECIMAL(5, 2),
     allowNull: true
   },
   taxAmount: {

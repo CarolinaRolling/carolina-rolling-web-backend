@@ -23,6 +23,116 @@ function cleanNumericFields(data, fields) {
   return cleaned;
 }
 
+// Helper function to generate Purchase Order PDF
+async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
+  const PDFDocument = require('pdfkit');
+  
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ margin: 50 });
+      const chunks = [];
+      
+      doc.on('data', chunk => chunks.push(chunk));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+      
+      // Header
+      doc.fontSize(24).font('Helvetica-Bold').text('PURCHASE ORDER', { align: 'center' });
+      doc.moveDown(0.5);
+      
+      // PO Number
+      doc.fontSize(16).fillColor('#1976d2').text(poNumber, { align: 'center' });
+      doc.fillColor('black');
+      doc.moveDown(1);
+      
+      // Company Info (left) and PO Info (right)
+      const startY = doc.y;
+      
+      // From section
+      doc.fontSize(10).font('Helvetica-Bold').text('FROM:', 50, startY);
+      doc.font('Helvetica').text('Carolina Rolling, Inc.', 50, startY + 15);
+      doc.text('Your Address Here', 50, startY + 28);
+      doc.text('Phone: (xxx) xxx-xxxx', 50, startY + 41);
+      
+      // To section
+      doc.font('Helvetica-Bold').text('TO:', 300, startY);
+      doc.font('Helvetica').text(supplier, 300, startY + 15);
+      
+      // PO Details
+      doc.font('Helvetica-Bold').text('DATE:', 450, startY);
+      doc.font('Helvetica').text(new Date().toLocaleDateString(), 450, startY + 15);
+      
+      doc.y = startY + 70;
+      doc.moveDown(1);
+      
+      // Reference info
+      doc.fontSize(10).font('Helvetica-Bold').text('Reference Information', { underline: true });
+      doc.moveDown(0.3);
+      doc.font('Helvetica');
+      doc.text(`Work Order: DR-${workOrder.drNumber}`);
+      doc.text(`Client: ${workOrder.clientName}`);
+      if (workOrder.clientPurchaseOrderNumber) {
+        doc.text(`Client PO: ${workOrder.clientPurchaseOrderNumber}`);
+      }
+      doc.moveDown(1);
+      
+      // Items table header
+      doc.font('Helvetica-Bold');
+      const tableTop = doc.y;
+      doc.rect(50, tableTop, 510, 20).fillAndStroke('#e3f2fd', '#1976d2');
+      doc.fillColor('black');
+      doc.text('Part #', 55, tableTop + 5);
+      doc.text('Qty', 100, tableTop + 5);
+      doc.text('Description', 140, tableTop + 5);
+      
+      // Items
+      doc.font('Helvetica');
+      let itemY = tableTop + 25;
+      
+      parts.forEach((part, index) => {
+        const rowHeight = 40;
+        
+        // Alternate row colors
+        if (index % 2 === 0) {
+          doc.rect(50, itemY - 5, 510, rowHeight).fill('#f5f5f5');
+        }
+        doc.fillColor('black');
+        
+        doc.text(part.partNumber.toString(), 55, itemY);
+        doc.text(part.quantity.toString(), 100, itemY);
+        
+        // Wrap description
+        const description = part.materialDescription || part.partType || 'N/A';
+        doc.text(description, 140, itemY, { width: 400 });
+        
+        itemY += rowHeight;
+        
+        // Check if we need a new page
+        if (itemY > 700) {
+          doc.addPage();
+          itemY = 50;
+        }
+      });
+      
+      // Footer
+      doc.moveDown(2);
+      doc.fontSize(10).font('Helvetica-Bold').text('Notes:', 50);
+      doc.font('Helvetica').text('Please reference the PO number on all correspondence and shipments.', 50);
+      doc.moveDown(1);
+      doc.text(`Material is for: ${workOrder.clientName} - DR-${workOrder.drNumber}`);
+      
+      // Signature line
+      doc.moveDown(2);
+      doc.text('_______________________________', 50);
+      doc.text('Authorized Signature', 50);
+      
+      doc.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
 // Helper to log activity for daily email
 async function logActivity(type, resourceType, resourceId, resourceNumber, clientName, description, details = {}) {
   try {
@@ -1337,6 +1447,43 @@ router.post('/:id/order-material', async (req, res, next) => {
           materialOrderedAt: new Date(),
           inboundOrderId: inboundOrder.id
         }, { transaction });
+      }
+
+      // Generate and upload PO PDF
+      try {
+        const pdfBuffer = await generatePurchaseOrderPDF(poNumberFormatted, supplier, parts, workOrder);
+        
+        // Upload to Cloudinary
+        const uploadResult = await new Promise((resolve, reject) => {
+          cloudinary.uploader.upload_stream(
+            {
+              folder: 'purchase-orders',
+              resource_type: 'raw',
+              public_id: `${poNumberFormatted}-${workOrder.drNumber}`,
+              format: 'pdf'
+            },
+            (error, result) => {
+              if (error) reject(error);
+              else resolve(result);
+            }
+          ).end(pdfBuffer);
+        });
+
+        // Save document record linked to work order
+        await WorkOrderDocument.create({
+          workOrderId: workOrder.id,
+          originalName: `${poNumberFormatted} - ${supplier}.pdf`,
+          mimeType: 'application/pdf',
+          size: pdfBuffer.length,
+          url: uploadResult.secure_url,
+          cloudinaryId: uploadResult.public_id,
+          documentType: 'purchase_order'
+        }, { transaction });
+
+        console.log(`Generated PO PDF: ${poNumberFormatted} for ${supplier}`);
+      } catch (pdfError) {
+        console.error('PDF generation error:', pdfError.message);
+        // Continue even if PDF fails - the PO record is still created
       }
     }
 

@@ -9,6 +9,32 @@ const { Estimate, EstimatePart, EstimatePartFile, EstimateFile, WorkOrder, WorkO
 
 const router = express.Router();
 
+// Helper to clean numeric fields - convert empty strings to null
+// List of all numeric fields that might be passed
+const NUMERIC_FIELDS = [
+  'laborRate', 'laborHours', 'laborTotal', 'laborMarkupPercent',
+  'materialUnitCost', 'materialTotal', 'materialMarkupPercent',
+  'rollingCost', 'rollingMarkupPercent', 'rollingTotal',
+  'otherServicesCost', 'otherServicesMarkupPercent', 'otherServicesTotal',
+  'setupCharge', 'otherCharges', 'partTotal', 'quantity',
+  'serviceDrillingCost', 'serviceCuttingCost', 'serviceFittingCost',
+  'serviceWeldingCost', 'serviceWeldingPercent',
+  'truckingCost', 'taxRate', 'taxAmount', 'subtotal', 'grandTotal'
+];
+
+function cleanNumericFields(data, fields = NUMERIC_FIELDS) {
+  const cleaned = { ...data };
+  fields.forEach(field => {
+    if (cleaned[field] === '' || cleaned[field] === undefined) {
+      cleaned[field] = null;
+    } else if (cleaned[field] !== null && cleaned[field] !== undefined) {
+      const num = parseFloat(cleaned[field]);
+      cleaned[field] = isNaN(num) ? null : num;
+    }
+  });
+  return cleaned;
+}
+
 // Helper to log activity for daily email
 async function logActivity(type, resourceType, resourceId, resourceNumber, clientName, description, details = {}) {
   try {
@@ -1571,7 +1597,7 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
       contactEmail: estimate.contactEmail,
       clientPurchaseOrderNumber: clientPurchaseOrderNumber || null,
       notes: notes || estimate.notes,
-      status: 'draft',
+      status: 'waiting_for_materials',
       estimateId: estimate.id,
       estimateNumber: estimate.estimateNumber,
       estimateTotal: estimate.grandTotal,

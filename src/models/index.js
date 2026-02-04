@@ -1473,6 +1473,105 @@ const DailyActivity = sequelize.define('DailyActivity', {
   timestamps: true
 });
 
+// Client Model - for autofill and tax management
+const Client = sequelize.define('Client', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  name: {
+    type: DataTypes.STRING,
+    allowNull: false,
+    unique: true
+  },
+  contactName: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  contactPhone: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  contactEmail: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  address: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  // Tax settings
+  taxStatus: {
+    type: DataTypes.STRING,
+    defaultValue: 'taxable' // 'taxable', 'resale', 'exempt'
+  },
+  resaleCertificate: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  customTaxRate: {
+    type: DataTypes.DECIMAL(10, 4),
+    allowNull: true // null means use default rate
+  },
+  notes: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  isActive: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: true
+  }
+}, {
+  tableName: 'clients',
+  timestamps: true
+});
+
+// Vendor Model - for supplier autofill
+const Vendor = sequelize.define('Vendor', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  name: {
+    type: DataTypes.STRING,
+    allowNull: false,
+    unique: true
+  },
+  contactName: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  contactPhone: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  contactEmail: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  address: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  accountNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  notes: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  isActive: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: true
+  }
+}, {
+  tableName: 'vendors',
+  timestamps: true
+});
+
 module.exports = {
   sequelize,
   User,
@@ -1493,5 +1592,7 @@ module.exports = {
   DRNumber,
   PONumber,
   EmailLog,
-  DailyActivity
+  DailyActivity,
+  Client,
+  Vendor
 };

@@ -528,7 +528,20 @@ router.post('/:id/parts', async (req, res, next) => {
       arcDegrees,
       sectionSize,
       flangeOut,
-      specialInstructions
+      specialInstructions,
+      // Material source fields
+      materialSource,
+      supplierName,
+      materialDescription,
+      // Pricing fields
+      laborRate,
+      laborHours,
+      laborTotal,
+      materialUnitCost,
+      materialTotal,
+      setupCharge,
+      otherCharges,
+      partTotal
     } = req.body;
 
     if (!partType) {
@@ -556,7 +569,20 @@ router.post('/:id/parts', async (req, res, next) => {
       arcDegrees,
       sectionSize,
       flangeOut: flangeOut || false,
-      specialInstructions
+      specialInstructions,
+      // Material source fields
+      materialSource: materialSource || 'customer',
+      supplierName,
+      materialDescription,
+      // Pricing fields
+      laborRate,
+      laborHours,
+      laborTotal,
+      materialUnitCost,
+      materialTotal,
+      setupCharge,
+      otherCharges,
+      partTotal
     });
 
     // Reload with files
@@ -612,7 +638,20 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
       specialInstructions,
       operatorNotes,
       status,
-      completedBy
+      completedBy,
+      // Material source fields
+      materialSource,
+      supplierName,
+      materialDescription,
+      // Pricing fields
+      laborRate,
+      laborHours,
+      laborTotal,
+      materialUnitCost,
+      materialTotal,
+      setupCharge,
+      otherCharges,
+      partTotal
     } = req.body;
 
     const updates = {};
@@ -636,6 +675,21 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     if (flangeOut !== undefined) updates.flangeOut = flangeOut;
     if (specialInstructions !== undefined) updates.specialInstructions = specialInstructions;
     if (operatorNotes !== undefined) updates.operatorNotes = operatorNotes;
+    
+    // Material source fields
+    if (materialSource !== undefined) updates.materialSource = materialSource;
+    if (supplierName !== undefined) updates.supplierName = supplierName;
+    if (materialDescription !== undefined) updates.materialDescription = materialDescription;
+    
+    // Pricing fields
+    if (laborRate !== undefined) updates.laborRate = laborRate;
+    if (laborHours !== undefined) updates.laborHours = laborHours;
+    if (laborTotal !== undefined) updates.laborTotal = laborTotal;
+    if (materialUnitCost !== undefined) updates.materialUnitCost = materialUnitCost;
+    if (materialTotal !== undefined) updates.materialTotal = materialTotal;
+    if (setupCharge !== undefined) updates.setupCharge = setupCharge;
+    if (otherCharges !== undefined) updates.otherCharges = otherCharges;
+    if (partTotal !== undefined) updates.partTotal = partTotal;
     
     if (status !== undefined) {
       updates.status = status;

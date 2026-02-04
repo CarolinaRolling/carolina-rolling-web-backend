@@ -17,6 +17,7 @@ const poNumbersRoutes = require('./routes/po-numbers');
 const emailRoutes = require('./routes/email');
 const { sendDailyEmail } = require('./routes/email');
 const { router: authRoutes, initializeAdmin } = require('./routes/auth');
+const clientsVendorsRoutes = require('./routes/clients-vendors');
 const { Op } = require('sequelize');
 
 // Configure Cloudinary
@@ -64,6 +65,7 @@ app.use('/api/backup', backupRoutes);
 app.use('/api/dr-numbers', drNumbersRoutes);
 app.use('/api/po-numbers', poNumbersRoutes);
 app.use('/api/email', emailRoutes);
+app.use('/api', clientsVendorsRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {

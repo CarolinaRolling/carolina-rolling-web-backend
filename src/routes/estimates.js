@@ -1484,7 +1484,7 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Estimate not found' } });
     }
 
-    if (estimate.status === 'converted') {
+    if (estimate.status === 'converted' || estimate.workOrderId) {
       await transaction.rollback();
       return res.status(400).json({ error: { message: 'Estimate has already been converted to a work order' } });
     }
@@ -1578,9 +1578,9 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
       }
     }
 
-    // Update estimate status
+    // Update estimate status - use 'accepted' and link to work order
     await estimate.update({
-      status: 'converted',
+      status: 'accepted',
       workOrderId: workOrder.id
     }, { transaction });
 
@@ -1604,16 +1604,14 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
 
     res.status(201).json({
       data: {
-        workOrder: completeWorkOrder,
-        inboundOrders: createdInboundOrders
+        workOrder: completeWorkOrder
       },
-      message: `Work order DR-${nextDRNumber} created successfully` + 
-        (createdInboundOrders.length > 0 ? `. ${createdInboundOrders.length} inbound order(s) created for material.` : '')
+      message: `Work order DR-${nextDRNumber} created successfully`
     });
   } catch (error) {
     await transaction.rollback();
     console.error('Convert to work order error:', error);
-    next(error);
+    res.status(500).json({ error: { message: error.message || 'Failed to convert estimate' } });
   }
 });
 

@@ -5,7 +5,7 @@ const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const cloudinary = require('cloudinary').v2;
 const { Op } = require('sequelize');
-const { WorkOrder, WorkOrderPart, WorkOrderPartFile, WorkOrderDocument, DailyActivity, DRNumber, sequelize } = require('../models');
+const { WorkOrder, WorkOrderPart, WorkOrderPartFile, WorkOrderDocument, DailyActivity, DRNumber, InboundOrder, PONumber, AppSettings, sequelize } = require('../models');
 
 const router = express.Router();
 
@@ -1154,6 +1154,158 @@ router.delete('/:id/documents/:documentId', async (req, res, next) => {
 
     res.json({ message: 'Document deleted successfully' });
   } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/workorders/:id/order-material - Create purchase orders for work order materials
+router.post('/:id/order-material', async (req, res, next) => {
+  const transaction = await sequelize.transaction();
+  
+  try {
+    const workOrder = await WorkOrder.findByPk(req.params.id, {
+      include: [{ model: WorkOrderPart, as: 'parts' }]
+    });
+
+    if (!workOrder) {
+      await transaction.rollback();
+      return res.status(404).json({ error: { message: 'Work order not found' } });
+    }
+
+    const { purchaseOrderNumber, partIds } = req.body;
+
+    if (!purchaseOrderNumber) {
+      await transaction.rollback();
+      return res.status(400).json({ error: { message: 'Purchase order number is required' } });
+    }
+
+    if (!partIds || partIds.length === 0) {
+      await transaction.rollback();
+      return res.status(400).json({ error: { message: 'At least one part must be selected' } });
+    }
+
+    // Get selected parts
+    const selectedParts = workOrder.parts.filter(p => partIds.includes(p.id));
+    
+    if (selectedParts.length === 0) {
+      await transaction.rollback();
+      return res.status(400).json({ error: { message: 'No valid parts selected' } });
+    }
+
+    // Group parts by supplier
+    const supplierGroups = {};
+    selectedParts.forEach(part => {
+      const supplier = part.supplierName || 'Unknown Supplier';
+      if (!supplierGroups[supplier]) {
+        supplierGroups[supplier] = [];
+      }
+      supplierGroups[supplier].push(part);
+    });
+
+    const suppliers = Object.keys(supplierGroups).sort();
+    const createdOrders = [];
+    const basePONumber = parseInt(purchaseOrderNumber);
+
+    // Create inbound order for each supplier
+    for (let i = 0; i < suppliers.length; i++) {
+      const supplier = suppliers[i];
+      const parts = supplierGroups[supplier];
+      
+      // Generate PO number - increment for each supplier
+      const poNumber = basePONumber + i;
+      const poNumberFormatted = `PO${poNumber}`;
+
+      // Build description from parts
+      const materialDescriptions = parts.map(p => 
+        `Part ${p.partNumber}: ${p.materialDescription || p.partType} (Qty: ${p.quantity})`
+      ).join('\n');
+
+      // Create PONumber record
+      try {
+        const existingPO = await PONumber.findOne({ where: { poNumber: poNumber }, transaction });
+        if (!existingPO) {
+          await PONumber.create({
+            poNumber: poNumber,
+            status: 'active',
+            supplier: supplier,
+            workOrderId: workOrder.id,
+            clientName: workOrder.clientName,
+            description: materialDescriptions
+          }, { transaction });
+        }
+      } catch (poError) {
+        console.error('PO creation error:', poError.message);
+      }
+
+      // Create inbound order
+      const inboundOrder = await InboundOrder.create({
+        poNumber: poNumberFormatted,
+        supplier: supplier,
+        materialDescription: materialDescriptions,
+        clientName: workOrder.clientName,
+        workOrderId: workOrder.id,
+        status: 'pending',
+        notes: `Material order for DR-${workOrder.drNumber}\nClient: ${workOrder.clientName}`
+      }, { transaction });
+
+      // Update PONumber record with inbound order ID
+      try {
+        await PONumber.update(
+          { inboundOrderId: inboundOrder.id },
+          { where: { poNumber: poNumber }, transaction }
+        );
+      } catch (updateError) {
+        console.error('PO update error:', updateError.message);
+      }
+
+      createdOrders.push({
+        inboundOrder,
+        supplier,
+        poNumber: poNumberFormatted,
+        parts: parts.map(p => ({ id: p.id, partNumber: p.partNumber, description: p.materialDescription }))
+      });
+
+      // Update parts with PO info
+      for (const part of parts) {
+        await part.update({
+          materialOrdered: true,
+          materialPurchaseOrderNumber: poNumberFormatted,
+          materialOrderedAt: new Date(),
+          inboundOrderId: inboundOrder.id
+        }, { transaction });
+      }
+    }
+
+    // Update next PO number setting
+    const nextPO = basePONumber + suppliers.length;
+    await AppSettings.upsert({
+      key: 'next_po_number',
+      value: { nextNumber: nextPO }
+    }, { transaction });
+
+    await transaction.commit();
+
+    // Log activity
+    await logActivity(
+      'created',
+      'purchase_order',
+      workOrder.id,
+      `PO${basePONumber}`,
+      workOrder.clientName,
+      `Created ${createdOrders.length} PO(s) for DR-${workOrder.drNumber}`,
+      { suppliers: suppliers, partCount: selectedParts.length }
+    );
+
+    res.status(201).json({
+      data: {
+        purchaseOrders: createdOrders,
+        totalOrders: createdOrders.length
+      },
+      message: `${createdOrders.length} purchase order(s) created`
+    });
+  } catch (error) {
+    await transaction.rollback();
+    console.error('Order material error:', error);
     next(error);
   }
 });

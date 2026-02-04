@@ -645,6 +645,22 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
   materialDescription: {
     type: DataTypes.STRING,
     allowNull: true
+  },
+  materialOrdered: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  materialOrderedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  materialPurchaseOrderNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  inboundOrderId: {
+    type: DataTypes.UUID,
+    allowNull: true
   }
 }, {
   tableName: 'work_order_parts',

@@ -1481,6 +1481,7 @@ router.post('/:id/order-material', async (req, res, next) => {
       const inboundOrder = await InboundOrder.create({
         purchaseOrderNumber: poNumberFormatted,
         supplier: supplier,
+        supplierName: supplier,  // Also set supplierName for display
         description: materialDescriptions,
         clientName: workOrder.clientName,
         workOrderId: workOrder.id,

@@ -1305,14 +1305,20 @@ router.get('/:id/documents/:documentId/signed-url', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Document not found' } });
     }
 
-    // Generate signed URL (valid for 1 hour)
-    const signedUrl = cloudinary.url(document.cloudinaryId, {
-      sign_url: true,
-      type: 'authenticated',
-      expires_at: Math.floor(Date.now() / 1000) + 3600
-    });
-
-    res.json({ data: { url: signedUrl || document.url } });
+    // For Cloudinary raw files (PDFs), just return the direct URL
+    // Cloudinary signed URLs work differently for raw vs image resources
+    if (document.url) {
+      res.json({ data: { url: document.url } });
+    } else if (document.cloudinaryId) {
+      // Try to generate a download URL for raw files
+      const downloadUrl = cloudinary.url(document.cloudinaryId, {
+        resource_type: 'raw',
+        flags: 'attachment'
+      });
+      res.json({ data: { url: downloadUrl } });
+    } else {
+      res.status(404).json({ error: { message: 'Document URL not available' } });
+    }
   } catch (error) {
     next(error);
   }

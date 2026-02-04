@@ -829,7 +829,7 @@ const Estimate = sequelize.define('Estimate', {
     allowNull: true
   },
   status: {
-    type: DataTypes.ENUM('draft', 'sent', 'accepted', 'declined', 'archived'),
+    type: DataTypes.ENUM('draft', 'sent', 'accepted', 'declined', 'archived', 'converted'),
     defaultValue: 'draft'
   },
   // Trucking (estimate-level, not per part)

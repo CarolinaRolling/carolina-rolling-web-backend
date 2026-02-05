@@ -251,8 +251,50 @@ router.get('/', async (req, res, next) => {
       offset: parseInt(offset)
     });
 
+    // Generate signed thumbnail URLs for inventory grid
+    const rowsWithThumbnails = workOrders.rows.map(wo => {
+      const data = wo.toJSON();
+      data.thumbnailUrl = null;
+      // Check documents for images first
+      if (data.documents) {
+        const imageDoc = data.documents.find(d => d.mimeType && d.mimeType.startsWith('image/'));
+        if (imageDoc && imageDoc.cloudinaryId) {
+          try {
+            data.thumbnailUrl = cloudinary.url(imageDoc.cloudinaryId, {
+              sign_url: true,
+              type: 'authenticated',
+              transformation: [{ width: 400, height: 250, crop: 'fill', quality: 'auto' }]
+            });
+          } catch (e) {
+            console.error('Thumbnail generation error:', e);
+          }
+        }
+      }
+      // Check part files for images if no document thumbnail found
+      if (!data.thumbnailUrl && data.parts) {
+        for (const part of data.parts) {
+          if (part.files) {
+            const imageFile = part.files.find(f => f.mimeType && f.mimeType.startsWith('image/'));
+            if (imageFile && imageFile.cloudinaryId) {
+              try {
+                data.thumbnailUrl = cloudinary.url(imageFile.cloudinaryId, {
+                  sign_url: true,
+                  type: 'authenticated',
+                  transformation: [{ width: 400, height: 250, crop: 'fill', quality: 'auto' }]
+                });
+              } catch (e) {
+                console.error('Thumbnail generation error:', e);
+              }
+              break;
+            }
+          }
+        }
+      }
+      return data;
+    });
+
     res.json({
-      data: workOrders.rows,
+      data: rowsWithThumbnails,
       total: workOrders.count,
       limit: parseInt(limit),
       offset: parseInt(offset)
@@ -1231,8 +1273,44 @@ router.get('/archived', async (req, res, next) => {
       offset: parseInt(offset)
     });
 
+    // Generate signed thumbnail URLs
+    const rowsWithThumbnails = workOrders.rows.map(wo => {
+      const data = wo.toJSON();
+      data.thumbnailUrl = null;
+      if (data.documents) {
+        const imageDoc = data.documents.find(d => d.mimeType && d.mimeType.startsWith('image/'));
+        if (imageDoc && imageDoc.cloudinaryId) {
+          try {
+            data.thumbnailUrl = cloudinary.url(imageDoc.cloudinaryId, {
+              sign_url: true,
+              type: 'authenticated',
+              transformation: [{ width: 400, height: 250, crop: 'fill', quality: 'auto' }]
+            });
+          } catch (e) { /* ignore */ }
+        }
+      }
+      if (!data.thumbnailUrl && data.parts) {
+        for (const part of data.parts) {
+          if (part.files) {
+            const imageFile = part.files.find(f => f.mimeType && f.mimeType.startsWith('image/'));
+            if (imageFile && imageFile.cloudinaryId) {
+              try {
+                data.thumbnailUrl = cloudinary.url(imageFile.cloudinaryId, {
+                  sign_url: true,
+                  type: 'authenticated',
+                  transformation: [{ width: 400, height: 250, crop: 'fill', quality: 'auto' }]
+                });
+              } catch (e) { /* ignore */ }
+              break;
+            }
+          }
+        }
+      }
+      return data;
+    });
+
     res.json({
-      data: workOrders.rows,
+      data: rowsWithThumbnails,
       total: workOrders.count,
       limit: parseInt(limit),
       offset: parseInt(offset)

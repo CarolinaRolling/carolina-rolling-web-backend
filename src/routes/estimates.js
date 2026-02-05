@@ -434,9 +434,11 @@ router.post('/:id/parts', async (req, res, next) => {
       ...req.body
     });
 
-    // Calculate part totals
-    const totals = calculatePartTotals(partData);
-    Object.assign(partData, totals);
+    // Calculate part totals (skip for plate_roll and angle_roll which have their own pricing)
+    if (partData.partType !== 'plate_roll' && partData.partType !== 'angle_roll') {
+      const totals = calculatePartTotals(partData);
+      Object.assign(partData, totals);
+    }
     
     const part = await EstimatePart.create(partData);
 
@@ -467,10 +469,12 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
 
     const updates = cleanNumericFields({ ...req.body });
     
-    // Calculate part totals
+    // Calculate part totals (skip for plate_roll and angle_roll which have their own pricing)
     const mergedPart = { ...part.toJSON(), ...updates };
-    const totals = calculatePartTotals(mergedPart);
-    Object.assign(updates, totals);
+    if (mergedPart.partType !== 'plate_roll' && mergedPart.partType !== 'angle_roll') {
+      const totals = calculatePartTotals(mergedPart);
+      Object.assign(updates, totals);
+    }
 
     await part.update(updates);
 
@@ -1135,8 +1139,10 @@ router.post('/:id/duplicate', async (req, res, next) => {
         materialSource: origPart.materialSource
       };
 
-      const totals = calculatePartTotals(partData);
-      Object.assign(partData, totals);
+      if (partData.partType !== 'plate_roll' && partData.partType !== 'angle_roll') {
+        const totals = calculatePartTotals(partData);
+        Object.assign(partData, totals);
+      }
       await EstimatePart.create(partData);
     }
 

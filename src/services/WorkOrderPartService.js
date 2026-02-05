@@ -58,7 +58,7 @@ class WorkOrderPartService {
       flangeOut: data.flangeOut || false,
       specialInstructions: data.specialInstructions,
       // Material source fields
-      materialSource: data.materialSource || 'customer',
+      materialSource: data.materialSource || 'customer_supplied',
       supplierName: data.supplierName || null,
       materialDescription: data.materialDescription || null,
       // Pricing fields

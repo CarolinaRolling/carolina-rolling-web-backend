@@ -138,7 +138,7 @@ class EstimateLinkService {
           flangeOut: ep.flangeOut || false,
           specialInstructions: ep.specialInstructions,
           // Material source
-          materialSource: ep.weSupplyMaterial ? 'we_order' : 'customer',
+          materialSource: ep.weSupplyMaterial ? 'we_order' : 'customer_supplied',
           supplierName: ep.supplierName || null,
           materialDescription: ep.materialDescription || null,
           // Pricing - map from estimate pricing fields

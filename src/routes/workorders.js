@@ -810,7 +810,7 @@ router.post('/:id/parts', async (req, res, next) => {
       flangeOut: flangeOut || false,
       specialInstructions,
       // Material source fields
-      materialSource: materialSource || 'customer',
+      materialSource: materialSource || 'customer_supplied',
       vendorId: resolvedVendorId,
       supplierName: resolvedSupplierName,
       materialDescription: materialDescription || null,

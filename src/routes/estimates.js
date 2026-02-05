@@ -1628,7 +1628,7 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
         supplierName: estimatePart.supplierName,
         vendorId: estimatePart.vendorId || null,
         // Set materialSource - prefer estimate's materialSource, fall back to weSupplyMaterial flag
-        materialSource: estimatePart.materialSource || (estimatePart.weSupplyMaterial ? 'we_order' : 'customer'),
+        materialSource: estimatePart.materialSource || (estimatePart.weSupplyMaterial ? 'we_order' : 'customer_supplied'),
         // Copy pricing fields
         laborRate: estimatePart.laborRate,
         laborHours: estimatePart.laborHours,

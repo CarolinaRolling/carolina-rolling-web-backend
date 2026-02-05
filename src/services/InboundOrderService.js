@@ -10,13 +10,15 @@ class InboundOrderService {
 
   // Get inbound order by ID
   async getById(id) {
-    const { InboundOrder } = this.models;
-    return InboundOrder.findByPk(id);
+    const { InboundOrder, Vendor } = this.models;
+    return InboundOrder.findByPk(id, {
+      include: [{ model: Vendor, as: 'vendor', attributes: ['id', 'name', 'contactName', 'contactPhone', 'contactEmail'] }]
+    });
   }
 
   // Get all inbound orders
   async getAll(options = {}) {
-    const { InboundOrder } = this.models;
+    const { InboundOrder, Vendor } = this.models;
     const { status, limit = 100, offset = 0 } = options;
 
     const where = {};
@@ -24,6 +26,7 @@ class InboundOrderService {
 
     return InboundOrder.findAll({
       where,
+      include: [{ model: Vendor, as: 'vendor', attributes: ['id', 'name', 'contactName', 'contactPhone', 'contactEmail'] }],
       order: [['createdAt', 'DESC']],
       limit: parseInt(limit),
       offset: parseInt(offset)
@@ -32,14 +35,23 @@ class InboundOrderService {
 
   // Create inbound order
   async create(data) {
-    const { InboundOrder } = this.models;
+    const { InboundOrder, Vendor } = this.models;
 
-    if (!data.supplierName || !data.purchaseOrderNumber || !data.description || !data.clientName) {
-      throw new Error('Missing required fields: supplierName, purchaseOrderNumber, description, clientName');
+    // Resolve vendor name from vendorId
+    let supplierName = data.supplierName;
+    if (data.vendorId && !supplierName) {
+      const vendor = await Vendor.findByPk(data.vendorId);
+      if (vendor) supplierName = vendor.name;
+    }
+
+    if (!supplierName || !data.purchaseOrderNumber || !data.description || !data.clientName) {
+      throw new Error('Missing required fields: vendor/supplierName, purchaseOrderNumber, description, clientName');
     }
 
     return InboundOrder.create({
-      supplierName: data.supplierName,
+      vendorId: data.vendorId || null,
+      supplierName: supplierName,
+      supplier: supplierName,
       purchaseOrderNumber: data.purchaseOrderNumber,
       description: data.description,
       clientName: data.clientName,

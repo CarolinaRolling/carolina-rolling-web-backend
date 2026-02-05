@@ -321,6 +321,14 @@ const InboundOrder = sequelize.define('InboundOrder', {
     defaultValue: DataTypes.UUIDV4,
     primaryKey: true
   },
+  vendorId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: {
+      model: 'vendors',
+      key: 'id'
+    }
+  },
   supplierName: {
     type: DataTypes.STRING,
     allowNull: true
@@ -336,6 +344,11 @@ const InboundOrder = sequelize.define('InboundOrder', {
   description: {
     type: DataTypes.TEXT,
     allowNull: false
+  },
+  clientId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'clients', key: 'id' }
   },
   clientName: {
     type: DataTypes.STRING,
@@ -392,6 +405,14 @@ const WorkOrder = sequelize.define('WorkOrder', {
     type: DataTypes.INTEGER,
     unique: true,
     allowNull: true
+  },
+  clientId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: {
+      model: 'clients',
+      key: 'id'
+    }
   },
   clientName: {
     type: DataTypes.STRING,
@@ -663,6 +684,14 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
     type: DataTypes.STRING,
     allowNull: true
   },
+  vendorId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: {
+      model: 'vendors',
+      key: 'id'
+    }
+  },
   supplierName: {
     type: DataTypes.STRING,
     allowNull: true
@@ -866,6 +895,14 @@ const Estimate = sequelize.define('Estimate', {
     unique: true,
     allowNull: false
   },
+  clientId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: {
+      model: 'clients',
+      key: 'id'
+    }
+  },
   clientName: {
     type: DataTypes.STRING,
     allowNull: false
@@ -1026,6 +1063,14 @@ const EstimatePart = sequelize.define('EstimatePart', {
   materialDescription: {
     type: DataTypes.STRING,
     allowNull: true
+  },
+  vendorId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: {
+      model: 'vendors',
+      key: 'id'
+    }
   },
   supplierName: {
     type: DataTypes.STRING,
@@ -1366,6 +1411,11 @@ const DRNumber = sequelize.define('DRNumber', {
     allowNull: true,
     references: { model: 'estimates', key: 'id' }
   },
+  clientId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'clients', key: 'id' }
+  },
   clientName: {
     type: DataTypes.STRING,
     allowNull: true
@@ -1407,6 +1457,11 @@ const PONumber = sequelize.define('PONumber', {
     type: DataTypes.STRING,
     allowNull: true
   },
+  vendorId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'vendors', key: 'id' }
+  },
   workOrderId: {
     type: DataTypes.UUID,
     allowNull: true,
@@ -1421,6 +1476,11 @@ const PONumber = sequelize.define('PONumber', {
     type: DataTypes.UUID,
     allowNull: true,
     references: { model: 'inbound_orders', key: 'id' }
+  },
+  clientId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'clients', key: 'id' }
   },
   clientName: {
     type: DataTypes.STRING,
@@ -1629,6 +1689,35 @@ const Vendor = sequelize.define('Vendor', {
   tableName: 'vendors',
   timestamps: true
 });
+
+// Vendor Associations
+Vendor.hasMany(WorkOrderPart, { foreignKey: 'vendorId', as: 'workOrderParts' });
+WorkOrderPart.belongsTo(Vendor, { foreignKey: 'vendorId', as: 'vendor' });
+
+Vendor.hasMany(EstimatePart, { foreignKey: 'vendorId', as: 'estimateParts' });
+EstimatePart.belongsTo(Vendor, { foreignKey: 'vendorId', as: 'vendor' });
+
+Vendor.hasMany(InboundOrder, { foreignKey: 'vendorId', as: 'inboundOrders' });
+InboundOrder.belongsTo(Vendor, { foreignKey: 'vendorId', as: 'vendor' });
+
+Vendor.hasMany(PONumber, { foreignKey: 'vendorId', as: 'poNumbers' });
+PONumber.belongsTo(Vendor, { foreignKey: 'vendorId', as: 'vendor' });
+
+// Client Associations
+Client.hasMany(WorkOrder, { foreignKey: 'clientId', as: 'workOrders' });
+WorkOrder.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
+
+Client.hasMany(Estimate, { foreignKey: 'clientId', as: 'estimates' });
+Estimate.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
+
+Client.hasMany(InboundOrder, { foreignKey: 'clientId', as: 'inboundOrders' });
+InboundOrder.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
+
+Client.hasMany(PONumber, { foreignKey: 'clientId', as: 'poNumbers' });
+PONumber.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
+
+Client.hasMany(DRNumber, { foreignKey: 'clientId', as: 'drNumbers' });
+DRNumber.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
 
 module.exports = {
   sequelize,

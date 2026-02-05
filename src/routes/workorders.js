@@ -5,7 +5,7 @@ const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const cloudinary = require('cloudinary').v2;
 const { Op } = require('sequelize');
-const { WorkOrder, WorkOrderPart, WorkOrderPartFile, WorkOrderDocument, DailyActivity, DRNumber, InboundOrder, PONumber, AppSettings, Estimate, sequelize } = require('../models');
+const { WorkOrder, WorkOrderPart, WorkOrderPartFile, WorkOrderDocument, DailyActivity, DRNumber, InboundOrder, PONumber, AppSettings, Estimate, Vendor, Client, sequelize } = require('../models');
 
 const router = express.Router();
 
@@ -274,10 +274,10 @@ router.get('/:id', async (req, res, next) => {
           {
             model: WorkOrderPart,
             as: 'parts',
-            include: [{
-              model: WorkOrderPartFile,
-              as: 'files'
-            }],
+            include: [
+              { model: WorkOrderPartFile, as: 'files' },
+              { model: Vendor, as: 'vendor', attributes: ['id', 'name', 'contactName', 'contactPhone', 'contactEmail'] }
+            ],
             order: [['partNumber', 'ASC']]
           },
           {
@@ -296,10 +296,10 @@ router.get('/:id', async (req, res, next) => {
           {
             model: WorkOrderPart,
             as: 'parts',
-            include: [{
-              model: WorkOrderPartFile,
-              as: 'files'
-            }],
+            include: [
+              { model: WorkOrderPartFile, as: 'files' },
+              { model: Vendor, as: 'vendor', attributes: ['id', 'name', 'contactName', 'contactPhone', 'contactEmail'] }
+            ],
             order: [['partNumber', 'ASC']]
           },
           {
@@ -325,6 +325,7 @@ router.post('/', async (req, res, next) => {
   try {
     const {
       clientName,
+      clientId: clientId || null,
       clientPO,
       clientPurchaseOrderNumber,
       jobNumber,
@@ -342,8 +343,16 @@ router.post('/', async (req, res, next) => {
       assignDRNumber = false
     } = req.body;
 
-    if (!clientName) {
-      return res.status(400).json({ error: { message: 'Client name is required' } });
+    if (!clientName && !clientId) {
+      return res.status(400).json({ error: { message: 'Client is required' } });
+    }
+
+    // Resolve client name from clientId if needed
+    let resolvedClientName = clientName;
+    let resolvedClientId = clientId || null;
+    if (resolvedClientId && !resolvedClientName) {
+      const client = await Client.findByPk(resolvedClientId);
+      if (client) resolvedClientName = client.name;
     }
 
     const orderNumber = generateOrderNumber();
@@ -355,7 +364,8 @@ router.post('/', async (req, res, next) => {
       // Create work order
       const workOrder = await WorkOrder.create({
         orderNumber,
-        clientName,
+        clientId: resolvedClientId,
+        clientName: resolvedClientName,
         clientPurchaseOrderNumber: clientPO || clientPurchaseOrderNumber,
         jobNumber,
         contactName,
@@ -464,6 +474,7 @@ router.put('/:id', async (req, res, next) => {
 
     const {
       clientName,
+      clientId: reqClientId,
       clientPurchaseOrderNumber,
       jobNumber,
       storageLocation,
@@ -489,9 +500,19 @@ router.put('/:id', async (req, res, next) => {
       return newVal;
     };
 
+    // Resolve clientId to clientName if needed
+    let resolvedClientName = clientName;
+    if (reqClientId !== undefined) {
+      if (reqClientId) {
+        const client = await Client.findByPk(reqClientId);
+        if (client) resolvedClientName = client.name;
+      }
+    }
+
     // Handle status transitions
     const updates = {
-      clientName: getValue(clientName, workOrder.clientName),
+      clientName: getValue(resolvedClientName, workOrder.clientName),
+      clientId: reqClientId !== undefined ? (reqClientId || null) : workOrder.clientId,
       clientPurchaseOrderNumber: getValue(clientPurchaseOrderNumber, workOrder.clientPurchaseOrderNumber),
       jobNumber: getValue(jobNumber, workOrder.jobNumber),
       storageLocation: getValue(storageLocation, workOrder.storageLocation),
@@ -717,6 +738,7 @@ router.post('/:id/parts', async (req, res, next) => {
       specialInstructions,
       // Material source fields
       materialSource,
+      vendorId,
       supplierName,
       materialDescription
     } = req.body;
@@ -725,9 +747,15 @@ router.post('/:id/parts', async (req, res, next) => {
       return res.status(400).json({ error: { message: 'Part type is required' } });
     }
 
-    console.log('Creating part with supplierName:', supplierName);
-    console.log('Creating part with materialSource:', materialSource);
-    console.log('Creating part with materialDescription:', materialDescription);
+    // Resolve vendor name from vendorId for backwards compat
+    let resolvedVendorId = vendorId || null;
+    let resolvedSupplierName = supplierName || null;
+    if (resolvedVendorId) {
+      const vendor = await Vendor.findByPk(resolvedVendorId);
+      if (vendor) resolvedSupplierName = vendor.name;
+    }
+
+    console.log('Creating part with vendorId:', resolvedVendorId, 'supplierName:', resolvedSupplierName);
 
     const part = await WorkOrderPart.create({
       workOrderId: workOrder.id,
@@ -753,7 +781,8 @@ router.post('/:id/parts', async (req, res, next) => {
       specialInstructions,
       // Material source fields
       materialSource: materialSource || 'customer',
-      supplierName: supplierName || null,
+      vendorId: resolvedVendorId,
+      supplierName: resolvedSupplierName,
       materialDescription: materialDescription || null,
       // Pricing fields - use cleaned values
       laborRate: cleanedData.laborRate,
@@ -766,7 +795,7 @@ router.post('/:id/parts', async (req, res, next) => {
       partTotal: cleanedData.partTotal
     });
 
-    console.log('Created part:', part.id, 'supplierName:', part.supplierName);
+    console.log('Created part:', part.id, 'vendorId:', part.vendorId);
 
     // Reload with files
     const createdPart = await WorkOrderPart.findByPk(part.id, {
@@ -830,6 +859,7 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
       completedBy,
       // Material source fields
       materialSource,
+      vendorId,
       supplierName,
       materialDescription
     } = req.body;
@@ -856,9 +886,17 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     if (specialInstructions !== undefined) updates.specialInstructions = specialInstructions;
     if (operatorNotes !== undefined) updates.operatorNotes = operatorNotes;
     
-    // Material source fields
+    // Material source fields - vendorId is primary, supplierName kept in sync
     if (materialSource !== undefined) updates.materialSource = materialSource;
-    if (supplierName !== undefined) updates.supplierName = supplierName;
+    if (vendorId !== undefined) {
+      updates.vendorId = vendorId || null;
+      if (vendorId) {
+        const vendor = await Vendor.findByPk(vendorId);
+        if (vendor) updates.supplierName = vendor.name;
+      } else {
+        updates.supplierName = null;
+      }
+    }
     if (materialDescription !== undefined) updates.materialDescription = materialDescription;
     
     // Pricing fields - use cleaned values
@@ -1432,24 +1470,34 @@ router.post('/:id/order-material', async (req, res, next) => {
       return res.status(400).json({ error: { message: 'No valid parts selected' } });
     }
 
-    // Group parts by supplier
+    // Group parts by vendorId (fall back to supplierName for legacy data)
     const supplierGroups = {};
-    selectedParts.forEach(part => {
-      const supplier = part.supplierName || 'Unknown Supplier';
-      if (!supplierGroups[supplier]) {
-        supplierGroups[supplier] = [];
+    for (const part of selectedParts) {
+      let groupKey, vendorName, vId;
+      if (part.vendorId) {
+        const vendor = await Vendor.findByPk(part.vendorId, { transaction });
+        groupKey = part.vendorId;
+        vendorName = vendor ? vendor.name : 'Unknown Supplier';
+        vId = part.vendorId;
+      } else {
+        groupKey = part.supplierName || 'Unknown Supplier';
+        vendorName = groupKey;
+        vId = null;
       }
-      supplierGroups[supplier].push(part);
-    });
+      if (!supplierGroups[groupKey]) {
+        supplierGroups[groupKey] = { vendorName, vendorId: vId, parts: [] };
+      }
+      supplierGroups[groupKey].parts.push(part);
+    }
 
-    const suppliers = Object.keys(supplierGroups).sort();
+    const groupKeys = Object.keys(supplierGroups).sort();
     const createdOrders = [];
     const basePONumber = parseInt(purchaseOrderNumber);
 
     // Create inbound order for each supplier
-    for (let i = 0; i < suppliers.length; i++) {
-      const supplier = suppliers[i];
-      const parts = supplierGroups[supplier];
+    for (let i = 0; i < groupKeys.length; i++) {
+      const group = supplierGroups[groupKeys[i]];
+      const { vendorName: supplier, vendorId: vId, parts } = group;
       
       // Generate PO number - increment for each supplier
       const poNumber = basePONumber + i;
@@ -1468,6 +1516,7 @@ router.post('/:id/order-material', async (req, res, next) => {
             poNumber: poNumber,
             status: 'active',
             supplier: supplier,
+            vendorId: vId,
             workOrderId: workOrder.id,
             clientName: workOrder.clientName,
             description: materialDescriptions
@@ -1481,7 +1530,8 @@ router.post('/:id/order-material', async (req, res, next) => {
       const inboundOrder = await InboundOrder.create({
         purchaseOrderNumber: poNumberFormatted,
         supplier: supplier,
-        supplierName: supplier,  // Also set supplierName for display
+        supplierName: supplier,
+        vendorId: vId,
         description: materialDescriptions,
         clientName: workOrder.clientName,
         workOrderId: workOrder.id,

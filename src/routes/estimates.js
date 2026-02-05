@@ -1015,6 +1015,7 @@ router.post('/:id/convert', async (req, res, next) => {
         awaitingInboundId: estPart.inboundOrderId,
         awaitingPONumber: estPart.materialPurchaseOrderNumber,
         supplierName: estPart.supplierName,
+        vendorId: estPart.vendorId || null,
         materialDescription: estPart.materialDescription
       }, { transaction });
     }
@@ -1625,6 +1626,7 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
         status: 'pending',
         // Copy supplier info for material ordering
         supplierName: estimatePart.supplierName,
+        vendorId: estimatePart.vendorId || null,
         // Set materialSource - prefer estimate's materialSource, fall back to weSupplyMaterial flag
         materialSource: estimatePart.materialSource || (estimatePart.weSupplyMaterial ? 'we_order' : 'customer'),
         // Copy pricing fields

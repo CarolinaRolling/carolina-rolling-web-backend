@@ -34,16 +34,14 @@ router.get('/clients/search', async (req, res, next) => {
   try {
     const { q } = req.query;
     
-    if (!q || q.length < 2) {
-      return res.json({ data: [] });
+    const where = { isActive: true };
+    if (q && q.length >= 1) {
+      where.name = { [Op.iLike]: `%${q}%` };
     }
     
     const clients = await Client.findAll({
-      where: {
-        name: { [Op.iLike]: `%${q}%` },
-        isActive: true
-      },
-      limit: 10,
+      where,
+      limit: 20,
       order: [['name', 'ASC']]
     });
     
@@ -213,16 +211,14 @@ router.get('/vendors/search', async (req, res, next) => {
   try {
     const { q } = req.query;
     
-    if (!q || q.length < 2) {
-      return res.json({ data: [] });
+    const where = { isActive: true };
+    if (q && q.length >= 1) {
+      where.name = { [Op.iLike]: `%${q}%` };
     }
     
     const vendors = await Vendor.findAll({
-      where: {
-        name: { [Op.iLike]: `%${q}%` },
-        isActive: true
-      },
-      limit: 10,
+      where,
+      limit: 20,
       order: [['name', 'ASC']]
     });
     

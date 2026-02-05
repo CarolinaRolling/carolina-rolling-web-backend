@@ -5,7 +5,7 @@ const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const cloudinary = require('cloudinary').v2;
 const { Op } = require('sequelize');
-const { WorkOrder, WorkOrderPart, WorkOrderPartFile, WorkOrderDocument, DailyActivity, DRNumber, InboundOrder, PONumber, AppSettings, Estimate, Vendor, Client, sequelize } = require('../models');
+const { WorkOrder, WorkOrderPart, WorkOrderPartFile, WorkOrderDocument, DailyActivity, DRNumber, InboundOrder, PONumber, AppSettings, Estimate, Vendor, Client, Shipment, ShipmentPhoto, sequelize } = require('../models');
 
 const router = express.Router();
 
@@ -245,18 +245,34 @@ router.get('/', async (req, res, next) => {
       }, {
         model: WorkOrderDocument,
         as: 'documents'
+      }, {
+        model: Shipment,
+        as: 'shipment',
+        include: [{ model: ShipmentPhoto, as: 'photos' }],
+        required: false
       }],
       order: [['createdAt', 'DESC']],
       limit: parseInt(limit),
       offset: parseInt(offset)
     });
 
-    // Generate signed thumbnail URLs for inventory grid
+    // Generate thumbnail URLs for inventory grid
     const rowsWithThumbnails = workOrders.rows.map(wo => {
       const data = wo.toJSON();
       data.thumbnailUrl = null;
-      // Check documents for images first
-      if (data.documents) {
+
+      // Priority 1: Shipment photos (these are public Cloudinary image URLs)
+      if (data.shipment && data.shipment.photos && data.shipment.photos.length > 0) {
+        const photo = data.shipment.photos[0];
+        // Shipment photos are uploaded as public images, URL works directly
+        // Add Cloudinary transformation for thumbnail
+        if (photo.url) {
+          data.thumbnailUrl = photo.url.replace('/upload/', '/upload/w_400,h_250,c_fill,q_auto/');
+        }
+      }
+
+      // Priority 2: Work order documents (authenticated - need signed URL)
+      if (!data.thumbnailUrl && data.documents) {
         const imageDoc = data.documents.find(d => d.mimeType && d.mimeType.startsWith('image/'));
         if (imageDoc && imageDoc.cloudinaryId) {
           try {
@@ -270,7 +286,8 @@ router.get('/', async (req, res, next) => {
           }
         }
       }
-      // Check part files for images if no document thumbnail found
+
+      // Priority 3: Part files (private - need signed URL)
       if (!data.thumbnailUrl && data.parts) {
         for (const part of data.parts) {
           if (part.files) {
@@ -1266,24 +1283,30 @@ router.get('/archived', async (req, res, next) => {
       where,
       include: [
         { model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] },
-        { model: WorkOrderDocument, as: 'documents' }
+        { model: WorkOrderDocument, as: 'documents' },
+        { model: Shipment, as: 'shipment', include: [{ model: ShipmentPhoto, as: 'photos' }], required: false }
       ],
       order: [['archivedAt', 'DESC']],
       limit: parseInt(limit),
       offset: parseInt(offset)
     });
 
-    // Generate signed thumbnail URLs
+    // Generate thumbnail URLs
     const rowsWithThumbnails = workOrders.rows.map(wo => {
       const data = wo.toJSON();
       data.thumbnailUrl = null;
-      if (data.documents) {
+      if (data.shipment && data.shipment.photos && data.shipment.photos.length > 0) {
+        const photo = data.shipment.photos[0];
+        if (photo.url) {
+          data.thumbnailUrl = photo.url.replace('/upload/', '/upload/w_400,h_250,c_fill,q_auto/');
+        }
+      }
+      if (!data.thumbnailUrl && data.documents) {
         const imageDoc = data.documents.find(d => d.mimeType && d.mimeType.startsWith('image/'));
         if (imageDoc && imageDoc.cloudinaryId) {
           try {
             data.thumbnailUrl = cloudinary.url(imageDoc.cloudinaryId, {
-              sign_url: true,
-              type: 'authenticated',
+              sign_url: true, type: 'authenticated',
               transformation: [{ width: 400, height: 250, crop: 'fill', quality: 'auto' }]
             });
           } catch (e) { /* ignore */ }
@@ -1296,8 +1319,7 @@ router.get('/archived', async (req, res, next) => {
             if (imageFile && imageFile.cloudinaryId) {
               try {
                 data.thumbnailUrl = cloudinary.url(imageFile.cloudinaryId, {
-                  sign_url: true,
-                  type: 'authenticated',
+                  sign_url: true, type: 'authenticated',
                   transformation: [{ width: 400, height: 250, crop: 'fill', quality: 'auto' }]
                 });
               } catch (e) { /* ignore */ }

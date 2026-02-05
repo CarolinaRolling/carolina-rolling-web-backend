@@ -848,6 +848,16 @@ WorkOrderPart.belongsTo(WorkOrder, {
   as: 'workOrder'
 });
 
+// WorkOrder -> Shipment association (for linked receiving info & photos)
+WorkOrder.hasOne(Shipment, {
+  foreignKey: 'workOrderId',
+  as: 'shipment'
+});
+Shipment.belongsTo(WorkOrder, {
+  foreignKey: 'workOrderId',
+  as: 'workOrder'
+});
+
 // WorkOrder document associations
 WorkOrder.hasMany(WorkOrderDocument, {
   foreignKey: 'workOrderId',

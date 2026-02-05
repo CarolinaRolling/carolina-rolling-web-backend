@@ -1660,7 +1660,7 @@ router.post('/:id/order-material', async (req, res, next) => {
     }
 
     // Update next PO number setting
-    const nextPO = basePONumber + suppliers.length;
+    const nextPO = basePONumber + groupKeys.length;
     await AppSettings.upsert({
       key: 'next_po_number',
       value: { nextNumber: nextPO }
@@ -1676,7 +1676,7 @@ router.post('/:id/order-material', async (req, res, next) => {
       `PO${basePONumber}`,
       workOrder.clientName,
       `Created ${createdOrders.length} PO(s) for DR-${workOrder.drNumber}`,
-      { suppliers: suppliers, partCount: selectedParts.length }
+      { suppliers: groupKeys.map(k => supplierGroups[k].vendorName), partCount: selectedParts.length }
     );
 
     res.status(201).json({

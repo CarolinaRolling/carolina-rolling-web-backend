@@ -242,6 +242,9 @@ router.get('/', async (req, res, next) => {
           model: WorkOrderPartFile,
           as: 'files'
         }]
+      }, {
+        model: WorkOrderDocument,
+        as: 'documents'
       }],
       order: [['createdAt', 'DESC']],
       limit: parseInt(limit),
@@ -1219,7 +1222,10 @@ router.get('/archived', async (req, res, next) => {
 
     const workOrders = await WorkOrder.findAndCountAll({
       where,
-      include: [{ model: WorkOrderPart, as: 'parts' }],
+      include: [
+        { model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] },
+        { model: WorkOrderDocument, as: 'documents' }
+      ],
       order: [['archivedAt', 'DESC']],
       limit: parseInt(limit),
       offset: parseInt(offset)

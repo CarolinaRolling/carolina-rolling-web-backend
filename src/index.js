@@ -163,6 +163,29 @@ async function startServer() {
       console.log('Continuing with existing schema - run migrations manually if needed');
     }
     
+    // Ensure critical columns exist (sync may fail silently with enum conflicts)
+    try {
+      const [cols] = await sequelize.query(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = 'estimate_parts'`
+      );
+      const colNames = cols.map(c => c.column_name);
+      
+      if (!colNames.includes('laborTotal')) {
+        await sequelize.query(`ALTER TABLE estimate_parts ADD COLUMN "laborTotal" DECIMAL(10,2)`);
+        console.log('Added laborTotal to estimate_parts');
+      }
+      if (!colNames.includes('setupCharge')) {
+        await sequelize.query(`ALTER TABLE estimate_parts ADD COLUMN "setupCharge" DECIMAL(10,2)`);
+        console.log('Added setupCharge to estimate_parts');
+      }
+      if (!colNames.includes('otherCharges')) {
+        await sequelize.query(`ALTER TABLE estimate_parts ADD COLUMN "otherCharges" DECIMAL(10,2)`);
+        console.log('Added otherCharges to estimate_parts');
+      }
+    } catch (colErr) {
+      console.error('Column check warning:', colErr.message);
+    }
+    
     // Initialize default admin user
     await initializeAdmin();
     

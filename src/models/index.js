@@ -324,10 +324,6 @@ const InboundOrder = sequelize.define('InboundOrder', {
   vendorId: {
     type: DataTypes.UUID,
     allowNull: true,
-    references: {
-      model: 'vendors',
-      key: 'id'
-    }
   },
   supplierName: {
     type: DataTypes.STRING,
@@ -348,7 +344,6 @@ const InboundOrder = sequelize.define('InboundOrder', {
   clientId: {
     type: DataTypes.UUID,
     allowNull: true,
-    references: { model: 'clients', key: 'id' }
   },
   clientName: {
     type: DataTypes.STRING,
@@ -409,10 +404,6 @@ const WorkOrder = sequelize.define('WorkOrder', {
   clientId: {
     type: DataTypes.UUID,
     allowNull: true,
-    references: {
-      model: 'clients',
-      key: 'id'
-    }
   },
   clientName: {
     type: DataTypes.STRING,
@@ -687,10 +678,6 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
   vendorId: {
     type: DataTypes.UUID,
     allowNull: true,
-    references: {
-      model: 'vendors',
-      key: 'id'
-    }
   },
   supplierName: {
     type: DataTypes.STRING,
@@ -898,10 +885,6 @@ const Estimate = sequelize.define('Estimate', {
   clientId: {
     type: DataTypes.UUID,
     allowNull: true,
-    references: {
-      model: 'clients',
-      key: 'id'
-    }
   },
   clientName: {
     type: DataTypes.STRING,
@@ -1067,10 +1050,6 @@ const EstimatePart = sequelize.define('EstimatePart', {
   vendorId: {
     type: DataTypes.UUID,
     allowNull: true,
-    references: {
-      model: 'vendors',
-      key: 'id'
-    }
   },
   supplierName: {
     type: DataTypes.STRING,
@@ -1414,7 +1393,6 @@ const DRNumber = sequelize.define('DRNumber', {
   clientId: {
     type: DataTypes.UUID,
     allowNull: true,
-    references: { model: 'clients', key: 'id' }
   },
   clientName: {
     type: DataTypes.STRING,
@@ -1460,7 +1438,6 @@ const PONumber = sequelize.define('PONumber', {
   vendorId: {
     type: DataTypes.UUID,
     allowNull: true,
-    references: { model: 'vendors', key: 'id' }
   },
   workOrderId: {
     type: DataTypes.UUID,
@@ -1480,7 +1457,6 @@ const PONumber = sequelize.define('PONumber', {
   clientId: {
     type: DataTypes.UUID,
     allowNull: true,
-    references: { model: 'clients', key: 'id' }
   },
   clientName: {
     type: DataTypes.STRING,

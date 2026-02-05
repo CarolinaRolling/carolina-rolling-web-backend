@@ -155,8 +155,13 @@ async function startServer() {
     
     // Sync models - use alter to add new columns
     // This is safe for adding new nullable columns
-    await sequelize.sync({ alter: true });
-    console.log('Database synchronized');
+    try {
+      await sequelize.sync({ alter: true });
+      console.log('Database synchronized');
+    } catch (syncErr) {
+      console.error('Database sync warning (non-fatal):', syncErr.message);
+      console.log('Continuing with existing schema - run migrations manually if needed');
+    }
     
     // Initialize default admin user
     await initializeAdmin();

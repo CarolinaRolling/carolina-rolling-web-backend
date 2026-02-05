@@ -242,71 +242,39 @@ router.get('/', async (req, res, next) => {
           model: WorkOrderPartFile,
           as: 'files'
         }]
-      }, {
-        model: WorkOrderDocument,
-        as: 'documents'
-      }, {
-        model: Shipment,
-        as: 'shipment',
-        include: [{ model: ShipmentPhoto, as: 'photos' }],
-        required: false
       }],
       order: [['createdAt', 'DESC']],
       limit: parseInt(limit),
       offset: parseInt(offset)
     });
 
+    // Batch fetch shipment photos for all work orders in this page
+    const workOrderIds = workOrders.rows.map(wo => wo.id);
+    let shipmentPhotoMap = {};
+    try {
+      const shipments = await Shipment.findAll({
+        where: { workOrderId: { [Op.in]: workOrderIds } },
+        include: [{ model: ShipmentPhoto, as: 'photos' }]
+      });
+      shipments.forEach(s => {
+        if (s.photos && s.photos.length > 0) {
+          shipmentPhotoMap[s.workOrderId] = s.photos[0].url;
+        }
+      });
+    } catch (e) {
+      console.error('Error fetching shipment photos for thumbnails:', e);
+    }
+
     // Generate thumbnail URLs for inventory grid
     const rowsWithThumbnails = workOrders.rows.map(wo => {
       const data = wo.toJSON();
       data.thumbnailUrl = null;
 
-      // Priority 1: Shipment photos (these are public Cloudinary image URLs)
-      if (data.shipment && data.shipment.photos && data.shipment.photos.length > 0) {
-        const photo = data.shipment.photos[0];
-        // Shipment photos are uploaded as public images, URL works directly
-        // Add Cloudinary transformation for thumbnail
-        if (photo.url) {
-          data.thumbnailUrl = photo.url.replace('/upload/', '/upload/w_400,h_250,c_fill,q_auto/');
-        }
+      // Priority 1: Shipment photos (public Cloudinary URLs — work directly)
+      if (shipmentPhotoMap[data.id]) {
+        data.thumbnailUrl = shipmentPhotoMap[data.id];
       }
 
-      // Priority 2: Work order documents (authenticated - need signed URL)
-      if (!data.thumbnailUrl && data.documents) {
-        const imageDoc = data.documents.find(d => d.mimeType && d.mimeType.startsWith('image/'));
-        if (imageDoc && imageDoc.cloudinaryId) {
-          try {
-            data.thumbnailUrl = cloudinary.url(imageDoc.cloudinaryId, {
-              sign_url: true,
-              type: 'authenticated',
-              transformation: [{ width: 400, height: 250, crop: 'fill', quality: 'auto' }]
-            });
-          } catch (e) {
-            console.error('Thumbnail generation error:', e);
-          }
-        }
-      }
-
-      // Priority 3: Part files (private - need signed URL)
-      if (!data.thumbnailUrl && data.parts) {
-        for (const part of data.parts) {
-          if (part.files) {
-            const imageFile = part.files.find(f => f.mimeType && f.mimeType.startsWith('image/'));
-            if (imageFile && imageFile.cloudinaryId) {
-              try {
-                data.thumbnailUrl = cloudinary.url(imageFile.cloudinaryId, {
-                  sign_url: true,
-                  type: 'authenticated',
-                  transformation: [{ width: 400, height: 250, crop: 'fill', quality: 'auto' }]
-                });
-              } catch (e) {
-                console.error('Thumbnail generation error:', e);
-              }
-              break;
-            }
-          }
-        }
-      }
       return data;
     });
 
@@ -1282,52 +1250,33 @@ router.get('/archived', async (req, res, next) => {
     const workOrders = await WorkOrder.findAndCountAll({
       where,
       include: [
-        { model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] },
-        { model: WorkOrderDocument, as: 'documents' },
-        { model: Shipment, as: 'shipment', include: [{ model: ShipmentPhoto, as: 'photos' }], required: false }
+        { model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }
       ],
       order: [['archivedAt', 'DESC']],
       limit: parseInt(limit),
       offset: parseInt(offset)
     });
 
-    // Generate thumbnail URLs
+    // Batch fetch shipment photos
+    const workOrderIds = workOrders.rows.map(wo => wo.id);
+    let shipmentPhotoMap = {};
+    try {
+      const shipments = await Shipment.findAll({
+        where: { workOrderId: { [Op.in]: workOrderIds } },
+        include: [{ model: ShipmentPhoto, as: 'photos' }]
+      });
+      shipments.forEach(s => {
+        if (s.photos && s.photos.length > 0) {
+          shipmentPhotoMap[s.workOrderId] = s.photos[0].url;
+        }
+      });
+    } catch (e) {
+      console.error('Error fetching shipment photos for thumbnails:', e);
+    }
+
     const rowsWithThumbnails = workOrders.rows.map(wo => {
       const data = wo.toJSON();
-      data.thumbnailUrl = null;
-      if (data.shipment && data.shipment.photos && data.shipment.photos.length > 0) {
-        const photo = data.shipment.photos[0];
-        if (photo.url) {
-          data.thumbnailUrl = photo.url.replace('/upload/', '/upload/w_400,h_250,c_fill,q_auto/');
-        }
-      }
-      if (!data.thumbnailUrl && data.documents) {
-        const imageDoc = data.documents.find(d => d.mimeType && d.mimeType.startsWith('image/'));
-        if (imageDoc && imageDoc.cloudinaryId) {
-          try {
-            data.thumbnailUrl = cloudinary.url(imageDoc.cloudinaryId, {
-              sign_url: true, type: 'authenticated',
-              transformation: [{ width: 400, height: 250, crop: 'fill', quality: 'auto' }]
-            });
-          } catch (e) { /* ignore */ }
-        }
-      }
-      if (!data.thumbnailUrl && data.parts) {
-        for (const part of data.parts) {
-          if (part.files) {
-            const imageFile = part.files.find(f => f.mimeType && f.mimeType.startsWith('image/'));
-            if (imageFile && imageFile.cloudinaryId) {
-              try {
-                data.thumbnailUrl = cloudinary.url(imageFile.cloudinaryId, {
-                  sign_url: true, type: 'authenticated',
-                  transformation: [{ width: 400, height: 250, crop: 'fill', quality: 'auto' }]
-                });
-              } catch (e) { /* ignore */ }
-              break;
-            }
-          }
-        }
-      }
+      data.thumbnailUrl = shipmentPhotoMap[data.id] || null;
       return data;
     });
 

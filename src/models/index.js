@@ -1078,6 +1078,18 @@ const EstimatePart = sequelize.define('EstimatePart', {
     defaultValue: 0
   },
   // Service costs
+  laborTotal: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: true
+  },
+  setupCharge: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: true
+  },
+  otherCharges: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: true
+  },
   rollingCost: {
     type: DataTypes.DECIMAL(10, 2),
     defaultValue: 0

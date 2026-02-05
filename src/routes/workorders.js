@@ -325,7 +325,7 @@ router.post('/', async (req, res, next) => {
   try {
     const {
       clientName,
-      clientId: clientId || null,
+      clientId,
       clientPO,
       clientPurchaseOrderNumber,
       jobNumber,

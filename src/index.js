@@ -186,6 +186,59 @@ async function startServer() {
       console.error('Column check warning:', colErr.message);
     }
     
+    // Add flat_stock to partType ENUMs if not present
+    try {
+      const enumTables = [
+        { table: 'estimate_parts', col: 'partType' },
+        { table: 'work_order_parts', col: 'partType' }
+      ];
+      for (const { table, col } of enumTables) {
+        try {
+          // Get the enum type name
+          const [typeInfo] = await sequelize.query(
+            `SELECT udt_name FROM information_schema.columns WHERE table_name = '${table}' AND column_name = '"${col}"' OR (table_name = '${table}' AND column_name = '${col}')`
+          );
+          if (typeInfo.length > 0) {
+            const enumName = typeInfo[0].udt_name;
+            // Check if flat_stock exists
+            const [vals] = await sequelize.query(`SELECT unnest(enum_range(NULL::${enumName}))::text as val`);
+            const hasFlat = vals.some(v => v.val === 'flat_stock');
+            if (!hasFlat) {
+              await sequelize.query(`ALTER TYPE ${enumName} ADD VALUE IF NOT EXISTS 'flat_stock'`);
+              console.log(`Added flat_stock to ${enumName}`);
+            }
+          }
+        } catch (enumErr) {
+          // Might fail if already exists or different DB
+        }
+      }
+    } catch (enumErr) {
+      console.error('Enum update warning:', enumErr.message);
+    }
+
+    // Add discount columns to estimates if not present
+    try {
+      const [estCols] = await sequelize.query(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = 'estimates'`
+      );
+      const estColNames = estCols.map(c => c.column_name);
+      const discountCols = [
+        { name: 'discountPercent', type: 'DECIMAL(5,2)' },
+        { name: 'discountAmount', type: 'DECIMAL(10,2)' },
+        { name: 'discountReason', type: 'VARCHAR(255)' },
+        { name: 'minimumOverride', type: 'BOOLEAN DEFAULT false' },
+        { name: 'minimumOverrideReason', type: 'VARCHAR(255)' }
+      ];
+      for (const col of discountCols) {
+        if (!estColNames.includes(col.name)) {
+          await sequelize.query(`ALTER TABLE estimates ADD COLUMN "${col.name}" ${col.type}`);
+          console.log(`Added ${col.name} to estimates`);
+        }
+      }
+    } catch (discErr) {
+      console.error('Discount column check warning:', discErr.message);
+    }
+    
     // Initialize default admin user
     await initializeAdmin();
     

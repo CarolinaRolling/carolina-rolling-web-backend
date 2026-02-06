@@ -136,15 +136,24 @@ function calculatePartTotals(part) {
 }
 
 // Calculate estimate totals
-function calculateEstimateTotals(parts, truckingCost, taxRate, taxExempt = false) {
+function calculateEstimateTotals(parts, truckingCost, taxRate, taxExempt = false, discountPercent = 0, discountAmount = 0) {
   let partsSubtotal = 0;
   parts.forEach(part => {
     partsSubtotal += parseFloat(part.partTotal) || 0;
   });
 
+  // Apply discount
+  let discountAmt = 0;
+  if (parseFloat(discountPercent) > 0) {
+    discountAmt = partsSubtotal * (parseFloat(discountPercent) / 100);
+  } else if (parseFloat(discountAmount) > 0) {
+    discountAmt = parseFloat(discountAmount);
+  }
+  const afterDiscount = partsSubtotal - discountAmt;
+
   const trucking = parseFloat(truckingCost) || 0;
-  const taxAmount = taxExempt ? 0 : partsSubtotal * (parseFloat(taxRate) / 100);
-  const grandTotal = partsSubtotal + taxAmount + trucking;
+  const taxAmount = taxExempt ? 0 : afterDiscount * (parseFloat(taxRate) / 100);
+  const grandTotal = afterDiscount + taxAmount + trucking;
 
   return {
     partsSubtotal: partsSubtotal.toFixed(2),
@@ -435,7 +444,7 @@ router.post('/:id/parts', async (req, res, next) => {
     });
 
     // Calculate part totals (skip for plate_roll and angle_roll which have their own pricing)
-    if (partData.partType !== 'plate_roll' && partData.partType !== 'angle_roll') {
+    if (!['plate_roll', 'angle_roll', 'flat_stock'].includes(partData.partType)) {
       const totals = calculatePartTotals(partData);
       Object.assign(partData, totals);
     }
@@ -471,7 +480,7 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     
     // Calculate part totals (skip for plate_roll and angle_roll which have their own pricing)
     const mergedPart = { ...part.toJSON(), ...updates };
-    if (mergedPart.partType !== 'plate_roll' && mergedPart.partType !== 'angle_roll') {
+    if (!['plate_roll', 'angle_roll', 'flat_stock'].includes(mergedPart.partType)) {
       const totals = calculatePartTotals(mergedPart);
       Object.assign(updates, totals);
     }
@@ -1139,7 +1148,7 @@ router.post('/:id/duplicate', async (req, res, next) => {
         materialSource: origPart.materialSource
       };
 
-      if (partData.partType !== 'plate_roll' && partData.partType !== 'angle_roll') {
+      if (!['plate_roll', 'angle_roll', 'flat_stock'].includes(partData.partType)) {
         const totals = calculatePartTotals(partData);
         Object.assign(partData, totals);
       }

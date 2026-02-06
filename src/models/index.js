@@ -558,7 +558,7 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
     allowNull: false
   },
   partType: {
-    type: DataTypes.ENUM('plate_roll', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'channel_roll', 'flat_bar', 'other'),
+    type: DataTypes.ENUM('plate_roll', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'channel_roll', 'flat_bar', 'flat_stock', 'other'),
     allowNull: false
   },
   clientPartNumber: {
@@ -946,6 +946,28 @@ const Estimate = sequelize.define('Estimate', {
     type: DataTypes.DECIMAL(10, 2),
     defaultValue: 0
   },
+  // Discount
+  discountPercent: {
+    type: DataTypes.DECIMAL(5, 2),
+    allowNull: true
+  },
+  discountAmount: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: true
+  },
+  discountReason: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  // Minimum charge override
+  minimumOverride: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  minimumOverrideReason: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
   // Custom tax
   useCustomTax: {
     type: DataTypes.BOOLEAN,
@@ -1037,7 +1059,7 @@ const EstimatePart = sequelize.define('EstimatePart', {
     allowNull: false
   },
   partType: {
-    type: DataTypes.ENUM('plate_roll', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'channel_roll', 'flat_bar', 'other'),
+    type: DataTypes.ENUM('plate_roll', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'channel_roll', 'flat_bar', 'flat_stock', 'other'),
     allowNull: false
   },
   clientPartNumber: {

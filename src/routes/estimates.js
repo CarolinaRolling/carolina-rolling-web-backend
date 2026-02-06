@@ -444,7 +444,7 @@ router.post('/:id/parts', async (req, res, next) => {
     });
 
     // Calculate part totals (skip for plate_roll and angle_roll which have their own pricing)
-    if (!['plate_roll', 'angle_roll', 'flat_stock'].includes(partData.partType)) {
+    if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll'].includes(partData.partType)) {
       const totals = calculatePartTotals(partData);
       Object.assign(partData, totals);
     }
@@ -480,7 +480,7 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     
     // Calculate part totals (skip for plate_roll and angle_roll which have their own pricing)
     const mergedPart = { ...part.toJSON(), ...updates };
-    if (!['plate_roll', 'angle_roll', 'flat_stock'].includes(mergedPart.partType)) {
+    if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll'].includes(mergedPart.partType)) {
       const totals = calculatePartTotals(mergedPart);
       Object.assign(updates, totals);
     }
@@ -1148,7 +1148,7 @@ router.post('/:id/duplicate', async (req, res, next) => {
         materialSource: origPart.materialSource
       };
 
-      if (!['plate_roll', 'angle_roll', 'flat_stock'].includes(partData.partType)) {
+      if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll'].includes(partData.partType)) {
         const totals = calculatePartTotals(partData);
         Object.assign(partData, totals);
       }

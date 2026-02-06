@@ -558,7 +558,7 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
     allowNull: false
   },
   partType: {
-    type: DataTypes.ENUM('plate_roll', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'channel_roll', 'flat_bar', 'flat_stock', 'other'),
+    type: DataTypes.ENUM('plate_roll', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'tube_roll', 'channel_roll', 'flat_bar', 'flat_stock', 'other'),
     allowNull: false
   },
   clientPartNumber: {
@@ -1059,7 +1059,7 @@ const EstimatePart = sequelize.define('EstimatePart', {
     allowNull: false
   },
   partType: {
-    type: DataTypes.ENUM('plate_roll', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'channel_roll', 'flat_bar', 'flat_stock', 'other'),
+    type: DataTypes.ENUM('plate_roll', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'tube_roll', 'channel_roll', 'flat_bar', 'flat_stock', 'other'),
     allowNull: false
   },
   clientPartNumber: {
@@ -1273,6 +1273,12 @@ const EstimatePart = sequelize.define('EstimatePart', {
   inboundOrderId: {
     type: DataTypes.UUID,
     allowNull: true
+  },
+  // JSONB column to persist form-specific state (underscore-prefixed fields)
+  formData: {
+    type: DataTypes.JSONB,
+    allowNull: true,
+    defaultValue: null
   }
 }, {
   tableName: 'estimate_parts',

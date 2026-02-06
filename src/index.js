@@ -207,6 +207,11 @@ async function startServer() {
               await sequelize.query(`ALTER TYPE ${enumName} ADD VALUE IF NOT EXISTS 'flat_stock'`);
               console.log(`Added flat_stock to ${enumName}`);
             }
+            const hasTube = vals.some(v => v.val === 'tube_roll');
+            if (!hasTube) {
+              await sequelize.query(`ALTER TYPE ${enumName} ADD VALUE IF NOT EXISTS 'tube_roll'`);
+              console.log(`Added tube_roll to ${enumName}`);
+            }
           }
         } catch (enumErr) {
           // Might fail if already exists or different DB
@@ -237,6 +242,20 @@ async function startServer() {
       }
     } catch (discErr) {
       console.error('Discount column check warning:', discErr.message);
+    }
+
+    // Add formData JSONB column to estimate_parts if not present
+    try {
+      const [partCols] = await sequelize.query(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = 'estimate_parts'`
+      );
+      const partColNames = partCols.map(c => c.column_name);
+      if (!partColNames.includes('formData')) {
+        await sequelize.query(`ALTER TABLE estimate_parts ADD COLUMN "formData" JSONB`);
+        console.log('Added formData column to estimate_parts');
+      }
+    } catch (formErr) {
+      console.error('formData column check warning:', formErr.message);
     }
     
     // Initialize default admin user

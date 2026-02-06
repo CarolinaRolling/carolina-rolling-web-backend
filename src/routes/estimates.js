@@ -9,6 +9,32 @@ const { Estimate, EstimatePart, EstimatePartFile, EstimateFile, WorkOrder, WorkO
 
 const router = express.Router();
 
+// Extract underscore-prefixed fields from part data into formData JSONB
+function extractFormData(data) {
+  const formData = {};
+  const cleaned = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (key.startsWith('_')) {
+      formData[key] = value;
+    } else {
+      cleaned[key] = value;
+    }
+  }
+  if (Object.keys(formData).length > 0) {
+    cleaned.formData = formData;
+  }
+  return cleaned;
+}
+
+// Merge formData back into part object for API response
+function mergeFormData(part) {
+  const obj = part.toJSON ? part.toJSON() : { ...part };
+  if (obj.formData && typeof obj.formData === 'object') {
+    Object.assign(obj, obj.formData);
+  }
+  return obj;
+}
+
 // Helper to clean numeric fields - convert empty strings to null
 // List of all numeric fields that might be passed
 const NUMERIC_FIELDS = [
@@ -259,7 +285,18 @@ router.get('/:id', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Estimate not found' } });
     }
 
-    res.json({ data: estimate });
+    // Merge formData fields back into parts for frontend
+    const estimateData = estimate.toJSON();
+    if (estimateData.parts) {
+      estimateData.parts = estimateData.parts.map(p => {
+        if (p.formData && typeof p.formData === 'object') {
+          return { ...p, ...p.formData };
+        }
+        return p;
+      });
+    }
+
+    res.json({ data: estimateData });
   } catch (error) {
     next(error);
   }
@@ -437,7 +474,7 @@ router.post('/:id/parts', async (req, res, next) => {
 
     const existingParts = await EstimatePart.count({ where: { estimateId: estimate.id } });
     
-    const partData = cleanNumericFields({
+    let partData = cleanNumericFields({
       estimateId: estimate.id,
       partNumber: existingParts + 1,
       ...req.body
@@ -445,6 +482,9 @@ router.post('/:id/parts', async (req, res, next) => {
 
     // Sanitize ENUM fields — empty strings break Postgres
     if (partData.rollType === '') partData.rollType = null;
+
+    // Extract underscore-prefixed fields into formData JSONB
+    partData = extractFormData(partData);
 
     // Calculate part totals (skip for plate_roll and angle_roll which have their own pricing)
     if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll'].includes(partData.partType)) {
@@ -460,7 +500,7 @@ router.post('/:id/parts', async (req, res, next) => {
     await estimate.update(estimateTotals);
 
     res.status(201).json({
-      data: part,
+      data: mergeFormData(part),
       message: 'Part added'
     });
   } catch (error) {
@@ -479,10 +519,13 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Part not found' } });
     }
 
-    const updates = cleanNumericFields({ ...req.body });
+    let updates = cleanNumericFields({ ...req.body });
     
     // Sanitize ENUM fields — empty strings break Postgres
     if (updates.rollType === '') updates.rollType = null;
+
+    // Extract underscore-prefixed fields into formData JSONB
+    updates = extractFormData(updates);
     
     // Calculate part totals (skip for plate_roll and angle_roll which have their own pricing)
     const mergedPart = { ...part.toJSON(), ...updates };
@@ -500,7 +543,7 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     await estimate.update(estimateTotals);
 
     res.json({
-      data: part,
+      data: mergeFormData(part),
       message: 'Part updated'
     });
   } catch (error) {
@@ -1151,7 +1194,11 @@ router.post('/:id/duplicate', async (req, res, next) => {
         arcDegrees: origPart.arcDegrees,
         flangeOut: origPart.flangeOut,
         specialInstructions: origPart.specialInstructions,
-        materialSource: origPart.materialSource
+        materialSource: origPart.materialSource,
+        materialTotal: origPart.materialTotal,
+        laborTotal: origPart.laborTotal,
+        partTotal: origPart.partTotal,
+        formData: origPart.formData
       };
 
       if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll'].includes(partData.partType)) {

@@ -443,6 +443,9 @@ router.post('/:id/parts', async (req, res, next) => {
       ...req.body
     });
 
+    // Sanitize ENUM fields — empty strings break Postgres
+    if (partData.rollType === '') partData.rollType = null;
+
     // Calculate part totals (skip for plate_roll and angle_roll which have their own pricing)
     if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll'].includes(partData.partType)) {
       const totals = calculatePartTotals(partData);
@@ -477,6 +480,9 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     }
 
     const updates = cleanNumericFields({ ...req.body });
+    
+    // Sanitize ENUM fields — empty strings break Postgres
+    if (updates.rollType === '') updates.rollType = null;
     
     // Calculate part totals (skip for plate_roll and angle_roll which have their own pricing)
     const mergedPart = { ...part.toJSON(), ...updates };

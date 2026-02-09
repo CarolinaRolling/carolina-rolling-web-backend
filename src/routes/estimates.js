@@ -1356,18 +1356,18 @@ router.get('/:id/pdf', async (req, res, next) => {
     }
 
     // Company name and info
-    doc.fontSize(18).fillColor(darkColor).font('Helvetica-Bold').text('CAROLINA ROLLING CO. INC.', 140, 40, { lineBreak: false });
+    doc.fontSize(18).fillColor(darkColor).font('Helvetica-Bold').text('CAROLINA ROLLING CO. INC.', 140, 40);
     doc.font('Helvetica').fontSize(9).fillColor(grayColor);
-    doc.text('9152 Sonrisa St., Bellflower, CA 90706', 140, 62, { lineBreak: false });
-    doc.text('Phone: (562) 633-1044', 140, 74, { lineBreak: false });
-    doc.text('Email: keetitrolling@carolinarolling.com', 140, 86, { lineBreak: false });
+    doc.text('9152 Sonrisa St., Bellflower, CA 90706', 140, 62);
+    doc.text('Phone: (562) 633-1044', 140, 74);
+    doc.text('Email: keetitrolling@carolinarolling.com', 140, 86);
     
     // Estimate title and number (right side)
-    doc.fontSize(22).fillColor(primaryColor).font('Helvetica-Bold').text('ESTIMATE', 400, 40, { align: 'right', width: 112, lineBreak: false });
-    doc.font('Helvetica').fontSize(11).fillColor(darkColor).text(estimate.estimateNumber, 400, 68, { align: 'right', width: 112, lineBreak: false });
-    doc.fontSize(9).fillColor(grayColor).text(`Date: ${formatDate(estimate.createdAt)}`, 400, 85, { align: 'right', width: 112, lineBreak: false });
+    doc.fontSize(22).fillColor(primaryColor).font('Helvetica-Bold').text('ESTIMATE', 400, 40, { align: 'right' });
+    doc.font('Helvetica').fontSize(11).fillColor(darkColor).text(estimate.estimateNumber, 400, 68, { align: 'right' });
+    doc.fontSize(9).fillColor(grayColor).text(`Date: ${formatDate(estimate.createdAt)}`, 400, 85, { align: 'right' });
     if (estimate.validUntil) {
-      doc.text(`Valid Until: ${formatDate(estimate.validUntil)}`, 400, 98, { align: 'right', width: 112, lineBreak: false });
+      doc.text(`Valid Until: ${formatDate(estimate.validUntil)}`, 400, 98, { align: 'right' });
     }
 
     // Divider line
@@ -1375,27 +1375,27 @@ router.get('/:id/pdf', async (req, res, next) => {
 
     // ========== CLIENT INFO ==========
     let yPos = 135;
-    doc.fontSize(10).fillColor(primaryColor).font('Helvetica-Bold').text('PREPARED FOR:', 50, yPos, { lineBreak: false });
+    doc.fontSize(10).fillColor(primaryColor).font('Helvetica-Bold').text('PREPARED FOR:', 50, yPos);
     doc.font('Helvetica');
     yPos += 16;
-    doc.fontSize(12).fillColor(darkColor).font('Helvetica-Bold').text(estimate.clientName, 50, yPos, { lineBreak: false });
+    doc.fontSize(12).fillColor(darkColor).font('Helvetica-Bold').text(estimate.clientName, 50, yPos);
     doc.font('Helvetica');
     yPos += 16;
     if (estimate.contactName) {
-      doc.fontSize(10).fillColor(grayColor).text(`Attn: ${estimate.contactName}`, 50, yPos, { lineBreak: false });
+      doc.fontSize(10).fillColor(grayColor).text(`Attn: ${estimate.contactName}`, 50, yPos);
       yPos += 13;
     }
-    if (estimate.contactEmail) { doc.text(estimate.contactEmail, 50, yPos, { lineBreak: false }); yPos += 13; }
-    if (estimate.contactPhone) { doc.text(estimate.contactPhone, 50, yPos, { lineBreak: false }); yPos += 13; }
+    if (estimate.contactEmail) { doc.text(estimate.contactEmail, 50, yPos); yPos += 13; }
+    if (estimate.contactPhone) { doc.text(estimate.contactPhone, 50, yPos); yPos += 13; }
 
     // Tax Exempt Badge (right side)
     if (estimate.taxExempt) {
       doc.fontSize(10).fillColor('#c62828').font('Helvetica-Bold')
-        .text('TAX EXEMPT', 400, 135, { align: 'right', width: 112, lineBreak: false });
+        .text('TAX EXEMPT', 400, 135, { align: 'right' });
       doc.font('Helvetica');
       if (estimate.taxExemptCertNumber) {
         doc.fontSize(8).fillColor(grayColor)
-          .text(`Cert#: ${estimate.taxExemptCertNumber}`, 400, 150, { align: 'right', width: 112, lineBreak: false });
+          .text(`Cert#: ${estimate.taxExemptCertNumber}`, 400, 150, { align: 'right' });
       }
     }
 
@@ -1412,16 +1412,16 @@ router.get('/:id/pdf', async (req, res, next) => {
     doc.strokeColor(lightGray).lineWidth(1).moveTo(50, yPos).lineTo(562, yPos).stroke();
     yPos += 10;
 
-    doc.fontSize(12).fillColor(primaryColor).text('SERVICES & MATERIALS', 50, yPos, { lineBreak: false });
+    doc.fontSize(12).fillColor(primaryColor).text('SERVICES & MATERIALS', 50, yPos);
     yPos += 25;
 
     // Table header
     doc.fontSize(8).fillColor(grayColor);
-    doc.text('ITEM', 50, yPos, { lineBreak: false });
-    doc.text('DESCRIPTION', 85, yPos, { lineBreak: false });
-    doc.text('QTY', 400, yPos, { width: 30, align: 'center', lineBreak: false });
-    doc.text('UNIT', 440, yPos, { width: 50, align: 'right', lineBreak: false });
-    doc.text('AMOUNT', 500, yPos, { width: 62, align: 'right', lineBreak: false });
+    doc.text('ITEM', 50, yPos);
+    doc.text('DESCRIPTION', 85, yPos);
+    doc.text('QTY', 400, yPos, { width: 30, align: 'center' });
+    doc.text('UNIT', 440, yPos, { width: 50, align: 'right' });
+    doc.text('AMOUNT', 500, yPos, { width: 62, align: 'right' });
     yPos += 12;
     doc.strokeColor(lightGray).lineWidth(0.5).moveTo(50, yPos).lineTo(562, yPos).stroke();
     yPos += 8;
@@ -1495,22 +1495,22 @@ router.get('/:id/pdf', async (req, res, next) => {
 
       // Part number
       doc.fontSize(9).fillColor(primaryColor).font('Helvetica-Bold');
-      doc.text(`#${part.partNumber}`, 50, yPos, { lineBreak: false });
+      doc.text(`#${part.partNumber}`, 50, yPos);
 
       // Part type + description  
       doc.fontSize(8).fillColor(darkColor).font('Helvetica-Bold');
-      doc.text(partLabel, 85, yPos, { lineBreak: false });
+      doc.text(partLabel, 85, yPos);
       doc.font('Helvetica').fillColor(grayColor);
       doc.text(description, 85, yPos + 11, { width: 300 });
       
       // Quantity
-      doc.fillColor(darkColor).text(qty.toString(), 400, yPos, { width: 30, align: 'center', lineBreak: false });
+      doc.fillColor(darkColor).text(qty.toString(), 400, yPos, { width: 30, align: 'center' });
       
       // Unit price
-      doc.text(formatCurrency(unitPrice), 440, yPos, { width: 50, align: 'right', lineBreak: false });
+      doc.text(formatCurrency(unitPrice), 440, yPos, { width: 50, align: 'right' });
 
       // Line total
-      doc.font('Helvetica-Bold').text(formatCurrency(lineTotal), 500, yPos, { width: 62, align: 'right', lineBreak: false });
+      doc.font('Helvetica-Bold').text(formatCurrency(lineTotal), 500, yPos, { width: 62, align: 'right' });
       doc.font('Helvetica');
 
       yPos += rowHeight + 4;
@@ -1524,13 +1524,13 @@ router.get('/:id/pdf', async (req, res, next) => {
     if (parseFloat(estimate.truckingCost) > 0 || estimate.truckingDescription) {
       if (yPos > 680) { doc.addPage(); yPos = 50; }
       
-      doc.fontSize(9).fillColor(darkColor).font('Helvetica-Bold').text('Trucking / Delivery', 85, yPos, { lineBreak: false });
+      doc.fontSize(9).fillColor(darkColor).font('Helvetica-Bold').text('Trucking / Delivery', 85, yPos);
       doc.font('Helvetica');
       if (estimate.truckingDescription) {
         doc.fontSize(8).fillColor(grayColor).text(estimate.truckingDescription, 85, yPos + 11, { width: 300 });
       }
       doc.fontSize(8).fillColor(darkColor).font('Helvetica-Bold')
-        .text(formatCurrency(estimate.truckingCost), 500, yPos, { width: 62, align: 'right', lineBreak: false });
+        .text(formatCurrency(estimate.truckingCost), 500, yPos, { width: 62, align: 'right' });
       doc.font('Helvetica');
       yPos += 30;
     }
@@ -1543,8 +1543,8 @@ router.get('/:id/pdf', async (req, res, next) => {
     yPos += 15;
 
     // Subtotal
-    doc.fontSize(10).fillColor(grayColor).text('Subtotal:', 350, yPos, { lineBreak: false });
-    doc.fillColor(darkColor).text(formatCurrency(estimate.partsSubtotal), 480, yPos, { align: 'right', width: 82, lineBreak: false });
+    doc.fontSize(10).fillColor(grayColor).text('Subtotal:', 350, yPos);
+    doc.fillColor(darkColor).text(formatCurrency(estimate.partsSubtotal), 480, yPos, { align: 'right' });
     yPos += 18;
 
     // Discount
@@ -1557,35 +1557,35 @@ router.get('/:id/pdf', async (req, res, next) => {
       const discountValue = discPct > 0
         ? (parseFloat(estimate.partsSubtotal) || 0) * discPct / 100
         : discAmt;
-      doc.fillColor('#c62828').text(discountDisplay, 350, yPos, { lineBreak: false });
-      doc.text(`-${formatCurrency(discountValue)}`, 480, yPos, { align: 'right', width: 82, lineBreak: false });
+      doc.fillColor('#c62828').text(discountDisplay, 350, yPos);
+      doc.text(`-${formatCurrency(discountValue)}`, 480, yPos, { align: 'right' });
       doc.fillColor(darkColor);
       yPos += 18;
     }
 
     // Trucking
     if (parseFloat(estimate.truckingCost) > 0) {
-      doc.fillColor(grayColor).text('Trucking:', 350, yPos, { lineBreak: false });
-      doc.fillColor(darkColor).text(formatCurrency(estimate.truckingCost), 480, yPos, { align: 'right', width: 82, lineBreak: false });
+      doc.fillColor(grayColor).text('Trucking:', 350, yPos);
+      doc.fillColor(darkColor).text(formatCurrency(estimate.truckingCost), 480, yPos, { align: 'right' });
       yPos += 18;
     }
 
     // Tax
     if (estimate.taxExempt) {
-      doc.fillColor(grayColor).text('Tax:', 350, yPos, { lineBreak: false });
-      doc.fillColor('#c62828').text('EXEMPT', 480, yPos, { align: 'right', width: 82, lineBreak: false });
+      doc.fillColor(grayColor).text('Tax:', 350, yPos);
+      doc.fillColor('#c62828').text('EXEMPT', 480, yPos, { align: 'right' });
       yPos += 18;
     } else if (parseFloat(estimate.taxAmount) > 0) {
-      doc.fillColor(grayColor).text(`Tax (${estimate.taxRate}%):`, 350, yPos, { lineBreak: false });
-      doc.fillColor(darkColor).text(formatCurrency(estimate.taxAmount), 480, yPos, { align: 'right', width: 82, lineBreak: false });
+      doc.fillColor(grayColor).text(`Tax (${estimate.taxRate}%):`, 350, yPos);
+      doc.fillColor(darkColor).text(formatCurrency(estimate.taxAmount), 480, yPos, { align: 'right' });
       yPos += 18;
     }
 
     // Grand Total
     doc.strokeColor(lightGray).lineWidth(1).moveTo(350, yPos).lineTo(562, yPos).stroke();
     yPos += 10;
-    doc.fontSize(14).fillColor(primaryColor).font('Helvetica-Bold').text('TOTAL:', 350, yPos, { lineBreak: false });
-    doc.text(formatCurrency(estimate.grandTotal), 480, yPos, { align: 'right', width: 82, lineBreak: false });
+    doc.fontSize(14).fillColor(primaryColor).font('Helvetica-Bold').text('TOTAL:', 350, yPos);
+    doc.text(formatCurrency(estimate.grandTotal), 480, yPos, { align: 'right' });
     doc.font('Helvetica');
     yPos += 30;
 
@@ -1600,17 +1600,17 @@ router.get('/:id/pdf', async (req, res, next) => {
     const ccTotal = grandTotal + ccFee;
 
     doc.fontSize(9).fillColor(grayColor);
-    doc.text('PAYMENT BY CREDIT CARD (Square)', 50, yPos, { lineBreak: false });
+    doc.text('PAYMENT BY CREDIT CARD (Square)', 50, yPos);
     yPos += 15;
     
     doc.fontSize(10).fillColor(darkColor);
-    doc.text(`Processing Fee (${squareRate}% + $${squareFixed.toFixed(2)}):`, 300, yPos, { lineBreak: false });
-    doc.text(formatCurrency(ccFee), 480, yPos, { align: 'right', width: 82, lineBreak: false });
+    doc.text(`Processing Fee (${squareRate}% + $${squareFixed.toFixed(2)}):`, 300, yPos);
+    doc.text(formatCurrency(ccFee), 480, yPos, { align: 'right' });
     yPos += 15;
     
     doc.font('Helvetica-Bold').fillColor(primaryColor);
-    doc.text('Credit Card Total:', 300, yPos, { lineBreak: false });
-    doc.text(formatCurrency(ccTotal), 480, yPos, { align: 'right', width: 82, lineBreak: false });
+    doc.text('Credit Card Total:', 300, yPos);
+    doc.text(formatCurrency(ccTotal), 480, yPos, { align: 'right' });
     doc.font('Helvetica');
     yPos += 25;
 
@@ -1621,7 +1621,7 @@ router.get('/:id/pdf', async (req, res, next) => {
       doc.strokeColor(lightGray).lineWidth(0.5).moveTo(50, yPos).lineTo(562, yPos).stroke();
       yPos += 15;
       
-      doc.fontSize(10).fillColor(primaryColor).text('NOTES:', 50, yPos, { lineBreak: false });
+      doc.fontSize(10).fillColor(primaryColor).text('NOTES:', 50, yPos);
       yPos += 15;
       doc.fontSize(9).fillColor(grayColor).text(estimate.notes, 50, yPos, { width: 500 });
     }
@@ -1636,11 +1636,11 @@ router.get('/:id/pdf', async (req, res, next) => {
       doc.fontSize(7).fillColor(grayColor);
       doc.text(
         'Carolina Rolling Co. Inc. | 9152 Sonrisa St., Bellflower, CA 90706 | (562) 633-1044 | keetitrolling@carolinarolling.com',
-        50, 745, { align: 'center', width: 512, lineBreak: false }
+        50, 745, { align: 'center', width: 512 }
       );
       doc.text(
         `${estimate.estimateNumber} | Page ${i + 1} of ${pageCount}`,
-        50, 756, { align: 'center', width: 512, lineBreak: false }
+        50, 756, { align: 'center', width: 512 }
       );
       doc.page.margins.bottom = savedBottomMargin;
     }

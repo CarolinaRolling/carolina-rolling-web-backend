@@ -1630,6 +1630,9 @@ router.get('/:id/pdf', async (req, res, next) => {
     const pageCount = doc.bufferedPageRange().count;
     for (let i = 0; i < pageCount; i++) {
       doc.switchToPage(i);
+      // Temporarily remove bottom margin so writing near page bottom doesn't auto-create pages
+      const savedBottomMargin = doc.page.margins.bottom;
+      doc.page.margins.bottom = 0;
       doc.fontSize(7).fillColor(grayColor);
       doc.text(
         'Carolina Rolling Co. Inc. | 9152 Sonrisa St., Bellflower, CA 90706 | (562) 633-1044 | keetitrolling@carolinarolling.com',
@@ -1639,6 +1642,7 @@ router.get('/:id/pdf', async (req, res, next) => {
         `${estimate.estimateNumber} | Page ${i + 1} of ${pageCount}`,
         50, 756, { align: 'center', width: 512, lineBreak: false }
       );
+      doc.page.margins.bottom = savedBottomMargin;
     }
 
     doc.end();

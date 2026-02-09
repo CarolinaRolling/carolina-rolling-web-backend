@@ -558,7 +558,7 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
     allowNull: false
   },
   partType: {
-    type: DataTypes.ENUM('plate_roll', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'tube_roll', 'channel_roll', 'flat_bar', 'flat_stock', 'other'),
+    type: DataTypes.ENUM('plate_roll', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'tube_roll', 'channel_roll', 'flat_bar', 'cone_roll', 'flat_stock', 'other'),
     allowNull: false
   },
   clientPartNumber: {
@@ -1059,7 +1059,7 @@ const EstimatePart = sequelize.define('EstimatePart', {
     allowNull: false
   },
   partType: {
-    type: DataTypes.ENUM('plate_roll', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'tube_roll', 'channel_roll', 'flat_bar', 'flat_stock', 'other'),
+    type: DataTypes.ENUM('plate_roll', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'tube_roll', 'channel_roll', 'flat_bar', 'cone_roll', 'flat_stock', 'other'),
     allowNull: false
   },
   clientPartNumber: {

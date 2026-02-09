@@ -1304,6 +1304,41 @@ router.get('/:id/pdf', async (req, res, next) => {
       });
     };
 
+    // Merge formData into parts
+    const mergedParts = estimate.parts.map(p => {
+      const obj = p.toJSON ? p.toJSON() : { ...p };
+      if (obj.formData && typeof obj.formData === 'object') {
+        Object.assign(obj, obj.formData);
+      }
+      return obj;
+    });
+
+    // Part type labels
+    const PART_LABELS = {
+      plate_roll: 'Plate Roll', angle_roll: 'Angle Roll', pipe_roll: 'Pipe/Tube Roll',
+      tube_roll: 'Sq/Rect Tube Roll', channel_roll: 'Channel Roll', beam_roll: 'Beam Roll',
+      flat_bar: 'Flat Bar Roll', flat_stock: 'Flat Stock', cone_roll: 'Cone Roll',
+      tee_bar: 'Tee Bar Roll', press_brake: 'Press Brake', other: 'Other'
+    };
+
+    // Spec abbreviation helper
+    const getSpecLabel = (part) => {
+      const mp = part._rollMeasurePoint || 'inside';
+      const isRad = !!part.radius && !part.diameter;
+      if (mp === 'inside') return isRad ? 'ISR' : 'ID';
+      if (mp === 'outside') return isRad ? 'OSR' : 'OD';
+      return isRad ? 'CLR' : 'CLD';
+    };
+
+    // Roll direction label helper
+    const getRollDirLabel = (part) => {
+      if (!part.rollType) return '';
+      if (part.partType === 'tee_bar') {
+        return part.rollType === 'easy_way' ? 'SO' : part.rollType === 'on_edge' ? 'SU' : 'SI';
+      }
+      return part.rollType === 'easy_way' ? 'EW' : part.rollType === 'on_edge' ? 'OE' : 'HW';
+    };
+
     // Colors
     const primaryColor = '#1976d2';
     const darkColor = '#333';
@@ -1311,7 +1346,6 @@ router.get('/:id/pdf', async (req, res, next) => {
     const lightGray = '#e0e0e0';
 
     // ========== HEADER WITH LOGO ==========
-    // Try to add logo
     const logoPath = path.join(__dirname, '../assets/logo.jpg');
     try {
       if (fs.existsSync(logoPath)) {
@@ -1321,7 +1355,7 @@ router.get('/:id/pdf', async (req, res, next) => {
       console.log('Logo not found, using text header');
     }
 
-    // Company name and info (next to logo)
+    // Company name and info
     doc.fontSize(18).fillColor(darkColor).font('Helvetica-Bold').text('CAROLINA ROLLING CO. INC.', 140, 40);
     doc.font('Helvetica').fontSize(9).fillColor(grayColor);
     doc.text('9152 Sonrisa St., Bellflower, CA 90706', 140, 62);
@@ -1351,16 +1385,10 @@ router.get('/:id/pdf', async (req, res, next) => {
       doc.fontSize(10).fillColor(grayColor).text(`Attn: ${estimate.contactName}`, 50, yPos);
       yPos += 13;
     }
-    if (estimate.contactEmail) {
-      doc.text(estimate.contactEmail, 50, yPos);
-      yPos += 13;
-    }
-    if (estimate.contactPhone) {
-      doc.text(estimate.contactPhone, 50, yPos);
-      yPos += 13;
-    }
+    if (estimate.contactEmail) { doc.text(estimate.contactEmail, 50, yPos); yPos += 13; }
+    if (estimate.contactPhone) { doc.text(estimate.contactPhone, 50, yPos); yPos += 13; }
 
-    // Tax Exempt Badge (right side of client section)
+    // Tax Exempt Badge (right side)
     if (estimate.taxExempt) {
       doc.fontSize(10).fillColor('#c62828').font('Helvetica-Bold')
         .text('TAX EXEMPT', 400, 135, { align: 'right' });
@@ -1388,108 +1416,127 @@ router.get('/:id/pdf', async (req, res, next) => {
     yPos += 25;
 
     // Table header
-    doc.fontSize(9).fillColor(grayColor);
+    doc.fontSize(8).fillColor(grayColor);
     doc.text('ITEM', 50, yPos);
-    doc.text('DESCRIPTION', 120, yPos);
-    doc.text('QTY', 380, yPos, { width: 40, align: 'center' });
-    doc.text('AMOUNT', 480, yPos, { align: 'right' });
-    yPos += 15;
+    doc.text('DESCRIPTION', 85, yPos);
+    doc.text('QTY', 400, yPos, { width: 30, align: 'center' });
+    doc.text('UNIT', 440, yPos, { width: 50, align: 'right' });
+    doc.text('AMOUNT', 500, yPos, { width: 62, align: 'right' });
+    yPos += 12;
     doc.strokeColor(lightGray).lineWidth(0.5).moveTo(50, yPos).lineTo(562, yPos).stroke();
-    yPos += 10;
+    yPos += 8;
 
     // Parts
-    const sortedParts = estimate.parts.sort((a, b) => a.partNumber - b.partNumber);
+    const sortedParts = mergedParts.sort((a, b) => a.partNumber - b.partNumber);
     
     for (const part of sortedParts) {
-      // Check if we need a new page
-      if (yPos > 680) {
-        doc.addPage();
-        yPos = 50;
+      if (yPos > 680) { doc.addPage(); yPos = 50; }
+
+      const partLabel = PART_LABELS[part.partType] || part.partType;
+      const qty = parseInt(part.quantity) || 1;
+      const matCost = parseFloat(part.materialTotal) || 0;
+      const matMarkup = parseFloat(part.materialMarkupPercent) || 0;
+      const matEach = matCost * (1 + matMarkup / 100);
+      const labEach = parseFloat(part.laborTotal) || 0;
+      const unitPrice = matEach + labEach;
+      const lineTotal = parseFloat(part.partTotal) || (unitPrice * qty);
+
+      // Build clean description lines
+      const descLines = [];
+
+      // Material description (already includes size info)
+      if (part.materialDescription) {
+        descLines.push(part.materialDescription);
+      } else {
+        // Build from individual fields
+        const specs = [];
+        if (part.material) specs.push(part.material);
+        if (part.sectionSize) specs.push(part.sectionSize);
+        if (part.thickness) specs.push(part.thickness);
+        if (part.width) specs.push(`${part.width}" wide`);
+        if (part.length) specs.push(part.length.toString().includes("'") || part.length.toString().includes('"') ? part.length : `${part.length}" long`);
+        if (part.outerDiameter) specs.push(`${part.outerDiameter}" OD`);
+        if (part.wallThickness) specs.push(`${part.wallThickness}" wall`);
+        if (specs.length) descLines.push(specs.join(' × '));
       }
 
-      // Part header
-      doc.fontSize(10).fillColor(darkColor).font('Helvetica-Bold');
-      const partTypeLabel = part.partType.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase());
-      doc.text(`Part ${part.partNumber} - ${partTypeLabel}`, 50, yPos);
-      doc.font('Helvetica');
-      yPos += 15;
+      // Rolling info
+      const rollVal = part.diameter || part.radius;
+      if (rollVal) {
+        const specLabel = getSpecLabel(part);
+        const dirLabel = getRollDirLabel(part);
+        let rollLine = `Roll: ${rollVal}" ${specLabel}`;
+        if (dirLabel) rollLine += ` (${dirLabel})`;
+        if (part.arcDegrees) rollLine += ` | Arc: ${part.arcDegrees}°`;
+        descLines.push(rollLine);
+      }
 
-      // Build description without showing markup percentages
-      let description = '';
-      
-      // Material info (simplified - no markup shown)
+      // Material source
       if (part.materialSource === 'customer_supplied') {
-        description += 'Customer Supplied Material\n';
-      } else if (part.materialDescription) {
-        description += `Material: ${part.materialDescription}\n`;
+        descLines.push('Customer Supplied');
+      } else if (part.supplierName) {
+        descLines.push(`Supplier: ${part.supplierName}`);
       }
 
-      // Specs
-      const specs = [];
-      if (part.material) specs.push(part.material);
-      if (part.thickness) specs.push(`${part.thickness}" thick`);
-      if (part.width) specs.push(`${part.width}" wide`);
-      if (part.length) specs.push(`${part.length}" long`);
-      if (part.outerDiameter) specs.push(`${part.outerDiameter}" OD`);
-      if (part.sectionSize) specs.push(part.sectionSize);
-      if (specs.length > 0) {
-        description += `Specs: ${specs.join(', ')}\n`;
-      }
-
-      // Rolling specs
-      const rollSpecs = [];
-      if (part.diameter) rollSpecs.push(`${part.diameter}" dia`);
-      if (part.radius) rollSpecs.push(`${part.radius}" radius`);
-      if (part.arcDegrees) rollSpecs.push(`${part.arcDegrees}°`);
-      if (part.rollType) rollSpecs.push(part.rollType.replace('_', ' '));
-      if (part.flangeOut) rollSpecs.push('Flange Out');
-      if (rollSpecs.length > 0) {
-        description += `Rolling: ${rollSpecs.join(', ')}\n`;
-      }
-
+      // Special instructions (truncated)
       if (part.specialInstructions) {
-        description += `Note: ${part.specialInstructions}\n`;
+        const instr = part.specialInstructions.length > 80 
+          ? part.specialInstructions.substring(0, 80) + '...' 
+          : part.specialInstructions;
+        descLines.push(`Note: ${instr}`);
       }
 
-      doc.fontSize(9).fillColor(grayColor);
-      doc.text(description.trim(), 120, yPos - 15, { width: 250 });
+      const description = descLines.join('\n');
+      const descHeight = doc.fontSize(8).heightOfString(description, { width: 300 });
+      const rowHeight = Math.max(descHeight, 12) + 8;
+
+      // Check page break with full row height
+      if (yPos + rowHeight > 700) { doc.addPage(); yPos = 50; }
+
+      // Part number
+      doc.fontSize(9).fillColor(primaryColor).font('Helvetica-Bold');
+      doc.text(`#${part.partNumber}`, 50, yPos);
+
+      // Part type + description  
+      doc.fontSize(8).fillColor(darkColor).font('Helvetica-Bold');
+      doc.text(partLabel, 85, yPos);
+      doc.font('Helvetica').fillColor(grayColor);
+      doc.text(description, 85, yPos + 11, { width: 300 });
       
       // Quantity
-      doc.text(part.quantity.toString(), 380, yPos - 15, { width: 40, align: 'center' });
+      doc.fillColor(darkColor).text(qty.toString(), 400, yPos, { width: 30, align: 'center' });
       
-      // Amount (part total, no breakdown shown)
-      doc.fillColor(darkColor).text(formatCurrency(part.partTotal), 480, yPos - 15, { align: 'right' });
+      // Unit price
+      doc.text(formatCurrency(unitPrice), 440, yPos, { width: 50, align: 'right' });
 
-      yPos += Math.max(doc.heightOfString(description.trim(), { width: 250 }), 15) + 10;
+      // Line total
+      doc.font('Helvetica-Bold').text(formatCurrency(lineTotal), 500, yPos, { width: 62, align: 'right' });
+      doc.font('Helvetica');
+
+      yPos += rowHeight + 4;
       
-      // Light divider between parts
-      doc.strokeColor('#f0f0f0').lineWidth(0.5).moveTo(50, yPos).lineTo(562, yPos).stroke();
-      yPos += 10;
+      // Light divider
+      doc.strokeColor('#eee').lineWidth(0.5).moveTo(85, yPos).lineTo(562, yPos).stroke();
+      yPos += 6;
     }
 
     // ========== TRUCKING ==========
     if (parseFloat(estimate.truckingCost) > 0 || estimate.truckingDescription) {
-      if (yPos > 680) {
-        doc.addPage();
-        yPos = 50;
-      }
+      if (yPos > 680) { doc.addPage(); yPos = 50; }
       
-      doc.fontSize(10).fillColor(darkColor).font('Helvetica-Bold').text('Trucking/Delivery', 50, yPos);
+      doc.fontSize(9).fillColor(darkColor).font('Helvetica-Bold').text('Trucking / Delivery', 85, yPos);
       doc.font('Helvetica');
-      yPos += 15;
-      
       if (estimate.truckingDescription) {
-        doc.fontSize(9).fillColor(grayColor).text(estimate.truckingDescription, 120, yPos - 15, { width: 250 });
+        doc.fontSize(8).fillColor(grayColor).text(estimate.truckingDescription, 85, yPos + 11, { width: 300 });
       }
-      doc.fillColor(darkColor).text(formatCurrency(estimate.truckingCost), 480, yPos - 15, { align: 'right' });
-      yPos += 20;
+      doc.fontSize(8).fillColor(darkColor).font('Helvetica-Bold')
+        .text(formatCurrency(estimate.truckingCost), 500, yPos, { width: 62, align: 'right' });
+      doc.font('Helvetica');
+      yPos += 30;
     }
 
     // ========== TOTALS ==========
-    if (yPos > 620) {
-      doc.addPage();
-      yPos = 50;
-    }
+    if (yPos > 620) { doc.addPage(); yPos = 50; }
 
     yPos += 10;
     doc.strokeColor(lightGray).lineWidth(1).moveTo(350, yPos).lineTo(562, yPos).stroke();
@@ -1500,7 +1547,23 @@ router.get('/:id/pdf', async (req, res, next) => {
     doc.fillColor(darkColor).text(formatCurrency(estimate.partsSubtotal), 480, yPos, { align: 'right' });
     yPos += 18;
 
-    // Trucking (if any)
+    // Discount
+    const discPct = parseFloat(estimate.discountPercent) || 0;
+    const discAmt = parseFloat(estimate.discountAmount) || 0;
+    if (discPct > 0 || discAmt > 0) {
+      const discountDisplay = discPct > 0 
+        ? `Discount (${discPct}%):` 
+        : 'Discount:';
+      const discountValue = discPct > 0
+        ? (parseFloat(estimate.partsSubtotal) || 0) * discPct / 100
+        : discAmt;
+      doc.fillColor('#c62828').text(discountDisplay, 350, yPos);
+      doc.text(`-${formatCurrency(discountValue)}`, 480, yPos, { align: 'right' });
+      doc.fillColor(darkColor);
+      yPos += 18;
+    }
+
+    // Trucking
     if (parseFloat(estimate.truckingCost) > 0) {
       doc.fillColor(grayColor).text('Trucking:', 350, yPos);
       doc.fillColor(darkColor).text(formatCurrency(estimate.truckingCost), 480, yPos, { align: 'right' });
@@ -1527,15 +1590,11 @@ router.get('/:id/pdf', async (req, res, next) => {
     yPos += 30;
 
     // ========== CREDIT CARD SECTION ==========
-    if (yPos > 680) {
-      doc.addPage();
-      yPos = 50;
-    }
+    if (yPos > 680) { doc.addPage(); yPos = 50; }
 
     doc.strokeColor(lightGray).lineWidth(0.5).moveTo(50, yPos).lineTo(562, yPos).stroke();
     yPos += 15;
 
-    // Calculate credit card total
     const grandTotal = parseFloat(estimate.grandTotal) || 0;
     const ccFee = (grandTotal * squareRate / 100) + squareFixed;
     const ccTotal = grandTotal + ccFee;
@@ -1557,10 +1616,7 @@ router.get('/:id/pdf', async (req, res, next) => {
 
     // ========== NOTES ==========
     if (estimate.notes) {
-      if (yPos > 680) {
-        doc.addPage();
-        yPos = 50;
-      }
+      if (yPos > 680) { doc.addPage(); yPos = 50; }
       
       doc.strokeColor(lightGray).lineWidth(0.5).moveTo(50, yPos).lineTo(562, yPos).stroke();
       yPos += 15;
@@ -1585,7 +1641,6 @@ router.get('/:id/pdf', async (req, res, next) => {
       );
     }
 
-    // Finalize
     doc.end();
 
   } catch (error) {

@@ -486,8 +486,8 @@ router.post('/:id/parts', async (req, res, next) => {
     // Extract underscore-prefixed fields into formData JSONB
     partData = extractFormData(partData);
 
-    // Calculate part totals (skip for plate_roll and angle_roll which have their own pricing)
-    if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll'].includes(partData.partType)) {
+    // Calculate part totals (skip for ea-priced types which compute their own partTotal)
+    if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll'].includes(partData.partType)) {
       const totals = calculatePartTotals(partData);
       Object.assign(partData, totals);
     }
@@ -527,9 +527,9 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     // Extract underscore-prefixed fields into formData JSONB
     updates = extractFormData(updates);
     
-    // Calculate part totals (skip for plate_roll and angle_roll which have their own pricing)
+    // Calculate part totals (skip for ea-priced types which compute their own partTotal)
     const mergedPart = { ...part.toJSON(), ...updates };
-    if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll'].includes(mergedPart.partType)) {
+    if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll'].includes(mergedPart.partType)) {
       const totals = calculatePartTotals(mergedPart);
       Object.assign(updates, totals);
     }
@@ -1201,7 +1201,7 @@ router.post('/:id/duplicate', async (req, res, next) => {
         formData: origPart.formData
       };
 
-      if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll'].includes(partData.partType)) {
+      if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll'].includes(partData.partType)) {
         const totals = calculatePartTotals(partData);
         Object.assign(partData, totals);
       }

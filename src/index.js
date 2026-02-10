@@ -153,6 +153,23 @@ async function startServer() {
     await sequelize.authenticate();
     console.log('Database connected successfully');
     
+    // CRITICAL: Convert work_orders status from ENUM to VARCHAR BEFORE sync
+    // (sync will fail if model says STRING but DB has ENUM)
+    try {
+      const [colInfo] = await sequelize.query(
+        `SELECT data_type, udt_name FROM information_schema.columns WHERE table_name = 'work_orders' AND column_name = 'status'`
+      );
+      if (colInfo.length > 0 && colInfo[0].data_type === 'USER-DEFINED') {
+        await sequelize.query(`ALTER TABLE work_orders ALTER COLUMN status TYPE VARCHAR(255) USING status::text`);
+        await sequelize.query(`DROP TYPE IF EXISTS "enum_work_orders_status"`);
+        console.log('Converted work_orders.status from ENUM to VARCHAR');
+      } else {
+        console.log('work_orders.status is already VARCHAR (or table does not exist yet)');
+      }
+    } catch (enumErr) {
+      console.log('Work orders status pre-sync conversion:', enumErr.message);
+    }
+    
     // Sync models - use alter to add new columns
     // This is safe for adding new nullable columns
     try {
@@ -298,22 +315,6 @@ async function startServer() {
     } catch (enumErr) {
       // Type might not exist or value already exists - both are fine
       console.log('Shipment enum check:', enumErr.message);
-    }
-
-    // Convert work_orders status from ENUM to VARCHAR (fixes picked_up and other ENUM issues permanently)
-    try {
-      const [colInfo] = await sequelize.query(
-        `SELECT data_type, udt_name FROM information_schema.columns WHERE table_name = 'work_orders' AND column_name = 'status'`
-      );
-      if (colInfo.length > 0 && colInfo[0].data_type === 'USER-DEFINED') {
-        await sequelize.query(`ALTER TABLE work_orders ALTER COLUMN status TYPE VARCHAR(255) USING status::text`);
-        await sequelize.query(`DROP TYPE IF EXISTS "enum_work_orders_status"`);
-        console.log('Converted work_orders.status from ENUM to VARCHAR');
-      } else {
-        console.log('work_orders.status is already VARCHAR');
-      }
-    } catch (enumErr) {
-      console.log('Work orders status type conversion:', enumErr.message);
     }
 
     // Ensure work_orders has archivedAt and shippedAt columns

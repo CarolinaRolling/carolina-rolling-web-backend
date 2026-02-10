@@ -300,6 +300,22 @@ async function startServer() {
       console.log('Shipment enum check:', enumErr.message);
     }
 
+    // Convert work_orders status from ENUM to VARCHAR (fixes picked_up and other ENUM issues permanently)
+    try {
+      const [colInfo] = await sequelize.query(
+        `SELECT data_type, udt_name FROM information_schema.columns WHERE table_name = 'work_orders' AND column_name = 'status'`
+      );
+      if (colInfo.length > 0 && colInfo[0].data_type === 'USER-DEFINED') {
+        await sequelize.query(`ALTER TABLE work_orders ALTER COLUMN status TYPE VARCHAR(255) USING status::text`);
+        await sequelize.query(`DROP TYPE IF EXISTS "enum_work_orders_status"`);
+        console.log('Converted work_orders.status from ENUM to VARCHAR');
+      } else {
+        console.log('work_orders.status is already VARCHAR');
+      }
+    } catch (enumErr) {
+      console.log('Work orders status type conversion:', enumErr.message);
+    }
+
     // Ensure work_orders has archivedAt and shippedAt columns
     try {
       const [woCols] = await sequelize.query(
@@ -321,6 +337,18 @@ async function startServer() {
       if (!woColNames.includes('minimumOverrideReason')) {
         await sequelize.query(`ALTER TABLE work_orders ADD COLUMN "minimumOverrideReason" VARCHAR(255)`);
         console.log('Added minimumOverrideReason to work_orders');
+      }
+      if (!woColNames.includes('completedAt')) {
+        await sequelize.query(`ALTER TABLE work_orders ADD COLUMN "completedAt" TIMESTAMPTZ`);
+        console.log('Added completedAt to work_orders');
+      }
+      if (!woColNames.includes('pickedUpAt')) {
+        await sequelize.query(`ALTER TABLE work_orders ADD COLUMN "pickedUpAt" TIMESTAMPTZ`);
+        console.log('Added pickedUpAt to work_orders');
+      }
+      if (!woColNames.includes('pickedUpBy')) {
+        await sequelize.query(`ALTER TABLE work_orders ADD COLUMN "pickedUpBy" VARCHAR(255)`);
+        console.log('Added pickedUpBy to work_orders');
       }
     } catch (woColErr) {
       console.error('Work orders column check warning:', woColErr.message);

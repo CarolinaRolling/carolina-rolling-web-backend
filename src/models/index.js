@@ -438,7 +438,7 @@ const WorkOrder = sequelize.define('WorkOrder', {
     allowNull: true
   },
   status: {
-    type: DataTypes.ENUM('quoted', 'work_order_generated', 'waiting_for_materials', 'received', 'processing', 'stored', 'shipped', 'archived'),
+    type: DataTypes.STRING,
     defaultValue: 'received'
   },
   notes: {

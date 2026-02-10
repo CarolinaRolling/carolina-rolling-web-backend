@@ -245,15 +245,15 @@ router.get('/', async (req, res, next) => {
     
     const where = {};
     
-    // By default, exclude archived/shipped unless specifically requested
+    // By default, exclude archived/shipped/picked_up unless specifically requested
     if (archived === 'true') {
-      where.status = { [Op.in]: ['archived', 'shipped'] };
+      where.status = { [Op.in]: ['archived', 'shipped', 'picked_up'] };
     } else if (archived === 'only') {
       where.status = 'archived';
     } else if (status) {
       where.status = status;
     } else {
-      where.status = { [Op.notIn]: ['archived', 'shipped'] };
+      where.status = { [Op.notIn]: ['archived', 'shipped', 'picked_up'] };
     }
     
     if (clientName) where.clientName = { [Op.iLike]: `%${clientName}%` };
@@ -310,6 +310,25 @@ router.get('/', async (req, res, next) => {
       limit: parseInt(limit),
       offset: parseInt(offset)
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/workorders/recently-completed - Orders completed from shop floor in last 48h
+router.get('/recently-completed', async (req, res, next) => {
+  try {
+    const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    const orders = await WorkOrder.findAll({
+      where: {
+        completedAt: { [Op.gte]: cutoff },
+        status: { [Op.in]: ['stored', 'shipped', 'archived'] }
+      },
+      include: [{ model: WorkOrderPart, as: 'parts' }],
+      order: [['completedAt', 'DESC']],
+      limit: 20
+    });
+    res.json({ data: orders });
   } catch (error) {
     next(error);
   }
@@ -533,6 +552,43 @@ router.put('/:id/status', async (req, res, next) => {
     }
     await workOrder.update({ status });
     res.json({ data: workOrder, message: `Status updated to ${status}` });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/workorders/:id/mark-complete - Shop floor marks order complete
+router.post('/:id/mark-complete', async (req, res, next) => {
+  try {
+    const workOrder = await WorkOrder.findByPk(req.params.id, {
+      include: [{ model: WorkOrderPart, as: 'parts' }]
+    });
+    if (!workOrder) {
+      return res.status(404).json({ error: { message: 'Work order not found' } });
+    }
+    
+    // Verify all parts are completed
+    const incompleteParts = workOrder.parts.filter(p => p.status !== 'completed');
+    if (incompleteParts.length > 0) {
+      return res.status(400).json({ 
+        error: { message: `${incompleteParts.length} part(s) not yet completed` }
+      });
+    }
+    
+    // Add completion note with timestamp
+    const now = new Date();
+    const completionNote = `✅ All ${workOrder.parts.length} part(s) completed from shop floor — ${now.toLocaleDateString()} ${now.toLocaleTimeString()}`;
+    const updatedNotes = workOrder.notes 
+      ? `${workOrder.notes}\n\n${completionNote}` 
+      : completionNote;
+    
+    await workOrder.update({ 
+      status: 'stored',
+      completedAt: now,
+      notes: updatedNotes
+    });
+    
+    res.json({ data: workOrder, message: 'Order marked complete and moved to Stored' });
   } catch (error) {
     next(error);
   }
@@ -1311,7 +1367,7 @@ router.get('/archived', async (req, res, next) => {
   try {
     const { clientName, drNumber, limit = 50, offset = 0 } = req.query;
     
-    const where = { status: { [Op.in]: ['archived', 'shipped'] } };
+    const where = { status: { [Op.in]: ['archived', 'shipped', 'picked_up'] } };
     if (clientName) where.clientName = { [Op.iLike]: `%${clientName}%` };
     if (drNumber) where.drNumber = parseInt(drNumber);
 

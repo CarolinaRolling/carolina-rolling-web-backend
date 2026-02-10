@@ -964,11 +964,14 @@ async function getNextDRNumber(transaction) {
     return drNumber;
   }
 
+  // Fallback: check both tables for max
   const lastDR = await DRNumber.findOne({
     order: [['drNumber', 'DESC']],
     transaction
   });
-  return lastDR ? lastDR.drNumber + 1 : 1;
+  const maxWODR = await WorkOrder.max('drNumber', { transaction }) || 0;
+  const maxDR = Math.max(lastDR?.drNumber || 0, maxWODR);
+  return maxDR + 1;
 }
 
 // POST /api/estimates/:id/convert - Convert estimate to work order (for customer supplied)
@@ -1699,11 +1702,8 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
 
     const { clientPurchaseOrderNumber, requestedDueDate, promisedDate, notes } = req.body;
 
-    // Get next DR number - check both dr_numbers table AND work_orders table
-    const maxDRFromTable = await DRNumber.max('drNumber') || 0;
-    const maxDRFromWorkOrders = await WorkOrder.max('drNumber') || 0;
-    const maxDR = Math.max(maxDRFromTable, maxDRFromWorkOrders, 2950);
-    const nextDRNumber = maxDR + 1;
+    // Get next DR number using the admin setting helper
+    const nextDRNumber = await getNextDRNumber(transaction);
 
     // Create DR number record
     const drRecord = await DRNumber.create({

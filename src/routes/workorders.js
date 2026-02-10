@@ -460,17 +460,24 @@ router.post('/', async (req, res, next) => {
       // Assign DR number if requested
       let drNumber = null;
       if (assignDRNumber) {
-        // Get next DR number
-        const maxDR = await DRNumber.findOne({
-          order: [['drNumber', 'DESC']],
-          transaction
-        });
-        drNumber = (maxDR?.drNumber || 0) + 1;
+        // Check admin setting for next DR number first
+        const drSetting = await AppSettings.findOne({ where: { key: 'next_dr_number' }, transaction });
         
-        // Also check work orders table
-        const maxWODR = await WorkOrder.max('drNumber', { transaction });
-        if (maxWODR && maxWODR >= drNumber) {
-          drNumber = maxWODR + 1;
+        if (drSetting?.value?.nextNumber) {
+          drNumber = drSetting.value.nextNumber;
+          await drSetting.update({ value: { nextNumber: drNumber + 1 } }, { transaction });
+        } else {
+          // Fallback: get max from both tables
+          const maxDR = await DRNumber.findOne({
+            order: [['drNumber', 'DESC']],
+            transaction
+          });
+          drNumber = (maxDR?.drNumber || 0) + 1;
+          
+          const maxWODR = await WorkOrder.max('drNumber', { transaction });
+          if (maxWODR && maxWODR >= drNumber) {
+            drNumber = maxWODR + 1;
+          }
         }
 
         // Update work order with DR number

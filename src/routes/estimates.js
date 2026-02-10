@@ -1078,7 +1078,8 @@ router.post('/:id/convert', async (req, res, next) => {
         awaitingPONumber: estPart.materialPurchaseOrderNumber,
         supplierName: estPart.supplierName,
         vendorId: estPart.vendorId || null,
-        materialDescription: estPart.materialDescription
+        materialDescription: estPart.materialDescription,
+        formData: estPart.formData || null
       }, { transaction });
     }
 
@@ -1764,7 +1765,9 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
         materialTotal: estimatePart.materialTotal,
         setupCharge: estimatePart.setupCharge,
         otherCharges: estimatePart.otherCharges,
-        partTotal: estimatePart.partTotal
+        partTotal: estimatePart.partTotal,
+        // Copy form display data (rolling descriptions, specs, etc.)
+        formData: estimatePart.formData || null
       }, { transaction });
 
       // Copy part files to work order part files

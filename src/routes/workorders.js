@@ -23,6 +23,32 @@ function cleanNumericFields(data, fields) {
   return cleaned;
 }
 
+// Extract underscore-prefixed fields from part data into formData JSONB
+function extractFormData(data) {
+  const formData = {};
+  const cleaned = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (key.startsWith('_')) {
+      formData[key] = value;
+    } else {
+      cleaned[key] = value;
+    }
+  }
+  if (Object.keys(formData).length > 0) {
+    cleaned.formData = formData;
+  }
+  return cleaned;
+}
+
+// Merge formData back into part object for API response
+function mergeFormData(part) {
+  const obj = part.toJSON ? part.toJSON() : { ...part };
+  if (obj.formData && typeof obj.formData === 'object') {
+    Object.assign(obj, obj.formData);
+  }
+  return obj;
+}
+
 // Helper function to generate Purchase Order PDF
 async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
   const PDFDocument = require('pdfkit');
@@ -219,15 +245,15 @@ router.get('/', async (req, res, next) => {
     
     const where = {};
     
-    // By default, exclude archived unless specifically requested
+    // By default, exclude archived/shipped unless specifically requested
     if (archived === 'true') {
-      where.status = 'archived';
+      where.status = { [Op.in]: ['archived', 'shipped'] };
     } else if (archived === 'only') {
       where.status = 'archived';
     } else if (status) {
       where.status = status;
     } else {
-      where.status = { [Op.ne]: 'archived' };
+      where.status = { [Op.notIn]: ['archived', 'shipped'] };
     }
     
     if (clientName) where.clientName = { [Op.iLike]: `%${clientName}%` };
@@ -494,6 +520,24 @@ router.post('/', async (req, res, next) => {
 });
 
 // PUT /api/workorders/:id - Update work order
+// PUT /api/workorders/:id/status - Quick status update (shop floor)
+router.put('/:id/status', async (req, res, next) => {
+  try {
+    const workOrder = await WorkOrder.findByPk(req.params.id);
+    if (!workOrder) {
+      return res.status(404).json({ error: { message: 'Work order not found' } });
+    }
+    const { status } = req.body;
+    if (!status) {
+      return res.status(400).json({ error: { message: 'Status is required' } });
+    }
+    await workOrder.update({ status });
+    res.json({ data: workOrder, message: `Status updated to ${status}` });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.put('/:id', async (req, res, next) => {
   try {
     const workOrder = await WorkOrder.findByPk(req.params.id);
@@ -745,6 +789,10 @@ router.post('/:id/parts', async (req, res, next) => {
     const numericFields = ['laborRate', 'laborHours', 'laborTotal', 'materialUnitCost', 
                           'materialTotal', 'setupCharge', 'otherCharges', 'partTotal'];
     const cleanedData = cleanNumericFields(req.body, numericFields);
+    
+    // Extract underscore-prefixed fields into formData JSONB
+    const extracted = extractFormData(req.body);
+    const formDataJson = extracted.formData || null;
 
     const {
       partType,
@@ -801,7 +849,7 @@ router.post('/:id/parts', async (req, res, next) => {
       outerDiameter,
       innerDiameter,
       wallThickness,
-      rollType,
+      rollType: rollType || null,
       radius,
       diameter,
       arcLength,
@@ -814,6 +862,8 @@ router.post('/:id/parts', async (req, res, next) => {
       vendorId: resolvedVendorId,
       supplierName: resolvedSupplierName,
       materialDescription: materialDescription || null,
+      // Form display data
+      formData: formDataJson,
       // Pricing fields - use cleaned values
       laborRate: cleanedData.laborRate,
       laborHours: cleanedData.laborHours,
@@ -863,6 +913,10 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     const numericFields = ['laborRate', 'laborHours', 'laborTotal', 'materialUnitCost', 
                           'materialTotal', 'setupCharge', 'otherCharges', 'partTotal'];
     const cleanedData = cleanNumericFields(req.body, numericFields);
+    
+    // Extract underscore-prefixed fields into formData JSONB
+    const extractedUpdate = extractFormData(req.body);
+    const formDataJson = extractedUpdate.formData || null;
 
     const {
       partType,
@@ -906,7 +960,7 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     if (outerDiameter !== undefined) updates.outerDiameter = outerDiameter;
     if (innerDiameter !== undefined) updates.innerDiameter = innerDiameter;
     if (wallThickness !== undefined) updates.wallThickness = wallThickness;
-    if (rollType !== undefined) updates.rollType = rollType;
+    if (rollType !== undefined) updates.rollType = rollType || null;
     if (radius !== undefined) updates.radius = radius;
     if (diameter !== undefined) updates.diameter = diameter;
     if (arcLength !== undefined) updates.arcLength = arcLength;
@@ -928,6 +982,11 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
       }
     }
     if (materialDescription !== undefined) updates.materialDescription = materialDescription;
+    
+    // Update formData if underscore-prefixed fields were sent
+    if (formDataJson) {
+      updates.formData = formDataJson;
+    }
     
     // Pricing fields - use cleaned values
     if (cleanedData.laborRate !== undefined) updates.laborRate = cleanedData.laborRate;
@@ -1242,14 +1301,6 @@ router.get('/archived', async (req, res, next) => {
     if (clientName) where.clientName = { [Op.iLike]: `%${clientName}%` };
     if (drNumber) where.drNumber = parseInt(drNumber);
 
-    // Only show within 5 years (by archivedAt, shippedAt, or createdAt)
-    const fiveYearsAgo = new Date();
-    fiveYearsAgo.setFullYear(fiveYearsAgo.getFullYear() - 5);
-    where[Op.or] = [
-      { archivedAt: { [Op.gte]: fiveYearsAgo } },
-      { archivedAt: null, createdAt: { [Op.gte]: fiveYearsAgo } }
-    ];
-
     const workOrders = await WorkOrder.findAndCountAll({
       where,
       include: [
@@ -1263,18 +1314,20 @@ router.get('/archived', async (req, res, next) => {
     // Batch fetch shipment photos
     const workOrderIds = workOrders.rows.map(wo => wo.id);
     let shipmentPhotoMap = {};
-    try {
-      const shipments = await Shipment.findAll({
-        where: { workOrderId: { [Op.in]: workOrderIds } },
-        include: [{ model: ShipmentPhoto, as: 'photos' }]
-      });
-      shipments.forEach(s => {
-        if (s.photos && s.photos.length > 0) {
-          shipmentPhotoMap[s.workOrderId] = s.photos[0].url;
-        }
-      });
-    } catch (e) {
-      console.error('Error fetching shipment photos for thumbnails:', e);
+    if (workOrderIds.length > 0) {
+      try {
+        const shipments = await Shipment.findAll({
+          where: { workOrderId: { [Op.in]: workOrderIds } },
+          include: [{ model: ShipmentPhoto, as: 'photos' }]
+        });
+        shipments.forEach(s => {
+          if (s.photos && s.photos.length > 0) {
+            shipmentPhotoMap[s.workOrderId] = s.photos[0].url;
+          }
+        });
+      } catch (e) {
+        console.error('Error fetching shipment photos for thumbnails:', e);
+      }
     }
 
     const rowsWithThumbnails = workOrders.rows.map(wo => {
@@ -1290,6 +1343,7 @@ router.get('/archived', async (req, res, next) => {
       offset: parseInt(offset)
     });
   } catch (error) {
+    console.error('Archived workorders error:', error);
     next(error);
   }
 });

@@ -1,7 +1,17 @@
 const express = require('express');
+const multer = require('multer');
+const cloudinary = require('cloudinary').v2;
 const { AppSettings } = require('../models');
 
 const router = express.Router();
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB max
+
+// Configure cloudinary
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
 
 // Default location positions matching warehouse_map.png
 const DEFAULT_LOCATIONS = [
@@ -542,6 +552,53 @@ async function sendScheduleEmail() {
   console.log(`Schedule email sent to ${scheduleEmail}`);
   return { success: true, message: `Schedule email sent to ${scheduleEmail}` };
 }
+
+// GET /api/settings/warehouse-map - Get warehouse map image URL
+router.get('/warehouse-map', async (req, res, next) => {
+  try {
+    const setting = await AppSettings.findOne({ where: { key: 'warehouse_map_url' } });
+    res.json({ data: { url: setting?.value || null } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/settings/warehouse-map - Upload warehouse map image
+router.post('/warehouse-map', upload.single('image'), async (req, res, next) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: { message: 'Image file is required' } });
+    }
+
+    // Upload to Cloudinary
+    const result = await new Promise((resolve, reject) => {
+      const stream = cloudinary.uploader.upload_stream(
+        { folder: 'warehouse-maps', resource_type: 'image', public_id: 'warehouse_map', overwrite: true },
+        (error, result) => {
+          if (error) reject(error);
+          else resolve(result);
+        }
+      );
+      stream.end(req.file.buffer);
+    });
+
+    const imageUrl = result.secure_url;
+
+    // Save URL to settings
+    const [setting, created] = await AppSettings.findOrCreate({
+      where: { key: 'warehouse_map_url' },
+      defaults: { value: imageUrl }
+    });
+    if (!created) {
+      await setting.update({ value: imageUrl });
+    }
+
+    res.json({ data: { url: imageUrl }, message: 'Warehouse map uploaded successfully' });
+  } catch (error) {
+    console.error('Warehouse map upload error:', error);
+    next(error);
+  }
+});
 
 // Export the sendScheduleEmail function for cron job
 module.exports = router;

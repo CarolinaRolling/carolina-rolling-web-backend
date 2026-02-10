@@ -293,16 +293,60 @@ async function startServer() {
     
     // Add 'archived' to shipments status ENUM if not present
     try {
-      const [enumVals] = await sequelize.query(
-        `SELECT unnest(enum_range(NULL::enum_shipments_status))::text AS val`
-      );
-      const vals = enumVals.map(r => r.val);
-      if (!vals.includes('archived')) {
-        await sequelize.query(`ALTER TYPE enum_shipments_status ADD VALUE IF NOT EXISTS 'archived'`);
-        console.log('Added archived to shipments status enum');
-      }
+      await sequelize.query(`ALTER TYPE "enum_shipments_status" ADD VALUE IF NOT EXISTS 'archived'`);
+      console.log('Ensured archived exists in shipments status enum');
     } catch (enumErr) {
-      console.error('Shipment enum check warning:', enumErr.message);
+      // Type might not exist or value already exists - both are fine
+      console.log('Shipment enum check:', enumErr.message);
+    }
+
+    // Ensure work_orders has archivedAt and shippedAt columns
+    try {
+      const [woCols] = await sequelize.query(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = 'work_orders'`
+      );
+      const woColNames = woCols.map(c => c.column_name);
+      if (!woColNames.includes('archivedAt')) {
+        await sequelize.query(`ALTER TABLE work_orders ADD COLUMN "archivedAt" TIMESTAMPTZ`);
+        console.log('Added archivedAt to work_orders');
+      }
+      if (!woColNames.includes('shippedAt')) {
+        await sequelize.query(`ALTER TABLE work_orders ADD COLUMN "shippedAt" TIMESTAMPTZ`);
+        console.log('Added shippedAt to work_orders');
+      }
+    } catch (woColErr) {
+      console.error('Work orders column check warning:', woColErr.message);
+    }
+
+    // Ensure work_order_parts has formData column
+    try {
+      const [wopCols] = await sequelize.query(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = 'work_order_parts'`
+      );
+      const wopColNames = wopCols.map(c => c.column_name);
+      if (!wopColNames.includes('formData')) {
+        await sequelize.query(`ALTER TABLE work_order_parts ADD COLUMN "formData" JSONB DEFAULT NULL`);
+        console.log('Added formData to work_order_parts');
+        
+        // Backfill formData from linked estimate parts
+        try {
+          await sequelize.query(`
+            UPDATE work_order_parts wop
+            SET "formData" = ep."formData"
+            FROM work_orders wo
+            JOIN estimates e ON e.id = wo."estimateId"
+            JOIN estimate_parts ep ON ep."estimateId" = e.id AND ep."partNumber" = wop."partNumber"
+            WHERE wop."workOrderId" = wo.id
+            AND ep."formData" IS NOT NULL
+            AND wop."formData" IS NULL
+          `);
+          console.log('Backfilled formData for existing work order parts');
+        } catch (bfErr) {
+          console.error('Backfill warning:', bfErr.message);
+        }
+      }
+    } catch (wopErr) {
+      console.error('Work order parts column check warning:', wopErr.message);
     }
     
     // Initialize default admin user

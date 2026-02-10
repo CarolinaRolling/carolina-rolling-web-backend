@@ -743,6 +743,12 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
   partTotal: {
     type: DataTypes.DECIMAL(10, 2),
     allowNull: true
+  },
+  // JSONB to persist form display data (rolling descriptions, specs, etc.)
+  formData: {
+    type: DataTypes.JSONB,
+    allowNull: true,
+    defaultValue: null
   }
 }, {
   tableName: 'work_order_parts',

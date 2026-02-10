@@ -122,6 +122,29 @@ function cleanupTempFile(filePath) {
   }
 }
 
+// GET /api/shipments/unlinked - Get shipments without a linked work order (waiting for instructions)
+router.get('/unlinked', async (req, res, next) => {
+  try {
+    const { Op } = require('sequelize');
+    const shipments = await Shipment.findAll({
+      where: {
+        workOrderId: { [Op.is]: null }
+      },
+      include: [
+        { model: ShipmentPhoto, as: 'photos' }
+      ],
+      order: [['receivedAt', 'DESC']]
+    });
+
+    res.json({
+      data: shipments.map(transformShipment),
+      total: shipments.length
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // GET /api/shipments - Get all shipments
 router.get('/', async (req, res, next) => {
   try {
@@ -231,14 +254,16 @@ router.post('/', async (req, res, next) => {
       requestedDueDate,
       promisedDate,
       createWorkOrder,
-      assignDRNumber
+      assignDRNumber,
+      linkToWorkOrderId,  // Link to existing work order instead of creating new
+      inboundOrderId      // Mark inbound as received
     } = req.body;
 
     if (!clientName) {
       return res.status(400).json({ error: { message: 'Client name is required' } });
     }
 
-    const { WorkOrder, DRNumber, sequelize } = require('../models');
+    const { WorkOrder, WorkOrderPart, DRNumber, InboundOrder, sequelize } = require('../models');
     const transaction = await sequelize.transaction();
 
     try {
@@ -263,9 +288,34 @@ router.post('/', async (req, res, next) => {
 
       let workOrder = null;
 
-      // Create linked work order if requested
-      if (createWorkOrder) {
-        // Generate work order number
+      if (linkToWorkOrderId) {
+        // Link to EXISTING work order (from inbound order flow)
+        workOrder = await WorkOrder.findByPk(linkToWorkOrderId, { transaction });
+        if (workOrder) {
+          await shipment.update({ workOrderId: workOrder.id }, { transaction });
+          
+          // Update storage location if provided
+          if (location) {
+            await workOrder.update({ storageLocation: location }, { transaction });
+          }
+          
+          // Mark all parts with material ordered as received
+          await WorkOrderPart.update(
+            { materialReceived: true, materialReceivedAt: new Date() },
+            { where: { workOrderId: workOrder.id, materialOrdered: true }, transaction }
+          );
+
+          // Update work order status
+          await workOrder.update({
+            allMaterialReceived: true,
+            receivedBy: receivedBy || workOrder.receivedBy,
+            status: workOrder.status === 'waiting_for_materials' ? 'received' : workOrder.status
+          }, { transaction });
+
+          workOrder = await WorkOrder.findByPk(workOrder.id, { transaction });
+        }
+      } else if (createWorkOrder) {
+        // Create NEW work order (walk-in material with no estimate)
         const date = new Date();
         const year = date.getFullYear().toString().slice(-2);
         const month = (date.getMonth() + 1).toString().padStart(2, '0');
@@ -287,28 +337,22 @@ router.post('/', async (req, res, next) => {
           allMaterialReceived: true
         }, { transaction });
 
-        // Link shipment to work order
         await shipment.update({ workOrderId: workOrder.id }, { transaction });
 
-        // Assign DR number if requested
         if (assignDRNumber) {
-          // Get next DR number
           const maxDR = await DRNumber.findOne({
             order: [['drNumber', 'DESC']],
             transaction
           });
           let drNumber = (maxDR?.drNumber || 0) + 1;
 
-          // Also check work orders table
           const maxWODR = await WorkOrder.max('drNumber', { transaction });
           if (maxWODR && maxWODR >= drNumber) {
             drNumber = maxWODR + 1;
           }
 
-          // Update work order with DR number
           await workOrder.update({ drNumber }, { transaction });
 
-          // Record DR number assignment
           await DRNumber.create({
             drNumber,
             workOrderId: workOrder.id,
@@ -318,13 +362,28 @@ router.post('/', async (req, res, next) => {
           }, { transaction });
         }
 
-        // Reload work order
         workOrder = await WorkOrder.findByPk(workOrder.id, { transaction });
+      }
+      // else: No work order — shipment is "waiting for instructions"
+
+      // Mark inbound order as received if provided
+      if (inboundOrderId) {
+        try {
+          const inbound = await InboundOrder.findByPk(inboundOrderId, { transaction });
+          if (inbound) {
+            await inbound.update({
+              status: 'received',
+              receivedAt: new Date(),
+              receivedBy: receivedBy || null
+            }, { transaction });
+          }
+        } catch (inbErr) {
+          console.error('Inbound update warning:', inbErr.message);
+        }
       }
 
       await transaction.commit();
 
-      // Reload shipment with associations
       const createdShipment = await Shipment.findByPk(shipment.id, {
         include: [
           { model: ShipmentPhoto, as: 'photos' },
@@ -345,8 +404,8 @@ router.post('/', async (req, res, next) => {
           workOrder: workOrder ? workOrder.toJSON() : null
         },
         message: workOrder 
-          ? `Shipment and work order DR-${workOrder.drNumber} created`
-          : 'Shipment created successfully'
+          ? `Shipment linked to DR-${workOrder.drNumber || 'pending'}`
+          : 'Shipment created — waiting for instructions'
       });
     } catch (err) {
       await transaction.rollback();
@@ -463,6 +522,87 @@ async function sendNewShipmentEmail(shipment, workOrder = null) {
   
   console.log(`Email notification sent to ${notificationEmail}`);
 }
+
+// POST /api/shipments/:id/link-workorder - Create WO and link to shipment
+router.post('/:id/link-workorder', async (req, res, next) => {
+  try {
+    const { WorkOrder, DRNumber, sequelize } = require('../models');
+    const { workOrderId } = req.body; // optionally link to existing WO
+    
+    const shipment = await Shipment.findByPk(req.params.id);
+    if (!shipment) {
+      return res.status(404).json({ error: { message: 'Shipment not found' } });
+    }
+
+    const transaction = await sequelize.transaction();
+    try {
+      let workOrder;
+
+      if (workOrderId) {
+        // Link to existing work order
+        workOrder = await WorkOrder.findByPk(workOrderId, { transaction });
+        if (!workOrder) {
+          await transaction.rollback();
+          return res.status(404).json({ error: { message: 'Work order not found' } });
+        }
+      } else {
+        // Create new work order
+        const date = new Date();
+        const year = date.getFullYear().toString().slice(-2);
+        const month = (date.getMonth() + 1).toString().padStart(2, '0');
+        const day = date.getDate().toString().padStart(2, '0');
+        const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+        const orderNumber = `WO-${year}${month}${day}-${random}`;
+
+        workOrder = await WorkOrder.create({
+          orderNumber,
+          clientName: shipment.clientName,
+          clientPurchaseOrderNumber: shipment.clientPurchaseOrderNumber,
+          storageLocation: shipment.location,
+          receivedBy: shipment.receivedBy,
+          receivedAt: shipment.receivedAt || new Date(),
+          status: 'received',
+          allMaterialReceived: true
+        }, { transaction });
+
+        // Assign DR number
+        const maxDR = await DRNumber.findOne({
+          order: [['drNumber', 'DESC']],
+          transaction
+        });
+        let drNumber = (maxDR?.drNumber || 0) + 1;
+        const maxWODR = await WorkOrder.max('drNumber', { transaction });
+        if (maxWODR && maxWODR >= drNumber) {
+          drNumber = maxWODR + 1;
+        }
+        await workOrder.update({ drNumber }, { transaction });
+        await DRNumber.create({
+          drNumber,
+          workOrderId: workOrder.id,
+          clientName: shipment.clientName,
+          assignedAt: new Date(),
+          assignedBy: 'system'
+        }, { transaction });
+
+        workOrder = await WorkOrder.findByPk(workOrder.id, { transaction });
+      }
+
+      // Link shipment to work order
+      await shipment.update({ workOrderId: workOrder.id }, { transaction });
+      await transaction.commit();
+
+      res.json({
+        data: { shipment: transformShipment(shipment), workOrder: workOrder.toJSON() },
+        message: `Linked to DR-${workOrder.drNumber}`
+      });
+    } catch (err) {
+      await transaction.rollback();
+      throw err;
+    }
+  } catch (error) {
+    next(error);
+  }
+});
 
 // PUT /api/shipments/:id - Update shipment
 router.put('/:id', async (req, res, next) => {

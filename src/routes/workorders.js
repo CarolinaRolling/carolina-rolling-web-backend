@@ -1233,26 +1233,29 @@ router.post('/:id/archive', async (req, res, next) => {
   }
 });
 
-// GET /api/workorders/archived - Get archived work orders (for 5 year retention)
+// GET /api/workorders/archived - Get archived/shipped work orders
 router.get('/archived', async (req, res, next) => {
   try {
     const { clientName, drNumber, limit = 50, offset = 0 } = req.query;
     
-    const where = { status: 'archived' };
+    const where = { status: { [Op.in]: ['archived', 'shipped'] } };
     if (clientName) where.clientName = { [Op.iLike]: `%${clientName}%` };
     if (drNumber) where.drNumber = parseInt(drNumber);
 
-    // Only show archived within 5 years
+    // Only show within 5 years (by archivedAt, shippedAt, or createdAt)
     const fiveYearsAgo = new Date();
     fiveYearsAgo.setFullYear(fiveYearsAgo.getFullYear() - 5);
-    where.archivedAt = { [Op.gte]: fiveYearsAgo };
+    where[Op.or] = [
+      { archivedAt: { [Op.gte]: fiveYearsAgo } },
+      { archivedAt: null, createdAt: { [Op.gte]: fiveYearsAgo } }
+    ];
 
     const workOrders = await WorkOrder.findAndCountAll({
       where,
       include: [
         { model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }
       ],
-      order: [['archivedAt', 'DESC']],
+      order: [['updatedAt', 'DESC']],
       limit: parseInt(limit),
       offset: parseInt(offset)
     });

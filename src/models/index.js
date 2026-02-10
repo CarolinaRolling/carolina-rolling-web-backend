@@ -139,7 +139,7 @@ const Shipment = sequelize.define('Shipment', {
     defaultValue: 1
   },
   status: {
-    type: DataTypes.ENUM('received', 'processing', 'stored', 'shipped'),
+    type: DataTypes.ENUM('received', 'processing', 'stored', 'shipped', 'archived'),
     defaultValue: 'received'
   },
   location: {

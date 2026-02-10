@@ -291,6 +291,20 @@ async function startServer() {
       console.error('Inbound column check warning:', inbErr.message);
     }
     
+    // Add 'archived' to shipments status ENUM if not present
+    try {
+      const [enumVals] = await sequelize.query(
+        `SELECT unnest(enum_range(NULL::enum_shipments_status))::text AS val`
+      );
+      const vals = enumVals.map(r => r.val);
+      if (!vals.includes('archived')) {
+        await sequelize.query(`ALTER TYPE enum_shipments_status ADD VALUE IF NOT EXISTS 'archived'`);
+        console.log('Added archived to shipments status enum');
+      }
+    } catch (enumErr) {
+      console.error('Shipment enum check warning:', enumErr.message);
+    }
+    
     // Initialize default admin user
     await initializeAdmin();
     

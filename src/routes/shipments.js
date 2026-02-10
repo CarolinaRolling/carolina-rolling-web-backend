@@ -148,11 +148,25 @@ router.get('/unlinked', async (req, res, next) => {
 // GET /api/shipments - Get all shipments
 router.get('/', async (req, res, next) => {
   try {
-    const { status, clientName, limit = 50, offset = 0 } = req.query;
+    const { status, clientName, search, archived, limit = 100, offset = 0 } = req.query;
+    const { Op } = require('sequelize');
     
     const where = {};
     if (status) where.status = status;
-    if (clientName) where.clientName = { [require('sequelize').Op.iLike]: `%${clientName}%` };
+    if (clientName) where.clientName = { [Op.iLike]: `%${clientName}%` };
+    if (archived === 'false') {
+      where.status = { [Op.ne]: 'archived' };
+    }
+    if (search) {
+      where[Op.or] = [
+        { clientName: { [Op.iLike]: `%${search}%` } },
+        { description: { [Op.iLike]: `%${search}%` } },
+        { clientPurchaseOrderNumber: { [Op.iLike]: `%${search}%` } },
+        { receivedBy: { [Op.iLike]: `%${search}%` } },
+        { location: { [Op.iLike]: `%${search}%` } },
+        { qrCode: { [Op.iLike]: `%${search}%` } }
+      ];
+    }
 
     const shipments = await Shipment.findAndCountAll({
       where,
@@ -522,6 +536,56 @@ async function sendNewShipmentEmail(shipment, workOrder = null) {
   
   console.log(`Email notification sent to ${notificationEmail}`);
 }
+
+// PUT /api/shipments/:id/archive - Archive a shipment
+router.put('/:id/archive', async (req, res, next) => {
+  try {
+    const shipment = await Shipment.findByPk(req.params.id);
+    if (!shipment) {
+      return res.status(404).json({ error: { message: 'Shipment not found' } });
+    }
+    await shipment.update({ status: 'archived' });
+    res.json({ data: transformShipment(shipment), message: 'Shipment archived' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/shipments/bulk-archive - Archive multiple shipments
+router.post('/bulk-archive', async (req, res, next) => {
+  try {
+    const { ids } = req.body;
+    if (!ids || !ids.length) {
+      return res.status(400).json({ error: { message: 'No IDs provided' } });
+    }
+    const { Op } = require('sequelize');
+    await Shipment.update(
+      { status: 'archived' },
+      { where: { id: { [Op.in]: ids } } }
+    );
+    res.json({ message: `${ids.length} shipments archived` });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/shipments/bulk-delete - Delete multiple shipments
+router.post('/bulk-delete', async (req, res, next) => {
+  try {
+    const { ids } = req.body;
+    if (!ids || !ids.length) {
+      return res.status(400).json({ error: { message: 'No IDs provided' } });
+    }
+    const { Op } = require('sequelize');
+    // Delete photos first
+    await ShipmentPhoto.destroy({ where: { shipmentId: { [Op.in]: ids } } });
+    await ShipmentDocument.destroy({ where: { shipmentId: { [Op.in]: ids } } });
+    await Shipment.destroy({ where: { id: { [Op.in]: ids } } });
+    res.json({ message: `${ids.length} shipments deleted` });
+  } catch (error) {
+    next(error);
+  }
+});
 
 // POST /api/shipments/:id/link-workorder - Create WO and link to shipment
 router.post('/:id/link-workorder', async (req, res, next) => {

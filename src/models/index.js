@@ -378,6 +378,14 @@ const InboundOrder = sequelize.define('InboundOrder', {
   receivedAt: {
     type: DataTypes.DATE,
     allowNull: true
+  },
+  receivedBy: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  workOrderId: {
+    type: DataTypes.UUID,
+    allowNull: true
   }
 }, {
   tableName: 'inbound_orders',

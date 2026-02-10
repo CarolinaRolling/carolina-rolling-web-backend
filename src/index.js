@@ -272,6 +272,24 @@ async function startServer() {
     } catch (formErr) {
       console.error('formData column check warning:', formErr.message);
     }
+
+    // Add receivedBy and workOrderId to inbound_orders if not present
+    try {
+      const [inbCols] = await sequelize.query(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = 'inbound_orders'`
+      );
+      const inbColNames = inbCols.map(c => c.column_name);
+      if (!inbColNames.includes('receivedBy')) {
+        await sequelize.query(`ALTER TABLE inbound_orders ADD COLUMN "receivedBy" VARCHAR(255)`);
+        console.log('Added receivedBy to inbound_orders');
+      }
+      if (!inbColNames.includes('workOrderId')) {
+        await sequelize.query(`ALTER TABLE inbound_orders ADD COLUMN "workOrderId" UUID`);
+        console.log('Added workOrderId to inbound_orders');
+      }
+    } catch (inbErr) {
+      console.error('Inbound column check warning:', inbErr.message);
+    }
     
     // Initialize default admin user
     await initializeAdmin();

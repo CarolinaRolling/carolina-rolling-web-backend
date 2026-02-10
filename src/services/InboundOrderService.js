@@ -119,6 +119,7 @@ class InboundOrderService {
 
   // Update status
   async updateStatus(id, status) {
+    const { WorkOrderPart } = this.models;
     const order = await this.getById(id);
     
     if (!order) {
@@ -129,6 +130,12 @@ class InboundOrderService {
     
     if (status === INBOUND_STATUSES.RECEIVED) {
       updates.receivedAt = new Date();
+      
+      // Update linked work order parts
+      await WorkOrderPart.update(
+        { materialReceived: true, materialReceivedAt: new Date() },
+        { where: { inboundOrderId: id } }
+      );
     }
 
     await order.update(updates);
@@ -137,6 +144,7 @@ class InboundOrderService {
 
   // Mark as received
   async markReceived(id, receivedBy) {
+    const { WorkOrderPart } = this.models;
     const order = await this.getById(id);
     
     if (!order) {
@@ -148,6 +156,12 @@ class InboundOrderService {
       receivedAt: new Date(),
       receivedBy: receivedBy || null
     });
+
+    // Update linked work order parts - mark material as received
+    await WorkOrderPart.update(
+      { materialReceived: true, materialReceivedAt: new Date() },
+      { where: { inboundOrderId: id } }
+    );
 
     return this.getById(id);
   }

@@ -561,7 +561,14 @@ router.put('/:id', async (req, res, next) => {
       promisedDate,
       status,
       pickedUpBy,
-      signatureData
+      signatureData,
+      // Pricing fields
+      truckingDescription,
+      truckingCost,
+      taxRate,
+      // Minimum override
+      minimumOverride,
+      minimumOverrideReason
     } = req.body;
 
     // Helper to check if value was provided (including empty string)
@@ -598,6 +605,13 @@ router.put('/:id', async (req, res, next) => {
       requestedDueDate: getDateValue(requestedDueDate, workOrder.requestedDueDate),
       promisedDate: getDateValue(promisedDate, workOrder.promisedDate)
     };
+
+    // Pricing fields
+    if (truckingDescription !== undefined) updates.truckingDescription = truckingDescription || null;
+    if (truckingCost !== undefined) updates.truckingCost = truckingCost || null;
+    if (taxRate !== undefined) updates.taxRate = taxRate || null;
+    if (minimumOverride !== undefined) updates.minimumOverride = minimumOverride;
+    if (minimumOverrideReason !== undefined) updates.minimumOverrideReason = minimumOverrideReason || null;
 
     if (status) {
       updates.status = status;

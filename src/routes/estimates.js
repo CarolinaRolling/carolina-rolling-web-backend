@@ -1045,7 +1045,17 @@ router.post('/:id/convert', async (req, res, next) => {
       estimateNumber: estimate.estimateNumber,
       estimateTotal: estimate.grandTotal,
       allMaterialReceived: allCustomerSupplied,
-      pendingInboundCount: allCustomerSupplied ? 0 : estimate.parts.filter(p => p.materialSource === 'we_order' && !p.materialReceived).length
+      pendingInboundCount: allCustomerSupplied ? 0 : estimate.parts.filter(p => p.materialSource === 'we_order' && !p.materialReceived).length,
+      // Copy order-level pricing
+      truckingDescription: estimate.truckingDescription,
+      truckingCost: estimate.truckingCost,
+      taxRate: estimate.taxRate,
+      taxAmount: estimate.taxAmount,
+      subtotal: estimate.subtotal,
+      grandTotal: estimate.grandTotal,
+      // Copy minimum charge settings
+      minimumOverride: estimate.minimumOverride || false,
+      minimumOverrideReason: estimate.minimumOverrideReason || null
     }, { transaction });
 
     // Create work order parts from estimate parts
@@ -1079,7 +1089,16 @@ router.post('/:id/convert', async (req, res, next) => {
         supplierName: estPart.supplierName,
         vendorId: estPart.vendorId || null,
         materialDescription: estPart.materialDescription,
-        formData: estPart.formData || null
+        formData: estPart.formData || null,
+        // Copy pricing fields
+        laborRate: estPart.laborRate,
+        laborHours: estPart.laborHours,
+        laborTotal: estPart.laborTotal,
+        materialUnitCost: estPart.materialUnitCost,
+        materialTotal: estPart.materialTotal,
+        setupCharge: estPart.setupCharge,
+        otherCharges: estPart.otherCharges,
+        partTotal: estPart.partTotal
       }, { transaction });
     }
 
@@ -1722,7 +1741,10 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
       taxRate: estimate.taxRate,
       taxAmount: estimate.taxAmount,
       subtotal: estimate.subtotal,
-      grandTotal: estimate.grandTotal
+      grandTotal: estimate.grandTotal,
+      // Copy minimum charge settings
+      minimumOverride: estimate.minimumOverride || false,
+      minimumOverrideReason: estimate.minimumOverrideReason || null
     }, { transaction });
 
     // Update DR record with work order ID

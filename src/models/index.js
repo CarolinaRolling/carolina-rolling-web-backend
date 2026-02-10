@@ -540,6 +540,15 @@ const WorkOrder = sequelize.define('WorkOrder', {
   grandTotal: {
     type: DataTypes.DECIMAL(10, 2),
     allowNull: true
+  },
+  // Minimum charge override (copied from estimate)
+  minimumOverride: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  minimumOverrideReason: {
+    type: DataTypes.STRING,
+    allowNull: true
   }
 }, {
   tableName: 'work_orders',

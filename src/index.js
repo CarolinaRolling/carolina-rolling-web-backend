@@ -314,6 +314,14 @@ async function startServer() {
         await sequelize.query(`ALTER TABLE work_orders ADD COLUMN "shippedAt" TIMESTAMPTZ`);
         console.log('Added shippedAt to work_orders');
       }
+      if (!woColNames.includes('minimumOverride')) {
+        await sequelize.query(`ALTER TABLE work_orders ADD COLUMN "minimumOverride" BOOLEAN DEFAULT false`);
+        console.log('Added minimumOverride to work_orders');
+      }
+      if (!woColNames.includes('minimumOverrideReason')) {
+        await sequelize.query(`ALTER TABLE work_orders ADD COLUMN "minimumOverrideReason" VARCHAR(255)`);
+        console.log('Added minimumOverrideReason to work_orders');
+      }
     } catch (woColErr) {
       console.error('Work orders column check warning:', woColErr.message);
     }

@@ -10,15 +10,18 @@ class InboundOrderService {
 
   // Get inbound order by ID
   async getById(id) {
-    const { InboundOrder, Vendor } = this.models;
+    const { InboundOrder, Vendor, WorkOrder } = this.models;
     return InboundOrder.findByPk(id, {
-      include: [{ model: Vendor, as: 'vendor', attributes: ['id', 'name', 'contactName', 'contactPhone', 'contactEmail'] }]
+      include: [
+        { model: Vendor, as: 'vendor', attributes: ['id', 'name', 'contactName', 'contactPhone', 'contactEmail'] },
+        { model: WorkOrder, as: 'workOrder', attributes: ['id', 'orderNumber', 'drNumber', 'clientName', 'status'] }
+      ]
     });
   }
 
   // Get all inbound orders
   async getAll(options = {}) {
-    const { InboundOrder, Vendor } = this.models;
+    const { InboundOrder, Vendor, WorkOrder } = this.models;
     const { status, limit = 100, offset = 0 } = options;
 
     const where = {};
@@ -26,7 +29,10 @@ class InboundOrderService {
 
     return InboundOrder.findAll({
       where,
-      include: [{ model: Vendor, as: 'vendor', attributes: ['id', 'name', 'contactName', 'contactPhone', 'contactEmail'] }],
+      include: [
+        { model: Vendor, as: 'vendor', attributes: ['id', 'name', 'contactName', 'contactPhone', 'contactEmail'] },
+        { model: WorkOrder, as: 'workOrder', attributes: ['id', 'orderNumber', 'drNumber', 'clientName', 'status'] }
+      ],
       order: [['createdAt', 'DESC']],
       limit: parseInt(limit),
       offset: parseInt(offset)

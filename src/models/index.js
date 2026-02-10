@@ -1734,6 +1734,9 @@ EstimatePart.belongsTo(Vendor, { foreignKey: 'vendorId', as: 'vendor' });
 Vendor.hasMany(InboundOrder, { foreignKey: 'vendorId', as: 'inboundOrders' });
 InboundOrder.belongsTo(Vendor, { foreignKey: 'vendorId', as: 'vendor' });
 
+WorkOrder.hasMany(InboundOrder, { foreignKey: 'workOrderId', as: 'inboundOrders' });
+InboundOrder.belongsTo(WorkOrder, { foreignKey: 'workOrderId', as: 'workOrder' });
+
 Vendor.hasMany(PONumber, { foreignKey: 'vendorId', as: 'poNumbers' });
 PONumber.belongsTo(Vendor, { foreignKey: 'vendorId', as: 'vendor' });
 

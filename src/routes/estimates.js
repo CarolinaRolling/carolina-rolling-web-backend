@@ -706,20 +706,10 @@ router.get('/:id/parts/:partId/files/:fileId/view', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'File not found' } });
     }
 
-    if (file.cloudinaryId) {
-      const resourceTypes = ['image', 'raw', 'video'];
-      for (const rt of resourceTypes) {
-        try {
-          const result = await cloudinary.api.resource(file.cloudinaryId, { resource_type: rt });
-          if (result.secure_url && result.secure_url !== file.url) {
-            await file.update({ url: result.secure_url });
-          }
-          return res.json({ data: { url: result.secure_url, originalName: file.originalName } });
-        } catch (e) { /* try next type */ }
-      }
-    }
-
-    res.json({ data: { url: file.url, originalName: file.originalName } });
+    // Return the download proxy URL which handles resource_type resolution
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const url = `${baseUrl}/api/estimates/${req.params.id}/parts/${req.params.partId}/files/${req.params.fileId}/download`;
+    res.json({ data: { url, originalName: file.originalName } });
   } catch (error) {
     next(error);
   }

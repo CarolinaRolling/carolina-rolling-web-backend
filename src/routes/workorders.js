@@ -1279,6 +1279,77 @@ router.get('/:id/parts/:partId/files/:fileId/signed-url', async (req, res, next)
 
 // DELETE /api/workorders/:id/parts/:partId/files/:fileId - Delete a file
 
+// GET /api/workorders/:id/parts/:partId/files/:fileId/debug - Debug file URL resolution
+router.get('/:id/parts/:partId/files/:fileId/debug', async (req, res, next) => {
+  try {
+    const file = await WorkOrderPartFile.findOne({
+      where: { id: req.params.fileId, workOrderPartId: req.params.partId }
+    });
+    if (!file) return res.status(404).json({ error: 'File not found in DB' });
+
+    const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+    const pubId = file.cloudinaryId;
+    const ext = path.extname(file.originalName || file.filename || '').toLowerCase() || '.pdf';
+    const versionMatch = file.url?.match(/\/v(\d+)\//);
+    const version = versionMatch ? `/v${versionMatch[1]}` : '';
+
+    const urlsToTest = [];
+    
+    // Signed URLs for private files
+    if (pubId && cloudName) {
+      try {
+        const signedUrl = cloudinary.url(pubId, { resource_type: 'raw', type: 'private', sign_url: true, secure: true });
+        urlsToTest.push({ label: 'signed-private', url: signedUrl });
+      } catch (e) { urlsToTest.push({ label: 'signed-private', url: 'GENERATION_FAILED: ' + e.message }); }
+      
+      try {
+        const hasExt = pubId.match(/\.\w+$/);
+        const format = hasExt ? hasExt[0].replace('.', '') : ext.replace('.', '');
+        const dlUrl = cloudinary.utils.private_download_url(pubId, format, { resource_type: 'raw', expires_at: Math.floor(Date.now() / 1000) + 3600 });
+        urlsToTest.push({ label: 'private-download', url: dlUrl });
+      } catch (e) { urlsToTest.push({ label: 'private-download', url: 'GENERATION_FAILED: ' + e.message }); }
+    }
+    
+    if (file.url) urlsToTest.push({ label: 'stored', url: file.url });
+    if (pubId && cloudName) {
+      urlsToTest.push({ label: 'raw+ver+ext', url: `https://res.cloudinary.com/${cloudName}/raw/upload${version}/${pubId}${ext}` });
+      urlsToTest.push({ label: 'raw+ver', url: `https://res.cloudinary.com/${cloudName}/raw/upload${version}/${pubId}` });
+      urlsToTest.push({ label: 'image+ver+ext', url: `https://res.cloudinary.com/${cloudName}/image/upload${version}/${pubId}${ext}` });
+      urlsToTest.push({ label: 'image+ver', url: `https://res.cloudinary.com/${cloudName}/image/upload${version}/${pubId}` });
+    }
+
+    // Test each URL with HEAD request
+    const results = [];
+    for (const { label, url } of urlsToTest) {
+      if (url.startsWith('GENERATION_FAILED')) {
+        results.push({ label, url, status: 'n/a' });
+        continue;
+      }
+      const status = await new Promise(resolve => {
+        const lib = url.startsWith('https') ? https : http;
+        const request = lib.request(url, { method: 'HEAD' }, resp => {
+          resp.resume();
+          resolve(resp.statusCode);
+        });
+        request.on('error', (e) => resolve('error: ' + e.message));
+        request.setTimeout(5000, () => { request.destroy(); resolve('timeout'); });
+        request.end();
+      });
+      results.push({ label, url: url.substring(0, 150), status });
+    }
+
+    res.json({
+      file: { id: file.id, cloudinaryId: pubId, storedUrl: file.url, originalName: file.originalName, mimeType: file.mimeType },
+      cloudName,
+      ext,
+      version,
+      results
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // GET /api/workorders/:id/parts/:partId/files/:fileId/download - Stream file from Cloudinary
 router.get('/:id/parts/:partId/files/:fileId/download', async (req, res, next) => {
   try {
@@ -1292,45 +1363,85 @@ router.get('/:id/parts/:partId/files/:fileId/download', async (req, res, next) =
 
     // Build list of candidate URLs to try
     const urlsToTry = [];
+    const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
     
-    // Always try stored URL first
+    if (file.cloudinaryId && cloudName) {
+      const pubId = file.cloudinaryId;
+      const ext = path.extname(file.originalName || file.filename || '').toLowerCase() || '.pdf';
+      
+      // Work order files are uploaded as raw+private — generate signed URL
+      try {
+        const signedUrl = cloudinary.url(pubId, {
+          resource_type: 'raw',
+          type: 'private',
+          sign_url: true,
+          secure: true
+        });
+        urlsToTry.push(signedUrl);
+      } catch (e) {
+        console.error('[file-proxy] Failed to generate signed URL:', e.message);
+      }
+      
+      // Also try authenticated download URL
+      try {
+        // For raw private, strip extension from pubId for format param
+        const hasExt = pubId.match(/\.\w+$/);
+        const cleanId = hasExt ? pubId : pubId;
+        const format = hasExt ? hasExt[0].replace('.', '') : ext.replace('.', '');
+        const signedDownload = cloudinary.utils.private_download_url(cleanId, format, {
+          resource_type: 'raw',
+          expires_at: Math.floor(Date.now() / 1000) + 3600
+        });
+        urlsToTry.push(signedDownload);
+      } catch (e) {
+        console.error('[file-proxy] Failed to generate download URL:', e.message);
+      }
+    }
+    
+    // Try stored URL
     if (file.url) urlsToTry.push(file.url);
     
-    // Build alternate URLs from cloudinaryId by swapping resource_type
-    if (file.cloudinaryId) {
-      const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
-      if (cloudName) {
-        const pubId = file.cloudinaryId;
-        const ext = path.extname(file.originalName || file.filename || '').toLowerCase() || '.pdf';
+    // Try public URL variants as fallback (for files that were copied from estimates)
+    if (file.cloudinaryId && cloudName) {
+      const pubId = file.cloudinaryId;
+      const ext = path.extname(file.originalName || file.filename || '').toLowerCase() || '.pdf';
+      const versionMatch = file.url?.match(/\/v(\d+)\//);
+      const version = versionMatch ? `/v${versionMatch[1]}` : '';
+      
+      urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload${version}/${pubId}${ext}`);
+      urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload${version}/${pubId}`);
+      urlsToTry.push(`https://res.cloudinary.com/${cloudName}/image/upload${version}/${pubId}${ext}`);
+      urlsToTry.push(`https://res.cloudinary.com/${cloudName}/image/upload${version}/${pubId}`);
+      if (version) {
         urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}${ext}`);
-        urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}`);
         urlsToTry.push(`https://res.cloudinary.com/${cloudName}/image/upload/${pubId}${ext}`);
-        urlsToTry.push(`https://res.cloudinary.com/${cloudName}/image/upload/${pubId}`);
       }
     }
     
     // Deduplicate
     const uniqueUrls = [...new Set(urlsToTry)];
+    
+    console.log(`[file-proxy] Trying ${uniqueUrls.length} URLs for WO file ${file.id} (${file.originalName})`);
 
     // Try each URL - stream the first one that works
-    for (const url of uniqueUrls) {
+    for (let i = 0; i < uniqueUrls.length; i++) {
+      const url = uniqueUrls[i];
       const upstream = await fetchWithRedirects(url);
       if (upstream) {
+        console.log(`[file-proxy] SUCCESS on attempt ${i + 1} for WO file ${file.id}`);
         const contentType = file.mimeType || upstream.headers['content-type'] || 'application/octet-stream';
         res.setHeader('Content-Type', contentType);
         if (upstream.headers['content-length']) res.setHeader('Content-Length', upstream.headers['content-length']);
         res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(file.originalName || file.filename || 'file')}"`);
         
-        // Fix stored URL for future requests if a different URL worked
-        if (url !== file.url) {
-          file.update({ url }).catch(() => {});
-        }
-        
         upstream.pipe(res);
         return;
+      } else {
+        console.log(`[file-proxy] FAIL attempt ${i + 1}: ${url.substring(0, 120)}...`);
       }
     }
-
+    
+    console.error(`[file-proxy] ALL URLS FAILED for WO file ${file.id}. cloudinaryId=${file.cloudinaryId}, storedUrl=${file.url}`);
     res.status(404).json({ error: { message: 'File not accessible on storage' } });
   } catch (error) {
     next(error);

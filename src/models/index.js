@@ -780,7 +780,7 @@ const WorkOrderPartFile = sequelize.define('WorkOrderPartFile', {
     }
   },
   fileType: {
-    type: DataTypes.ENUM('pdf_print', 'step_file', 'other'),
+    type: DataTypes.STRING,
     allowNull: false
   },
   filename: {
@@ -1348,7 +1348,7 @@ const EstimatePartFile = sequelize.define('EstimatePartFile', {
     allowNull: true
   },
   fileType: {
-    type: DataTypes.ENUM('drawing', 'print', 'specification', 'other'),
+    type: DataTypes.STRING,
     defaultValue: 'other'
   }
 }, {
@@ -1688,6 +1688,10 @@ const Client = sequelize.define('Client', {
   isActive: {
     type: DataTypes.BOOLEAN,
     defaultValue: true
+  },
+  noTag: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
   }
 }, {
   tableName: 'clients',

@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { Client, Vendor, Estimate, WorkOrder, Shipment, sequelize } = require('../models');
+const { Client, Vendor } = require('../models');
 const { Op } = require('sequelize');
 
 // ============= CLIENTS =============
@@ -29,7 +29,7 @@ router.get('/clients', async (req, res, next) => {
   }
 });
 
-// GET /api/clients/search - Search clients for autofill (searches Clients table + distinct names from estimates/WOs/shipments)
+// GET /api/clients/search - Search clients for autofill (Clients table only)
 router.get('/clients/search', async (req, res, next) => {
   try {
     const { q } = req.query;
@@ -37,46 +37,29 @@ router.get('/clients/search', async (req, res, next) => {
       return res.json({ data: [] });
     }
 
-    // 1. Search the Clients table
     const clients = await Client.findAll({
       where: { isActive: true, name: { [Op.iLike]: `%${q}%` } },
-      limit: 10,
+      limit: 20,
       order: [['name', 'ASC']]
     });
 
-    const results = clients.map(c => ({
-      id: c.id,
-      name: c.name,
-      contactName: c.contactName,
-      contactPhone: c.contactPhone,
-      contactEmail: c.contactEmail
-    }));
-    const seenNames = new Set(results.map(r => r.name.toLowerCase()));
+    res.json({ data: clients });
+  } catch (error) {
+    next(error);
+  }
+});
 
-    // 2. Also search distinct clientName from estimates, work orders, shipments
-    const likePattern = `%${q}%`;
-    const [extraNames] = await sequelize.query(`
-      SELECT DISTINCT name FROM (
-        SELECT DISTINCT "clientName" AS name FROM estimates WHERE "clientName" ILIKE :pattern
-        UNION
-        SELECT DISTINCT "clientName" AS name FROM work_orders WHERE "clientName" ILIKE :pattern
-        UNION
-        SELECT DISTINCT "clientName" AS name FROM shipments WHERE "clientName" ILIKE :pattern
-      ) AS all_names
-      ORDER BY name ASC
-      LIMIT 20
-    `, { replacements: { pattern: likePattern } });
+// GET /api/clients/check-notag?name=ClientName - Check if client has no-tag flag
+router.get('/clients/check-notag', async (req, res, next) => {
+  try {
+    const { name } = req.query;
+    if (!name) return res.json({ data: { noTag: false } });
 
-    for (const row of extraNames) {
-      if (!seenNames.has(row.name.toLowerCase())) {
-        results.push({ id: `name:${row.name}`, name: row.name });
-        seenNames.add(row.name.toLowerCase());
-      }
-    }
+    const client = await Client.findOne({
+      where: { name: { [Op.iLike]: name.trim() }, isActive: true }
+    });
 
-    // Sort all results alphabetically, limit to 20
-    results.sort((a, b) => a.name.localeCompare(b.name));
-    res.json({ data: results.slice(0, 20) });
+    res.json({ data: { noTag: client?.noTag === true } });
   } catch (error) {
     next(error);
   }

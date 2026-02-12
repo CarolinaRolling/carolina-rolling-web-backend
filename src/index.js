@@ -169,6 +169,34 @@ async function startServer() {
     } catch (enumErr) {
       console.log('Work orders status pre-sync conversion:', enumErr.message);
     }
+
+    // Convert work_order_part_files fileType from ENUM to VARCHAR BEFORE sync
+    try {
+      const [wopfCol] = await sequelize.query(
+        `SELECT data_type FROM information_schema.columns WHERE table_name = 'work_order_part_files' AND column_name = 'fileType'`
+      );
+      if (wopfCol.length > 0 && wopfCol[0].data_type === 'USER-DEFINED') {
+        await sequelize.query(`ALTER TABLE work_order_part_files ALTER COLUMN "fileType" TYPE VARCHAR(255) USING "fileType"::text`);
+        await sequelize.query(`DROP TYPE IF EXISTS "enum_work_order_part_files_fileType"`);
+        console.log('Converted work_order_part_files.fileType from ENUM to VARCHAR');
+      }
+    } catch (enumErr) {
+      console.log('WO part files fileType pre-sync conversion:', enumErr.message);
+    }
+
+    // Convert estimate_part_files fileType from ENUM to VARCHAR BEFORE sync
+    try {
+      const [epfCol] = await sequelize.query(
+        `SELECT data_type FROM information_schema.columns WHERE table_name = 'estimate_part_files' AND column_name = 'fileType'`
+      );
+      if (epfCol.length > 0 && epfCol[0].data_type === 'USER-DEFINED') {
+        await sequelize.query(`ALTER TABLE estimate_part_files ALTER COLUMN "fileType" TYPE VARCHAR(255) USING "fileType"::text`);
+        await sequelize.query(`DROP TYPE IF EXISTS "enum_estimate_part_files_fileType"`);
+        console.log('Converted estimate_part_files.fileType from ENUM to VARCHAR');
+      }
+    } catch (enumErr) {
+      console.log('Estimate part files fileType pre-sync conversion:', enumErr.message);
+    }
     
     // Sync models - use alter to add new columns
     // This is safe for adding new nullable columns
@@ -389,6 +417,17 @@ async function startServer() {
       }
     } catch (wopErr) {
       console.error('Work order parts column check warning:', wopErr.message);
+    }
+
+    // Add noTag column to clients table
+    try {
+      const [clientCols] = await sequelize.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'clients'`);
+      if (!clientCols.some(c => c.column_name === 'noTag')) {
+        await sequelize.query(`ALTER TABLE clients ADD COLUMN "noTag" BOOLEAN DEFAULT false`);
+        console.log('Added noTag column to clients');
+      }
+    } catch (ntErr) {
+      console.error('Client noTag column check warning:', ntErr.message);
     }
     
     // Initialize default admin user

@@ -492,7 +492,7 @@ router.post('/:id/parts', async (req, res, next) => {
     partData = extractFormData(partData);
 
     // Calculate part totals (skip for ea-priced types which compute their own partTotal)
-    if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll'].includes(partData.partType)) {
+    if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service'].includes(partData.partType)) {
       const totals = calculatePartTotals(partData);
       Object.assign(partData, totals);
     }
@@ -534,7 +534,7 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     
     // Calculate part totals (skip for ea-priced types which compute their own partTotal)
     const mergedPart = { ...part.toJSON(), ...updates };
-    if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll'].includes(mergedPart.partType)) {
+    if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service'].includes(mergedPart.partType)) {
       const totals = calculatePartTotals(mergedPart);
       Object.assign(updates, totals);
     }
@@ -1229,7 +1229,7 @@ router.post('/:id/duplicate', async (req, res, next) => {
         formData: origPart.formData
       };
 
-      if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll'].includes(partData.partType)) {
+      if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service'].includes(partData.partType)) {
         const totals = calculatePartTotals(partData);
         Object.assign(partData, totals);
       }
@@ -1804,6 +1804,17 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
       // Copy part files to work order part files
       if (estimatePart.files && estimatePart.files.length > 0) {
         for (const file of estimatePart.files) {
+          // Normalize estimate fileType values to work order values
+          let fileType = file.fileType || 'other';
+          const ext = (file.originalName || file.filename || '').toLowerCase();
+          if (ext.endsWith('.pdf') || fileType === 'drawing' || fileType === 'print') {
+            fileType = 'pdf_print';
+          } else if (ext.endsWith('.stp') || ext.endsWith('.step') || fileType === 'step_file') {
+            fileType = 'step_file';
+          } else if (fileType === 'specification') {
+            fileType = 'other';
+          }
+          
           await WorkOrderPartFile.create({
             workOrderPartId: workOrderPart.id,
             filename: file.filename,
@@ -1812,7 +1823,7 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
             size: file.size,
             url: file.url,
             cloudinaryId: file.cloudinaryId,
-            fileType: file.fileType
+            fileType
           }, { transaction });
         }
       }

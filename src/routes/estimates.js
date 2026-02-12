@@ -1310,7 +1310,7 @@ router.get('/:id/pdf', async (req, res, next) => {
 
     // Generate PDF using PDFKit
     const PDFDocument = require('pdfkit');
-    const doc = new PDFDocument({ margin: 50, size: 'LETTER' });
+    const doc = new PDFDocument({ margin: 50, size: 'LETTER', bufferPages: true });
 
     // Set response headers
     res.setHeader('Content-Type', 'application/pdf');
@@ -1346,7 +1346,7 @@ router.get('/:id/pdf', async (req, res, next) => {
       plate_roll: 'Plate Roll', angle_roll: 'Angle Roll', pipe_roll: 'Pipe/Tube Roll',
       tube_roll: 'Sq/Rect Tube Roll', channel_roll: 'Channel Roll', beam_roll: 'Beam Roll',
       flat_bar: 'Flat Bar Roll', flat_stock: 'Flat Stock', cone_roll: 'Cone Roll',
-      tee_bar: 'Tee Bar Roll', press_brake: 'Press Brake', other: 'Other'
+      tee_bar: 'Tee Bar Roll', press_brake: 'Press Brake', fab_service: 'Fabrication Service', other: 'Other'
     };
 
     // Spec abbreviation helper
@@ -1677,7 +1677,11 @@ router.get('/:id/pdf', async (req, res, next) => {
 
   } catch (error) {
     console.error('PDF generation error:', error);
-    next(error);
+    if (!res.headersSent) {
+      next(error);
+    } else {
+      res.end();
+    }
   }
 });
 

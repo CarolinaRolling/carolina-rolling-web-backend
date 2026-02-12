@@ -2,12 +2,32 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const https = require('https');
+const http = require('http');
 const { v4: uuidv4 } = require('uuid');
 const cloudinary = require('cloudinary').v2;
 const { Op } = require('sequelize');
 const { Estimate, EstimatePart, EstimatePartFile, EstimateFile, WorkOrder, WorkOrderPart, WorkOrderPartFile, InboundOrder, AppSettings, DRNumber, PONumber, DailyActivity, sequelize } = require('../models');
 
 const router = express.Router();
+
+// Fetch a URL following redirects (up to 5 hops), returns response stream or null
+function fetchWithRedirects(url, maxRedirects = 5) {
+  return new Promise((resolve) => {
+    const lib = url.startsWith('https') ? https : http;
+    lib.get(url, (resp) => {
+      if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location && maxRedirects > 0) {
+        resp.resume();
+        fetchWithRedirects(resp.headers.location, maxRedirects - 1).then(resolve);
+      } else if (resp.statusCode === 200) {
+        resolve(resp);
+      } else {
+        resp.resume();
+        resolve(null);
+      }
+    }).on('error', () => resolve(null));
+  });
+}
 
 // Extract underscore-prefixed fields from part data into formData JSONB
 function extractFormData(data) {
@@ -287,16 +307,17 @@ router.get('/:id', async (req, res, next) => {
 
     // Merge formData fields back into parts for frontend
     const estimateData = estimate.toJSON();
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
     if (estimateData.parts) {
-      estimateData.parts = estimateData.parts.map(p => {
-        // Rewrite file URLs to use download proxy (handles resource_type mismatches)
+      // Rewrite file URLs to use download proxy (handles resource_type mismatches transparently)
+      const baseUrl = `${req.protocol}://${req.get('host')}`;
+      for (const p of estimateData.parts) {
         if (p.files) {
-          p.files = p.files.map(f => ({
-            ...f,
-            url: `${baseUrl}/api/estimates/${estimateData.id}/parts/${p.id}/files/${f.id}/download`
-          }));
+          for (const f of p.files) {
+            f.url = `${baseUrl}/api/estimates/${estimateData.id}/parts/${p.id}/files/${f.id}/download`;
+          }
         }
+      }
+      estimateData.parts = estimateData.parts.map(p => {
         if (p.formData && typeof p.formData === 'object') {
           return { ...p, ...p.formData };
         }
@@ -686,45 +707,25 @@ router.get('/:id/parts/:partId/files/:fileId/view', async (req, res, next) => {
     }
 
     if (file.cloudinaryId) {
-      // Build URLs for each resource type to find one that works
-      // Old uploads used resource_type: 'auto' which may store PDFs as 'image'
-      // New uploads use resource_type: 'raw'
-      const cloudName = cloudinary.config().cloud_name;
-      const ext = (file.originalName || file.filename || '').split('.').pop() || '';
-      
-      // Try raw URL first (correct for new uploads and most file types)
-      const rawUrl = `https://res.cloudinary.com/${cloudName}/raw/upload/${file.cloudinaryId}`;
-      const imageUrl = `https://res.cloudinary.com/${cloudName}/image/upload/${file.cloudinaryId}${ext ? '.' + ext : ''}`;
-      
-      // Check which URL works by doing a HEAD request
-      const https = require('https');
-      const checkUrl = (url) => new Promise((resolve) => {
-        https.request(url, { method: 'HEAD' }, (resp) => {
-          resolve(resp.statusCode === 200);
-        }).on('error', () => resolve(false)).end();
-      });
-      
-      if (await checkUrl(rawUrl)) {
-        return res.json({ data: { url: rawUrl, originalName: file.originalName } });
-      }
-      if (await checkUrl(imageUrl)) {
-        return res.json({ data: { url: imageUrl, originalName: file.originalName } });
-      }
-      
-      // Also try the stored URL itself
-      if (file.url && await checkUrl(file.url)) {
-        return res.json({ data: { url: file.url, originalName: file.originalName } });
+      const resourceTypes = ['image', 'raw', 'video'];
+      for (const rt of resourceTypes) {
+        try {
+          const result = await cloudinary.api.resource(file.cloudinaryId, { resource_type: rt });
+          if (result.secure_url && result.secure_url !== file.url) {
+            await file.update({ url: result.secure_url });
+          }
+          return res.json({ data: { url: result.secure_url, originalName: file.originalName } });
+        } catch (e) { /* try next type */ }
       }
     }
 
-    // Last resort: return stored URL anyway
     res.json({ data: { url: file.url, originalName: file.originalName } });
   } catch (error) {
     next(error);
   }
 });
 
-// GET /api/estimates/:id/parts/:partId/files/:fileId/download - Redirect to working file URL
+// GET /api/estimates/:id/parts/:partId/files/:fileId/download - Stream file from Cloudinary
 router.get('/:id/parts/:partId/files/:fileId/download', async (req, res, next) => {
   try {
     const file = await EstimatePartFile.findOne({
@@ -735,27 +736,49 @@ router.get('/:id/parts/:partId/files/:fileId/download', async (req, res, next) =
       return res.status(404).json({ error: { message: 'File not found' } });
     }
 
+    // Build list of candidate URLs to try
+    const urlsToTry = [];
+    
+    // Always try stored URL first
+    if (file.url) urlsToTry.push(file.url);
+    
+    // Build alternate URLs from cloudinaryId by swapping resource_type in URL
     if (file.cloudinaryId) {
-      const cloudName = cloudinary.config().cloud_name;
-      const ext = (file.originalName || file.filename || '').split('.').pop() || '';
-      const urls = [
-        file.url,
-        `https://res.cloudinary.com/${cloudName}/raw/upload/${file.cloudinaryId}`,
-        `https://res.cloudinary.com/${cloudName}/image/upload/${file.cloudinaryId}${ext ? '.' + ext : ''}`
-      ];
+      const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+      if (cloudName) {
+        const pubId = file.cloudinaryId;
+        const ext = path.extname(file.originalName || file.filename || '').toLowerCase() || '.pdf';
+        // Try raw (new uploads), image (old auto uploads for PDFs), and with/without extension
+        urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}${ext}`);
+        urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}`);
+        urlsToTry.push(`https://res.cloudinary.com/${cloudName}/image/upload/${pubId}${ext}`);
+        urlsToTry.push(`https://res.cloudinary.com/${cloudName}/image/upload/${pubId}`);
+      }
+    }
+    
+    // Deduplicate
+    const uniqueUrls = [...new Set(urlsToTry)];
 
-      const https = require('https');
-      for (const url of urls) {
-        const works = await new Promise((resolve) => {
-          https.request(url, { method: 'HEAD' }, (resp) => {
-            resolve(resp.statusCode === 200);
-          }).on('error', () => resolve(false)).end();
-        });
-        if (works) return res.redirect(url);
+    // Try each URL - stream the first one that works
+    for (const url of uniqueUrls) {
+      const upstream = await fetchWithRedirects(url);
+      if (upstream) {
+        const contentType = file.mimeType || upstream.headers['content-type'] || 'application/octet-stream';
+        res.setHeader('Content-Type', contentType);
+        if (upstream.headers['content-length']) res.setHeader('Content-Length', upstream.headers['content-length']);
+        res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(file.originalName || file.filename || 'file')}"`);
+        
+        // Fix stored URL for future requests if a different URL worked
+        if (url !== file.url) {
+          file.update({ url }).catch(() => {});
+        }
+        
+        upstream.pipe(res);
+        return;
       }
     }
 
-    return res.redirect(file.url);
+    res.status(404).json({ error: { message: 'File not accessible on storage' } });
   } catch (error) {
     next(error);
   }

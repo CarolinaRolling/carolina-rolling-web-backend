@@ -1693,11 +1693,13 @@ router.get('/:id/pdf', async (req, res, next) => {
         descLines.push(rollLine);
       }
 
-      // Material source
-      if (part.materialSource === 'customer_supplied') {
-        descLines.push('Customer Supplied');
-      } else if (part.supplierName) {
-        descLines.push(`Supplier: ${part.supplierName}`);
+      // Material source (skip for fab services)
+      if (part.partType !== 'fab_service') {
+        if (part.materialSource === 'customer_supplied') {
+          descLines.push(`Material supplied by: ${estimate.clientName || 'Customer'}`);
+        } else {
+          descLines.push('Material supplied by: Carolina Rolling Company');
+        }
       }
 
       // Special instructions (truncated)

@@ -287,8 +287,16 @@ router.get('/:id', async (req, res, next) => {
 
     // Merge formData fields back into parts for frontend
     const estimateData = estimate.toJSON();
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
     if (estimateData.parts) {
       estimateData.parts = estimateData.parts.map(p => {
+        // Rewrite file URLs to use download proxy (handles resource_type mismatches)
+        if (p.files) {
+          p.files = p.files.map(f => ({
+            ...f,
+            url: `${baseUrl}/api/estimates/${estimateData.id}/parts/${p.id}/files/${f.id}/download`
+          }));
+        }
         if (p.formData && typeof p.formData === 'object') {
           return { ...p, ...p.formData };
         }
@@ -631,10 +639,12 @@ router.post('/:id/parts/:partId/files', upload.single('file'), async (req, res, 
       return res.status(400).json({ error: { message: 'No file uploaded' } });
     }
 
-    // Upload to Cloudinary
+    // Upload to Cloudinary (use 'raw' for consistent PDF handling)
     const result = await cloudinary.uploader.upload(req.file.path, {
       folder: 'estimate-part-files',
-      resource_type: 'auto'
+      resource_type: 'raw',
+      use_filename: true,
+      unique_filename: true
     });
 
     // Clean up local file
@@ -664,6 +674,93 @@ router.post('/:id/parts/:partId/files', upload.single('file'), async (req, res, 
   }
 });
 
+// GET /api/estimates/:id/parts/:partId/files/:fileId/view - Get viewable URL for a part file
+router.get('/:id/parts/:partId/files/:fileId/view', async (req, res, next) => {
+  try {
+    const file = await EstimatePartFile.findOne({
+      where: { id: req.params.fileId, partId: req.params.partId }
+    });
+
+    if (!file) {
+      return res.status(404).json({ error: { message: 'File not found' } });
+    }
+
+    if (file.cloudinaryId) {
+      // Build URLs for each resource type to find one that works
+      // Old uploads used resource_type: 'auto' which may store PDFs as 'image'
+      // New uploads use resource_type: 'raw'
+      const cloudName = cloudinary.config().cloud_name;
+      const ext = (file.originalName || file.filename || '').split('.').pop() || '';
+      
+      // Try raw URL first (correct for new uploads and most file types)
+      const rawUrl = `https://res.cloudinary.com/${cloudName}/raw/upload/${file.cloudinaryId}`;
+      const imageUrl = `https://res.cloudinary.com/${cloudName}/image/upload/${file.cloudinaryId}${ext ? '.' + ext : ''}`;
+      
+      // Check which URL works by doing a HEAD request
+      const https = require('https');
+      const checkUrl = (url) => new Promise((resolve) => {
+        https.request(url, { method: 'HEAD' }, (resp) => {
+          resolve(resp.statusCode === 200);
+        }).on('error', () => resolve(false)).end();
+      });
+      
+      if (await checkUrl(rawUrl)) {
+        return res.json({ data: { url: rawUrl, originalName: file.originalName } });
+      }
+      if (await checkUrl(imageUrl)) {
+        return res.json({ data: { url: imageUrl, originalName: file.originalName } });
+      }
+      
+      // Also try the stored URL itself
+      if (file.url && await checkUrl(file.url)) {
+        return res.json({ data: { url: file.url, originalName: file.originalName } });
+      }
+    }
+
+    // Last resort: return stored URL anyway
+    res.json({ data: { url: file.url, originalName: file.originalName } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/estimates/:id/parts/:partId/files/:fileId/download - Redirect to working file URL
+router.get('/:id/parts/:partId/files/:fileId/download', async (req, res, next) => {
+  try {
+    const file = await EstimatePartFile.findOne({
+      where: { id: req.params.fileId, partId: req.params.partId }
+    });
+
+    if (!file) {
+      return res.status(404).json({ error: { message: 'File not found' } });
+    }
+
+    if (file.cloudinaryId) {
+      const cloudName = cloudinary.config().cloud_name;
+      const ext = (file.originalName || file.filename || '').split('.').pop() || '';
+      const urls = [
+        file.url,
+        `https://res.cloudinary.com/${cloudName}/raw/upload/${file.cloudinaryId}`,
+        `https://res.cloudinary.com/${cloudName}/image/upload/${file.cloudinaryId}${ext ? '.' + ext : ''}`
+      ];
+
+      const https = require('https');
+      for (const url of urls) {
+        const works = await new Promise((resolve) => {
+          https.request(url, { method: 'HEAD' }, (resp) => {
+            resolve(resp.statusCode === 200);
+          }).on('error', () => resolve(false)).end();
+        });
+        if (works) return res.redirect(url);
+      }
+    }
+
+    return res.redirect(file.url);
+  } catch (error) {
+    next(error);
+  }
+});
+
 // DELETE /api/estimates/:id/parts/:partId/files/:fileId - Delete a part file
 router.delete('/:id/parts/:partId/files/:fileId', async (req, res, next) => {
   try {
@@ -678,9 +775,14 @@ router.delete('/:id/parts/:partId/files/:fileId', async (req, res, next) => {
     // Delete from Cloudinary
     if (file.cloudinaryId) {
       try {
-        await cloudinary.uploader.destroy(file.cloudinaryId);
+        await cloudinary.uploader.destroy(file.cloudinaryId, { resource_type: 'raw' });
       } catch (err) {
-        console.error('Failed to delete from Cloudinary:', err);
+        // Try image type for old files uploaded with resource_type: 'auto'
+        try {
+          await cloudinary.uploader.destroy(file.cloudinaryId, { resource_type: 'image' });
+        } catch (err2) {
+          console.error('Failed to delete from Cloudinary:', err2);
+        }
       }
     }
 

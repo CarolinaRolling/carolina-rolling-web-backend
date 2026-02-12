@@ -389,7 +389,20 @@ router.get('/:id', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Work order not found' } });
     }
 
-    res.json({ data: workOrder });
+    // Rewrite file URLs to use our download proxy (handles old resource_type mismatches)
+    const woJson = workOrder.toJSON();
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    if (woJson.parts) {
+      for (const part of woJson.parts) {
+        if (part.files) {
+          for (const file of part.files) {
+            file.url = `${baseUrl}/api/workorders/${woJson.id}/parts/${part.id}/files/${file.id}/download`;
+          }
+        }
+      }
+    }
+
+    res.json({ data: woJson });
   } catch (error) {
     next(error);
   }
@@ -1233,32 +1246,56 @@ router.get('/:id/parts/:partId/files/:fileId/signed-url', async (req, res, next)
     }
 
     if (file.cloudinaryId) {
-      const expiresAt = Math.floor(Date.now() / 1000) + 3600;
-      const signedUrl = cloudinary.utils.private_download_url(
-        file.cloudinaryId,
-        'raw',
-        {
-          resource_type: 'raw',
-          expires_at: expiresAt,
-          attachment: false
-        }
-      );
+      // Try signed URL first (works for files uploaded as raw+private)
+      try {
+        const expiresAt = Math.floor(Date.now() / 1000) + 3600;
+        const signedUrl = cloudinary.utils.private_download_url(
+          file.cloudinaryId,
+          'raw',
+          { resource_type: 'raw', expires_at: expiresAt, attachment: false }
+        );
 
-      return res.json({
-        data: {
-          url: signedUrl,
-          expiresIn: 3600,
-          originalName: file.originalName || file.filename
+        // Verify it works with a HEAD request
+        const https = require('https');
+        const works = await new Promise((resolve) => {
+          https.request(signedUrl, { method: 'HEAD' }, (resp) => {
+            resolve(resp.statusCode === 200);
+          }).on('error', () => resolve(false)).end();
+        });
+
+        if (works) {
+          return res.json({
+            data: { url: signedUrl, expiresIn: 3600, originalName: file.originalName || file.filename }
+          });
         }
+      } catch (e) {
+        // signed URL failed, try public URLs
+      }
+
+      // Fallback for files copied from estimates (uploaded with resource_type: 'auto')
+      const cloudName = cloudinary.config().cloud_name;
+      const ext = (file.originalName || file.filename || '').split('.').pop() || '';
+      const rawUrl = `https://res.cloudinary.com/${cloudName}/raw/upload/${file.cloudinaryId}`;
+      const imageUrl = `https://res.cloudinary.com/${cloudName}/image/upload/${file.cloudinaryId}${ext ? '.' + ext : ''}`;
+
+      const https = require('https');
+      const checkUrl = (url) => new Promise((resolve) => {
+        https.request(url, { method: 'HEAD' }, (resp) => {
+          resolve(resp.statusCode === 200);
+        }).on('error', () => resolve(false)).end();
       });
+
+      if (await checkUrl(rawUrl)) {
+        return res.json({ data: { url: rawUrl, expiresIn: null, originalName: file.originalName || file.filename } });
+      }
+      if (await checkUrl(imageUrl)) {
+        return res.json({ data: { url: imageUrl, expiresIn: null, originalName: file.originalName || file.filename } });
+      }
     }
 
+    // Last resort: stored URL
     res.json({
-      data: {
-        url: file.url,
-        expiresIn: null,
-        originalName: file.originalName || file.filename
-      }
+      data: { url: file.url, expiresIn: null, originalName: file.originalName || file.filename }
     });
   } catch (error) {
     next(error);
@@ -1266,6 +1303,45 @@ router.get('/:id/parts/:partId/files/:fileId/signed-url', async (req, res, next)
 });
 
 // DELETE /api/workorders/:id/parts/:partId/files/:fileId - Delete a file
+
+// GET /api/workorders/:id/parts/:partId/files/:fileId/download - Redirect to working file URL
+router.get('/:id/parts/:partId/files/:fileId/download', async (req, res, next) => {
+  try {
+    const file = await WorkOrderPartFile.findOne({
+      where: { id: req.params.fileId, workOrderPartId: req.params.partId }
+    });
+
+    if (!file) {
+      return res.status(404).json({ error: { message: 'File not found' } });
+    }
+
+    if (file.cloudinaryId) {
+      const cloudName = cloudinary.config().cloud_name;
+      const ext = (file.originalName || file.filename || '').split('.').pop() || '';
+      const urls = [
+        file.url,
+        `https://res.cloudinary.com/${cloudName}/raw/upload/${file.cloudinaryId}`,
+        `https://res.cloudinary.com/${cloudName}/image/upload/${file.cloudinaryId}${ext ? '.' + ext : ''}`
+      ];
+
+      const https = require('https');
+      for (const url of urls) {
+        const works = await new Promise((resolve) => {
+          https.request(url, { method: 'HEAD' }, (resp) => {
+            resolve(resp.statusCode === 200);
+          }).on('error', () => resolve(false)).end();
+        });
+        if (works) return res.redirect(url);
+      }
+    }
+
+    // Last resort
+    return res.redirect(file.url);
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.delete('/:id/parts/:partId/files/:fileId', async (req, res, next) => {
   try {
     const file = await WorkOrderPartFile.findOne({

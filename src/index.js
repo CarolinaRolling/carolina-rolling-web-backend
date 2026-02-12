@@ -244,6 +244,11 @@ async function startServer() {
               await sequelize.query(`ALTER TYPE ${enumName} ADD VALUE IF NOT EXISTS 'press_brake'`);
               console.log(`Added press_brake to ${enumName}`);
             }
+            const hasFabService = vals.some(v => v.val === 'fab_service');
+            if (!hasFabService) {
+              await sequelize.query(`ALTER TYPE ${enumName} ADD VALUE IF NOT EXISTS 'fab_service'`);
+              console.log(`Added fab_service to ${enumName}`);
+            }
           }
         } catch (enumErr) {
           // Might fail if already exists or different DB

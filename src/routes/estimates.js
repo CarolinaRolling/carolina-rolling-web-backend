@@ -383,7 +383,10 @@ router.put('/:id', async (req, res, next) => {
     const updates = {};
     const fields = ['clientName', 'contactName', 'contactEmail', 'contactPhone', 
       'projectDescription', 'notes', 'internalNotes', 'validUntil', 'taxRate',
-      'useCustomTax', 'customTaxReason', 'truckingDescription', 'truckingCost', 'status'];
+      'useCustomTax', 'customTaxReason', 'truckingDescription', 'truckingCost', 'status',
+      'taxExempt', 'taxExemptCertNumber', 'taxExemptReason',
+      'discountPercent', 'discountAmount', 'discountReason',
+      'minimumOverride', 'minimumOverrideReason'];
     
     fields.forEach(field => {
       if (req.body[field] !== undefined) {
@@ -411,7 +414,9 @@ router.put('/:id', async (req, res, next) => {
       parts, 
       updates.truckingCost ?? estimate.truckingCost, 
       updates.taxRate ?? estimate.taxRate,
-      updates.taxExempt ?? estimate.taxExempt
+      updates.taxExempt ?? estimate.taxExempt,
+      updates.discountPercent ?? estimate.discountPercent,
+      updates.discountAmount ?? estimate.discountAmount
     );
     await estimate.update(totals);
 
@@ -496,7 +501,7 @@ router.post('/:id/parts', async (req, res, next) => {
 
     // Recalculate estimate totals
     const allParts = await EstimatePart.findAll({ where: { estimateId: estimate.id } });
-    const estimateTotals = calculateEstimateTotals(allParts, estimate.truckingCost, estimate.taxRate);
+    const estimateTotals = calculateEstimateTotals(allParts, estimate.truckingCost, estimate.taxRate, estimate.taxExempt, estimate.discountPercent, estimate.discountAmount);
     await estimate.update(estimateTotals);
 
     res.status(201).json({
@@ -539,7 +544,7 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     // Recalculate estimate totals
     const estimate = await Estimate.findByPk(req.params.id);
     const allParts = await EstimatePart.findAll({ where: { estimateId: estimate.id } });
-    const estimateTotals = calculateEstimateTotals(allParts, estimate.truckingCost, estimate.taxRate);
+    const estimateTotals = calculateEstimateTotals(allParts, estimate.truckingCost, estimate.taxRate, estimate.taxExempt, estimate.discountPercent, estimate.discountAmount);
     await estimate.update(estimateTotals);
 
     res.json({
@@ -578,7 +583,7 @@ router.delete('/:id/parts/:partId', async (req, res, next) => {
     // Recalculate estimate totals
     const estimate = await Estimate.findByPk(req.params.id);
     const allParts = await EstimatePart.findAll({ where: { estimateId: estimate.id } });
-    const estimateTotals = calculateEstimateTotals(allParts, estimate.truckingCost, estimate.taxRate);
+    const estimateTotals = calculateEstimateTotals(allParts, estimate.truckingCost, estimate.taxRate, estimate.taxExempt, estimate.discountPercent, estimate.discountAmount);
     await estimate.update(estimateTotals);
 
     res.json({ message: 'Part deleted' });
@@ -1233,7 +1238,7 @@ router.post('/:id/duplicate', async (req, res, next) => {
 
     // Recalculate totals
     const parts = await EstimatePart.findAll({ where: { estimateId: newEstimate.id } });
-    const estimateTotals = calculateEstimateTotals(parts, newEstimate.truckingCost, newEstimate.taxRate);
+    const estimateTotals = calculateEstimateTotals(parts, newEstimate.truckingCost, newEstimate.taxRate, newEstimate.taxExempt, newEstimate.discountPercent, newEstimate.discountAmount);
     await newEstimate.update(estimateTotals);
 
     // Reload with parts

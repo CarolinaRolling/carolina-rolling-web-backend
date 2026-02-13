@@ -445,6 +445,10 @@ async function startServer() {
         await sequelize.query(`ALTER TABLE clients ADD COLUMN "permitRawResponse" TEXT DEFAULT NULL`);
         console.log('Added permitRawResponse column to clients');
       }
+      if (!clientCols.some(c => c.column_name === 'permitOwnerName')) {
+        await sequelize.query(`ALTER TABLE clients ADD COLUMN "permitOwnerName" VARCHAR(255) DEFAULT NULL`);
+        console.log('Added permitOwnerName column to clients');
+      }
     } catch (ntErr) {
       console.error('Client column check warning:', ntErr.message);
     }
@@ -533,7 +537,8 @@ async function startServer() {
               await client.update({
                 permitStatus: result.status,
                 permitLastVerified: new Date(),
-                permitRawResponse: result.rawResponse
+                permitRawResponse: result.rawResponse,
+                permitOwnerName: result.ownerName || null
               });
             }
           } catch (e) { console.error('[CRON] DB update failed:', e.message); }

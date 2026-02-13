@@ -53,7 +53,8 @@ router.post('/verify-permit', async (req, res, next) => {
           await client.update({
             permitStatus: result.status,
             permitLastVerified: new Date(),
-            permitRawResponse: result.rawResponse
+            permitRawResponse: result.rawResponse,
+            permitOwnerName: result.ownerName || null
           });
           console.log(`[Permit] Updated client ${clientId} status: ${result.status}`);
         }
@@ -128,7 +129,8 @@ router.post('/verify-permits/batch', async (req, res, next) => {
               await client.update({
                 permitStatus: result.status,
                 permitLastVerified: new Date(),
-                permitRawResponse: result.rawResponse
+                permitRawResponse: result.rawResponse,
+                permitOwnerName: result.ownerName || null
               });
             }
           } catch (dbErr) {

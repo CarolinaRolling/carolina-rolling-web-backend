@@ -1704,6 +1704,10 @@ const Client = sequelize.define('Client', {
   permitRawResponse: {
     type: DataTypes.TEXT,
     allowNull: true
+  },
+  permitOwnerName: {
+    type: DataTypes.STRING,
+    allowNull: true
   }
 }, {
   tableName: 'clients',

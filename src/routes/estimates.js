@@ -1658,7 +1658,12 @@ router.get('/:id/pdf', async (req, res, next) => {
       const qty = parseInt(part.quantity) || 1;
       const matCost = parseFloat(part.materialTotal) || 0;
       const matMarkup = parseFloat(part.materialMarkupPercent) || 0;
-      const matEach = matCost * (1 + matMarkup / 100);
+      const matEachRaw = matCost * (1 + matMarkup / 100);
+      // Apply rounding
+      const rounding = part.formData?._materialRounding || part._materialRounding || 'none';
+      let matEach = matEachRaw;
+      if (rounding === 'dollar' && matEach > 0) matEach = Math.ceil(matEach);
+      if (rounding === 'five' && matEach > 0) matEach = Math.ceil(matEach / 5) * 5;
       const labEach = parseFloat(part.laborTotal) || 0;
       const unitPrice = matEach + labEach;
       const lineTotal = parseFloat(part.partTotal) || (unitPrice * qty);
@@ -1701,6 +1706,10 @@ router.get('/:id/pdf', async (req, res, next) => {
           descLines.push('Material supplied by: Carolina Rolling Company');
         }
       }
+
+      // Material/Rolling pricing breakdown
+      if (matEach > 0) descLines.push(`Material: ${formatCurrency(matEach)}`);
+      if (labEach > 0) descLines.push(`${part.partType === 'fab_service' ? 'Service' : (part.partType === 'flat_stock' ? 'Handling' : 'Rolling')}: ${formatCurrency(labEach)}`);
 
       // Special instructions (truncated)
       if (part.specialInstructions) {

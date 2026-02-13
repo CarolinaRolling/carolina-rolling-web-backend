@@ -521,7 +521,7 @@ router.post('/:id/parts', async (req, res, next) => {
     partData = extractFormData(partData);
 
     // Calculate part totals (skip for ea-priced types which compute their own partTotal)
-    if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service'].includes(partData.partType)) {
+    if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'].includes(partData.partType)) {
       const totals = calculatePartTotals(partData);
       Object.assign(partData, totals);
     }
@@ -563,7 +563,7 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     
     // Calculate part totals (skip for ea-priced types which compute their own partTotal)
     const mergedPart = { ...part.toJSON(), ...updates };
-    if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service'].includes(mergedPart.partType)) {
+    if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'].includes(mergedPart.partType)) {
       const totals = calculatePartTotals(mergedPart);
       Object.assign(updates, totals);
     }
@@ -1423,7 +1423,7 @@ router.post('/:id/duplicate', async (req, res, next) => {
         formData: origPart.formData
       };
 
-      if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service'].includes(partData.partType)) {
+      if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'].includes(partData.partType)) {
         const totals = calculatePartTotals(partData);
         Object.assign(partData, totals);
       }
@@ -1540,7 +1540,7 @@ router.get('/:id/pdf', async (req, res, next) => {
       plate_roll: 'Plate Roll', angle_roll: 'Angle Roll', pipe_roll: 'Pipe/Tube Roll',
       tube_roll: 'Sq/Rect Tube Roll', channel_roll: 'Channel Roll', beam_roll: 'Beam Roll',
       flat_bar: 'Flat Bar Roll', flat_stock: 'Flat Stock', cone_roll: 'Cone Roll',
-      tee_bar: 'Tee Bar Roll', press_brake: 'Press Brake', fab_service: 'Fabrication Service', other: 'Other'
+      tee_bar: 'Tee Bar Roll', press_brake: 'Press Brake', fab_service: 'Fabrication Service', shop_rate: 'Shop Rate', other: 'Other'
     };
 
     // Spec abbreviation helper
@@ -1698,8 +1698,8 @@ router.get('/:id/pdf', async (req, res, next) => {
         descLines.push(rollLine);
       }
 
-      // Material source (skip for fab services)
-      if (part.partType !== 'fab_service') {
+      // Material source (skip for fab services and shop rate)
+      if (!['fab_service', 'shop_rate'].includes(part.partType)) {
         if (part.materialSource === 'customer_supplied') {
           descLines.push(`Material supplied by: ${estimate.clientName || 'Customer'}`);
         } else {
@@ -1709,7 +1709,12 @@ router.get('/:id/pdf', async (req, res, next) => {
 
       // Material/Rolling pricing breakdown
       if (matEach > 0) descLines.push(`Material: ${formatCurrency(matEach)}`);
-      if (labEach > 0) descLines.push(`${part.partType === 'fab_service' ? 'Service' : (part.partType === 'flat_stock' ? 'Handling' : 'Rolling')}: ${formatCurrency(labEach)}`);
+      if (labEach > 0) descLines.push(`${part.partType === 'fab_service' ? 'Service' : part.partType === 'shop_rate' ? 'Shop Rate' : (part.partType === 'flat_stock' ? 'Handling' : 'Rolling')}: ${formatCurrency(labEach)}`);
+
+      // Shop rate warning
+      if (part.partType === 'shop_rate') {
+        descLines.push('* Pricing based on estimated hours — actual cost may vary');
+      }
 
       // Special instructions (truncated)
       if (part.specialInstructions) {

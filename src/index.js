@@ -4,7 +4,7 @@ const cors = require('cors');
 const path = require('path');
 const cloudinary = require('cloudinary').v2;
 const cron = require('node-cron');
-const { sequelize, Shipment, ShipmentPhoto, ShipmentDocument, User, AppSettings, WorkOrder } = require('./models');
+const { sequelize, Shipment, ShipmentPhoto, ShipmentDocument, User, AppSettings, WorkOrder, Client } = require('./models');
 const shipmentRoutes = require('./routes/shipments');
 const settingsRoutes = require('./routes/settings');
 const { sendScheduleEmail } = require('./routes/settings');
@@ -18,6 +18,7 @@ const emailRoutes = require('./routes/email');
 const { sendDailyEmail } = require('./routes/email');
 const { router: authRoutes, initializeAdmin } = require('./routes/auth');
 const clientsVendorsRoutes = require('./routes/clients-vendors');
+const permitVerificationRoutes = require('./routes/permit-verification');
 const { Op } = require('sequelize');
 
 // Configure Cloudinary
@@ -66,6 +67,7 @@ app.use('/api/dr-numbers', drNumbersRoutes);
 app.use('/api/po-numbers', poNumbersRoutes);
 app.use('/api/email', emailRoutes);
 app.use('/api', clientsVendorsRoutes);
+app.use('/api', permitVerificationRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -277,6 +279,11 @@ async function startServer() {
               await sequelize.query(`ALTER TYPE ${enumName} ADD VALUE IF NOT EXISTS 'fab_service'`);
               console.log(`Added fab_service to ${enumName}`);
             }
+            const hasShopRate = vals.some(v => v.val === 'shop_rate');
+            if (!hasShopRate) {
+              await sequelize.query(`ALTER TYPE ${enumName} ADD VALUE IF NOT EXISTS 'shop_rate'`);
+              console.log(`Added shop_rate to ${enumName}`);
+            }
           }
         } catch (enumErr) {
           // Might fail if already exists or different DB
@@ -426,8 +433,20 @@ async function startServer() {
         await sequelize.query(`ALTER TABLE clients ADD COLUMN "noTag" BOOLEAN DEFAULT false`);
         console.log('Added noTag column to clients');
       }
+      if (!clientCols.some(c => c.column_name === 'permitStatus')) {
+        await sequelize.query(`ALTER TABLE clients ADD COLUMN "permitStatus" VARCHAR(255) DEFAULT 'unverified'`);
+        console.log('Added permitStatus column to clients');
+      }
+      if (!clientCols.some(c => c.column_name === 'permitLastVerified')) {
+        await sequelize.query(`ALTER TABLE clients ADD COLUMN "permitLastVerified" TIMESTAMPTZ DEFAULT NULL`);
+        console.log('Added permitLastVerified column to clients');
+      }
+      if (!clientCols.some(c => c.column_name === 'permitRawResponse')) {
+        await sequelize.query(`ALTER TABLE clients ADD COLUMN "permitRawResponse" TEXT DEFAULT NULL`);
+        console.log('Added permitRawResponse column to clients');
+      }
     } catch (ntErr) {
-      console.error('Client noTag column check warning:', ntErr.message);
+      console.error('Client column check warning:', ntErr.message);
     }
     
     // Initialize default admin user
@@ -492,6 +511,41 @@ async function startServer() {
     });
     
     console.log('Daily summary emails configured for 5:00 AM and 2:30 PM Eastern');
+
+    // Yearly CDTFA permit verification — runs January 2nd at 3 AM Eastern
+    cron.schedule('0 3 2 1 *', async () => {
+      console.log('[CRON] Starting annual CDTFA permit verification...');
+      try {
+        const { verifyBatch } = require('./services/permitVerification');
+        const { Op } = require('sequelize');
+        const clients = await Client.findAll({
+          where: { isActive: true, resaleCertificate: { [Op.ne]: null } }
+        });
+        const withPermits = clients.filter(c => c.resaleCertificate && c.resaleCertificate.trim());
+        console.log(`[CRON] Found ${withPermits.length} clients with resale certificates`);
+        if (withPermits.length === 0) return;
+
+        const permits = withPermits.map(c => ({ id: c.id, permitNumber: c.resaleCertificate.trim() }));
+        await verifyBatch(permits, async (result) => {
+          try {
+            const client = await Client.findByPk(result.clientId);
+            if (client) {
+              await client.update({
+                permitStatus: result.status,
+                permitLastVerified: new Date(),
+                permitRawResponse: result.rawResponse
+              });
+            }
+          } catch (e) { console.error('[CRON] DB update failed:', e.message); }
+        }, 60000); // 1 minute between each
+        console.log('[CRON] Annual permit verification complete');
+      } catch (err) {
+        console.error('[CRON] Annual permit verification failed:', err);
+      }
+    }, {
+      timezone: 'America/New_York'
+    });
+    console.log('Annual CDTFA permit verification configured for January 2nd at 3:00 AM Eastern');
 
     app.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);

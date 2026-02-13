@@ -575,7 +575,7 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
     allowNull: false
   },
   partType: {
-    type: DataTypes.ENUM('plate_roll', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'tube_roll', 'channel_roll', 'flat_bar', 'cone_roll', 'tee_bar', 'press_brake', 'flat_stock', 'fab_service', 'other'),
+    type: DataTypes.ENUM('plate_roll', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'tube_roll', 'channel_roll', 'flat_bar', 'cone_roll', 'tee_bar', 'press_brake', 'flat_stock', 'fab_service', 'shop_rate', 'other'),
     allowNull: false
   },
   clientPartNumber: {
@@ -1082,7 +1082,7 @@ const EstimatePart = sequelize.define('EstimatePart', {
     allowNull: false
   },
   partType: {
-    type: DataTypes.ENUM('plate_roll', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'tube_roll', 'channel_roll', 'flat_bar', 'cone_roll', 'tee_bar', 'press_brake', 'flat_stock', 'fab_service', 'other'),
+    type: DataTypes.ENUM('plate_roll', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'tube_roll', 'channel_roll', 'flat_bar', 'cone_roll', 'tee_bar', 'press_brake', 'flat_stock', 'fab_service', 'shop_rate', 'other'),
     allowNull: false
   },
   clientPartNumber: {
@@ -1692,6 +1692,18 @@ const Client = sequelize.define('Client', {
   noTag: {
     type: DataTypes.BOOLEAN,
     defaultValue: false
+  },
+  permitStatus: {
+    type: DataTypes.STRING,
+    defaultValue: 'unverified' // active, closed, inactive, not_found, error, unverified
+  },
+  permitLastVerified: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  permitRawResponse: {
+    type: DataTypes.TEXT,
+    allowNull: true
   }
 }, {
   tableName: 'clients',

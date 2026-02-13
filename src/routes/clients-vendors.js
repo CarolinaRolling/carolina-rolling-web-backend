@@ -92,7 +92,8 @@ router.post('/clients', async (req, res, next) => {
       taxStatus,
       resaleCertificate,
       customTaxRate,
-      notes
+      notes,
+      noTag
     } = req.body;
     
     if (!name) {
@@ -114,7 +115,8 @@ router.post('/clients', async (req, res, next) => {
       taxStatus: taxStatus || 'taxable',
       resaleCertificate,
       customTaxRate: customTaxRate ? parseFloat(customTaxRate) : null,
-      notes
+      notes,
+      noTag: noTag || false
     });
     
     res.status(201).json({ data: client, message: 'Client created successfully' });
@@ -142,7 +144,8 @@ router.put('/clients/:id', async (req, res, next) => {
       resaleCertificate,
       customTaxRate,
       notes,
-      isActive
+      isActive,
+      noTag
     } = req.body;
     
     // Check for duplicate name (excluding current)
@@ -168,7 +171,8 @@ router.put('/clients/:id', async (req, res, next) => {
       resaleCertificate: resaleCertificate !== undefined ? resaleCertificate : client.resaleCertificate,
       customTaxRate: customTaxRate !== undefined ? (customTaxRate ? parseFloat(customTaxRate) : null) : client.customTaxRate,
       notes: notes !== undefined ? notes : client.notes,
-      isActive: isActive !== undefined ? isActive : client.isActive
+      isActive: isActive !== undefined ? isActive : client.isActive,
+      noTag: noTag !== undefined ? noTag : client.noTag
     });
     
     res.json({ data: client, message: 'Client updated successfully' });

@@ -458,9 +458,24 @@ router.post('/', async (req, res, next) => {
     // Resolve client name from clientId if needed
     let resolvedClientName = clientName;
     let resolvedClientId = clientId || null;
+    let resolvedClient = null;
     if (resolvedClientId && !resolvedClientName) {
-      const client = await Client.findByPk(resolvedClientId);
-      if (client) resolvedClientName = client.name;
+      resolvedClient = await Client.findByPk(resolvedClientId);
+      if (resolvedClient) resolvedClientName = resolvedClient.name;
+    } else if (resolvedClientId) {
+      resolvedClient = await Client.findByPk(resolvedClientId);
+    }
+
+    // Determine tax rate: client-specific > admin default
+    let effectiveTaxRate = null;
+    if (resolvedClient?.customTaxRate) {
+      effectiveTaxRate = parseFloat(resolvedClient.customTaxRate) * 100; // stored as decimal, convert to %
+    }
+    if (!effectiveTaxRate) {
+      try {
+        const taxSetting = await AppSettings.findOne({ where: { key: 'tax_settings' } });
+        effectiveTaxRate = taxSetting?.value?.defaultTaxRate || 9.75;
+      } catch (e) { effectiveTaxRate = 9.75; }
     }
 
     const orderNumber = generateOrderNumber();
@@ -487,6 +502,7 @@ router.post('/', async (req, res, next) => {
         requestedDueDate: requestedDueDate || null,
         promisedDate: promisedDate || null,
         status,
+        taxRate: effectiveTaxRate,
         allMaterialReceived: true
       }, { transaction });
 

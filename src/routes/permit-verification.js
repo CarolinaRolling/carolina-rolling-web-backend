@@ -54,7 +54,8 @@ router.post('/verify-permit', async (req, res, next) => {
             permitStatus: result.status,
             permitLastVerified: new Date(),
             permitRawResponse: result.rawResponse,
-            permitOwnerName: result.ownerName || null
+            permitOwnerName: result.ownerName || null,
+                permitDbaName: result.dbaName || null
           });
           console.log(`[Permit] Updated client ${clientId} status: ${result.status}`);
         }
@@ -130,7 +131,8 @@ router.post('/verify-permits/batch', async (req, res, next) => {
                 permitStatus: result.status,
                 permitLastVerified: new Date(),
                 permitRawResponse: result.rawResponse,
-                permitOwnerName: result.ownerName || null
+                permitOwnerName: result.ownerName || null,
+                permitDbaName: result.dbaName || null
               });
             }
           } catch (dbErr) {

@@ -135,15 +135,15 @@ async function scrapeResultDetails(page) {
 
     console.log('[CDTFA] Label-value map:', JSON.stringify(labelMap));
 
-    // Extract owner name: prefer "Owner Name" field, fallback to "DBA Name"
-    let ownerName = labelMap['Owner Name'] || labelMap['DBA Name'] || '';
+    // Extract owner name and DBA name separately
+    let ownerName = labelMap['Owner Name'] || '';
+    let dbaName = labelMap['DBA Name'] || '';
 
     // Fallback: parse pageText for label→value on next line
     if (!ownerName && allText.pageText) {
       const lines = allText.pageText.split('\n').map(l => l.trim()).filter(Boolean);
       for (let i = 0; i < lines.length; i++) {
         if (lines[i] === 'Owner Name') {
-          // Scan forward for a real value (skip blanks, other labels)
           const skipLabels = ['DBA Name', 'City', 'Zip Code', 'Address', 'Suspension Begin', 'Suspension End', 'End Date', 'Start Date'];
           for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
             const candidate = lines[j].trim();
@@ -157,10 +157,27 @@ async function scrapeResultDetails(page) {
       }
     }
 
-    return { ownerName, rawFields: allText, labelMap };
+    if (!dbaName && allText.pageText) {
+      const lines = allText.pageText.split('\n').map(l => l.trim()).filter(Boolean);
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i] === 'DBA Name') {
+          const skipLabels = ['Owner Name', 'City', 'Zip Code', 'Address', 'Suspension Begin', 'Suspension End', 'End Date', 'Start Date'];
+          for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+            const candidate = lines[j].trim();
+            if (candidate && candidate.length > 2 && !skipLabels.includes(candidate) && !/^[\t\s]*$/.test(candidate)) {
+              dbaName = candidate;
+              break;
+            }
+          }
+          break;
+        }
+      }
+    }
+
+    return { ownerName, dbaName, rawFields: allText, labelMap };
   } catch (err) {
     console.error('[CDTFA] Failed to scrape result details:', err.message);
-    return { ownerName: '', rawFields: {}, labelMap: {} };
+    return { ownerName: '', dbaName: '', rawFields: {}, labelMap: {} };
   }
 }
 
@@ -170,7 +187,7 @@ async function verifySinglePermit(permitNumber, options = {}) {
 
   let chromePath;
   try { chromePath = findChromePath(); } catch (e) {
-    return { permitNumber, status: 'error', rawResponse: e.message, ownerName: '', verifiedDate: new Date().toISOString(), error: e.message };
+    return { permitNumber, status: 'error', rawResponse: e.message, ownerName: '', dbaName: '', verifiedDate: new Date().toISOString(), error: e.message };
   }
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -210,6 +227,7 @@ async function verifySinglePermit(permitNumber, options = {}) {
       return {
         permitNumber, status, rawResponse,
         ownerName: details.ownerName || '',
+        dbaName: details.dbaName || '',
         rawFields: details.rawFields || {},
         labelMap: details.labelMap || {},
         verifiedDate: new Date().toISOString(), error: null
@@ -224,7 +242,7 @@ async function verifySinglePermit(permitNumber, options = {}) {
 
   return {
     permitNumber, status: 'error', rawResponse: lastError ? lastError.message : 'Unknown error',
-    ownerName: '', verifiedDate: new Date().toISOString(), error: lastError ? lastError.message : 'Verification failed after retries'
+    ownerName: '', dbaName: '', verifiedDate: new Date().toISOString(), error: lastError ? lastError.message : 'Verification failed after retries'
   };
 }
 

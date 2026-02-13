@@ -1708,6 +1708,10 @@ const Client = sequelize.define('Client', {
   permitOwnerName: {
     type: DataTypes.STRING,
     allowNull: true
+  },
+  permitDbaName: {
+    type: DataTypes.STRING,
+    allowNull: true
   }
 }, {
   tableName: 'clients',

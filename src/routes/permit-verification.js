@@ -1,10 +1,20 @@
 const express = require('express');
 const router = express.Router();
 const { Client } = require('../models');
-const { verifySinglePermit, verifyBatch } = require('../services/permitVerification');
+const { verifySinglePermit, verifyBatch, debugChromeInfo } = require('../services/permitVerification');
 
 // In-memory batch job tracking
 let batchJob = null;
+
+// GET /api/verify-permits/debug — Show Chrome detection info
+router.get('/verify-permits/debug', async (req, res) => {
+  try {
+    const info = debugChromeInfo();
+    res.json({ data: info });
+  } catch (err) {
+    res.json({ data: { error: err.message } });
+  }
+});
 
 // POST /api/verify-permit — Verify a single permit number
 router.post('/verify-permit', async (req, res, next) => {
@@ -16,9 +26,19 @@ router.post('/verify-permit', async (req, res, next) => {
     }
 
     // Clean up the permit number (ensure dash format)
-    const cleanPermit = permitNumber.replace(/[^0-9-]/g, '').trim();
+    let cleanPermit = permitNumber.replace(/[^0-9-]/g, '').trim();
     if (!cleanPermit) {
       return res.status(400).json({ error: { message: 'Invalid permit number format' } });
+    }
+
+    // Auto-insert dash if user entered 9 straight digits
+    if (/^\d{9}$/.test(cleanPermit)) {
+      cleanPermit = cleanPermit.slice(0, 3) + '-' + cleanPermit.slice(3);
+    }
+
+    // Validate format: 999-999999
+    if (!/^\d{3}-\d{6}$/.test(cleanPermit)) {
+      return res.status(400).json({ error: { message: 'Permit number must be 9 digits in format: 123-456789' } });
     }
 
     console.log(`[Permit] Single verification requested: ${cleanPermit} (client: ${clientId || 'none'})`);

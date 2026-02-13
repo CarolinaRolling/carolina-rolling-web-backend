@@ -64,7 +64,7 @@ router.post('/verify-permit', async (req, res, next) => {
     }
 
     res.json({
-      data: { ...result, rawFields: result.rawFields || {} },
+      data: { ...result, rawFields: result.rawFields || {}, labelMap: result.labelMap || {} },
       message: `Permit verification complete: ${result.status}`
     });
   } catch (error) {

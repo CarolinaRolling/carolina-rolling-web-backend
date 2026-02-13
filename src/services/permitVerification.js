@@ -32,9 +32,7 @@ function findChromePath() {
     '/usr/bin/chromium',
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
   ];
-  for (const p of candidates) {
-    if (fs.existsSync(p)) return p;
-  }
+  for (const p of candidates) { if (fs.existsSync(p)) return p; }
   try {
     const found = execSync('find /app -name "chrome" -type f 2>/dev/null | head -5').toString().trim();
     if (found) return found.split('\n')[0];
@@ -43,106 +41,126 @@ function findChromePath() {
 }
 
 /**
- * Extract owner name from the CDTFA result page.
- * Scrapes all text content from the result area and parses out the business/owner name.
+ * Scrape result details from the CDTFA page after a permit lookup.
+ * The page uses span#caption2_f-N for LABELS (e.g. "Owner Name")
+ * and separate elements for the actual VALUES.
  */
 async function scrapeResultDetails(page) {
   try {
-    // The CDTFA result page renders results in a container after submission.
-    // Try to grab all visible text from span/div elements near the result area.
-    // Common CDTFA result fields follow patterns like caption2_f-N or text in the result container.
     const allText = await page.evaluate(() => {
       const results = {};
-      
-      // Grab all spans that look like result fields (caption2_f-N pattern)
+
+      // 1. Grab label fields (span#caption2_f-N)
       for (let i = 1; i <= 20; i++) {
         const el = document.querySelector(`span#caption2_f-${i}`);
         if (el && el.textContent.trim()) {
-          results[`field_${i}`] = el.textContent.trim();
+          results[`label_${i}`] = el.textContent.trim();
         }
       }
-      
-      // Also try other common patterns
-      const patterns = ['span[id*="caption"]', 'span[id*="f-"]', 'div[id*="result"]', 'td', 'label'];
-      const seen = new Set();
-      for (const sel of patterns) {
-        document.querySelectorAll(sel).forEach(el => {
-          const text = el.textContent.trim();
-          if (text && text.length > 2 && text.length < 200 && !seen.has(text)) {
-            seen.add(text);
+
+      // 2. Try to get VALUE fields via multiple ID patterns
+      for (let i = 1; i <= 20; i++) {
+        // span#f-N (most common for read-only result values)
+        let valEl = document.querySelector(`span#f-${i}`);
+        if (valEl && valEl.textContent.trim()) { results[`value_${i}`] = valEl.textContent.trim(); continue; }
+        // input#f-N
+        valEl = document.querySelector(`input#f-${i}`);
+        if (valEl && (valEl.value || '').trim()) { results[`value_${i}`] = valEl.value.trim(); continue; }
+        // div#f-N
+        valEl = document.querySelector(`div#f-${i}`);
+        if (valEl && valEl.textContent.trim()) { results[`value_${i}`] = valEl.textContent.trim(); continue; }
+      }
+
+      // 3. d-N pattern (form inputs)
+      for (let i = 1; i <= 20; i++) {
+        let valEl = document.querySelector(`span#d-${i}`);
+        if (valEl && valEl.textContent.trim()) { results[`d_span_${i}`] = valEl.textContent.trim(); }
+        valEl = document.querySelector(`input#d-${i}`);
+        if (valEl && (valEl.value || '').trim()) { results[`d_input_${i}`] = valEl.value.trim(); }
+      }
+
+      // 4. Look at parent containers of each label for adjacent value elements
+      for (let i = 2; i <= 15; i++) {
+        const labelEl = document.querySelector(`span#caption2_f-${i}`);
+        if (!labelEl) continue;
+        const parent = labelEl.closest('div') || labelEl.parentElement;
+        if (!parent) continue;
+
+        // Check siblings/children that are NOT the label
+        const children = parent.querySelectorAll('span, input, div, td');
+        for (const child of children) {
+          if (child.id && child.id.startsWith('caption2_')) continue;
+          const txt = (child.value || child.textContent || '').trim();
+          if (txt && txt !== labelEl.textContent.trim() && txt.length > 1 && txt.length < 150) {
+            results[`pair_${i}`] = txt;
+            break;
           }
-        });
-      }
-      results.allText = Array.from(seen).join(' | ');
-      
-      // Try to get all text from the main content area
-      const mainContent = document.querySelector('#CONTROL_CONTAINER__0') || document.body;
-      results.pageText = mainContent ? mainContent.innerText.substring(0, 3000) : '';
-      
-      return results;
-    });
+        }
 
-    // Parse owner name from the scraped content
-    let ownerName = '';
-    
-    // Look through numbered fields for a name-like value
-    // Typically: field_2 = status, field_3 or field_4 = owner/business name
-    for (let i = 3; i <= 10; i++) {
-      const val = allText[`field_${i}`];
-      if (val && val.length > 2 && !val.toLowerCase().includes('seller') && !val.toLowerCase().includes('valid') && 
-          !val.toLowerCase().includes('permit') && !val.toLowerCase().includes('closed') &&
-          !val.toLowerCase().includes('search') && !val.toLowerCase().includes('verify') &&
-          !val.toLowerCase().includes('account') && !val.toLowerCase().includes('identification') &&
-          !/^\d+[-\d]*$/.test(val)) {
-        ownerName = val;
-        break;
-      }
-    }
-
-    // If we didn't find it in numbered fields, search page text for name patterns
-    if (!ownerName && allText.pageText) {
-      const lines = allText.pageText.split('\n').map(l => l.trim()).filter(Boolean);
-      for (const line of lines) {
-        // Look for lines that follow "Owner" or "Name" or "Business" labels
-        if (/^(owner|business\s*name|DBA|registered\s*owner)/i.test(line)) {
-          // Next meaningful line might be the name
-          const idx = lines.indexOf(line);
-          if (idx >= 0 && idx + 1 < lines.length) {
-            const nextLine = lines[idx + 1].trim();
-            if (nextLine.length > 2 && nextLine.length < 100) {
-              ownerName = nextLine;
-              break;
+        // Check grandparent for table-row style layouts (label cell → value cell)
+        const grandparent = parent.parentElement;
+        if (grandparent) {
+          const nextSib = parent.nextElementSibling;
+          if (nextSib) {
+            const sibText = (nextSib.value || nextSib.textContent || '').trim();
+            if (sibText && sibText.length > 1 && sibText.length < 150) {
+              results[`sibling_${i}`] = sibText;
             }
           }
         }
       }
+
+      // 5. Page text for fallback parsing
+      const resultContainer = document.querySelector('#CONTROL_CONTAINER__0') || document.body;
+      results.pageText = resultContainer ? resultContainer.innerText.substring(0, 4000) : '';
+
+      return results;
+    });
+
+    console.log('[CDTFA] Raw scraped fields:', JSON.stringify(allText).substring(0, 2000));
+
+    // Build label→value map
+    const labelMap = {};
+    for (const [key, val] of Object.entries(allText)) {
+      if (key.startsWith('label_')) {
+        const idx = key.replace('label_', '');
+        // Try value_N, pair_N, sibling_N in order
+        const value = allText[`value_${idx}`] || allText[`pair_${idx}`] || allText[`sibling_${idx}`] || '';
+        // Only map if value is different from the label itself
+        if (value && value !== val && !value.includes('Toggle Date') && !value.includes('Search')) {
+          labelMap[val] = value;
+        }
+      }
     }
-    
-    // If still no luck, look for lines that look like business names in page text
+
+    console.log('[CDTFA] Label-value map:', JSON.stringify(labelMap));
+
+    // Extract owner name: prefer "Owner Name" field, fallback to "DBA Name"
+    let ownerName = labelMap['Owner Name'] || labelMap['DBA Name'] || '';
+
+    // Fallback: parse pageText for label→value on next line
     if (!ownerName && allText.pageText) {
       const lines = allText.pageText.split('\n').map(l => l.trim()).filter(Boolean);
-      // Find the status line, then the next non-trivial line after it is usually the business name
       for (let i = 0; i < lines.length; i++) {
-        if (lines[i].toLowerCase().includes('valid') || lines[i].toLowerCase().includes('closed') || lines[i].toLowerCase().includes('not found')) {
+        if (lines[i] === 'Owner Name') {
+          // Scan forward for a real value (skip blanks, other labels)
+          const skipLabels = ['DBA Name', 'City', 'Zip Code', 'Address', 'Suspension Begin', 'Suspension End', 'End Date', 'Start Date'];
           for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
             const candidate = lines[j].trim();
-            if (candidate.length > 3 && candidate.length < 100 && 
-                !/^\d+$/.test(candidate) && !candidate.toLowerCase().includes('search') &&
-                !candidate.toLowerCase().includes('verify') && !candidate.toLowerCase().includes('note:')) {
+            if (candidate && candidate.length > 2 && !skipLabels.includes(candidate) && !/^[\t\s]*$/.test(candidate)) {
               ownerName = candidate;
               break;
             }
           }
-          if (ownerName) break;
+          break;
         }
       }
     }
 
-    console.log('[CDTFA] Scraped result details:', JSON.stringify({ ownerName, fieldCount: Object.keys(allText).length }));
-    return { ownerName, rawFields: allText };
+    return { ownerName, rawFields: allText, labelMap };
   } catch (err) {
     console.error('[CDTFA] Failed to scrape result details:', err.message);
-    return { ownerName: '', rawFields: {} };
+    return { ownerName: '', rawFields: {}, labelMap: {} };
   }
 }
 
@@ -151,20 +169,17 @@ async function verifySinglePermit(permitNumber, options = {}) {
   let lastError = null;
 
   let chromePath;
-  try {
-    chromePath = findChromePath();
-  } catch (e) {
+  try { chromePath = findChromePath(); } catch (e) {
     return { permitNumber, status: 'error', rawResponse: e.message, ownerName: '', verifiedDate: new Date().toISOString(), error: e.message };
   }
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     let browser = null;
     try {
-      console.log(`[CDTFA] Verifying permit ${permitNumber} (attempt ${attempt + 1}/${maxRetries + 1}) using ${chromePath}`);
+      console.log(`[CDTFA] Verifying permit ${permitNumber} (attempt ${attempt + 1}/${maxRetries + 1})`);
 
       browser = await puppeteer.launch({
-        executablePath: chromePath,
-        headless: 'new',
+        executablePath: chromePath, headless: 'new',
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--disable-extensions', '--single-process']
       });
 
@@ -187,21 +202,17 @@ async function verifySinglePermit(permitNumber, options = {}) {
 
       const rawResponse = await page.$eval(SELECTORS.resultStatus, el => el.textContent.trim());
       const status = parsePermitStatus(rawResponse);
-
-      // Scrape owner name and other details
       const details = await scrapeResultDetails(page);
 
       console.log(`[CDTFA] Permit ${permitNumber}: ${status} — "${rawResponse}" — Owner: "${details.ownerName}"`);
       await browser.close();
 
       return {
-        permitNumber,
-        status,
-        rawResponse,
+        permitNumber, status, rawResponse,
         ownerName: details.ownerName || '',
         rawFields: details.rawFields || {},
-        verifiedDate: new Date().toISOString(),
-        error: null
+        labelMap: details.labelMap || {},
+        verifiedDate: new Date().toISOString(), error: null
       };
     } catch (err) {
       lastError = err;

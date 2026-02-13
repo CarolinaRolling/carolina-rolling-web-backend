@@ -1623,9 +1623,11 @@ router.get('/archived', async (req, res, next) => {
   }
 });
 
-// POST /api/workorders/:id/duplicate-to-estimate - Create estimate from archived work order
+// POST /api/workorders/:id/duplicate-to-estimate - Create estimate from work order (for repeat orders)
 router.post('/:id/duplicate-to-estimate', async (req, res, next) => {
   try {
+    const { Estimate, EstimatePart } = require('../models');
+
     const workOrder = await WorkOrder.findByPk(req.params.id, {
       include: [{ model: WorkOrderPart, as: 'parts' }]
     });
@@ -1634,45 +1636,89 @@ router.post('/:id/duplicate-to-estimate', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Work order not found' } });
     }
 
-    // Return data needed to create estimate (actual creation happens in estimate route)
-    const estimateData = {
+    // Generate estimate number
+    const now = new Date();
+    const year = now.getFullYear().toString().slice(-2);
+    const month = (now.getMonth() + 1).toString().padStart(2, '0');
+    const day = now.getDate().toString().padStart(2, '0');
+    const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+    const estimateNumber = `EST-${year}${month}${day}-${random}`;
+
+    // Create new estimate — copy client info, clear pricing
+    const newEstimate = await Estimate.create({
+      estimateNumber,
       clientName: workOrder.clientName,
       contactName: workOrder.contactName,
       contactEmail: workOrder.contactEmail,
       contactPhone: workOrder.contactPhone,
-      projectDescription: workOrder.notes,
-      parts: workOrder.parts.map(p => ({
-        partNumber: p.partNumber,
-        partType: p.partType,
-        clientPartNumber: p.clientPartNumber,
-        quantity: p.quantity,
-        material: p.material,
-        thickness: p.thickness,
-        width: p.width,
-        length: p.length,
-        outerDiameter: p.outerDiameter,
-        wallThickness: p.wallThickness,
-        sectionSize: p.sectionSize,
-        rollType: p.rollType,
-        radius: p.radius,
-        diameter: p.diameter,
-        arcDegrees: p.arcDegrees,
-        flangeOut: p.flangeOut,
-        specialInstructions: p.specialInstructions,
-        materialSource: p.materialSource,
-        materialDescription: p.materialDescription,
-        supplierName: p.supplierName
-      })),
-      sourceWorkOrder: {
-        id: workOrder.id,
-        orderNumber: workOrder.orderNumber,
-        drNumber: workOrder.drNumber
-      }
-    };
+      clientPurchaseOrderNumber: '',
+      projectDescription: workOrder.notes || '',
+      internalNotes: `Reorder from ${workOrder.drNumber ? `DR-${workOrder.drNumber}` : workOrder.orderNumber}`,
+      taxRate: workOrder.taxRate,
+      taxExempt: workOrder.taxExempt,
+      status: 'draft'
+    });
 
-    res.json({
-      data: estimateData,
-      message: `Ready to create estimate from ${workOrder.drNumber ? `DR-${workOrder.drNumber}` : workOrder.orderNumber}`
+    // Copy parts — keep specs & labor, clear material pricing
+    for (const origPart of (workOrder.parts || [])) {
+      const partJson = origPart.toJSON();
+      
+      // Copy formData but clear material cost fields within it
+      let formData = partJson.formData || {};
+      if (typeof formData === 'string') {
+        try { formData = JSON.parse(formData); } catch(e) { formData = {}; }
+      }
+      // Clear material pricing in formData
+      if (formData.materialTotal) formData.materialTotal = '';
+      if (formData.materialUnitCost) formData.materialUnitCost = '';
+
+      await EstimatePart.create({
+        estimateId: newEstimate.id,
+        partNumber: partJson.partNumber,
+        partType: partJson.partType,
+        clientPartNumber: partJson.clientPartNumber,
+        quantity: partJson.quantity,
+        // Specs — keep these
+        material: partJson.material,
+        thickness: partJson.thickness,
+        width: partJson.width,
+        length: partJson.length,
+        outerDiameter: partJson.outerDiameter,
+        wallThickness: partJson.wallThickness,
+        sectionSize: partJson.sectionSize,
+        rollType: partJson.rollType,
+        radius: partJson.radius,
+        diameter: partJson.diameter,
+        arcDegrees: partJson.arcDegrees,
+        flangeOut: partJson.flangeOut,
+        specialInstructions: partJson.specialInstructions,
+        materialDescription: partJson.materialDescription,
+        materialSource: partJson.materialSource,
+        supplierName: partJson.supplierName,
+        // Labor — keep
+        laborTotal: partJson.laborTotal,
+        rollingCost: partJson.rollingCost,
+        // Material pricing — CLEAR for requoting
+        materialUnitCost: 0,
+        materialTotal: 0,
+        materialMarkupPercent: partJson.materialMarkupPercent || 0,
+        otherServicesCost: partJson.otherServicesCost || 0,
+        otherServicesMarkupPercent: partJson.otherServicesMarkupPercent || 0,
+        // Part total = labor only (material cleared)
+        partTotal: partJson.laborTotal || 0,
+        // formData — keep all part-specific settings (roll specs, etc.)
+        formData
+      });
+    }
+
+    // Reload with parts
+    const createdEstimate = await Estimate.findByPk(newEstimate.id, {
+      include: [{ model: EstimatePart, as: 'parts' }]
+    });
+
+    res.status(201).json({
+      data: createdEstimate,
+      message: `Estimate ${estimateNumber} created from ${workOrder.drNumber ? `DR-${workOrder.drNumber}` : workOrder.orderNumber} — material pricing cleared for requoting`
     });
   } catch (error) {
     next(error);

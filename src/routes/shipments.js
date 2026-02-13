@@ -235,6 +235,7 @@ router.get('/workorder/:workOrderId', async (req, res, next) => {
 // GET /api/shipments/:id - Get shipment by ID (must be AFTER specific routes)
 router.get('/:id', async (req, res, next) => {
   try {
+    const { WorkOrder } = require('../models');
     const shipment = await Shipment.findByPk(req.params.id, {
       include: [
         { model: ShipmentPhoto, as: 'photos' },
@@ -246,7 +247,22 @@ router.get('/:id', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Shipment not found' } });
     }
 
-    res.json({ data: transformShipment(shipment) });
+    const data = transformShipment(shipment);
+    
+    // Attach work order info if linked
+    if (data.workOrderId) {
+      try {
+        const wo = await WorkOrder.findByPk(data.workOrderId, { attributes: ['id', 'orderNumber', 'drNumber', 'clientName', 'status'] });
+        if (wo) {
+          data.workOrderNumber = wo.orderNumber;
+          data.workOrderDR = wo.drNumber;
+          data.workOrderClientName = wo.clientName;
+          data.workOrderStatus = wo.status;
+        }
+      } catch (e) { console.error('Failed to fetch linked WO:', e.message); }
+    }
+
+    res.json({ data });
   } catch (error) {
     next(error);
   }
@@ -681,7 +697,7 @@ router.put('/:id', async (req, res, next) => {
 
     const allowedFields = [
       'clientName', 'jobNumber', 'clientPurchaseOrderNumber', 'description', 'partNumbers', 'quantity',
-      'status', 'location', 'notes', 'receivedBy', 'requestedDueDate', 'promisedDate', 'pickedUpBy'
+      'status', 'location', 'notes', 'receivedBy', 'requestedDueDate', 'promisedDate', 'pickedUpBy', 'workOrderId'
     ];
 
     const updates = {};

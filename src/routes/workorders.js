@@ -1860,34 +1860,20 @@ router.get('/:id/documents/:documentId/download', async (req, res, next) => {
       const pubId = document.cloudinaryId;
       const hasPdfExt = pubId.toLowerCase().endsWith('.pdf');
       
-      // Direct public raw URLs — handle both with/without .pdf extension in pubId
       if (hasPdfExt) {
-        // pubId already has .pdf — use as-is, and also try without .pdf
         urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}`);
         urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId.replace(/\.pdf$/i, '')}`);
       } else {
-        // pubId doesn't have .pdf — try with and without
         urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}.pdf`);
         urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}`);
       }
       
-      // Try signed URL for private files
-      try {
-        urlsToTry.push(cloudinary.url(pubId, { resource_type: 'raw', type: 'private', sign_url: true, secure: true }));
-      } catch (e) {}
-      // Also try without .pdf extension for signed
+      try { urlsToTry.push(cloudinary.url(pubId, { resource_type: 'raw', type: 'private', sign_url: true, secure: true })); } catch (e) {}
       if (hasPdfExt) {
-        try {
-          urlsToTry.push(cloudinary.url(pubId.replace(/\.pdf$/i, ''), { resource_type: 'raw', type: 'private', sign_url: true, secure: true }));
-        } catch (e) {}
+        try { urlsToTry.push(cloudinary.url(pubId.replace(/\.pdf$/i, ''), { resource_type: 'raw', type: 'private', sign_url: true, secure: true })); } catch (e) {}
       }
+      try { urlsToTry.push(cloudinary.url(pubId, { resource_type: 'raw', sign_url: true, secure: true })); } catch (e) {}
       
-      // Try signed public URL
-      try {
-        urlsToTry.push(cloudinary.url(pubId, { resource_type: 'raw', sign_url: true, secure: true }));
-      } catch (e) {}
-      
-      // Try with version from stored URL
       const versionMatch = document.url?.match(/\/v(\d+)\//);
       const version = versionMatch ? `/v${versionMatch[1]}` : '';
       if (version) {
@@ -1901,14 +1887,14 @@ router.get('/:id/documents/:documentId/download', async (req, res, next) => {
       }
     }
     
-    // Deduplicate
     const uniqueUrls = [...new Set(urlsToTry)];
     
-    console.log(`[doc-proxy] Trying ${uniqueUrls.length} URLs for document ${document.id} (${document.originalName})`);
+    console.log(`[doc-proxy] Trying ${uniqueUrls.length} URLs for document ${document.id} (${document.originalName}), stored url: ${document.url || 'NULL'}`);
 
     // Try each URL - stream the first one that works
     for (let i = 0; i < uniqueUrls.length; i++) {
       const url = uniqueUrls[i];
+      console.log(`[doc-proxy] Attempt ${i + 1}: ${url.substring(0, 120)}...`);
       const upstream = await fetchWithRedirects(url);
       if (upstream) {
         console.log(`[doc-proxy] SUCCESS on attempt ${i + 1} for document ${document.id}`);
@@ -1921,10 +1907,61 @@ router.get('/:id/documents/:documentId/download', async (req, res, next) => {
       }
     }
 
-    console.error(`[doc-proxy] ALL URLs failed for document ${document.id}`);
+    // FALLBACK: If this is a purchase order, regenerate the PDF on the fly
+    if (document.documentType === 'purchase_order') {
+      console.log(`[doc-proxy] All URLs failed — regenerating PO PDF on the fly for document ${document.id}`);
+      try {
+        const workOrder = await WorkOrder.findByPk(req.params.id, {
+          include: [{ model: WorkOrderPart, as: 'parts' }]
+        });
+        if (workOrder) {
+          const poMatch = document.originalName?.match(/^(PO\d+)/);
+          const poNumber = poMatch ? poMatch[1] : 'PO0000';
+          const supplierMatch = document.originalName?.match(/^PO\d+\s*-\s*(.+?)\.pdf$/i);
+          let supplier = supplierMatch ? supplierMatch[1].trim() : 'Unknown Supplier';
+          
+          // Try to find actual vendor name from parts
+          const poParts = workOrder.parts.filter(p => p.materialPurchaseOrderNumber === poNumber);
+          if (poParts.length > 0 && poParts[0].vendorId) {
+            const vendor = await Vendor.findByPk(poParts[0].vendorId);
+            if (vendor) supplier = vendor.name;
+          }
+          const partsForPdf = poParts.length > 0 ? poParts : workOrder.parts;
+
+          const pdfBuffer = await generatePurchaseOrderPDF(poNumber, supplier, partsForPdf, workOrder);
+          
+          console.log(`[doc-proxy] Regenerated ${poNumber} on the fly (${pdfBuffer.length} bytes)`);
+          res.setHeader('Content-Type', 'application/pdf');
+          res.setHeader('Content-Length', pdfBuffer.length);
+          res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(document.originalName || 'PO.pdf')}"`);
+          res.send(pdfBuffer);
+          
+          // Re-upload to Cloudinary in the background so next time it works from cache
+          setImmediate(async () => {
+            try {
+              const uploadResult = await new Promise((resolve, reject) => {
+                cloudinary.uploader.upload_stream(
+                  { folder: 'purchase-orders', resource_type: 'raw', public_id: `${poNumber}-${workOrder.drNumber}`, format: 'pdf', overwrite: true },
+                  (error, result) => { if (error) reject(error); else resolve(result); }
+                ).end(pdfBuffer);
+              });
+              await document.update({ url: uploadResult.secure_url, cloudinaryId: uploadResult.public_id, size: pdfBuffer.length });
+              console.log(`[doc-proxy] Background re-upload success: ${uploadResult.secure_url}`);
+            } catch (uploadErr) {
+              console.error(`[doc-proxy] Background re-upload failed:`, uploadErr.message);
+            }
+          });
+          return;
+        }
+      } catch (regenErr) {
+        console.error(`[doc-proxy] Fallback regeneration failed:`, regenErr.message);
+      }
+    }
+
+    console.error(`[doc-proxy] ALL URLs failed for document ${document.id}, no fallback available`);
     res.status(502).json({ 
-      error: { message: 'Unable to retrieve document from storage. The file may need to be re-generated.' },
-      debug: { urlsTried: uniqueUrls.length, cloudinaryId: document.cloudinaryId }
+      error: { message: 'Unable to retrieve document from storage.' },
+      debug: { urlsTried: uniqueUrls.length, cloudinaryId: document.cloudinaryId, storedUrl: document.url ? 'present' : 'NULL' }
     });
   } catch (error) {
     next(error);
@@ -2105,7 +2142,9 @@ router.get('/:id/print-package', async (req, res, next) => {
         pdfSources.push({
           label: `PO: ${doc.originalName}`,
           cloudinaryId: doc.cloudinaryId,
-          url: doc.url
+          url: doc.url,
+          isPurchaseOrder: true,
+          docName: doc.originalName
         });
       }
     }
@@ -2186,7 +2225,32 @@ router.get('/:id/print-package', async (req, res, next) => {
             }
           } catch (e) {}
         }
-        console.error(`[print-package] Failed to fetch: ${source.label}`);
+        console.error(`[print-package] Failed to fetch from Cloudinary: ${source.label}`);
+        
+        // Fallback: if this is a PO, regenerate it on the fly
+        if (source.isPurchaseOrder && source.docName) {
+          try {
+            const poMatch = source.docName.match(/^(PO\d+)/);
+            const poNumber = poMatch ? poMatch[1] : 'PO0000';
+            const supplierMatch = source.docName.match(/^PO\d+\s*-\s*(.+?)\.pdf$/i);
+            let supplier = supplierMatch ? supplierMatch[1].trim() : 'Unknown Supplier';
+            
+            const poParts = workOrder.parts.filter(p => p.materialPurchaseOrderNumber === poNumber);
+            if (poParts.length > 0 && poParts[0].vendorId) {
+              const vendor = await Vendor.findByPk(poParts[0].vendorId);
+              if (vendor) supplier = vendor.name;
+            }
+            const partsForPdf = poParts.length > 0 ? poParts : workOrder.parts;
+            
+            const buf = await generatePurchaseOrderPDF(poNumber, supplier, partsForPdf, workOrder);
+            console.log(`[print-package] Regenerated ${poNumber} on the fly (${buf.length} bytes)`);
+            resolve(buf);
+            return;
+          } catch (regenErr) {
+            console.error(`[print-package] PO regeneration failed: ${regenErr.message}`);
+          }
+        }
+        
         resolve(null);
       });
     };

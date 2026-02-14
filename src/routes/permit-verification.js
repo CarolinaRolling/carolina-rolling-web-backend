@@ -278,8 +278,8 @@ router.get('/verify-permits/report-pdf', async (req, res, next) => {
 
     // ── TABLE ──
     const startX = 50;
-    const colWidths = { name: 150, permit: 90, status: 60, verified: 80, owner: 100, warnings: 120 };
-    const totalW = Object.values(colWidths).reduce((a, b) => a + b, 0);
+    const colWidths = { name: 120, permit: 78, status: 56, verified: 72, owner: 96, warnings: 90 };
+    const totalW = Object.values(colWidths).reduce((a, b) => a + b, 0); // = 512
     const rowH = 20;
     const headerH = 22;
 

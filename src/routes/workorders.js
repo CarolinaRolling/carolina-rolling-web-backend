@@ -421,6 +421,12 @@ router.get('/:id', async (req, res, next) => {
         }
       }
     }
+    // Rewrite document URLs to use download proxy
+    if (woJson.documents) {
+      for (const doc of woJson.documents) {
+        doc.url = `${baseUrl}/api/workorders/${woJson.id}/documents/${doc.id}/download`;
+      }
+    }
 
     res.json({ data: woJson });
   } catch (error) {
@@ -1819,20 +1825,101 @@ router.get('/:id/documents/:documentId/signed-url', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Document not found' } });
     }
 
-    // For Cloudinary raw files (PDFs), just return the direct URL
-    // Cloudinary signed URLs work differently for raw vs image resources
-    if (document.url) {
-      res.json({ data: { url: document.url } });
-    } else if (document.cloudinaryId) {
-      // Try to generate a download URL for raw files
-      const downloadUrl = cloudinary.url(document.cloudinaryId, {
-        resource_type: 'raw',
-        flags: 'attachment'
-      });
-      res.json({ data: { url: downloadUrl } });
-    } else {
-      res.status(404).json({ error: { message: 'Document URL not available' } });
+    // Return the download proxy URL (same pattern as part files)
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const url = `${baseUrl}/api/workorders/${req.params.id}/documents/${req.params.documentId}/download`;
+    
+    res.json({ data: { url, originalName: document.originalName || document.filename } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/workorders/:id/documents/:documentId/download - Stream document from Cloudinary
+router.get('/:id/documents/:documentId/download', async (req, res, next) => {
+  try {
+    const document = await WorkOrderDocument.findOne({
+      where: { 
+        id: req.params.documentId,
+        workOrderId: req.params.id
+      }
+    });
+
+    if (!document) {
+      return res.status(404).json({ error: { message: 'Document not found' } });
     }
+
+    // Build list of candidate URLs to try
+    const urlsToTry = [];
+    const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+    
+    if (document.cloudinaryId && cloudName) {
+      const pubId = document.cloudinaryId;
+      
+      // PO PDFs are uploaded as raw (public) — try direct URL first
+      urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}.pdf`);
+      urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}`);
+      
+      // Try signed URL for private files
+      try {
+        const signedUrl = cloudinary.url(pubId, {
+          resource_type: 'raw',
+          type: 'private',
+          sign_url: true,
+          secure: true
+        });
+        urlsToTry.push(signedUrl);
+      } catch (e) {
+        // Not a private file, that's fine
+      }
+      
+      // Try signed public URL
+      try {
+        const signedUrl = cloudinary.url(pubId, {
+          resource_type: 'raw',
+          sign_url: true,
+          secure: true
+        });
+        urlsToTry.push(signedUrl);
+      } catch (e) {}
+      
+      // Try with version from stored URL
+      const versionMatch = document.url?.match(/\/v(\d+)\//);
+      const version = versionMatch ? `/v${versionMatch[1]}` : '';
+      if (version) {
+        urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload${version}/${pubId}.pdf`);
+        urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload${version}/${pubId}`);
+      }
+    }
+    
+    // Try stored URL as-is
+    if (document.url) urlsToTry.push(document.url);
+    
+    // Deduplicate
+    const uniqueUrls = [...new Set(urlsToTry)];
+    
+    console.log(`[doc-proxy] Trying ${uniqueUrls.length} URLs for document ${document.id} (${document.originalName})`);
+
+    // Try each URL - stream the first one that works
+    for (let i = 0; i < uniqueUrls.length; i++) {
+      const url = uniqueUrls[i];
+      const upstream = await fetchWithRedirects(url);
+      if (upstream) {
+        console.log(`[doc-proxy] SUCCESS on attempt ${i + 1} for document ${document.id}`);
+        const contentType = document.mimeType || upstream.headers['content-type'] || 'application/pdf';
+        res.setHeader('Content-Type', contentType);
+        if (upstream.headers['content-length']) res.setHeader('Content-Length', upstream.headers['content-length']);
+        res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(document.originalName || 'document.pdf')}"`);
+        upstream.pipe(res);
+        return;
+      }
+    }
+
+    console.error(`[doc-proxy] ALL URLs failed for document ${document.id}`);
+    res.status(502).json({ 
+      error: { message: 'Unable to retrieve document from storage. The file may need to be re-generated.' },
+      debug: { urlsTried: uniqueUrls.length, cloudinaryId: document.cloudinaryId }
+    });
   } catch (error) {
     next(error);
   }
@@ -1865,6 +1952,174 @@ router.delete('/:id/documents/:documentId', async (req, res, next) => {
 
     res.json({ message: 'Document deleted successfully' });
   } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/workorders/:id/print-package - Merge all relevant PDFs into one download
+// ?mode=production  → part PDFs only
+// ?mode=full        → part PDFs + order docs + purchase orders
+router.get('/:id/print-package', async (req, res, next) => {
+  try {
+    const { PDFDocument } = require('pdf-lib');
+    const mode = req.query.mode || 'production';
+
+    const workOrder = await WorkOrder.findByPk(req.params.id, {
+      include: [
+        { model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] },
+        { model: WorkOrderDocument, as: 'documents' }
+      ]
+    });
+
+    if (!workOrder) {
+      return res.status(404).json({ error: { message: 'Work order not found' } });
+    }
+
+    // Collect URLs to merge based on mode
+    const pdfSources = [];
+
+    // Part PDFs (both modes)
+    const sortedParts = (workOrder.parts || []).sort((a, b) => a.partNumber - b.partNumber);
+    for (const part of sortedParts) {
+      const pdfFiles = (part.files || []).filter(f => 
+        f.mimeType === 'application/pdf' || (f.originalName || '').toLowerCase().endsWith('.pdf')
+      );
+      for (const file of pdfFiles) {
+        pdfSources.push({ 
+          label: `Part ${part.partNumber}: ${file.originalName}`,
+          cloudinaryId: file.cloudinaryId,
+          url: file.url
+        });
+      }
+    }
+
+    // Full mode: add order documents and purchase orders
+    if (mode === 'full' && workOrder.documents) {
+      // Order documents (non-PO)
+      for (const doc of workOrder.documents.filter(d => d.documentType !== 'purchase_order')) {
+        if (doc.mimeType === 'application/pdf' || (doc.originalName || '').toLowerCase().endsWith('.pdf')) {
+          pdfSources.push({
+            label: `Doc: ${doc.originalName}`,
+            cloudinaryId: doc.cloudinaryId,
+            url: doc.url
+          });
+        }
+      }
+      // Purchase orders
+      for (const doc of workOrder.documents.filter(d => d.documentType === 'purchase_order')) {
+        pdfSources.push({
+          label: `PO: ${doc.originalName}`,
+          cloudinaryId: doc.cloudinaryId,
+          url: doc.url
+        });
+      }
+    }
+
+    if (pdfSources.length === 0) {
+      return res.status(404).json({ error: { message: 'No PDF files to merge' } });
+    }
+
+    console.log(`[print-package] Merging ${pdfSources.length} PDFs for WO ${workOrder.id} (mode: ${mode})`);
+
+    // Fetch all PDFs as buffers
+    const fetchPdfBuffer = (source) => {
+      return new Promise(async (resolve) => {
+        // Build candidate URLs (same logic as download proxy)
+        const urlsToTry = [];
+        const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+
+        if (source.cloudinaryId && cloudName) {
+          const pubId = source.cloudinaryId;
+          // Public raw URL
+          urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}.pdf`);
+          urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}`);
+          // Signed private
+          try {
+            urlsToTry.push(cloudinary.url(pubId, { resource_type: 'raw', type: 'private', sign_url: true, secure: true }));
+          } catch (e) {}
+          // Signed public
+          try {
+            urlsToTry.push(cloudinary.url(pubId, { resource_type: 'raw', sign_url: true, secure: true }));
+          } catch (e) {}
+          // With version
+          const vMatch = source.url?.match(/\/v(\d+)\//);
+          if (vMatch) {
+            urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/v${vMatch[1]}/${pubId}.pdf`);
+            urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/v${vMatch[1]}/${pubId}`);
+          }
+        }
+        if (source.url) urlsToTry.push(source.url);
+
+        const uniqueUrls = [...new Set(urlsToTry)];
+
+        for (const url of uniqueUrls) {
+          try {
+            const stream = await fetchWithRedirects(url);
+            if (stream) {
+              const chunks = [];
+              stream.on('data', c => chunks.push(c));
+              stream.on('end', () => {
+                const buf = Buffer.concat(chunks);
+                // Verify it's actually a PDF (starts with %PDF)
+                if (buf.length > 4 && buf.slice(0, 5).toString() === '%PDF-') {
+                  resolve(buf);
+                } else {
+                  resolve(null);
+                }
+              });
+              stream.on('error', () => resolve(null));
+              return;
+            }
+          } catch (e) {}
+        }
+        console.error(`[print-package] Failed to fetch: ${source.label}`);
+        resolve(null);
+      });
+    };
+
+    // Fetch all in parallel
+    const buffers = await Promise.all(pdfSources.map(s => fetchPdfBuffer(s)));
+
+    // Merge PDFs
+    const mergedPdf = await PDFDocument.create();
+    let mergedCount = 0;
+
+    for (let i = 0; i < buffers.length; i++) {
+      if (!buffers[i]) {
+        console.warn(`[print-package] Skipping ${pdfSources[i].label} — fetch failed`);
+        continue;
+      }
+      try {
+        const srcDoc = await PDFDocument.load(buffers[i], { ignoreEncryption: true });
+        const pages = await mergedPdf.copyPages(srcDoc, srcDoc.getPageIndices());
+        pages.forEach(page => mergedPdf.addPage(page));
+        mergedCount++;
+        console.log(`[print-package] Added ${pdfSources[i].label} (${srcDoc.getPageCount()} pages)`);
+      } catch (pdfErr) {
+        console.warn(`[print-package] Could not merge ${pdfSources[i].label}: ${pdfErr.message}`);
+      }
+    }
+
+    if (mergedCount === 0) {
+      return res.status(502).json({ error: { message: 'Could not retrieve any PDF files from storage' } });
+    }
+
+    const mergedBytes = await mergedPdf.save();
+    const drLabel = workOrder.drNumber ? `DR-${workOrder.drNumber}` : workOrder.orderNumber;
+    const filename = mode === 'full' 
+      ? `${drLabel}_Full_Package.pdf`
+      : `${drLabel}_Part_Prints.pdf`;
+
+    console.log(`[print-package] Merged ${mergedCount}/${pdfSources.length} PDFs → ${mergedBytes.length} bytes`);
+
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+      'Content-Length': mergedBytes.length
+    });
+    res.send(Buffer.from(mergedBytes));
+  } catch (error) {
+    console.error('[print-package] Error:', error);
     next(error);
   }
 });

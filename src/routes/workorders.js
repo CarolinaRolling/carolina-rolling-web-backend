@@ -7,25 +7,28 @@ const http = require('http');
 const { v4: uuidv4 } = require('uuid');
 const cloudinary = require('cloudinary').v2;
 const { Op } = require('sequelize');
+const { PDFDocument: PDFLibDocument } = require('pdf-lib');
 const { WorkOrder, WorkOrderPart, WorkOrderPartFile, WorkOrderDocument, DailyActivity, DRNumber, InboundOrder, PONumber, AppSettings, Estimate, Vendor, Client, Shipment, ShipmentPhoto, sequelize } = require('../models');
 
 const router = express.Router();
 
 // Fetch a URL following redirects (up to 5 hops), returns response stream or null
-function fetchWithRedirects(url, maxRedirects = 5) {
+function fetchWithRedirects(url, maxRedirects = 5, timeoutMs = 15000) {
   return new Promise((resolve) => {
     const lib = url.startsWith('https') ? https : http;
-    lib.get(url, (resp) => {
+    const req = lib.get(url, (resp) => {
       if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location && maxRedirects > 0) {
         resp.resume();
-        fetchWithRedirects(resp.headers.location, maxRedirects - 1).then(resolve);
+        fetchWithRedirects(resp.headers.location, maxRedirects - 1, timeoutMs).then(resolve);
       } else if (resp.statusCode === 200) {
         resolve(resp);
       } else {
         resp.resume();
         resolve(null);
       }
-    }).on('error', () => resolve(null));
+    });
+    req.on('error', () => resolve(null));
+    req.setTimeout(timeoutMs, () => { req.destroy(); resolve(null); });
   });
 }
 
@@ -75,102 +78,191 @@ async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
   
   return new Promise((resolve, reject) => {
     try {
-      const doc = new PDFDocument({ margin: 50 });
+      const doc = new PDFDocument({ margin: 50, size: 'letter' });
       const chunks = [];
+      const W = 512; // usable width (612 - 100 margins)
+      const L = 50;  // left margin
+      const R = L + W; // right edge
       
       doc.on('data', chunk => chunks.push(chunk));
       doc.on('end', () => resolve(Buffer.concat(chunks)));
       doc.on('error', reject);
       
-      // Header
-      doc.fontSize(24).font('Helvetica-Bold').text('PURCHASE ORDER', { align: 'center' });
-      doc.moveDown(0.5);
+      // ─── TOP BORDER ───
+      doc.rect(L, 40, W, 4).fill('#1565c0');
       
-      // PO Number
-      doc.fontSize(16).fillColor('#1976d2').text(poNumber, { align: 'center' });
-      doc.fillColor('black');
-      doc.moveDown(1);
+      // ─── HEADER: Company + PO Title ───
+      const headerY = 52;
       
-      // Company Info (left) and PO Info (right)
-      const startY = doc.y;
+      // Company name & info (left)
+      doc.fontSize(14).font('Helvetica-Bold').fillColor('#1565c0').text('CAROLINA ROLLING COMPANY INC.', L, headerY);
+      doc.fontSize(8).font('Helvetica').fillColor('#444');
+      doc.text('9152 Sonrisa St, Bellflower, CA 90706', L, headerY + 18);
+      doc.text('Phone: (562) 633-1044  •  Email: keepitrolling@carolinarolling.com', L, headerY + 28);
       
-      // From section
-      doc.fontSize(10).font('Helvetica-Bold').text('FROM:', 50, startY);
-      doc.font('Helvetica').text('Carolina Rolling, Inc.', 50, startY + 15);
-      doc.text('Your Address Here', 50, startY + 28);
-      doc.text('Phone: (xxx) xxx-xxxx', 50, startY + 41);
+      // PO label + number (right)
+      doc.fontSize(24).font('Helvetica-Bold').fillColor('#1565c0').text('PURCHASE ORDER', L, headerY, { width: W, align: 'right' });
+      doc.fontSize(14).font('Helvetica-Bold').fillColor('#333').text(poNumber, L, headerY + 28, { width: W, align: 'right' });
       
-      // To section
-      doc.font('Helvetica-Bold').text('TO:', 300, startY);
-      doc.font('Helvetica').text(supplier, 300, startY + 15);
+      // ─── DIVIDER ───
+      doc.moveTo(L, headerY + 46).lineTo(R, headerY + 46).strokeColor('#ccc').lineWidth(1).stroke();
       
-      // PO Details
-      doc.font('Helvetica-Bold').text('DATE:', 450, startY);
-      doc.font('Helvetica').text(new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' }), 450, startY + 15);
+      // ─── INFO BOXES ───
+      const boxY = headerY + 56;
+      const boxH = 70;
+      const halfW = (W - 16) / 2;
       
-      doc.y = startY + 70;
-      doc.moveDown(1);
+      // TO box (left)
+      doc.rect(L, boxY, halfW, boxH).lineWidth(1).strokeColor('#ddd').stroke();
+      doc.rect(L, boxY, halfW, 16).fill('#f0f0f0');
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#666').text('VENDOR', L + 8, boxY + 4);
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#000').text(supplier, L + 8, boxY + 22, { width: halfW - 16 });
       
-      // Reference info
-      doc.fontSize(10).font('Helvetica-Bold').text('Reference Information', { underline: true });
-      doc.moveDown(0.3);
-      doc.font('Helvetica');
-      doc.text(`Work Order: DR-${workOrder.drNumber}`);
-      doc.text(`Client: ${workOrder.clientName}`);
-      if (workOrder.clientPurchaseOrderNumber) {
-        doc.text(`Client PO: ${workOrder.clientPurchaseOrderNumber}`);
-      }
-      doc.moveDown(1);
+      // SHIP TO box (right)
+      const boxX2 = L + halfW + 16;
+      doc.rect(boxX2, boxY, halfW, boxH).lineWidth(1).strokeColor('#ddd').stroke();
+      doc.rect(boxX2, boxY, halfW, 16).fill('#f0f0f0');
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#666').text('SHIP TO', boxX2 + 8, boxY + 4);
+      doc.fontSize(9).font('Helvetica').fillColor('#000');
+      doc.text('Carolina Rolling Company Inc.', boxX2 + 8, boxY + 22, { width: halfW - 16 });
+      doc.text('9152 Sonrisa St', boxX2 + 8, boxY + 34);
+      doc.text('Bellflower, CA 90706', boxX2 + 8, boxY + 46);
       
-      // Items table header
-      doc.font('Helvetica-Bold');
-      const tableTop = doc.y;
-      doc.rect(50, tableTop, 510, 20).fillAndStroke('#e3f2fd', '#1976d2');
-      doc.fillColor('black');
-      doc.text('Part #', 55, tableTop + 5);
-      doc.text('Qty', 100, tableTop + 5);
-      doc.text('Description', 140, tableTop + 5);
+      // ─── PO DETAILS ROW ───
+      const detY = boxY + boxH + 12;
+      const colW = W / 4;
+      const detFields = [
+        ['PO DATE', new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' })],
+        ['WORK ORDER', workOrder.drNumber ? `DR-${workOrder.drNumber}` : (workOrder.orderNumber || '—')],
+        ['CLIENT', workOrder.clientName || '—'],
+        ['CLIENT PO#', workOrder.clientPurchaseOrderNumber || '—']
+      ];
       
-      // Items
-      doc.font('Helvetica');
-      let itemY = tableTop + 25;
-      
-      parts.forEach((part, index) => {
-        const rowHeight = 40;
-        
-        // Alternate row colors
-        if (index % 2 === 0) {
-          doc.rect(50, itemY - 5, 510, rowHeight).fill('#f5f5f5');
-        }
-        doc.fillColor('black');
-        
-        doc.text(part.partNumber.toString(), 55, itemY);
-        doc.text(part.quantity.toString(), 100, itemY);
-        
-        // Wrap description
-        const description = part.materialDescription || part.partType || 'N/A';
-        doc.text(description, 140, itemY, { width: 400 });
-        
-        itemY += rowHeight;
-        
-        // Check if we need a new page
-        if (itemY > 700) {
-          doc.addPage();
-          itemY = 50;
-        }
+      detFields.forEach(([label, value], i) => {
+        const x = L + (i * colW);
+        doc.rect(x, detY, colW, 32).lineWidth(0.5).strokeColor('#ddd').stroke();
+        doc.rect(x, detY, colW, 14).fill('#f5f5f5');
+        doc.fontSize(7).font('Helvetica-Bold').fillColor('#888').text(label, x + 6, detY + 3);
+        doc.fontSize(9).font('Helvetica-Bold').fillColor('#000').text(value, x + 6, detY + 17, { width: colW - 12 });
       });
       
-      // Footer
-      doc.moveDown(2);
-      doc.fontSize(10).font('Helvetica-Bold').text('Notes:', 50);
-      doc.font('Helvetica').text('Please reference the PO number on all correspondence and shipments.', 50);
-      doc.moveDown(1);
-      doc.text(`Material is for: ${workOrder.clientName} - DR-${workOrder.drNumber}`);
+      // ─── ITEMS TABLE ───
+      const tableY = detY + 46;
+      const cols = { item: L, qty: L + 40, desc: L + 80, cutFile: L + 360 };
+      const colWidths = { item: 40, qty: 40, desc: 280, cutFile: W - 360 };
       
-      // Signature line
-      doc.moveDown(2);
-      doc.text('_______________________________', 50);
-      doc.text('Authorized Signature', 50);
+      // Table header
+      doc.rect(L, tableY, W, 18).fill('#1565c0');
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#fff');
+      doc.text('ITEM', cols.item + 6, tableY + 5);
+      doc.text('QTY', cols.qty + 6, tableY + 5);
+      doc.text('DESCRIPTION', cols.desc + 6, tableY + 5);
+      doc.text('CUT FILE', cols.cutFile + 6, tableY + 5);
+      
+      // Table rows
+      let rowY = tableY + 18;
+      doc.font('Helvetica').fillColor('#000');
+      
+      const sortedParts = [...parts].sort((a, b) => (a.partNumber || 0) - (b.partNumber || 0));
+      
+      sortedParts.forEach((part, index) => {
+        // Build description
+        const partObj = part.toJSON ? part.toJSON() : { ...part };
+        if (partObj.formData && typeof partObj.formData === 'object') Object.assign(partObj, partObj.formData);
+        
+        let desc = partObj._materialDescription || partObj.materialDescription || '';
+        if (!desc) {
+          const pieces = [];
+          if (partObj.sectionSize) pieces.push(partObj.sectionSize);
+          if (partObj.thickness) pieces.push(partObj.thickness);
+          if (partObj.width) pieces.push(`x ${partObj.width}"`);
+          if (partObj.length) pieces.push(`x ${partObj.length}`);
+          if (partObj.outerDiameter) pieces.push(`${partObj.outerDiameter}" OD`);
+          if (partObj.wallThickness && partObj.wallThickness !== 'SOLID') pieces.push(`x ${partObj.wallThickness} wall`);
+          if (partObj.wallThickness === 'SOLID') pieces.push('Solid');
+          if (partObj.material) pieces.push(partObj.material);
+          if (partObj.partType) pieces.push(partObj.partType.replace(/_/g, ' '));
+          desc = pieces.join(' ') || 'N/A';
+        }
+        
+        const cutFile = partObj.cutFileReference || '';
+        
+        // Calculate row height based on description length
+        const descHeight = doc.heightOfString(desc, { width: colWidths.desc - 12 });
+        const rowHeight = Math.max(28, descHeight + 12);
+        
+        // Page break check
+        if (rowY + rowHeight > 700) {
+          doc.addPage();
+          rowY = 50;
+          // Repeat header on new page
+          doc.rect(L, rowY, W, 18).fill('#1565c0');
+          doc.fontSize(8).font('Helvetica-Bold').fillColor('#fff');
+          doc.text('ITEM', cols.item + 6, rowY + 5);
+          doc.text('QTY', cols.qty + 6, rowY + 5);
+          doc.text('DESCRIPTION', cols.desc + 6, rowY + 5);
+          doc.text('CUT FILE', cols.cutFile + 6, rowY + 5);
+          rowY += 18;
+          doc.font('Helvetica').fillColor('#000');
+        }
+        
+        // Alternating row background
+        if (index % 2 === 0) {
+          doc.rect(L, rowY, W, rowHeight).fill('#f8f9fa');
+        }
+        
+        // Row border
+        doc.moveTo(L, rowY + rowHeight).lineTo(R, rowY + rowHeight).strokeColor('#e0e0e0').lineWidth(0.5).stroke();
+        
+        doc.fillColor('#000');
+        doc.fontSize(9).font('Helvetica-Bold').text(`${partObj.partNumber || index + 1}`, cols.item + 6, rowY + 6, { width: colWidths.item - 12 });
+        doc.font('Helvetica').text(`${partObj.quantity || 1}`, cols.qty + 6, rowY + 6, { width: colWidths.qty - 12 });
+        doc.fontSize(8.5).text(desc, cols.desc + 6, rowY + 6, { width: colWidths.desc - 12 });
+        
+        if (cutFile) {
+          doc.fontSize(8).fillColor('#1565c0').font('Helvetica-Bold').text(cutFile, cols.cutFile + 6, rowY + 6, { width: colWidths.cutFile - 12 });
+          doc.fillColor('#000').font('Helvetica');
+        }
+        
+        rowY += rowHeight;
+      });
+      
+      // Table bottom border
+      doc.moveTo(L, rowY).lineTo(R, rowY).strokeColor('#1565c0').lineWidth(1.5).stroke();
+      
+      // ─── NOTES / TERMS ───
+      const notesY = rowY + 20;
+      
+      // MTR requirement box
+      doc.rect(L, notesY, W, 36).lineWidth(1.5).strokeColor('#c62828').stroke();
+      doc.rect(L, notesY, W, 14).fill('#ffebee');
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#c62828').text('⚠ IMPORTANT', L + 8, notesY + 3);
+      doc.fontSize(9).font('Helvetica-Bold').fillColor('#c62828');
+      doc.text('Material Test Reports (MTRs) are required with all shipments.', L + 8, notesY + 18);
+      
+      // General notes
+      const notesY2 = notesY + 46;
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#333').text('TERMS & INSTRUCTIONS:', L, notesY2);
+      doc.fontSize(8).font('Helvetica').fillColor('#444');
+      doc.text(`• Please reference ${poNumber} on all correspondence, packing lists, and invoices.`, L + 8, notesY2 + 14);
+      doc.text(`• Material is for: ${workOrder.clientName} — ${workOrder.drNumber ? 'DR-' + workOrder.drNumber : workOrder.orderNumber}`, L + 8, notesY2 + 26);
+      doc.text('• Notify us immediately of any delays or backorders.', L + 8, notesY2 + 38);
+      
+      // Any parts with cut files — add a prominent note
+      const partsWithCutFiles = sortedParts.filter(p => {
+        const obj = p.toJSON ? p.toJSON() : { ...p };
+        if (obj.formData) Object.assign(obj, obj.formData);
+        return obj.cutFileReference;
+      });
+      if (partsWithCutFiles.length > 0) {
+        doc.text('• Cut files referenced above will be sent separately via email.', L + 8, notesY2 + 50);
+      }
+      
+      // ─── FOOTER ───
+      const footY = 730;
+      doc.moveTo(L, footY).lineTo(R, footY).strokeColor('#ccc').lineWidth(0.5).stroke();
+      doc.fontSize(7).font('Helvetica').fillColor('#999');
+      doc.text(`Carolina Rolling Company Inc.  •  ${poNumber}  •  Generated ${new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' })}`, L, footY + 6, { width: W, align: 'center' });
       
       doc.end();
     } catch (err) {
@@ -2093,7 +2185,6 @@ router.post('/:id/documents/:documentId/regenerate', async (req, res, next) => {
 // ?mode=full        → part PDFs + order docs + purchase orders
 router.get('/:id/print-package', async (req, res, next) => {
   try {
-    const { PDFDocument } = require('pdf-lib');
     const mode = req.query.mode || 'production';
 
     const workOrder = await WorkOrder.findByPk(req.params.id, {
@@ -2107,10 +2198,12 @@ router.get('/:id/print-package', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Work order not found' } });
     }
 
-    // Collect URLs to merge based on mode
+    // Build list of internal proxy URLs to fetch each PDF through our own working endpoints
+    const port = process.env.PORT || 5001;
+    const baseUrl = `http://localhost:${port}/api/workorders/${workOrder.id}`;
     const pdfSources = [];
 
-    // Part PDFs (both modes)
+    // Part PDFs (both modes) — use the part file download proxy
     const sortedParts = (workOrder.parts || []).sort((a, b) => a.partNumber - b.partNumber);
     for (const part of sortedParts) {
       const pdfFiles = (part.files || []).filter(f => 
@@ -2119,139 +2212,69 @@ router.get('/:id/print-package', async (req, res, next) => {
       for (const file of pdfFiles) {
         pdfSources.push({ 
           label: `Part ${part.partNumber}: ${file.originalName}`,
-          cloudinaryId: file.cloudinaryId,
-          url: file.url
+          proxyUrl: `${baseUrl}/parts/${part.id}/files/${file.id}/download`
         });
       }
     }
 
-    // Full mode: add order documents and purchase orders
+    // Full mode: add order documents and purchase orders — use the document download proxy
     if (mode === 'full' && workOrder.documents) {
-      // Order documents (non-PO)
       for (const doc of workOrder.documents.filter(d => d.documentType !== 'purchase_order')) {
         if (doc.mimeType === 'application/pdf' || (doc.originalName || '').toLowerCase().endsWith('.pdf')) {
           pdfSources.push({
             label: `Doc: ${doc.originalName}`,
-            cloudinaryId: doc.cloudinaryId,
-            url: doc.url
+            proxyUrl: `${baseUrl}/documents/${doc.id}/download`
           });
         }
       }
-      // Purchase orders
       for (const doc of workOrder.documents.filter(d => d.documentType === 'purchase_order')) {
         pdfSources.push({
           label: `PO: ${doc.originalName}`,
-          cloudinaryId: doc.cloudinaryId,
-          url: doc.url,
-          isPurchaseOrder: true,
-          docName: doc.originalName
+          proxyUrl: `${baseUrl}/documents/${doc.id}/download`
         });
       }
     }
 
     if (pdfSources.length === 0) {
+      console.log(`[print-package] No PDF sources found for WO ${workOrder.id} (mode: ${mode})`);
       return res.status(404).json({ error: { message: 'No PDF files to merge' } });
     }
 
-    console.log(`[print-package] Merging ${pdfSources.length} PDFs for WO ${workOrder.id} (mode: ${mode})`);
+    console.log(`[print-package] Merging ${pdfSources.length} PDFs for WO ${workOrder.id} (mode: ${mode}):`);
+    pdfSources.forEach((s, i) => console.log(`[print-package]   ${i + 1}. ${s.label}`));
 
-    // Fetch all PDFs as buffers
+    // Fetch each PDF through our own internal proxy endpoints (which handle all Cloudinary URL resolution + PO regen)
     const fetchPdfBuffer = (source) => {
-      return new Promise(async (resolve) => {
-        // Build candidate URLs (same logic as download proxy)
-        const urlsToTry = [];
-        const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
-
-        // Try stored URL first
-        if (source.url) urlsToTry.push(source.url);
-
-        if (source.cloudinaryId && cloudName) {
-          const pubId = source.cloudinaryId;
-          const hasPdfExt = pubId.toLowerCase().endsWith('.pdf');
-          
-          // Public raw URL — handle .pdf already in pubId
-          if (hasPdfExt) {
-            urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}`);
-            urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId.replace(/\.pdf$/i, '')}`);
-          } else {
-            urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}.pdf`);
-            urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}`);
-          }
-          // Signed private
-          try {
-            urlsToTry.push(cloudinary.url(pubId, { resource_type: 'raw', type: 'private', sign_url: true, secure: true }));
-          } catch (e) {}
-          if (hasPdfExt) {
-            try {
-              urlsToTry.push(cloudinary.url(pubId.replace(/\.pdf$/i, ''), { resource_type: 'raw', type: 'private', sign_url: true, secure: true }));
-            } catch (e) {}
-          }
-          // Signed public
-          try {
-            urlsToTry.push(cloudinary.url(pubId, { resource_type: 'raw', sign_url: true, secure: true }));
-          } catch (e) {}
-          // With version
-          const vMatch = source.url?.match(/\/v(\d+)\//);
-          if (vMatch) {
-            if (hasPdfExt) {
-              urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/v${vMatch[1]}/${pubId}`);
-              urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/v${vMatch[1]}/${pubId.replace(/\.pdf$/i, '')}`);
-            } else {
-              urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/v${vMatch[1]}/${pubId}.pdf`);
-              urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/v${vMatch[1]}/${pubId}`);
-            }
-          }
-        }
-
-        const uniqueUrls = [...new Set(urlsToTry)];
-
-        for (const url of uniqueUrls) {
-          try {
-            const stream = await fetchWithRedirects(url);
-            if (stream) {
-              const chunks = [];
-              stream.on('data', c => chunks.push(c));
-              stream.on('end', () => {
-                const buf = Buffer.concat(chunks);
-                // Verify it's actually a PDF (starts with %PDF)
-                if (buf.length > 4 && buf.slice(0, 5).toString() === '%PDF-') {
-                  resolve(buf);
-                } else {
-                  resolve(null);
-                }
-              });
-              stream.on('error', () => resolve(null));
-              return;
-            }
-          } catch (e) {}
-        }
-        console.error(`[print-package] Failed to fetch from Cloudinary: ${source.label}`);
+      return new Promise((resolve) => {
+        const url = source.proxyUrl;
+        // Forward auth cookie/header so the proxy endpoints can authenticate
+        const options = { headers: {} };
+        if (req.headers.cookie) options.headers.cookie = req.headers.cookie;
+        if (req.headers.authorization) options.headers.authorization = req.headers.authorization;
         
-        // Fallback: if this is a PO, regenerate it on the fly
-        if (source.isPurchaseOrder && source.docName) {
-          try {
-            const poMatch = source.docName.match(/^(PO\d+)/);
-            const poNumber = poMatch ? poMatch[1] : 'PO0000';
-            const supplierMatch = source.docName.match(/^PO\d+\s*-\s*(.+?)\.pdf$/i);
-            let supplier = supplierMatch ? supplierMatch[1].trim() : 'Unknown Supplier';
-            
-            const poParts = workOrder.parts.filter(p => p.materialPurchaseOrderNumber === poNumber);
-            if (poParts.length > 0 && poParts[0].vendorId) {
-              const vendor = await Vendor.findByPk(poParts[0].vendorId);
-              if (vendor) supplier = vendor.name;
-            }
-            const partsForPdf = poParts.length > 0 ? poParts : workOrder.parts;
-            
-            const buf = await generatePurchaseOrderPDF(poNumber, supplier, partsForPdf, workOrder);
-            console.log(`[print-package] Regenerated ${poNumber} on the fly (${buf.length} bytes)`);
-            resolve(buf);
+        http.get(url, options, (resp) => {
+          if (resp.statusCode !== 200) {
+            resp.resume();
+            console.warn(`[print-package] Proxy returned ${resp.statusCode} for ${source.label}`);
+            resolve(null);
             return;
-          } catch (regenErr) {
-            console.error(`[print-package] PO regeneration failed: ${regenErr.message}`);
           }
-        }
-        
-        resolve(null);
+          const chunks = [];
+          resp.on('data', c => chunks.push(c));
+          resp.on('end', () => {
+            const buf = Buffer.concat(chunks);
+            if (buf.length > 4 && buf.slice(0, 5).toString() === '%PDF-') {
+              resolve(buf);
+            } else {
+              console.warn(`[print-package] Not a valid PDF for ${source.label} (${buf.length} bytes, starts with: ${buf.slice(0, 20).toString()})`);
+              resolve(null);
+            }
+          });
+          resp.on('error', () => resolve(null));
+        }).on('error', (err) => {
+          console.error(`[print-package] Fetch error for ${source.label}: ${err.message}`);
+          resolve(null);
+        });
       });
     };
 
@@ -2259,7 +2282,7 @@ router.get('/:id/print-package', async (req, res, next) => {
     const buffers = await Promise.all(pdfSources.map(s => fetchPdfBuffer(s)));
 
     // Merge PDFs
-    const mergedPdf = await PDFDocument.create();
+    const mergedPdf = await PDFLibDocument.create();
     let mergedCount = 0;
 
     for (let i = 0; i < buffers.length; i++) {
@@ -2268,7 +2291,7 @@ router.get('/:id/print-package', async (req, res, next) => {
         continue;
       }
       try {
-        const srcDoc = await PDFDocument.load(buffers[i], { ignoreEncryption: true });
+        const srcDoc = await PDFLibDocument.load(buffers[i], { ignoreEncryption: true });
         const pages = await mergedPdf.copyPages(srcDoc, srcDoc.getPageIndices());
         pages.forEach(page => mergedPdf.addPage(page));
         mergedCount++;
@@ -2279,7 +2302,7 @@ router.get('/:id/print-package', async (req, res, next) => {
     }
 
     if (mergedCount === 0) {
-      return res.status(502).json({ error: { message: 'Could not retrieve any PDF files from storage' } });
+      return res.status(404).json({ error: { message: 'No PDF files could be retrieved or generated' } });
     }
 
     const mergedBytes = await mergedPdf.save();
@@ -2297,8 +2320,10 @@ router.get('/:id/print-package', async (req, res, next) => {
     });
     res.send(Buffer.from(mergedBytes));
   } catch (error) {
-    console.error('[print-package] Error:', error);
-    next(error);
+    console.error('[print-package] FATAL Error:', error.message, error.stack);
+    if (!res.headersSent) {
+      res.status(500).json({ error: { message: 'Print package generation failed: ' + error.message } });
+    }
   }
 });
 

@@ -586,6 +586,10 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
     type: DataTypes.STRING,
     allowNull: true
   },
+  cutFileReference: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
   quantity: {
     type: DataTypes.INTEGER,
     defaultValue: 1
@@ -1090,6 +1094,10 @@ const EstimatePart = sequelize.define('EstimatePart', {
     allowNull: true
   },
   heatNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  cutFileReference: {
     type: DataTypes.STRING,
     allowNull: true
   },

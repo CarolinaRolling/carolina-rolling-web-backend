@@ -132,8 +132,7 @@ async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
       const detY = boxY + boxH + 12;
       const detFields = [
         ['PO DATE', new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' })],
-        ['WORK ORDER', workOrder.drNumber ? `DR-${workOrder.drNumber}` : (workOrder.orderNumber || '—')],
-        ['CLIENT PO#', workOrder.clientPurchaseOrderNumber || '—']
+        ['WORK ORDER', workOrder.drNumber ? `DR-${workOrder.drNumber}` : (workOrder.orderNumber || '—')]
       ];
       const colW = W / detFields.length;
       

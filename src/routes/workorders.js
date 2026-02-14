@@ -231,6 +231,13 @@ async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
       doc.moveTo(L, rowY).lineTo(R, rowY).strokeColor('#1565c0').lineWidth(1.5).stroke();
       
       // ─── NOTES / TERMS ───
+      // Check if notes section fits on current page (~140px needed)
+      const notesNeeded = 130;
+      if (rowY + 20 + notesNeeded > 720) {
+        doc.addPage();
+        rowY = 50;
+      }
+      
       const notesY = rowY + 20;
       
       // MTR requirement box
@@ -249,17 +256,19 @@ async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
       doc.text('• Notify us immediately of any delays or backorders.', L + 8, notesY2 + 38);
       
       // Any parts with cut files — add a prominent note
+      let lastNoteY = notesY2 + 38;
       const partsWithCutFiles = sortedParts.filter(p => {
         const obj = p.toJSON ? p.toJSON() : { ...p };
         if (obj.formData) Object.assign(obj, obj.formData);
         return obj.cutFileReference;
       });
       if (partsWithCutFiles.length > 0) {
-        doc.text('• Cut files referenced above will be sent separately via email.', L + 8, notesY2 + 50);
+        lastNoteY = notesY2 + 50;
+        doc.text('• Cut files referenced above will be sent separately via email.', L + 8, lastNoteY);
       }
       
-      // ─── FOOTER ───
-      const footY = 730;
+      // ─── FOOTER — positioned right after notes ───
+      const footY = lastNoteY + 24;
       doc.moveTo(L, footY).lineTo(R, footY).strokeColor('#ccc').lineWidth(0.5).stroke();
       doc.fontSize(7).font('Helvetica').fillColor('#999');
       doc.text(`Carolina Rolling Company Inc.  •  ${poNumber}  •  Generated ${new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' })}`, L, footY + 6, { width: W, align: 'center' });

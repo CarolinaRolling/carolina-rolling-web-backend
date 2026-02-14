@@ -2180,12 +2180,14 @@ router.post('/:id/documents/:documentId/regenerate', async (req, res, next) => {
   }
 });
 
-// GET /api/workorders/:id/print-package - Merge all relevant PDFs into one download
-// ?mode=production  → part PDFs only
-// ?mode=full        → part PDFs + order docs + purchase orders
-router.get('/:id/print-package', async (req, res, next) => {
+// POST /api/workorders/:id/print-package - Render work order HTML + merge part PDFs into one complete document
+// Body: { html: string, mode: 'production' | 'full' }
+router.post('/:id/print-package', async (req, res, next) => {
   try {
-    const mode = req.query.mode || 'production';
+    const puppeteer = require('puppeteer-core');
+    const { execSync } = require('child_process');
+    const mode = req.body.mode || 'production';
+    const workOrderHtml = req.body.html;
 
     const workOrder = await WorkOrder.findByPk(req.params.id, {
       include: [
@@ -2198,12 +2200,63 @@ router.get('/:id/print-package', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Work order not found' } });
     }
 
-    // Build list of internal proxy URLs to fetch each PDF through our own working endpoints
+    console.log(`[print-package] Building ${mode} package for WO ${workOrder.id}, HTML: ${workOrderHtml ? workOrderHtml.length + ' chars' : 'none'}`);
+
+    // ─── Step 1: Render work order HTML to PDF via Puppeteer ───
+    let woPagesPdf = null;
+    if (workOrderHtml) {
+      try {
+        // Find Chrome
+        let chromePath;
+        if (process.env.PUPPETEER_EXECUTABLE_PATH && fs.existsSync(process.env.PUPPETEER_EXECUTABLE_PATH)) {
+          chromePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+        } else {
+          const candidates = [
+            '/app/.chrome-for-testing/chrome-linux64/chrome',
+            '/app/.chrome-for-testing/chrome-linux/chrome',
+            '/app/.apt/usr/bin/google-chrome',
+            '/usr/bin/google-chrome',
+            '/usr/bin/chromium',
+          ];
+          for (const p of candidates) { if (fs.existsSync(p)) { chromePath = p; break; } }
+          if (!chromePath) {
+            try {
+              const found = execSync('which chrome google-chrome chromium 2>/dev/null || find /app -name "chrome" -type f 2>/dev/null | head -1').toString().trim();
+              if (found) chromePath = found.split('\n')[0];
+            } catch (e) {}
+          }
+        }
+
+        if (chromePath) {
+          console.log(`[print-package] Rendering HTML with Chrome: ${chromePath}`);
+          const browser = await puppeteer.launch({
+            executablePath: chromePath,
+            headless: 'new',
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+          });
+          const page = await browser.newPage();
+          await page.setContent(workOrderHtml, { waitUntil: 'load', timeout: 15000 });
+          woPagesPdf = await page.pdf({
+            format: 'Letter',
+            margin: { top: '0.4in', bottom: '0.4in', left: '0.4in', right: '0.4in' },
+            printBackground: true
+          });
+          await browser.close();
+          console.log(`[print-package] Rendered work order HTML → ${woPagesPdf.length} bytes`);
+        } else {
+          console.warn('[print-package] Chrome not found — skipping HTML render');
+        }
+      } catch (renderErr) {
+        console.error('[print-package] HTML render failed:', renderErr.message);
+      }
+    }
+
+    // ─── Step 2: Collect attached PDFs ───
     const port = process.env.PORT || 5001;
     const baseUrl = `http://localhost:${port}/api/workorders/${workOrder.id}`;
     const pdfSources = [];
 
-    // Part PDFs (both modes) — use the part file download proxy
+    // Part PDFs (both modes)
     const sortedParts = (workOrder.parts || []).sort((a, b) => a.partNumber - b.partNumber);
     for (const part of sortedParts) {
       const pdfFiles = (part.files || []).filter(f => 
@@ -2217,7 +2270,7 @@ router.get('/:id/print-package', async (req, res, next) => {
       }
     }
 
-    // Full mode: add order documents and purchase orders — use the document download proxy
+    // Full mode: add order documents and purchase orders
     if (mode === 'full' && workOrder.documents) {
       for (const doc of workOrder.documents.filter(d => d.documentType !== 'purchase_order')) {
         if (doc.mimeType === 'application/pdf' || (doc.originalName || '').toLowerCase().endsWith('.pdf')) {
@@ -2235,24 +2288,17 @@ router.get('/:id/print-package', async (req, res, next) => {
       }
     }
 
-    if (pdfSources.length === 0) {
-      console.log(`[print-package] No PDF sources found for WO ${workOrder.id} (mode: ${mode})`);
-      return res.status(404).json({ error: { message: 'No PDF files to merge' } });
-    }
+    console.log(`[print-package] Fetching ${pdfSources.length} attached PDFs...`);
 
-    console.log(`[print-package] Merging ${pdfSources.length} PDFs for WO ${workOrder.id} (mode: ${mode}):`);
-    pdfSources.forEach((s, i) => console.log(`[print-package]   ${i + 1}. ${s.label}`));
-
-    // Fetch each PDF through our own internal proxy endpoints (which handle all Cloudinary URL resolution + PO regen)
+    // ─── Step 3: Fetch attached PDFs via internal proxy ───
     const fetchPdfBuffer = (source) => {
       return new Promise((resolve) => {
         const url = source.proxyUrl;
-        // Forward auth cookie/header so the proxy endpoints can authenticate
         const options = { headers: {} };
         if (req.headers.cookie) options.headers.cookie = req.headers.cookie;
         if (req.headers.authorization) options.headers.authorization = req.headers.authorization;
         
-        http.get(url, options, (resp) => {
+        const request = http.get(url, options, (resp) => {
           if (resp.statusCode !== 200) {
             resp.resume();
             console.warn(`[print-package] Proxy returned ${resp.statusCode} for ${source.label}`);
@@ -2266,32 +2312,47 @@ router.get('/:id/print-package', async (req, res, next) => {
             if (buf.length > 4 && buf.slice(0, 5).toString() === '%PDF-') {
               resolve(buf);
             } else {
-              console.warn(`[print-package] Not a valid PDF for ${source.label} (${buf.length} bytes, starts with: ${buf.slice(0, 20).toString()})`);
+              console.warn(`[print-package] Not a valid PDF for ${source.label} (${buf.length} bytes)`);
               resolve(null);
             }
           });
           resp.on('error', () => resolve(null));
-        }).on('error', (err) => {
+        });
+        request.on('error', (err) => {
           console.error(`[print-package] Fetch error for ${source.label}: ${err.message}`);
           resolve(null);
         });
+        request.setTimeout(15000, () => { request.destroy(); resolve(null); });
       });
     };
 
-    // Fetch all in parallel
-    const buffers = await Promise.all(pdfSources.map(s => fetchPdfBuffer(s)));
+    const attachedBuffers = await Promise.all(pdfSources.map(s => fetchPdfBuffer(s)));
 
-    // Merge PDFs
+    // ─── Step 4: Merge everything into one PDF ───
     const mergedPdf = await PDFLibDocument.create();
     let mergedCount = 0;
 
-    for (let i = 0; i < buffers.length; i++) {
-      if (!buffers[i]) {
+    // First: work order details pages
+    if (woPagesPdf) {
+      try {
+        const woDoc = await PDFLibDocument.load(woPagesPdf, { ignoreEncryption: true });
+        const pages = await mergedPdf.copyPages(woDoc, woDoc.getPageIndices());
+        pages.forEach(page => mergedPdf.addPage(page));
+        mergedCount++;
+        console.log(`[print-package] Added work order details (${woDoc.getPageCount()} pages)`);
+      } catch (e) {
+        console.warn(`[print-package] Could not add work order pages: ${e.message}`);
+      }
+    }
+
+    // Then: attached PDFs (part prints, docs, POs)
+    for (let i = 0; i < attachedBuffers.length; i++) {
+      if (!attachedBuffers[i]) {
         console.warn(`[print-package] Skipping ${pdfSources[i].label} — fetch failed`);
         continue;
       }
       try {
-        const srcDoc = await PDFLibDocument.load(buffers[i], { ignoreEncryption: true });
+        const srcDoc = await PDFLibDocument.load(attachedBuffers[i], { ignoreEncryption: true });
         const pages = await mergedPdf.copyPages(srcDoc, srcDoc.getPageIndices());
         pages.forEach(page => mergedPdf.addPage(page));
         mergedCount++;
@@ -2302,20 +2363,20 @@ router.get('/:id/print-package', async (req, res, next) => {
     }
 
     if (mergedCount === 0) {
-      return res.status(404).json({ error: { message: 'No PDF files could be retrieved or generated' } });
+      return res.status(404).json({ error: { message: 'No content could be generated' } });
     }
 
     const mergedBytes = await mergedPdf.save();
     const drLabel = workOrder.drNumber ? `DR-${workOrder.drNumber}` : workOrder.orderNumber;
     const filename = mode === 'full' 
       ? `${drLabel}_Full_Package.pdf`
-      : `${drLabel}_Part_Prints.pdf`;
+      : `${drLabel}_Production_Package.pdf`;
 
-    console.log(`[print-package] Merged ${mergedCount}/${pdfSources.length} PDFs → ${mergedBytes.length} bytes`);
+    console.log(`[print-package] Complete! ${mergedCount} docs merged → ${mergedBytes.length} bytes (${filename})`);
 
     res.set({
       'Content-Type': 'application/pdf',
-      'Content-Disposition': `attachment; filename="${filename}"`,
+      'Content-Disposition': `inline; filename="${filename}"`,
       'Content-Length': mergedBytes.length
     });
     res.send(Buffer.from(mergedBytes));
@@ -2326,6 +2387,7 @@ router.get('/:id/print-package', async (req, res, next) => {
     }
   }
 });
+
 
 // POST /api/workorders/:id/order-material - Create purchase orders for work order materials
 router.post('/:id/order-material', async (req, res, next) => {

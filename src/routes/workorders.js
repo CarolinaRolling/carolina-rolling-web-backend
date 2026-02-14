@@ -1853,47 +1853,53 @@ router.get('/:id/documents/:documentId/download', async (req, res, next) => {
     const urlsToTry = [];
     const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
     
+    // Try stored URL first — it came directly from Cloudinary upload response
+    if (document.url) urlsToTry.push(document.url);
+    
     if (document.cloudinaryId && cloudName) {
       const pubId = document.cloudinaryId;
+      const hasPdfExt = pubId.toLowerCase().endsWith('.pdf');
       
-      // PO PDFs are uploaded as raw (public) — try direct URL first
-      urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}.pdf`);
-      urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}`);
+      // Direct public raw URLs — handle both with/without .pdf extension in pubId
+      if (hasPdfExt) {
+        // pubId already has .pdf — use as-is, and also try without .pdf
+        urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}`);
+        urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId.replace(/\.pdf$/i, '')}`);
+      } else {
+        // pubId doesn't have .pdf — try with and without
+        urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}.pdf`);
+        urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}`);
+      }
       
       // Try signed URL for private files
       try {
-        const signedUrl = cloudinary.url(pubId, {
-          resource_type: 'raw',
-          type: 'private',
-          sign_url: true,
-          secure: true
-        });
-        urlsToTry.push(signedUrl);
-      } catch (e) {
-        // Not a private file, that's fine
+        urlsToTry.push(cloudinary.url(pubId, { resource_type: 'raw', type: 'private', sign_url: true, secure: true }));
+      } catch (e) {}
+      // Also try without .pdf extension for signed
+      if (hasPdfExt) {
+        try {
+          urlsToTry.push(cloudinary.url(pubId.replace(/\.pdf$/i, ''), { resource_type: 'raw', type: 'private', sign_url: true, secure: true }));
+        } catch (e) {}
       }
       
       // Try signed public URL
       try {
-        const signedUrl = cloudinary.url(pubId, {
-          resource_type: 'raw',
-          sign_url: true,
-          secure: true
-        });
-        urlsToTry.push(signedUrl);
+        urlsToTry.push(cloudinary.url(pubId, { resource_type: 'raw', sign_url: true, secure: true }));
       } catch (e) {}
       
       // Try with version from stored URL
       const versionMatch = document.url?.match(/\/v(\d+)\//);
       const version = versionMatch ? `/v${versionMatch[1]}` : '';
       if (version) {
-        urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload${version}/${pubId}.pdf`);
-        urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload${version}/${pubId}`);
+        if (hasPdfExt) {
+          urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload${version}/${pubId}`);
+          urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload${version}/${pubId.replace(/\.pdf$/i, '')}`);
+        } else {
+          urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload${version}/${pubId}.pdf`);
+          urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload${version}/${pubId}`);
+        }
       }
     }
-    
-    // Try stored URL as-is
-    if (document.url) urlsToTry.push(document.url);
     
     // Deduplicate
     const uniqueUrls = [...new Set(urlsToTry)];
@@ -1952,6 +1958,95 @@ router.delete('/:id/documents/:documentId', async (req, res, next) => {
 
     res.json({ message: 'Document deleted successfully' });
   } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/workorders/:id/documents/:documentId/regenerate - Regenerate a purchase order PDF
+router.post('/:id/documents/:documentId/regenerate', async (req, res, next) => {
+  try {
+    const doc = await WorkOrderDocument.findOne({
+      where: { id: req.params.documentId, workOrderId: req.params.id }
+    });
+    if (!doc) {
+      return res.status(404).json({ error: { message: 'Document not found' } });
+    }
+    if (doc.documentType !== 'purchase_order') {
+      return res.status(400).json({ error: { message: 'Only purchase order PDFs can be regenerated' } });
+    }
+
+    const workOrder = await WorkOrder.findByPk(req.params.id, {
+      include: [{ model: WorkOrderPart, as: 'parts' }]
+    });
+    if (!workOrder) {
+      return res.status(404).json({ error: { message: 'Work order not found' } });
+    }
+
+    // Extract PO number from doc name (e.g. "PO7808 - Supplier Name.pdf" → "PO7808")
+    const poMatch = doc.originalName?.match(/^(PO\d+)/);
+    const poNumber = poMatch ? poMatch[1] : 'PO0000';
+
+    // Find parts linked to this PO
+    const poParts = workOrder.parts.filter(p => p.materialPurchaseOrderNumber === poNumber);
+    
+    // Determine supplier from doc name or parts
+    const supplierMatch = doc.originalName?.match(/^PO\d+\s*-\s*(.+?)\.pdf$/i);
+    let supplier = supplierMatch ? supplierMatch[1].trim() : 'Unknown Supplier';
+    if (poParts.length > 0 && poParts[0].vendorId) {
+      const vendor = await Vendor.findByPk(poParts[0].vendorId);
+      if (vendor) supplier = vendor.name;
+    }
+
+    // Use all parts if none matched the PO number (fallback)
+    const partsForPdf = poParts.length > 0 ? poParts : workOrder.parts;
+
+    console.log(`[regenerate-po] Regenerating ${poNumber} for ${supplier} (${partsForPdf.length} parts)`);
+
+    // Generate PDF
+    const pdfBuffer = await generatePurchaseOrderPDF(poNumber, supplier, partsForPdf, workOrder);
+
+    // Delete old Cloudinary file
+    if (doc.cloudinaryId) {
+      try {
+        await cloudinary.uploader.destroy(doc.cloudinaryId, { resource_type: 'raw' });
+      } catch (e) {
+        console.error('[regenerate-po] Failed to delete old file:', e.message);
+      }
+    }
+
+    // Upload new PDF — use public_id without format to avoid .pdf.pdf
+    const uploadResult = await new Promise((resolve, reject) => {
+      cloudinary.uploader.upload_stream(
+        {
+          folder: 'purchase-orders',
+          resource_type: 'raw',
+          public_id: `${poNumber}-${workOrder.drNumber}`,
+          format: 'pdf',
+          overwrite: true,
+          invalidate: true
+        },
+        (error, result) => {
+          if (error) reject(error);
+          else resolve(result);
+        }
+      ).end(pdfBuffer);
+    });
+
+    // Update document record
+    await doc.update({
+      url: uploadResult.secure_url,
+      cloudinaryId: uploadResult.public_id,
+      size: pdfBuffer.length
+    });
+
+    console.log(`[regenerate-po] Success — new URL: ${uploadResult.secure_url}`);
+
+    res.json({ 
+      message: 'Purchase order PDF regenerated successfully',
+      data: { url: uploadResult.secure_url, cloudinaryId: uploadResult.public_id }
+    });
+  } catch (error) {
+    console.error('[regenerate-po] Error:', error);
     next(error);
   }
 });
@@ -2028,15 +2123,30 @@ router.get('/:id/print-package', async (req, res, next) => {
         const urlsToTry = [];
         const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
 
+        // Try stored URL first
+        if (source.url) urlsToTry.push(source.url);
+
         if (source.cloudinaryId && cloudName) {
           const pubId = source.cloudinaryId;
-          // Public raw URL
-          urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}.pdf`);
-          urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}`);
+          const hasPdfExt = pubId.toLowerCase().endsWith('.pdf');
+          
+          // Public raw URL — handle .pdf already in pubId
+          if (hasPdfExt) {
+            urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}`);
+            urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId.replace(/\.pdf$/i, '')}`);
+          } else {
+            urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}.pdf`);
+            urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}`);
+          }
           // Signed private
           try {
             urlsToTry.push(cloudinary.url(pubId, { resource_type: 'raw', type: 'private', sign_url: true, secure: true }));
           } catch (e) {}
+          if (hasPdfExt) {
+            try {
+              urlsToTry.push(cloudinary.url(pubId.replace(/\.pdf$/i, ''), { resource_type: 'raw', type: 'private', sign_url: true, secure: true }));
+            } catch (e) {}
+          }
           // Signed public
           try {
             urlsToTry.push(cloudinary.url(pubId, { resource_type: 'raw', sign_url: true, secure: true }));
@@ -2044,11 +2154,15 @@ router.get('/:id/print-package', async (req, res, next) => {
           // With version
           const vMatch = source.url?.match(/\/v(\d+)\//);
           if (vMatch) {
-            urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/v${vMatch[1]}/${pubId}.pdf`);
-            urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/v${vMatch[1]}/${pubId}`);
+            if (hasPdfExt) {
+              urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/v${vMatch[1]}/${pubId}`);
+              urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/v${vMatch[1]}/${pubId.replace(/\.pdf$/i, '')}`);
+            } else {
+              urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/v${vMatch[1]}/${pubId}.pdf`);
+              urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/v${vMatch[1]}/${pubId}`);
+            }
           }
         }
-        if (source.url) urlsToTry.push(source.url);
 
         const uniqueUrls = [...new Set(urlsToTry)];
 

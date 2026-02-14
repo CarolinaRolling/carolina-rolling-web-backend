@@ -130,13 +130,12 @@ async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
       
       // ─── PO DETAILS ROW ───
       const detY = boxY + boxH + 12;
-      const colW = W / 4;
       const detFields = [
         ['PO DATE', new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' })],
         ['WORK ORDER', workOrder.drNumber ? `DR-${workOrder.drNumber}` : (workOrder.orderNumber || '—')],
-        ['CLIENT', workOrder.clientName || '—'],
         ['CLIENT PO#', workOrder.clientPurchaseOrderNumber || '—']
       ];
+      const colW = W / detFields.length;
       
       detFields.forEach(([label, value], i) => {
         const x = L + (i * colW);
@@ -252,7 +251,7 @@ async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
       doc.fontSize(8).font('Helvetica-Bold').fillColor('#333').text('TERMS & INSTRUCTIONS:', L, notesY2);
       doc.fontSize(8).font('Helvetica').fillColor('#444');
       doc.text(`• Please reference ${poNumber} on all correspondence, packing lists, and invoices.`, L + 8, notesY2 + 14);
-      doc.text(`• Material is for: ${workOrder.clientName} — ${workOrder.drNumber ? 'DR-' + workOrder.drNumber : workOrder.orderNumber}`, L + 8, notesY2 + 26);
+      doc.text(`• Material is for: ${workOrder.drNumber ? 'DR-' + workOrder.drNumber : workOrder.orderNumber}`, L + 8, notesY2 + 26);
       doc.text('• Notify us immediately of any delays or backorders.', L + 8, notesY2 + 38);
       
       // Any parts with cut files — add a prominent note

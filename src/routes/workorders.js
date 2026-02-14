@@ -106,7 +106,7 @@ async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
       
       // PO Details
       doc.font('Helvetica-Bold').text('DATE:', 450, startY);
-      doc.font('Helvetica').text(new Date().toLocaleDateString(), 450, startY + 15);
+      doc.font('Helvetica').text(new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' }), 450, startY + 15);
       
       doc.y = startY + 70;
       doc.moveDown(1);
@@ -633,7 +633,7 @@ router.post('/:id/mark-complete', async (req, res, next) => {
     
     // Add completion note with timestamp
     const now = new Date();
-    const completionNote = `✅ All ${workOrder.parts.length} part(s) completed from shop floor — ${now.toLocaleDateString()} ${now.toLocaleTimeString()}`;
+    const completionNote = `✅ All ${workOrder.parts.length} part(s) completed from shop floor — ${now.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' })} ${now.toLocaleTimeString('en-US', { timeZone: 'America/Los_Angeles' })}`;
     const updatedNotes = workOrder.notes 
       ? `${workOrder.notes}\n\n${completionNote}` 
       : completionNote;

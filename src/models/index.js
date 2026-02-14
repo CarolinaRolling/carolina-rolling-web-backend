@@ -1282,8 +1282,8 @@ const EstimatePart = sequelize.define('EstimatePart', {
   },
   // Material source - we order vs customer supplied
   materialSource: {
-    type: DataTypes.ENUM('we_order', 'customer_supplied'),
-    defaultValue: 'we_order'
+    type: DataTypes.STRING,
+    defaultValue: 'customer_supplied'
   },
   materialReceived: {
     type: DataTypes.BOOLEAN,

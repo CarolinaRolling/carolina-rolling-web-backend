@@ -1262,46 +1262,54 @@ router.post('/:id/convert', async (req, res, next) => {
 
     // Create work order parts from estimate parts
     for (const estPart of estimate.parts) {
-      await WorkOrderPart.create({
-        workOrderId: workOrder.id,
-        partNumber: estPart.partNumber,
-        partType: estPart.partType,
-        clientPartNumber: estPart.clientPartNumber,
-        heatNumber: estPart.heatNumber,
-        quantity: estPart.quantity,
-        material: estPart.material,
-        thickness: estPart.thickness,
-        width: estPart.width,
-        length: estPart.length,
-        outerDiameter: estPart.outerDiameter,
-        wallThickness: estPart.wallThickness,
-        sectionSize: estPart.sectionSize,
-        rollType: estPart.rollType,
-        radius: estPart.radius,
-        diameter: estPart.diameter,
-        arcDegrees: estPart.arcDegrees,
-        flangeOut: estPart.flangeOut,
-        specialInstructions: estPart.specialInstructions,
-        status: 'pending',
-        materialSource: estPart.materialSource,
-        materialReceived: estPart.materialSource === 'customer_supplied' || estPart.materialReceived,
-        materialReceivedAt: estPart.materialSource === 'customer_supplied' ? new Date() : estPart.materialReceivedAt,
-        awaitingInboundId: estPart.inboundOrderId,
-        awaitingPONumber: estPart.materialPurchaseOrderNumber,
-        supplierName: estPart.supplierName,
-        vendorId: estPart.vendorId || null,
-        materialDescription: estPart.materialDescription,
-        formData: estPart.formData || null,
-        // Copy pricing fields
-        laborRate: estPart.laborRate,
-        laborHours: estPart.laborHours,
-        laborTotal: estPart.laborTotal,
-        materialUnitCost: estPart.materialUnitCost,
-        materialTotal: estPart.materialTotal,
-        setupCharge: estPart.setupCharge,
-        otherCharges: estPart.otherCharges,
-        partTotal: estPart.partTotal
-      }, { transaction });
+      try {
+        await WorkOrderPart.create({
+          workOrderId: workOrder.id,
+          partNumber: estPart.partNumber || 1,
+          partType: estPart.partType || 'other',
+          clientPartNumber: estPart.clientPartNumber,
+          heatNumber: estPart.heatNumber,
+          quantity: estPart.quantity || 1,
+          material: estPart.material,
+          thickness: estPart.thickness,
+          width: estPart.width,
+          length: estPart.length,
+          outerDiameter: estPart.outerDiameter,
+          wallThickness: estPart.wallThickness,
+          sectionSize: estPart.sectionSize,
+          rollType: estPart.rollType,
+          radius: estPart.radius,
+          diameter: estPart.diameter,
+          arcDegrees: estPart.arcDegrees,
+          flangeOut: estPart.flangeOut,
+          specialInstructions: estPart.specialInstructions,
+          status: 'pending',
+          materialSource: estPart.materialSource || 
+            (['fab_service', 'shop_rate'].includes(estPart.partType) ? 'customer_supplied' :
+            (estPart.weSupplyMaterial ? 'we_order' : 'customer_supplied')),
+          materialReceived: estPart.materialSource === 'customer_supplied' || estPart.materialReceived,
+          materialReceivedAt: estPart.materialSource === 'customer_supplied' ? new Date() : estPart.materialReceivedAt,
+          awaitingInboundId: estPart.inboundOrderId,
+          awaitingPONumber: estPart.materialPurchaseOrderNumber,
+          supplierName: estPart.supplierName,
+          vendorId: estPart.vendorId || null,
+          materialDescription: estPart.materialDescription,
+          formData: estPart.formData || null,
+          // Copy pricing fields
+          laborRate: estPart.laborRate,
+          laborHours: estPart.laborHours,
+          laborTotal: estPart.laborTotal,
+          materialUnitCost: estPart.materialUnitCost,
+          materialTotal: estPart.materialTotal,
+          setupCharge: estPart.setupCharge,
+          otherCharges: estPart.otherCharges,
+          partTotal: estPart.partTotal
+        }, { transaction });
+      } catch (partErr) {
+        console.error(`Failed to create WO part #${estPart.partNumber} (type: ${estPart.partType}):`, partErr.message);
+        if (partErr.errors) partErr.errors.forEach(e => console.error(`  Validation: ${e.path} - ${e.message}`));
+        throw new Error(`Failed on part #${estPart.partNumber} (${estPart.partType}): ${partErr.message}`);
+      }
     }
 
     // Create DR number entry if assigned
@@ -1522,7 +1530,8 @@ router.get('/:id/pdf', async (req, res, next) => {
     const formatDate = (date) => {
       if (!date) return '';
       return new Date(date).toLocaleDateString('en-US', { 
-        year: 'numeric', month: 'long', day: 'numeric' 
+        year: 'numeric', month: 'long', day: 'numeric',
+        timeZone: 'America/Los_Angeles'
       });
     };
 
@@ -1537,7 +1546,7 @@ router.get('/:id/pdf', async (req, res, next) => {
 
     // Part type labels
     const PART_LABELS = {
-      plate_roll: 'Plate Roll', angle_roll: 'Angle Roll', pipe_roll: 'Pipe/Tube Roll',
+      plate_roll: 'Plate Roll', angle_roll: 'Angle Roll', pipe_roll: 'Pipes/Tubes/Round',
       tube_roll: 'Sq/Rect Tube Roll', channel_roll: 'Channel Roll', beam_roll: 'Beam Roll',
       flat_bar: 'Flat Bar Roll', flat_stock: 'Flat Stock', cone_roll: 'Cone Roll',
       tee_bar: 'Tee Bar Roll', press_brake: 'Press Brake', fab_service: 'Fabrication Service', shop_rate: 'Shop Rate', other: 'Other'
@@ -1683,7 +1692,8 @@ router.get('/:id/pdf', async (req, res, next) => {
         if (part.width) specs.push(`${part.width}" wide`);
         if (part.length) specs.push(part.length.toString().includes("'") || part.length.toString().includes('"') ? part.length : `${part.length}" long`);
         if (part.outerDiameter) specs.push(`${part.outerDiameter}" OD`);
-        if (part.wallThickness) specs.push(`${part.wallThickness}" wall`);
+        if (part.wallThickness && part.wallThickness !== 'SOLID') specs.push(`${part.wallThickness}" wall`);
+        if (part.wallThickness === 'SOLID') specs.push('Solid Bar');
         if (specs.length) descLines.push(specs.join(' × '));
       }
 
@@ -1971,71 +1981,80 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
 
     // Create work order parts from estimate parts
     for (const estimatePart of estimate.parts) {
-      const workOrderPart = await WorkOrderPart.create({
-        workOrderId: workOrder.id,
-        partNumber: estimatePart.partNumber,
-        partType: estimatePart.partType,
-        clientPartNumber: estimatePart.clientPartNumber,
-        heatNumber: estimatePart.heatNumber,
-        quantity: estimatePart.quantity,
-        materialDescription: estimatePart.materialDescription,
-        material: estimatePart.material,
-        thickness: estimatePart.thickness,
-        width: estimatePart.width,
-        length: estimatePart.length,
-        outerDiameter: estimatePart.outerDiameter,
-        wallThickness: estimatePart.wallThickness,
-        sectionSize: estimatePart.sectionSize,
-        rollType: estimatePart.rollType,
-        radius: estimatePart.radius,
-        diameter: estimatePart.diameter,
-        arcDegrees: estimatePart.arcDegrees,
-        flangeOut: estimatePart.flangeOut,
-        specialInstructions: estimatePart.specialInstructions,
-        status: 'pending',
-        // Copy supplier info for material ordering
-        supplierName: estimatePart.supplierName,
-        vendorId: estimatePart.vendorId || null,
-        // Set materialSource - prefer estimate's materialSource, fall back to weSupplyMaterial flag
-        materialSource: estimatePart.materialSource || (estimatePart.weSupplyMaterial ? 'we_order' : 'customer_supplied'),
-        // Copy pricing fields
-        laborRate: estimatePart.laborRate,
-        laborHours: estimatePart.laborHours,
-        laborTotal: estimatePart.laborTotal,
-        materialUnitCost: estimatePart.materialUnitCost,
-        materialTotal: estimatePart.materialTotal,
-        setupCharge: estimatePart.setupCharge,
-        otherCharges: estimatePart.otherCharges,
-        partTotal: estimatePart.partTotal,
-        // Copy form display data (rolling descriptions, specs, etc.)
-        formData: estimatePart.formData || null
-      }, { transaction });
+      try {
+        const workOrderPart = await WorkOrderPart.create({
+          workOrderId: workOrder.id,
+          partNumber: estimatePart.partNumber || 1,
+          partType: estimatePart.partType || 'other',
+          clientPartNumber: estimatePart.clientPartNumber,
+          heatNumber: estimatePart.heatNumber,
+          quantity: estimatePart.quantity || 1,
+          materialDescription: estimatePart.materialDescription,
+          material: estimatePart.material,
+          thickness: estimatePart.thickness,
+          width: estimatePart.width,
+          length: estimatePart.length,
+          outerDiameter: estimatePart.outerDiameter,
+          wallThickness: estimatePart.wallThickness,
+          sectionSize: estimatePart.sectionSize,
+          rollType: estimatePart.rollType,
+          radius: estimatePart.radius,
+          diameter: estimatePart.diameter,
+          arcDegrees: estimatePart.arcDegrees,
+          flangeOut: estimatePart.flangeOut,
+          specialInstructions: estimatePart.specialInstructions,
+          status: 'pending',
+          // Copy supplier info for material ordering
+          supplierName: estimatePart.supplierName,
+          vendorId: estimatePart.vendorId || null,
+          // Set materialSource - prefer estimate's materialSource, fall back to weSupplyMaterial flag
+          // For service types (fab_service, shop_rate), default to customer_supplied since no material is involved
+          materialSource: estimatePart.materialSource || 
+            (['fab_service', 'shop_rate'].includes(estimatePart.partType) ? 'customer_supplied' :
+            (estimatePart.weSupplyMaterial ? 'we_order' : 'customer_supplied')),
+          // Copy pricing fields
+          laborRate: estimatePart.laborRate,
+          laborHours: estimatePart.laborHours,
+          laborTotal: estimatePart.laborTotal,
+          materialUnitCost: estimatePart.materialUnitCost,
+          materialTotal: estimatePart.materialTotal,
+          setupCharge: estimatePart.setupCharge,
+          otherCharges: estimatePart.otherCharges,
+          partTotal: estimatePart.partTotal,
+          // Copy form display data (rolling descriptions, specs, etc.)
+          formData: estimatePart.formData || null
+        }, { transaction });
 
-      // Copy part files to work order part files
-      if (estimatePart.files && estimatePart.files.length > 0) {
-        for (const file of estimatePart.files) {
-          // Normalize estimate fileType values to work order values
-          let fileType = file.fileType || 'other';
-          const ext = (file.originalName || file.filename || '').toLowerCase();
-          if (ext.endsWith('.pdf') || fileType === 'drawing' || fileType === 'print') {
-            fileType = 'pdf_print';
-          } else if (ext.endsWith('.stp') || ext.endsWith('.step') || fileType === 'step_file') {
-            fileType = 'step_file';
-          } else if (fileType === 'specification') {
-            fileType = 'other';
+        // Copy part files to work order part files
+        if (estimatePart.files && estimatePart.files.length > 0) {
+          for (const file of estimatePart.files) {
+            // Normalize estimate fileType values to work order values
+            let fileType = file.fileType || 'other';
+            const ext = (file.originalName || file.filename || '').toLowerCase();
+            if (ext.endsWith('.pdf') || fileType === 'drawing' || fileType === 'print') {
+              fileType = 'pdf_print';
+            } else if (ext.endsWith('.stp') || ext.endsWith('.step') || fileType === 'step_file') {
+              fileType = 'step_file';
+            } else if (fileType === 'specification') {
+              fileType = 'other';
+            }
+            
+            await WorkOrderPartFile.create({
+              workOrderPartId: workOrderPart.id,
+              filename: file.filename,
+              originalName: file.originalName,
+              mimeType: file.mimeType,
+              size: file.size,
+              url: file.url,
+              cloudinaryId: file.cloudinaryId,
+              fileType
+            }, { transaction });
           }
-          
-          await WorkOrderPartFile.create({
-            workOrderPartId: workOrderPart.id,
-            filename: file.filename,
-            originalName: file.originalName,
-            mimeType: file.mimeType,
-            size: file.size,
-            url: file.url,
-            cloudinaryId: file.cloudinaryId,
-            fileType
-          }, { transaction });
         }
+      } catch (partErr) {
+        console.error(`Failed to create WO part #${estimatePart.partNumber} (type: ${estimatePart.partType}):`, partErr.message);
+        if (partErr.errors) partErr.errors.forEach(e => console.error(`  Validation: ${e.path} - ${e.message}`));
+        throw new Error(`Failed on part #${estimatePart.partNumber} (${estimatePart.partType}): ${partErr.message}`);
       }
     }
 
@@ -2072,7 +2091,12 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
   } catch (error) {
     await transaction.rollback();
     console.error('Convert to work order error:', error);
-    res.status(500).json({ error: { message: error.message || 'Failed to convert estimate' } });
+    // Include validation details if available
+    const details = error.errors ? error.errors.map(e => `${e.path}: ${e.message}`).join(', ') : '';
+    const msg = details 
+      ? `Validation error: ${details}` 
+      : (error.message || 'Failed to convert estimate');
+    res.status(error.message?.includes('Validation') ? 400 : 500).json({ error: { message: msg } });
   }
 });
 

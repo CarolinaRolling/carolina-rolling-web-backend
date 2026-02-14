@@ -248,7 +248,7 @@ class MaterialOrderService {
         
         // Order Info
         doc.font('Helvetica-Bold').text(`Date: `, { continued: true });
-        doc.font('Helvetica').text(new Date().toLocaleDateString());
+        doc.font('Helvetica').text(new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' }));
         
         if (workOrder.drNumber) {
           doc.font('Helvetica-Bold').text(`DR Number: `, { continued: true });

@@ -4,7 +4,7 @@ const cors = require('cors');
 const path = require('path');
 const cloudinary = require('cloudinary').v2;
 const cron = require('node-cron');
-const { sequelize, Shipment, ShipmentPhoto, ShipmentDocument, User, AppSettings, WorkOrder, Client } = require('./models');
+const { sequelize, Shipment, ShipmentPhoto, ShipmentDocument, User, AppSettings, WorkOrder, Client, DailyActivity } = require('./models');
 const shipmentRoutes = require('./routes/shipments');
 const settingsRoutes = require('./routes/settings');
 const { sendScheduleEmail } = require('./routes/settings');
@@ -198,6 +198,20 @@ async function startServer() {
       }
     } catch (enumErr) {
       console.log('Estimate part files fileType pre-sync conversion:', enumErr.message);
+    }
+
+    // Convert work_order_parts materialSource from ENUM to VARCHAR BEFORE sync
+    try {
+      const [msCol] = await sequelize.query(
+        `SELECT data_type FROM information_schema.columns WHERE table_name = 'work_order_parts' AND column_name = 'materialSource'`
+      );
+      if (msCol.length > 0 && msCol[0].data_type === 'USER-DEFINED') {
+        await sequelize.query(`ALTER TABLE work_order_parts ALTER COLUMN "materialSource" TYPE VARCHAR(255) USING "materialSource"::text`);
+        await sequelize.query(`DROP TYPE IF EXISTS "enum_work_order_parts_materialSource"`);
+        console.log('Converted work_order_parts.materialSource from ENUM to VARCHAR');
+      }
+    } catch (enumErr) {
+      console.log('WO parts materialSource pre-sync conversion:', enumErr.message);
     }
     
     // Sync models - use alter to add new columns
@@ -466,12 +480,9 @@ async function startServer() {
     // Run cleanup every 24 hours
     setInterval(cleanupOldShippedItems, 24 * 60 * 60 * 1000);
     
-    // Schedule daily email at 6:00 AM Pacific Time
-    // Cron runs in UTC, Pacific is UTC-8 (or UTC-7 during DST)
-    // 6 AM Pacific = 14:00 UTC (standard) or 13:00 UTC (DST)
-    // Using 14:00 UTC for PST (winter) - adjust if needed
-    cron.schedule('0 14 * * *', async () => {
-      console.log('Running scheduled daily email job...');
+    // Comprehensive morning digest at 5:00 AM Pacific
+    cron.schedule('0 5 * * *', async () => {
+      console.log('Running 5:00 AM comprehensive daily digest...');
       try {
         // Check if schedule email is enabled
         const setting = await AppSettings.findOne({
@@ -480,47 +491,35 @@ async function startServer() {
         
         if (setting?.value?.enabled !== false) {
           const result = await sendScheduleEmail();
-          console.log('Daily schedule email result:', result);
+          console.log('Morning digest result:', result);
         } else {
-          console.log('Daily schedule email is disabled, skipping');
+          console.log('Daily digest email is disabled, skipping');
         }
       } catch (error) {
-        console.error('Failed to send daily schedule email:', error);
+        console.error('Failed to send daily digest:', error);
       }
     }, {
-      timezone: 'America/Los_Angeles'  // This handles DST automatically
+      timezone: 'America/Los_Angeles'
     });
     
-    console.log('Daily schedule email cron job configured for 6:00 AM Pacific');
+    console.log('Morning digest configured for 5:00 AM Pacific');
     
-    // NEW: Daily summary emails at 5:00 AM and 2:30 PM Eastern
-    cron.schedule('0 5 * * *', async () => {
-      console.log('Running 5:00 AM daily summary email...');
-      try {
-        const result = await sendDailyEmail();
-        console.log('5:00 AM daily summary result:', result);
-      } catch (error) {
-        console.error('Failed to send 5:00 AM daily summary:', error);
-      }
-    }, {
-      timezone: 'America/New_York'
-    });
-    
+    // Afternoon activity update at 2:30 PM Pacific
     cron.schedule('30 14 * * *', async () => {
-      console.log('Running 2:30 PM daily summary email...');
+      console.log('Running 2:30 PM activity summary email...');
       try {
         const result = await sendDailyEmail();
-        console.log('2:30 PM daily summary result:', result);
+        console.log('2:30 PM activity summary result:', result);
       } catch (error) {
-        console.error('Failed to send 2:30 PM daily summary:', error);
+        console.error('Failed to send 2:30 PM activity summary:', error);
       }
     }, {
-      timezone: 'America/New_York'
+      timezone: 'America/Los_Angeles'
     });
     
-    console.log('Daily summary emails configured for 5:00 AM and 2:30 PM Eastern');
+    console.log('Afternoon activity summary configured for 2:30 PM Pacific');
 
-    // Yearly CDTFA permit verification — runs January 2nd at 3 AM Eastern
+    // Yearly CDTFA permit verification — runs January 2nd at 3 AM Pacific
     cron.schedule('0 3 2 1 *', async () => {
       console.log('[CRON] Starting annual CDTFA permit verification...');
       try {
@@ -531,8 +530,17 @@ async function startServer() {
         });
         const withPermits = clients.filter(c => c.resaleCertificate && c.resaleCertificate.trim());
         console.log(`[CRON] Found ${withPermits.length} clients with resale certificates`);
+        
+        // Log start
+        await DailyActivity.create({
+          activityType: 'verification',
+          resourceType: 'system',
+          description: `Annual CDTFA permit verification started — ${withPermits.length} clients to verify`
+        });
+
         if (withPermits.length === 0) return;
 
+        let verified = 0, active = 0, closed = 0, failed = 0;
         const permits = withPermits.map(c => ({ id: c.id, permitNumber: c.resaleCertificate.trim() }));
         await verifyBatch(permits, async (result) => {
           try {
@@ -545,17 +553,36 @@ async function startServer() {
                 permitOwnerName: result.ownerName || null,
                 permitDbaName: result.dbaName || null
               });
+              verified++;
+              if (result.status === 'Active') active++;
+              else if (result.status === 'Closed') closed++;
+              else failed++;
             }
-          } catch (e) { console.error('[CRON] DB update failed:', e.message); }
+          } catch (e) { console.error('[CRON] DB update failed:', e.message); failed++; }
         }, 60000); // 1 minute between each
+
+        // Log completion
+        await DailyActivity.create({
+          activityType: 'verification',
+          resourceType: 'system',
+          description: `Annual CDTFA verification complete — ${verified} verified: ${active} active, ${closed} closed, ${failed} failed`
+        });
+
         console.log('[CRON] Annual permit verification complete');
       } catch (err) {
         console.error('[CRON] Annual permit verification failed:', err);
+        try {
+          await DailyActivity.create({
+            activityType: 'verification',
+            resourceType: 'system',
+            description: `Annual CDTFA verification FAILED: ${err.message}`
+          });
+        } catch(e) {}
       }
     }, {
-      timezone: 'America/New_York'
+      timezone: 'America/Los_Angeles'
     });
-    console.log('Annual CDTFA permit verification configured for January 2nd at 3:00 AM Eastern');
+    console.log('Annual CDTFA permit verification configured for January 2nd at 3:00 AM Pacific');
 
     app.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);

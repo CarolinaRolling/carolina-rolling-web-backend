@@ -549,6 +549,19 @@ const WorkOrder = sequelize.define('WorkOrder', {
   minimumOverrideReason: {
     type: DataTypes.STRING,
     allowNull: true
+  },
+  // Tax exempt
+  taxExempt: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  taxExemptReason: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  taxExemptCertNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
   }
 }, {
   tableName: 'work_orders',

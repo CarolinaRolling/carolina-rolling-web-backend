@@ -1720,6 +1720,11 @@ const Client = sequelize.define('Client', {
   permitDbaName: {
     type: DataTypes.STRING,
     allowNull: true
+  },
+  paymentTerms: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    defaultValue: null
   }
 }, {
   tableName: 'clients',

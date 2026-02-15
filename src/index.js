@@ -213,6 +213,25 @@ async function startServer() {
     } catch (enumErr) {
       console.log('WO parts materialSource pre-sync conversion:', enumErr.message);
     }
+
+    // Add rush_service to partType ENUMs BEFORE sync
+    try {
+      for (const table of ['work_order_parts', 'estimate_parts']) {
+        const [typeInfo] = await sequelize.query(
+          `SELECT udt_name FROM information_schema.columns WHERE table_name = '${table}' AND column_name = 'partType'`
+        );
+        if (typeInfo.length > 0) {
+          const enumName = typeInfo[0].udt_name;
+          const [vals] = await sequelize.query(`SELECT unnest(enum_range(NULL::${enumName}))::text as val`);
+          if (!vals.some(v => v.val === 'rush_service')) {
+            await sequelize.query(`ALTER TYPE ${enumName} ADD VALUE IF NOT EXISTS 'rush_service'`);
+            console.log(`Added rush_service to ${enumName}`);
+          }
+        }
+      }
+    } catch (enumErr) {
+      console.log('Pre-sync rush_service enum addition:', enumErr.message);
+    }
     
     // Sync models - use alter to add new columns
     // This is safe for adding new nullable columns
@@ -297,6 +316,11 @@ async function startServer() {
             if (!hasShopRate) {
               await sequelize.query(`ALTER TYPE ${enumName} ADD VALUE IF NOT EXISTS 'shop_rate'`);
               console.log(`Added shop_rate to ${enumName}`);
+            }
+            const hasRushService = vals.some(v => v.val === 'rush_service');
+            if (!hasRushService) {
+              await sequelize.query(`ALTER TYPE ${enumName} ADD VALUE IF NOT EXISTS 'rush_service'`);
+              console.log(`Added rush_service to ${enumName}`);
             }
           }
         } catch (enumErr) {

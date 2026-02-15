@@ -575,7 +575,7 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
     allowNull: false
   },
   partType: {
-    type: DataTypes.ENUM('plate_roll', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'tube_roll', 'channel_roll', 'flat_bar', 'cone_roll', 'tee_bar', 'press_brake', 'flat_stock', 'fab_service', 'shop_rate', 'other'),
+    type: DataTypes.ENUM('plate_roll', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'tube_roll', 'channel_roll', 'flat_bar', 'cone_roll', 'tee_bar', 'press_brake', 'flat_stock', 'fab_service', 'shop_rate', 'rush_service', 'other'),
     allowNull: false
   },
   clientPartNumber: {
@@ -1086,7 +1086,7 @@ const EstimatePart = sequelize.define('EstimatePart', {
     allowNull: false
   },
   partType: {
-    type: DataTypes.ENUM('plate_roll', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'tube_roll', 'channel_roll', 'flat_bar', 'cone_roll', 'tee_bar', 'press_brake', 'flat_stock', 'fab_service', 'shop_rate', 'other'),
+    type: DataTypes.ENUM('plate_roll', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'tube_roll', 'channel_roll', 'flat_bar', 'cone_roll', 'tee_bar', 'press_brake', 'flat_stock', 'fab_service', 'shop_rate', 'rush_service', 'other'),
     allowNull: false
   },
   clientPartNumber: {

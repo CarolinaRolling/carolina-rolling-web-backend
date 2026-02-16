@@ -1506,10 +1506,7 @@ router.get('/:id/pdf', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Estimate not found' } });
     }
 
-    // Get Square fee rate from settings (default 2.9% + $0.30)
-    const squareSetting = await AppSettings.findOne({ where: { key: 'square_fees' } });
-    const squareRate = squareSetting?.value?.rate || 2.9;
-    const squareFixed = squareSetting?.value?.fixed || 0.30;
+    // Square fees are hardcoded: In-Person 2.6% + $0.15, Manual 3.5% + $0.15
 
     // Generate PDF using PDFKit
     const PDFDocument = require('pdfkit');
@@ -1592,7 +1589,7 @@ router.get('/:id/pdf', async (req, res, next) => {
     doc.font('Helvetica').fontSize(9).fillColor(grayColor);
     doc.text('9152 Sonrisa St., Bellflower, CA 90706', 140, 62, { lineBreak: false });
     doc.text('Phone: (562) 633-1044', 140, 74, { lineBreak: false });
-    doc.text('Email: keetitrolling@carolinarolling.com', 140, 86, { lineBreak: false });
+    doc.text('Email: keepitrolling@carolinarolling.com', 140, 86, { lineBreak: false });
     
     // Estimate title and number (right side)
     doc.fontSize(22).fillColor(primaryColor).font('Helvetica-Bold').text('ESTIMATE', 400, 40, { align: 'right', width: 112, lineBreak: false });
@@ -1695,7 +1692,7 @@ router.get('/:id/pdf', async (req, res, next) => {
         if (part.outerDiameter) specs.push(`${part.outerDiameter}" OD`);
         if (part.wallThickness && part.wallThickness !== 'SOLID') specs.push(`${part.wallThickness}" wall`);
         if (part.wallThickness === 'SOLID') specs.push('Solid Bar');
-        if (specs.length) descLines.push(specs.join(' × '));
+        if (specs.length) descLines.push(specs.join(' x '));
       }
 
       // Rolling info
@@ -1707,6 +1704,20 @@ router.get('/:id/pdf', async (req, res, next) => {
         if (dirLabel) rollLine += ` (${dirLabel})`;
         if (part.arcDegrees) rollLine += ` | Arc: ${part.arcDegrees}°`;
         descLines.push(rollLine);
+      }
+
+      // Complete rings note
+      if (part._completeRings && part._ringsNeeded) {
+        descLines.push(`${part._ringsNeeded} complete ring(s) required`);
+      }
+
+      // Cone segment breakdown
+      if (part.partType === 'cone_roll' && part._coneSegmentDetails && part._coneSegmentDetails.length > 0) {
+        const rSegs = parseInt(part._coneRadialSegments) || 1;
+        descLines.push(`Cone Segments: ${part._coneSegmentDetails.length} layer(s) x ${rSegs} @ ${(360 / rSegs).toFixed(0)} deg`);
+        part._coneSegmentDetails.forEach(s => {
+          descLines.push(`  L${s.layer}: ${s.segmentAngle.toFixed(1)} deg segment - Sheet ${s.sheetWidth}" x ${s.sheetHeight}" | OR: ${s.outerRadius.toFixed(1)}" / IR: ${s.innerRadius.toFixed(1)}"`);
+        });
       }
 
       // Material source (skip for fab services and shop rate)
@@ -1724,7 +1735,7 @@ router.get('/:id/pdf', async (req, res, next) => {
 
       // Shop rate warning
       if (part.partType === 'shop_rate') {
-        descLines.push('* Pricing based on estimated hours — actual cost may vary');
+        descLines.push('* Pricing based on estimated hours - actual cost may vary');
       }
 
       // Special instructions (truncated)
@@ -1845,21 +1856,30 @@ router.get('/:id/pdf', async (req, res, next) => {
     yPos += 15;
 
     const grandTotal = parseFloat(estimate.grandTotal) || 0;
-    const ccFee = (grandTotal * squareRate / 100) + squareFixed;
-    const ccTotal = grandTotal + ccFee;
+    const ccInPersonFee = (grandTotal * 2.6 / 100) + 0.15;
+    const ccInPersonTotal = grandTotal + ccInPersonFee;
+    const ccManualFee = (grandTotal * 3.5 / 100) + 0.15;
+    const ccManualTotal = grandTotal + ccManualFee;
 
     doc.fontSize(9).fillColor(grayColor);
     doc.text('PAYMENT BY CREDIT CARD (Square)', 50, yPos, { lineBreak: false });
     yPos += 15;
     
-    doc.fontSize(10).fillColor(darkColor);
-    doc.text(`Processing Fee (${squareRate}% + $${squareFixed.toFixed(2)}):`, 300, yPos, { lineBreak: false });
-    doc.text(formatCurrency(ccFee), 480, yPos, { align: 'right', width: 82, lineBreak: false });
-    yPos += 15;
-    
+    // In-Person row
+    doc.fontSize(9).fillColor(darkColor);
+    doc.text('In-Person (2.6% + $0.15):', 60, yPos, { lineBreak: false });
+    doc.text(`Fee: ${formatCurrency(ccInPersonFee)}`, 300, yPos, { lineBreak: false });
     doc.font('Helvetica-Bold').fillColor(primaryColor);
-    doc.text('Credit Card Total:', 300, yPos, { lineBreak: false });
-    doc.text(formatCurrency(ccTotal), 480, yPos, { align: 'right', width: 82, lineBreak: false });
+    doc.text(formatCurrency(ccInPersonTotal), 480, yPos, { align: 'right', width: 82, lineBreak: false });
+    doc.font('Helvetica');
+    yPos += 14;
+    
+    // Manual Input row
+    doc.fontSize(9).fillColor(darkColor);
+    doc.text('Manual Input (3.5% + $0.15):', 60, yPos, { lineBreak: false });
+    doc.text(`Fee: ${formatCurrency(ccManualFee)}`, 300, yPos, { lineBreak: false });
+    doc.font('Helvetica-Bold').fillColor('#E65100');
+    doc.text(formatCurrency(ccManualTotal), 480, yPos, { align: 'right', width: 82, lineBreak: false });
     doc.font('Helvetica');
     yPos += 25;
 
@@ -1884,7 +1904,7 @@ router.get('/:id/pdf', async (req, res, next) => {
       doc.page.margins.bottom = 0;
       doc.fontSize(7).fillColor(grayColor);
       doc.text(
-        'Carolina Rolling Co. Inc. | 9152 Sonrisa St., Bellflower, CA 90706 | (562) 633-1044 | keetitrolling@carolinarolling.com',
+        'Carolina Rolling Co. Inc. | 9152 Sonrisa St., Bellflower, CA 90706 | (562) 633-1044 | keepitrolling@carolinarolling.com',
         50, 745, { align: 'center', width: 512, lineBreak: false }
       );
       doc.text(

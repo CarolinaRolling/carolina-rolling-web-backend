@@ -1711,15 +1711,19 @@ router.get('/:id/pdf', async (req, res, next) => {
         descLines.push(`${part._ringsNeeded} complete ring(s) required`);
       }
 
-      // Cone segment breakdown
-      if (part.partType === 'cone_roll' && part._coneSegmentDetails && part._coneSegmentDetails.length > 0) {
+      // Cone info: type + segments + layout file
+      if (part.partType === 'cone_roll') {
+        const cType = part._coneType || 'concentric';
+        if (cType === 'eccentric') {
+          descLines.push('Eccentric' + (part._coneEccentricAngle ? ' = ' + part._coneEccentricAngle + ' deg' : ''));
+        } else {
+          descLines.push('Concentric');
+        }
+        // Segment info only if segmented (>1 radial segments)
         const rSegs = parseInt(part._coneRadialSegments) || 1;
-        const layerPrefix = part._coneSegmentDetails.length > 1 ? `${part._coneSegmentDetails.length} layers x ` : '';
-        descLines.push(`Cone Segments: ${layerPrefix}${rSegs} @ ${(360 / rSegs).toFixed(0)} deg`);
-        if (part._coneSegmentDetails.length > 1) {
-          part._coneSegmentDetails.forEach(s => {
-            descLines.push(`  L${s.layer}: ${s.segmentAngle.toFixed(1)} deg - Sheet ${s.sheetWidth}" x ${s.sheetHeight}" | OR: ${s.outerRadius.toFixed(1)}" / IR: ${s.innerRadius.toFixed(1)}"`);
-          });
+        if (rSegs > 1) {
+          const layerPrefix = (part._coneSegmentDetails && part._coneSegmentDetails.length > 1) ? part._coneSegmentDetails.length + ' layers x ' : '';
+          descLines.push(layerPrefix + rSegs + ' @ ' + (360 / rSegs).toFixed(0) + ' deg');
         }
       }
 
@@ -1730,6 +1734,11 @@ router.get('/:id/pdf', async (req, res, next) => {
         } else {
           descLines.push('Material supplied by: Carolina Rolling Company');
         }
+      }
+
+      // Layout filename (cone cut file reference)
+      if (part.partType === 'cone_roll' && part.cutFileReference) {
+        descLines.push(`Layout Filename: ${part.cutFileReference}`);
       }
 
       // Material/Rolling pricing breakdown
@@ -1868,22 +1877,8 @@ router.get('/:id/pdf', async (req, res, next) => {
     doc.text('PAYMENT BY CREDIT CARD (Square)', 50, yPos, { lineBreak: false });
     yPos += 15;
     
-    // In-Person row
     doc.fontSize(9).fillColor(darkColor);
-    doc.text('In-Person (2.6% + $0.15):', 60, yPos, { lineBreak: false });
-    doc.text(`Fee: ${formatCurrency(ccInPersonFee)}`, 300, yPos, { lineBreak: false });
-    doc.font('Helvetica-Bold').fillColor(primaryColor);
-    doc.text(formatCurrency(ccInPersonTotal), 480, yPos, { align: 'right', width: 82, lineBreak: false });
-    doc.font('Helvetica');
-    yPos += 14;
-    
-    // Manual Input row
-    doc.fontSize(9).fillColor(darkColor);
-    doc.text('Manual Input (3.5% + $0.15):', 60, yPos, { lineBreak: false });
-    doc.text(`Fee: ${formatCurrency(ccManualFee)}`, 300, yPos, { lineBreak: false });
-    doc.font('Helvetica-Bold').fillColor('#E65100');
-    doc.text(formatCurrency(ccManualTotal), 480, yPos, { align: 'right', width: 82, lineBreak: false });
-    doc.font('Helvetica');
+    doc.text(`In-Person (2.6% + $0.15): ${formatCurrency(ccInPersonTotal)}   |   Manual (3.5% + $0.15): ${formatCurrency(ccManualTotal)}`, 60, yPos, { lineBreak: false });
     yPos += 25;
 
     // ========== NOTES ==========

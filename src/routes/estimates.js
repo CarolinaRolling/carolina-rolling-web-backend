@@ -785,28 +785,42 @@ router.get('/:id/parts/:partId/files/:fileId/download', async (req, res, next) =
     const urlsToTry = [];
     const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
     
-    // Always try stored URL first
-    if (file.url) urlsToTry.push(file.url);
-    
     if (file.cloudinaryId && cloudName) {
       const pubId = file.cloudinaryId;
       const ext = path.extname(file.originalName || file.filename || '').toLowerCase() || '.pdf';
       
-      // If stored URL has /private/ in it, generate a signed URL
+      // Try signed URLs first for private files
       if (file.url && file.url.includes('/private/')) {
         try {
-          const signedUrl = cloudinary.utils.private_download_url(pubId, ext.replace('.', ''), {
+          const signedUrl = cloudinary.url(pubId, {
+            resource_type: 'raw',
+            type: 'private',
+            sign_url: true,
+            secure: true
+          });
+          urlsToTry.push(signedUrl);
+        } catch (e) {
+          console.error('[file-proxy] Failed to generate signed URL:', e.message);
+        }
+        
+        try {
+          const hasExt = pubId.match(/\.\w+$/);
+          const cleanId = hasExt ? pubId : pubId;
+          const format = hasExt ? hasExt[0].replace('.', '') : ext.replace('.', '');
+          const signedDownload = cloudinary.utils.private_download_url(cleanId, format, {
             resource_type: 'raw',
             expires_at: Math.floor(Date.now() / 1000) + 3600
           });
-          urlsToTry.unshift(signedUrl); // Try signed URL first
+          urlsToTry.push(signedDownload);
         } catch (e) {
-          console.error('Failed to generate signed URL:', e.message);
+          console.error('[file-proxy] Failed to generate download URL:', e.message);
         }
       }
       
-      // Try public URLs with different resource types
-      // Extract version from stored URL if available
+      // Try stored URL
+      if (file.url) urlsToTry.push(file.url);
+      
+      // Try public URL variants as fallback
       const versionMatch = file.url?.match(/\/v(\d+)\//);
       const version = versionMatch ? `/v${versionMatch[1]}` : '';
       
@@ -814,11 +828,13 @@ router.get('/:id/parts/:partId/files/:fileId/download', async (req, res, next) =
       urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload${version}/${pubId}`);
       urlsToTry.push(`https://res.cloudinary.com/${cloudName}/image/upload${version}/${pubId}${ext}`);
       urlsToTry.push(`https://res.cloudinary.com/${cloudName}/image/upload${version}/${pubId}`);
-      // Try without version too
       if (version) {
         urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}${ext}`);
         urlsToTry.push(`https://res.cloudinary.com/${cloudName}/image/upload/${pubId}${ext}`);
       }
+    } else {
+      // No cloudinaryId - just try stored URL
+      if (file.url) urlsToTry.push(file.url);
     }
     
     // Deduplicate
@@ -1103,22 +1119,86 @@ router.get('/:id/files/:fileId/signed-url', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'File not found' } });
     }
 
-    if (file.cloudinaryId) {
-      const expiresAt = Math.floor(Date.now() / 1000) + 3600;
-      const signedUrl = cloudinary.utils.private_download_url(
-        file.cloudinaryId,
-        'raw',
-        { resource_type: 'raw', expires_at: expiresAt, attachment: true }
-      );
-
-      return res.json({
-        data: { url: signedUrl, expiresIn: 3600, originalName: file.originalName }
-      });
-    }
+    // Return proxy download URL for consistent file serving
+    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const url = `${baseUrl}/api/estimates/${req.params.id}/files/${req.params.fileId}/download`;
 
     res.json({
-      data: { url: file.url, expiresIn: null, originalName: file.originalName }
+      data: { url, expiresIn: null, originalName: file.originalName }
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/estimates/:id/files/:fileId/download - Stream estimate-level file
+router.get('/:id/files/:fileId/download', async (req, res, next) => {
+  try {
+    const file = await EstimateFile.findOne({
+      where: { id: req.params.fileId, estimateId: req.params.id }
+    });
+
+    if (!file) {
+      return res.status(404).json({ error: { message: 'File not found' } });
+    }
+
+    const urlsToTry = [];
+    const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+
+    if (file.cloudinaryId && cloudName) {
+      const pubId = file.cloudinaryId;
+      const ext = path.extname(file.originalName || file.filename || '').toLowerCase() || '.pdf';
+
+      if (file.url && file.url.includes('/private/')) {
+        try {
+          const signedUrl = cloudinary.url(pubId, { resource_type: 'raw', type: 'private', sign_url: true, secure: true });
+          urlsToTry.push(signedUrl);
+        } catch (e) { console.error('[file-proxy] signed URL error:', e.message); }
+        try {
+          const hasExt = pubId.match(/\.\w+$/);
+          const format = hasExt ? hasExt[0].replace('.', '') : ext.replace('.', '');
+          const signedDownload = cloudinary.utils.private_download_url(pubId, format, { resource_type: 'raw', expires_at: Math.floor(Date.now() / 1000) + 3600 });
+          urlsToTry.push(signedDownload);
+        } catch (e) { console.error('[file-proxy] download URL error:', e.message); }
+      }
+
+      if (file.url) urlsToTry.push(file.url);
+
+      const versionMatch = file.url?.match(/\/v(\d+)\//);
+      const version = versionMatch ? `/v${versionMatch[1]}` : '';
+      urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload${version}/${pubId}${ext}`);
+      urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload${version}/${pubId}`);
+      urlsToTry.push(`https://res.cloudinary.com/${cloudName}/image/upload${version}/${pubId}${ext}`);
+      urlsToTry.push(`https://res.cloudinary.com/${cloudName}/image/upload${version}/${pubId}`);
+      if (version) {
+        urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}${ext}`);
+        urlsToTry.push(`https://res.cloudinary.com/${cloudName}/image/upload/${pubId}${ext}`);
+      }
+    } else {
+      if (file.url) urlsToTry.push(file.url);
+    }
+
+    const uniqueUrls = [...new Set(urlsToTry)];
+    console.log(`[file-proxy] Trying ${uniqueUrls.length} URLs for estimate file ${file.id} (${file.originalName})`);
+
+    for (const url of uniqueUrls) {
+      const upstream = await fetchWithRedirects(url);
+      if (upstream) {
+        console.log(`[file-proxy] SUCCESS for estimate file ${file.id}`);
+        const contentType = file.mimeType || upstream.headers['content-type'] || 'application/octet-stream';
+        res.setHeader('Content-Type', contentType);
+        if (upstream.headers['content-length']) res.setHeader('Content-Length', upstream.headers['content-length']);
+        res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(file.originalName || file.filename || 'file')}"`);
+        if (url !== file.url && !url.includes('?')) {
+          file.update({ url }).catch(() => {});
+        }
+        upstream.pipe(res);
+        return;
+      }
+    }
+
+    console.error(`[file-proxy] ALL URLS FAILED for estimate file ${file.id}. cloudinaryId=${file.cloudinaryId}, storedUrl=${file.url}`);
+    res.status(404).json({ error: { message: 'File not accessible on storage' } });
   } catch (error) {
     next(error);
   }
@@ -1889,12 +1969,15 @@ router.get('/:id/pdf', async (req, res, next) => {
     const ccManualFee = (grandTotal * 3.5 / 100) + 0.15;
     const ccManualTotal = grandTotal + ccManualFee;
 
-    doc.fontSize(9).fillColor(grayColor);
-    doc.text('PAYMENT BY CREDIT CARD (Square)', 50, yPos, { lineBreak: false });
-    yPos += 15;
+    doc.fontSize(9).font('Helvetica-Bold').fillColor(darkColor);
+    doc.text('Total with Credit Card Fees', 50, yPos, { align: 'right', width: 512, lineBreak: false });
+    doc.font('Helvetica');
+    yPos += 14;
     
     doc.fontSize(9).fillColor(darkColor);
-    doc.text(`In-Person (2.6% + $0.15): ${formatCurrency(ccInPersonTotal)}   |   Manual (3.5% + $0.15): ${formatCurrency(ccManualTotal)}`, 60, yPos, { lineBreak: false });
+    doc.text(`In-Person (2.6% + $0.15): ${formatCurrency(ccInPersonTotal)}`, 50, yPos, { align: 'right', width: 512, lineBreak: false });
+    yPos += 13;
+    doc.text(`Manual (3.5% + $0.15): ${formatCurrency(ccManualTotal)}`, 50, yPos, { align: 'right', width: 512, lineBreak: false });
     yPos += 25;
 
     // ========== NOTES ==========

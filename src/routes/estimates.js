@@ -1678,8 +1678,24 @@ router.get('/:id/pdf', async (req, res, next) => {
       // Build clean description lines
       const descLines = [];
 
-      // Material description (already includes size info)
-      if (part.materialDescription) {
+      // Material description - for cones, always rebuild from fields to avoid stale/garbled data
+      if (part.partType === 'cone_roll') {
+        const fd = part.formData || {};
+        const thk = part.thickness || fd.thickness || '';
+        const ldType = (fd._coneLargeDiaType || 'inside') === 'inside' ? 'ID' : (fd._coneLargeDiaType === 'outside' ? 'OD' : 'CLD');
+        const sdType = (fd._coneSmallDiaType || 'inside') === 'inside' ? 'ID' : (fd._coneSmallDiaType === 'outside' ? 'OD' : 'CLD');
+        const ld = parseFloat(fd._coneLargeDia) || 0;
+        const sd = parseFloat(fd._coneSmallDia) || 0;
+        const vh = parseFloat(fd._coneHeight) || 0;
+        const grade = part.material || '';
+        const origin = fd._materialOrigin || '';
+        let coneLine = thk ? thk + ' ' : '';
+        coneLine += 'Cone - ';
+        if (ld && sd && vh) coneLine += ld.toFixed(1) + '" ' + ldType + ' x ' + sd.toFixed(1) + '" ' + sdType + ' x ' + vh.toFixed(1) + '" VH';
+        if (grade) coneLine += ' ' + grade;
+        if (origin) coneLine += ' ' + origin;
+        descLines.push(coneLine);
+      } else if (part.materialDescription) {
         descLines.push(part.materialDescription);
       } else {
         // Build from individual fields
@@ -1702,7 +1718,7 @@ router.get('/:id/pdf', async (req, res, next) => {
         const dirLabel = getRollDirLabel(part);
         let rollLine = `Roll: ${rollVal}" ${specLabel}`;
         if (dirLabel) rollLine += ` (${dirLabel})`;
-        if (part.arcDegrees) rollLine += ` | Arc: ${part.arcDegrees}°`;
+        if (part.arcDegrees) rollLine += ` | Arc: ${part.arcDegrees} deg`;
         descLines.push(rollLine);
       }
 

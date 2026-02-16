@@ -169,6 +169,21 @@ async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
         if (partObj.formData && typeof partObj.formData === 'object') Object.assign(partObj, partObj.formData);
         
         let desc = partObj._materialDescription || partObj.materialDescription || '';
+        // For cones, rebuild from fields to avoid stale/garbled data
+        if (partObj.partType === 'cone_roll') {
+          const thk = partObj.thickness || '';
+          const ldType = (partObj._coneLargeDiaType || 'inside') === 'inside' ? 'ID' : (partObj._coneLargeDiaType === 'outside' ? 'OD' : 'CLD');
+          const sdType = (partObj._coneSmallDiaType || 'inside') === 'inside' ? 'ID' : (partObj._coneSmallDiaType === 'outside' ? 'OD' : 'CLD');
+          const ld = parseFloat(partObj._coneLargeDia) || 0;
+          const sd = parseFloat(partObj._coneSmallDia) || 0;
+          const vh = parseFloat(partObj._coneHeight) || 0;
+          const grade = partObj.material || '';
+          const origin = partObj._materialOrigin || '';
+          desc = (thk ? thk + ' ' : '') + 'Cone - ';
+          if (ld && sd && vh) desc += ld.toFixed(1) + '" ' + ldType + ' x ' + sd.toFixed(1) + '" ' + sdType + ' x ' + vh.toFixed(1) + '" VH';
+          if (grade) desc += ' ' + grade;
+          if (origin) desc += ' ' + origin;
+        }
         if (!desc) {
           const pieces = [];
           if (partObj.sectionSize) pieces.push(partObj.sectionSize);

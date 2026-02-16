@@ -1714,10 +1714,13 @@ router.get('/:id/pdf', async (req, res, next) => {
       // Cone segment breakdown
       if (part.partType === 'cone_roll' && part._coneSegmentDetails && part._coneSegmentDetails.length > 0) {
         const rSegs = parseInt(part._coneRadialSegments) || 1;
-        descLines.push(`Cone Segments: ${part._coneSegmentDetails.length} layer(s) x ${rSegs} @ ${(360 / rSegs).toFixed(0)} deg`);
-        part._coneSegmentDetails.forEach(s => {
-          descLines.push(`  L${s.layer}: ${s.segmentAngle.toFixed(1)} deg segment - Sheet ${s.sheetWidth}" x ${s.sheetHeight}" | OR: ${s.outerRadius.toFixed(1)}" / IR: ${s.innerRadius.toFixed(1)}"`);
-        });
+        const layerPrefix = part._coneSegmentDetails.length > 1 ? `${part._coneSegmentDetails.length} layers x ` : '';
+        descLines.push(`Cone Segments: ${layerPrefix}${rSegs} @ ${(360 / rSegs).toFixed(0)} deg`);
+        if (part._coneSegmentDetails.length > 1) {
+          part._coneSegmentDetails.forEach(s => {
+            descLines.push(`  L${s.layer}: ${s.segmentAngle.toFixed(1)} deg - Sheet ${s.sheetWidth}" x ${s.sheetHeight}" | OR: ${s.outerRadius.toFixed(1)}" / IR: ${s.innerRadius.toFixed(1)}"`);
+          });
+        }
       }
 
       // Material source (skip for fab services and shop rate)

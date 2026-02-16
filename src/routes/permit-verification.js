@@ -50,13 +50,18 @@ router.post('/verify-permit', async (req, res, next) => {
       try {
         const client = await Client.findByPk(clientId);
         if (client) {
-          await client.update({
+          const updateData = {
             permitStatus: result.status,
             permitLastVerified: new Date(),
             permitRawResponse: result.rawResponse,
             permitOwnerName: result.ownerName || null,
                 permitDbaName: result.dbaName || null
-          });
+          };
+          // Auto-set taxStatus to resale when permit is verified active
+          if (result.status === 'active') {
+            updateData.taxStatus = 'resale';
+          }
+          await client.update(updateData);
           console.log(`[Permit] Updated client ${clientId} status: ${result.status}`);
         }
       } catch (dbErr) {
@@ -127,13 +132,17 @@ router.post('/verify-permits/batch', async (req, res, next) => {
           try {
             const client = await Client.findByPk(result.clientId);
             if (client) {
-              await client.update({
+              const batchUpdateData = {
                 permitStatus: result.status,
                 permitLastVerified: new Date(),
                 permitRawResponse: result.rawResponse,
                 permitOwnerName: result.ownerName || null,
                 permitDbaName: result.dbaName || null
-              });
+              };
+              if (result.status === 'active') {
+                batchUpdateData.taxStatus = 'resale';
+              }
+              await client.update(batchUpdateData);
             }
           } catch (dbErr) {
             console.error(`[Batch] DB update failed for client ${result.clientId}:`, dbErr.message);

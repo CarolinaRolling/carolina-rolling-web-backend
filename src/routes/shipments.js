@@ -684,6 +684,27 @@ router.post('/:id/link-workorder', async (req, res, next) => {
   }
 });
 
+// POST /api/shipments/:id/unlink-workorder - Unlink a shipment from its work order
+router.post('/:id/unlink-workorder', async (req, res, next) => {
+  try {
+    const shipment = await Shipment.findByPk(req.params.id);
+    if (!shipment) {
+      return res.status(404).json({ error: { message: 'Shipment not found' } });
+    }
+    if (!shipment.workOrderId) {
+      return res.status(400).json({ error: { message: 'Shipment is not linked to any work order' } });
+    }
+    const previousWOId = shipment.workOrderId;
+    await shipment.update({ workOrderId: null });
+    res.json({
+      data: transformShipment(shipment),
+      message: `Shipment unlinked from work order`
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // PUT /api/shipments/:id - Update shipment
 router.put('/:id', async (req, res, next) => {
   try {

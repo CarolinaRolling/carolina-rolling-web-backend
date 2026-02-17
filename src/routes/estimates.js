@@ -1833,7 +1833,10 @@ router.get('/:id/pdf', async (req, res, next) => {
         // Build from individual fields
         const specs = [];
         if (part.material) specs.push(part.material);
-        if (part.sectionSize) specs.push(part.sectionSize);
+        if (part.sectionSize) {
+          const sizeDisplay = part.partType === 'pipe_roll' && part._schedule ? part.sectionSize.replace(' Pipe', ` Sch ${part._schedule} Pipe`) : part.sectionSize;
+          specs.push(sizeDisplay);
+        }
         if (part.thickness) specs.push(part.thickness);
         if (part.width) specs.push(`${part.width}" wide`);
         if (part.length) specs.push(part.length.toString().includes("'") || part.length.toString().includes('"') ? part.length : `${part.length}" long`);

@@ -186,7 +186,10 @@ async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
         }
         if (!desc) {
           const pieces = [];
-          if (partObj.sectionSize) pieces.push(partObj.sectionSize);
+          if (partObj.sectionSize) {
+            const sizeDisplay = partObj.partType === 'pipe_roll' && partObj._schedule ? partObj.sectionSize.replace(' Pipe', ` Sch ${partObj._schedule} Pipe`) : partObj.sectionSize;
+            pieces.push(sizeDisplay);
+          }
           if (partObj.thickness) pieces.push(partObj.thickness);
           if (partObj.width) pieces.push(`x ${partObj.width}"`);
           if (partObj.length) pieces.push(`x ${partObj.length}`);

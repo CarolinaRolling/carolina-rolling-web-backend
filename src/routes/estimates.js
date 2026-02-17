@@ -12,20 +12,22 @@ const { Estimate, EstimatePart, EstimatePartFile, EstimateFile, WorkOrder, WorkO
 const router = express.Router();
 
 // Fetch a URL following redirects (up to 5 hops), returns response stream or null
-function fetchWithRedirects(url, maxRedirects = 5) {
+function fetchWithRedirects(url, maxRedirects = 5, timeoutMs = 15000) {
   return new Promise((resolve) => {
     const lib = url.startsWith('https') ? https : http;
-    lib.get(url, (resp) => {
+    const req = lib.get(url, (resp) => {
       if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location && maxRedirects > 0) {
         resp.resume();
-        fetchWithRedirects(resp.headers.location, maxRedirects - 1).then(resolve);
+        fetchWithRedirects(resp.headers.location, maxRedirects - 1, timeoutMs).then(resolve);
       } else if (resp.statusCode === 200) {
         resolve(resp);
       } else {
         resp.resume();
         resolve(null);
       }
-    }).on('error', () => resolve(null));
+    });
+    req.on('error', () => resolve(null));
+    req.setTimeout(timeoutMs, () => { req.destroy(); resolve(null); });
   });
 }
 
@@ -117,12 +119,22 @@ const upload = multer({
   storage,
   limits: { fileSize: 50 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    const allowedExtensions = ['.pdf', '.dxf', '.step', '.stp'];
+    const allowedTypes = [
+      'application/pdf',
+      'application/stp',
+      'application/step',
+      'model/step',
+      'application/octet-stream',
+      'image/png',
+      'image/jpeg',
+      'image/gif'
+    ];
+    const allowedExtensions = ['.pdf', '.dxf', '.step', '.stp', '.dwg', '.png', '.jpg', '.jpeg', '.gif'];
     const ext = path.extname(file.originalname).toLowerCase();
-    if (allowedExtensions.includes(ext)) {
+    if (allowedTypes.includes(file.mimetype) || allowedExtensions.includes(ext)) {
       cb(null, true);
     } else {
-      cb(new Error('Invalid file type. Only PDF, DXF, and STEP files are allowed.'));
+      cb(new Error('Invalid file type. Allowed: PDF, DXF, DWG, STEP, and image files.'));
     }
   }
 });
@@ -645,52 +657,72 @@ router.get('/:id/parts/:partId/files', async (req, res, next) => {
   }
 });
 
-// POST /api/estimates/:id/parts/:partId/files - Upload file to a specific part
-router.post('/:id/parts/:partId/files', upload.single('file'), async (req, res, next) => {
+// POST /api/estimates/:id/parts/:partId/files - Upload file(s) to a specific part
+router.post('/:id/parts/:partId/files', upload.array('files', 10), async (req, res, next) => {
+  const tempFiles = [];
   try {
     const part = await EstimatePart.findOne({
       where: { id: req.params.partId, estimateId: req.params.id }
     });
 
     if (!part) {
+      req.files?.forEach(f => { try { fs.unlinkSync(f.path); } catch(e){} });
       return res.status(404).json({ error: { message: 'Part not found' } });
     }
 
-    if (!req.file) {
+    // Support both single file (field='file') and multi file (field='files')
+    const uploadedFiles = req.files || [];
+    if (req.file) uploadedFiles.push(req.file);
+    
+    if (uploadedFiles.length === 0) {
       return res.status(400).json({ error: { message: 'No file uploaded' } });
     }
 
-    // Upload to Cloudinary (use 'raw' for consistent PDF handling)
-    const result = await cloudinary.uploader.upload(req.file.path, {
-      folder: 'estimate-part-files',
-      resource_type: 'raw',
-      use_filename: true,
-      unique_filename: true
-    });
+    tempFiles.push(...uploadedFiles.map(f => f.path));
 
-    // Clean up local file
-    fs.unlinkSync(req.file.path);
-
-    // Determine file type from request or default to 'other'
     const fileType = req.body.fileType || 'other';
+    
+    const savedFiles = await Promise.all(uploadedFiles.map(async (file) => {
+      // Determine file type from extension
+      const ext = path.extname(file.originalname).toLowerCase();
+      let detectedType = fileType;
+      if (ext === '.pdf') detectedType = 'drawing';
+      else if (ext === '.stp' || ext === '.step') detectedType = 'step_file';
+      else if (ext === '.dxf') detectedType = 'drawing';
 
-    // Create file record
-    const partFile = await EstimatePartFile.create({
-      partId: part.id,
-      filename: req.file.filename,
-      originalName: req.file.originalname,
-      mimeType: req.file.mimetype,
-      size: req.file.size,
-      url: result.secure_url,
-      cloudinaryId: result.public_id,
-      fileType: fileType
-    });
+      // Upload to Cloudinary - use private type like work orders
+      const result = await cloudinary.uploader.upload(file.path, {
+        folder: `estimates/${req.params.id}/parts/${req.params.partId}`,
+        resource_type: 'raw',
+        type: 'private',
+        use_filename: true,
+        unique_filename: true
+      });
+
+      // Clean up local file
+      try { fs.unlinkSync(file.path); } catch(e){}
+
+      // Create file record
+      const partFile = await EstimatePartFile.create({
+        partId: part.id,
+        filename: file.filename,
+        originalName: file.originalname,
+        mimeType: file.mimetype,
+        size: file.size,
+        url: result.secure_url,
+        cloudinaryId: result.public_id,
+        fileType: detectedType
+      });
+
+      return partFile;
+    }));
 
     res.status(201).json({
-      data: partFile,
-      message: 'File uploaded'
+      data: savedFiles.length === 1 ? savedFiles[0] : savedFiles,
+      message: `${savedFiles.length} file(s) uploaded`
     });
   } catch (error) {
+    tempFiles.forEach(p => { try { fs.unlinkSync(p); } catch(e){} });
     next(error);
   }
 });
@@ -789,32 +821,30 @@ router.get('/:id/parts/:partId/files/:fileId/download', async (req, res, next) =
       const pubId = file.cloudinaryId;
       const ext = path.extname(file.originalName || file.filename || '').toLowerCase() || '.pdf';
       
-      // Try signed URLs first for private files
-      if (file.url && file.url.includes('/private/')) {
-        try {
-          const signedUrl = cloudinary.url(pubId, {
-            resource_type: 'raw',
-            type: 'private',
-            sign_url: true,
-            secure: true
-          });
-          urlsToTry.push(signedUrl);
-        } catch (e) {
-          console.error('[file-proxy] Failed to generate signed URL:', e.message);
-        }
-        
-        try {
-          const hasExt = pubId.match(/\.\w+$/);
-          const cleanId = hasExt ? pubId : pubId;
-          const format = hasExt ? hasExt[0].replace('.', '') : ext.replace('.', '');
-          const signedDownload = cloudinary.utils.private_download_url(cleanId, format, {
-            resource_type: 'raw',
-            expires_at: Math.floor(Date.now() / 1000) + 3600
-          });
-          urlsToTry.push(signedDownload);
-        } catch (e) {
-          console.error('[file-proxy] Failed to generate download URL:', e.message);
-        }
+      // Always try signed URLs first (files may be private)
+      try {
+        const signedUrl = cloudinary.url(pubId, {
+          resource_type: 'raw',
+          type: 'private',
+          sign_url: true,
+          secure: true
+        });
+        urlsToTry.push(signedUrl);
+      } catch (e) {
+        console.error('[file-proxy] Failed to generate signed URL:', e.message);
+      }
+      
+      // Also try authenticated download URL
+      try {
+        const hasExt = pubId.match(/\.\w+$/);
+        const format = hasExt ? hasExt[0].replace('.', '') : ext.replace('.', '');
+        const signedDownload = cloudinary.utils.private_download_url(pubId, format, {
+          resource_type: 'raw',
+          expires_at: Math.floor(Date.now() / 1000) + 3600
+        });
+        urlsToTry.push(signedDownload);
+      } catch (e) {
+        console.error('[file-proxy] Failed to generate download URL:', e.message);
       }
       
       // Try stored URL
@@ -1149,18 +1179,17 @@ router.get('/:id/files/:fileId/download', async (req, res, next) => {
       const pubId = file.cloudinaryId;
       const ext = path.extname(file.originalName || file.filename || '').toLowerCase() || '.pdf';
 
-      if (file.url && file.url.includes('/private/')) {
-        try {
-          const signedUrl = cloudinary.url(pubId, { resource_type: 'raw', type: 'private', sign_url: true, secure: true });
-          urlsToTry.push(signedUrl);
-        } catch (e) { console.error('[file-proxy] signed URL error:', e.message); }
-        try {
-          const hasExt = pubId.match(/\.\w+$/);
-          const format = hasExt ? hasExt[0].replace('.', '') : ext.replace('.', '');
-          const signedDownload = cloudinary.utils.private_download_url(pubId, format, { resource_type: 'raw', expires_at: Math.floor(Date.now() / 1000) + 3600 });
-          urlsToTry.push(signedDownload);
-        } catch (e) { console.error('[file-proxy] download URL error:', e.message); }
-      }
+      // Always try signed URLs first (files may be private)
+      try {
+        const signedUrl = cloudinary.url(pubId, { resource_type: 'raw', type: 'private', sign_url: true, secure: true });
+        urlsToTry.push(signedUrl);
+      } catch (e) { console.error('[file-proxy] signed URL error:', e.message); }
+      try {
+        const hasExt = pubId.match(/\.\w+$/);
+        const format = hasExt ? hasExt[0].replace('.', '') : ext.replace('.', '');
+        const signedDownload = cloudinary.utils.private_download_url(pubId, format, { resource_type: 'raw', expires_at: Math.floor(Date.now() / 1000) + 3600 });
+        urlsToTry.push(signedDownload);
+      } catch (e) { console.error('[file-proxy] download URL error:', e.message); }
 
       if (file.url) urlsToTry.push(file.url);
 

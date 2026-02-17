@@ -373,7 +373,17 @@ router.post('/', async (req, res, next) => {
       effectiveTaxRate = taxSetting?.value?.defaultTaxRate || 7.0;
     }
 
-    const estimateNumber = generateEstimateNumber();
+    // Use custom estimate number if provided, otherwise auto-generate
+    let estimateNumber;
+    if (req.body.estimateNumber && req.body.estimateNumber.trim()) {
+      estimateNumber = req.body.estimateNumber.trim();
+      const existing = await Estimate.findOne({ where: { estimateNumber } });
+      if (existing) {
+        return res.status(409).json({ error: { message: `Estimate number "${estimateNumber}" is already in use` } });
+      }
+    } else {
+      estimateNumber = generateEstimateNumber();
+    }
 
     // Create estimate
     const estimate = await Estimate.create({
@@ -434,6 +444,19 @@ router.put('/:id', async (req, res, next) => {
         updates[field] = req.body[field];
       }
     });
+
+    // Handle custom estimate number with uniqueness check
+    if (req.body.estimateNumber !== undefined && req.body.estimateNumber !== estimate.estimateNumber) {
+      const newNum = req.body.estimateNumber.trim();
+      if (!newNum) {
+        return res.status(400).json({ error: { message: 'Estimate number cannot be empty' } });
+      }
+      const existing = await Estimate.findOne({ where: { estimateNumber: newNum } });
+      if (existing && existing.id !== estimate.id) {
+        return res.status(409).json({ error: { message: `Estimate number "${newNum}" is already in use` } });
+      }
+      updates.estimateNumber = newNum;
+    }
 
     if (updates.status) {
       if (updates.status === 'sent' && !estimate.sentAt) {

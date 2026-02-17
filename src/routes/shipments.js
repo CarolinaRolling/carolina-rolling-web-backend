@@ -645,15 +645,24 @@ router.post('/:id/link-workorder', async (req, res, next) => {
           allMaterialReceived: true
         }, { transaction });
 
-        // Assign DR number
-        const maxDR = await DRNumber.findOne({
-          order: [['drNumber', 'DESC']],
-          transaction
-        });
-        let drNumber = (maxDR?.drNumber || 0) + 1;
-        const maxWODR = await WorkOrder.max('drNumber', { transaction });
-        if (maxWODR && maxWODR >= drNumber) {
-          drNumber = maxWODR + 1;
+        // Assign DR number (same logic as workorder creation)
+        const { AppSettings } = require('../models');
+        let drNumber = null;
+        const drSetting = await AppSettings.findOne({ where: { key: 'next_dr_number' }, transaction });
+        
+        if (drSetting?.value?.nextNumber) {
+          drNumber = drSetting.value.nextNumber;
+          await drSetting.update({ value: { nextNumber: drNumber + 1 } }, { transaction });
+        } else {
+          const maxDR = await DRNumber.findOne({
+            order: [['drNumber', 'DESC']],
+            transaction
+          });
+          drNumber = (maxDR?.drNumber || 0) + 1;
+          const maxWODR = await WorkOrder.max('drNumber', { transaction });
+          if (maxWODR && maxWODR >= drNumber) {
+            drNumber = maxWODR + 1;
+          }
         }
         await workOrder.update({ drNumber }, { transaction });
         await DRNumber.create({

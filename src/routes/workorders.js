@@ -770,6 +770,68 @@ router.post('/:id/mark-complete', async (req, res, next) => {
   }
 });
 
+// PUT /:id/dr-number - Change DR number (must be unique)
+router.put('/:id/dr-number', async (req, res, next) => {
+  try {
+    const { drNumber } = req.body;
+    const newDR = parseInt(drNumber);
+    if (!newDR || newDR < 1) {
+      return res.status(400).json({ error: { message: 'Invalid DR number' } });
+    }
+
+    const workOrder = await WorkOrder.findByPk(req.params.id);
+    if (!workOrder) {
+      return res.status(404).json({ error: { message: 'Work order not found' } });
+    }
+
+    if (workOrder.drNumber === newDR) {
+      return res.json({ data: workOrder.toJSON(), message: 'No change' });
+    }
+
+    // Check uniqueness across WorkOrders and DRNumbers
+    const existingWO = await WorkOrder.findOne({ where: { drNumber: newDR } });
+    if (existingWO && existingWO.id !== workOrder.id) {
+      return res.status(409).json({ error: { message: `DR-${newDR} is already assigned to another work order` } });
+    }
+
+    const transaction = await sequelize.transaction();
+    try {
+      const oldDR = workOrder.drNumber;
+
+      // Update work order
+      await workOrder.update({ drNumber: newDR }, { transaction });
+
+      // Update or create DRNumber record
+      if (oldDR) {
+        const existingDRRecord = await DRNumber.findOne({ where: { drNumber: oldDR, workOrderId: workOrder.id }, transaction });
+        if (existingDRRecord) {
+          await existingDRRecord.update({ drNumber: newDR }, { transaction });
+        }
+      } else {
+        await DRNumber.create({
+          drNumber: newDR,
+          workOrderId: workOrder.id,
+          clientName: workOrder.clientName,
+          assignedAt: new Date(),
+          assignedBy: req.user?.username || 'system'
+        }, { transaction });
+      }
+
+      await transaction.commit();
+
+      res.json({
+        data: workOrder.toJSON(),
+        message: `DR number changed from ${oldDR ? 'DR-' + oldDR : 'none'} to DR-${newDR}`
+      });
+    } catch (err) {
+      await transaction.rollback();
+      throw err;
+    }
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.put('/:id', async (req, res, next) => {
   try {
     const workOrder = await WorkOrder.findByPk(req.params.id);

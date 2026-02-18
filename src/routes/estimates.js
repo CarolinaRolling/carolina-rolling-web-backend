@@ -333,6 +333,8 @@ async function loadLaborMinimums() {
 }
 
 function calculateEstimateTotals(parts, truckingCost, taxRate, taxExempt = false, discountPercent = 0, discountAmount = 0, minInfo = null) {
+  // Ensure taxExempt is boolean (SQLite may store as 0/1)
+  const isExempt = taxExempt === true || taxExempt === 1 || taxExempt === '1' || taxExempt === 'true';
   let partsSubtotal = 0;
 
   if (minInfo && minInfo.minimumApplies) {
@@ -381,7 +383,7 @@ function calculateEstimateTotals(parts, truckingCost, taxRate, taxExempt = false
   const afterDiscount = partsSubtotal - discountAmt;
 
   const trucking = parseFloat(truckingCost) || 0;
-  const taxAmount = taxExempt ? 0 : afterDiscount * (parseFloat(taxRate) / 100);
+  const taxAmount = isExempt ? 0 : afterDiscount * (parseFloat(taxRate) / 100);
   const grandTotal = afterDiscount + taxAmount + trucking;
 
   return {
@@ -395,8 +397,10 @@ function calculateEstimateTotals(parts, truckingCost, taxRate, taxExempt = false
 async function calculateEstimateTotalsWithMinimums(parts, estimate) {
   const laborMinimums = await loadLaborMinimums();
   const minInfo = getMinimumInfo(parts, estimate.minimumOverride, laborMinimums);
+  // Coerce taxExempt to boolean (SQLite stores as 0/1)
+  const taxExempt = estimate.taxExempt === true || estimate.taxExempt === 1 || estimate.taxExempt === '1' || estimate.taxExempt === 'true';
   return calculateEstimateTotals(
-    parts, estimate.truckingCost, estimate.taxRate, estimate.taxExempt,
+    parts, estimate.truckingCost, estimate.taxRate, taxExempt,
     estimate.discountPercent, estimate.discountAmount, minInfo
   );
 }
@@ -664,6 +668,11 @@ router.put('/:id', async (req, res, next) => {
     }
 
     await estimate.update(updates);
+
+    // Ensure taxExempt is proper boolean after update (SQLite stores as 0/1)
+    if (estimate.taxExempt !== undefined) {
+      estimate.taxExempt = estimate.taxExempt === true || estimate.taxExempt === 1 || estimate.taxExempt === '1' || estimate.taxExempt === 'true';
+    }
 
     // Recalculate totals with minimum charge logic
     const parts = await EstimatePart.findAll({ where: { estimateId: estimate.id } });
@@ -1824,12 +1833,20 @@ router.get('/:id/pdf', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Estimate not found' } });
     }
 
+    // Ensure taxExempt is a proper boolean (SQLite stores as 0/1)
+    const isTaxExempt = estimate.taxExempt === true || estimate.taxExempt === 1 || estimate.taxExempt === '1' || estimate.taxExempt === 'true';
+    estimate.taxExempt = isTaxExempt;
+
+    console.log(`[PDF] Estimate ${estimate.estimateNumber}: taxExempt=${estimate.taxExempt} (raw=${estimate.getDataValue('taxExempt')}), taxRate=${estimate.taxRate}`);
+
     // Recalculate totals with minimum charge logic (stored values may not include minimums)
     const pdfTotals = await calculateEstimateTotalsWithMinimums(estimate.parts, estimate);
     // Override stored totals with recalculated values for PDF rendering
     estimate.partsSubtotal = pdfTotals.partsSubtotal;
     estimate.taxAmount = pdfTotals.taxAmount;
     estimate.grandTotal = pdfTotals.grandTotal;
+
+    console.log(`[PDF] Recalculated: taxAmount=${pdfTotals.taxAmount}, grandTotal=${pdfTotals.grandTotal}`);
 
     // Also compute minimum info for display on PDF
     const pdfLaborMinimums = await loadLaborMinimums();

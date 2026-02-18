@@ -2256,10 +2256,13 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
     }
 
     // Update estimate status - use 'accepted' and link to work order
-    await estimate.update({
+    const statusUpdates = {
       status: 'accepted',
       workOrderId: workOrder.id
-    }, { transaction });
+    };
+    if (!estimate.sentAt) statusUpdates.sentAt = new Date();
+    if (!estimate.acceptedAt) statusUpdates.acceptedAt = new Date();
+    await estimate.update(statusUpdates, { transaction });
 
     await transaction.commit();
 

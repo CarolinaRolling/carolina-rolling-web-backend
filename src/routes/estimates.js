@@ -1837,7 +1837,7 @@ router.get('/:id/pdf', async (req, res, next) => {
     const isTaxExempt = estimate.taxExempt === true || estimate.taxExempt === 1 || estimate.taxExempt === '1' || estimate.taxExempt === 'true';
     estimate.taxExempt = isTaxExempt;
 
-    console.log(`[PDF] Estimate ${estimate.estimateNumber}: taxExempt=${estimate.taxExempt} (raw=${estimate.getDataValue('taxExempt')}), taxRate=${estimate.taxRate}`);
+    console.log(`[PDF] Estimate ${estimate.estimateNumber}: taxExempt=${isTaxExempt}, taxRate=${estimate.taxRate}`);
 
     // Recalculate totals with minimum charge logic (stored values may not include minimums)
     const pdfTotals = await calculateEstimateTotalsWithMinimums(estimate.parts, estimate);
@@ -1968,10 +1968,6 @@ router.get('/:id/pdf', async (req, res, next) => {
       doc.fontSize(10).fillColor('#c62828').font('Helvetica-Bold')
         .text('TAX EXEMPT', 400, 135, { align: 'right', width: 112, lineBreak: false });
       doc.font('Helvetica');
-      if (estimate.taxExemptCertNumber) {
-        doc.fontSize(8).fillColor(grayColor)
-          .text(`Cert#: ${estimate.taxExemptCertNumber}`, 400, 150, { align: 'right', width: 112, lineBreak: false });
-      }
     }
 
     // Project description

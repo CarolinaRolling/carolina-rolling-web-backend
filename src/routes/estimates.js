@@ -1787,8 +1787,22 @@ router.get('/:id/pdf', async (req, res, next) => {
     doc.strokeColor(lightGray).lineWidth(0.5).moveTo(50, yPos).lineTo(562, yPos).stroke();
     yPos += 8;
 
-    // Parts
-    const sortedParts = mergedParts.sort((a, b) => a.partNumber - b.partNumber);
+    // Parts - group services under their parent part
+    const sortedAll = mergedParts.sort((a, b) => a.partNumber - b.partNumber);
+    const regularParts = sortedAll.filter(p => !['fab_service', 'shop_rate'].includes(p.partType) || !p._linkedPartId);
+    const servicePartsArr = sortedAll.filter(p => ['fab_service', 'shop_rate'].includes(p.partType) && p._linkedPartId);
+    const sortedParts = [];
+    const usedSvcIds = new Set();
+    regularParts.forEach(rp => {
+      sortedParts.push(rp);
+      servicePartsArr.forEach(sp => {
+        if (String(sp._linkedPartId) === String(rp.id) && !usedSvcIds.has(sp.id)) {
+          sortedParts.push(sp);
+          usedSvcIds.add(sp.id);
+        }
+      });
+    });
+    servicePartsArr.forEach(sp => { if (!usedSvcIds.has(sp.id)) sortedParts.push(sp); });
     
     for (const part of sortedParts) {
       if (yPos > 680) { doc.addPage(); yPos = 50; }
@@ -1916,15 +1930,24 @@ router.get('/:id/pdf', async (req, res, next) => {
       // Check page break with full row height
       if (yPos + rowHeight > 700) { doc.addPage(); yPos = 50; }
 
+      const isLinkedSvc = ['fab_service', 'shop_rate'].includes(part.partType) && part._linkedPartId;
+      const linkedParentPart = isLinkedSvc ? sortedParts.find(p => String(p.id) === String(part._linkedPartId)) : null;
+      const xOffset = isLinkedSvc ? 20 : 0;
+
+      // Service background tint
+      if (isLinkedSvc) {
+        doc.save().rect(50 + xOffset, yPos - 2, 512 - xOffset, rowHeight + 4).fill('#fce4ec').restore();
+      }
+
       // Part number
-      doc.fontSize(9).fillColor(primaryColor).font('Helvetica-Bold');
-      doc.text(`#${part.partNumber}`, 50, yPos, { lineBreak: false });
+      doc.fontSize(9).fillColor(isLinkedSvc ? '#7b1fa2' : primaryColor).font('Helvetica-Bold');
+      doc.text(isLinkedSvc ? '\u21B3' : `#${part.partNumber}`, 50 + xOffset, yPos, { lineBreak: false });
 
       // Part type + description  
-      doc.fontSize(8).fillColor(darkColor).font('Helvetica-Bold');
-      doc.text(partLabel, 85, yPos, { lineBreak: false });
+      doc.fontSize(8).fillColor(isLinkedSvc ? '#7b1fa2' : darkColor).font('Helvetica-Bold');
+      doc.text(partLabel + (isLinkedSvc && linkedParentPart ? ` (for Part #${linkedParentPart.partNumber})` : ''), 85 + xOffset, yPos, { lineBreak: false });
       doc.font('Helvetica').fillColor(grayColor);
-      doc.text(description, 85, yPos + 11, { width: 300 });
+      doc.text(description, 85 + xOffset, yPos + 11, { width: 300 - xOffset });
       
       // Quantity
       doc.fillColor(darkColor).text(qty.toString(), 400, yPos, { width: 30, align: 'center', lineBreak: false });

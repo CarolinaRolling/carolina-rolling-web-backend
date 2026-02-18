@@ -161,12 +161,26 @@ async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
       let rowY = tableY + 18;
       doc.font('Helvetica').fillColor('#000');
       
-      const sortedParts = [...parts].sort((a, b) => (a.partNumber || 0) - (b.partNumber || 0));
+      const sortedAll = [...parts].sort((a, b) => (a.partNumber || 0) - (b.partNumber || 0));
+      // Group services under parent parts
+      const mergedAll = sortedAll.map(p => {
+        const o = p.toJSON ? p.toJSON() : { ...p };
+        if (o.formData && typeof o.formData === 'object') Object.assign(o, o.formData);
+        return o;
+      });
+      const regParts = mergedAll.filter(p => !['fab_service', 'shop_rate'].includes(p.partType) || !p._linkedPartId);
+      const svcParts = mergedAll.filter(p => ['fab_service', 'shop_rate'].includes(p.partType) && p._linkedPartId);
+      const sortedParts = [];
+      const usedSvc = new Set();
+      regParts.forEach(rp => {
+        sortedParts.push(rp);
+        svcParts.forEach(sp => {
+          if (String(sp._linkedPartId) === String(rp.id) && !usedSvc.has(sp.id)) { sortedParts.push(sp); usedSvc.add(sp.id); }
+        });
+      });
+      svcParts.forEach(sp => { if (!usedSvc.has(sp.id)) sortedParts.push(sp); });
       
-      sortedParts.forEach((part, index) => {
-        // Build description
-        const partObj = part.toJSON ? part.toJSON() : { ...part };
-        if (partObj.formData && typeof partObj.formData === 'object') Object.assign(partObj, partObj.formData);
+      sortedParts.forEach((partObj, index) => {
         
         let desc = partObj._materialDescription || partObj.materialDescription || '';
         // For cones, rebuild from fields to avoid stale/garbled data

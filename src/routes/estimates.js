@@ -194,11 +194,182 @@ function calculatePartTotals(part) {
 }
 
 // Calculate estimate totals
-function calculateEstimateTotals(parts, truckingCost, taxRate, taxExempt = false, discountPercent = 0, discountAmount = 0) {
-  let partsSubtotal = 0;
+const EA_PRICED_TYPES = ['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'];
+
+// Parse dimension string: "3/8"" → 0.375, "1-1/2"" → 1.5, "2.5" → 2.5, "24 ga" → 0.025
+function parseDimension(val) {
+  if (!val) return 0;
+  const s = String(val).trim().replace(/["\u2033]/g, '');
+  if (!isNaN(s) && s !== '') return parseFloat(s);
+  const gaugeMatch = s.match(/^(\d+)\s*ga/i);
+  if (gaugeMatch) {
+    const gaugeMap = { 24: 0.025, 22: 0.030, 20: 0.036, 18: 0.048, 16: 0.060, 14: 0.075, 12: 0.105, 11: 0.120, 10: 0.135 };
+    return gaugeMap[parseInt(gaugeMatch[1])] || 0;
+  }
+  const mixedMatch = s.match(/^(\d+)\s*[-\u2013]\s*(\d+)\s*\/\s*(\d+)/);
+  if (mixedMatch) return parseInt(mixedMatch[1]) + parseInt(mixedMatch[2]) / parseInt(mixedMatch[3]);
+  const fracMatch = s.match(/^(\d+)\s*\/\s*(\d+)/);
+  if (fracMatch) return parseInt(fracMatch[1]) / parseInt(fracMatch[2]);
+  const leadMatch = s.match(/^([\d.]+)/);
+  if (leadMatch) return parseFloat(leadMatch[1]);
+  return 0;
+}
+
+function getPartSize(part) {
+  const fd = (part.formData && typeof part.formData === 'object') ? part.formData : {};
+  const merged = { ...part, ...fd };
+  if (merged.partType === 'plate_roll' || merged.partType === 'flat_stock') return parseDimension(merged.thickness);
+  if (merged.partType === 'angle_roll') return parseDimension(merged._angleSize || merged.sectionSize || '');
+  if (merged.partType === 'pipe_roll') return parseDimension(merged.outerDiameter);
+  if (merged.partType === 'tube_roll') return parseDimension(merged._tubeSize || merged.sectionSize || '');
+  if (merged.partType === 'flat_bar') return parseDimension(merged._barSize || merged.sectionSize || '');
+  if (merged.partType === 'channel_roll') return parseDimension(merged._channelSize || merged.sectionSize || '');
+  if (merged.partType === 'beam_roll') return parseDimension(merged._beamSize || merged.sectionSize || '');
+  if (merged.partType === 'tee_bar') return parseDimension(merged._teeSize || merged.sectionSize || '');
+  if (merged.partType === 'cone_roll') return parseFloat(merged._coneLargeDia) || parseDimension(merged.sectionSize || '');
+  return parseDimension(merged.sectionSize || merged.thickness || '');
+}
+
+function getPartWidth(part) {
+  const fd = (part.formData && typeof part.formData === 'object') ? part.formData : {};
+  return parseDimension(fd.width || part.width);
+}
+
+function getLaborMinimum(part, laborMinimums) {
+  if (!laborMinimums || !laborMinimums.length) return null;
+  const partSize = getPartSize(part);
+  const partWidth = getPartWidth(part);
+  let bestSpecificRule = null, bestGeneralRule = null, bestFallbackRule = null;
+
+  for (const rule of laborMinimums) {
+    if (rule.partType !== part.partType) continue;
+    if (!bestFallbackRule || parseFloat(rule.minimum) > parseFloat(bestFallbackRule.minimum)) bestFallbackRule = rule;
+
+    const hasMinSize = rule.minSize != null && rule.minSize !== '' && parseFloat(rule.minSize) > 0;
+    const hasMaxSize = rule.maxSize != null && rule.maxSize !== '' && parseFloat(rule.maxSize) > 0;
+    const hasMinWidth = rule.minWidth != null && rule.minWidth !== '' && parseFloat(rule.minWidth) > 0;
+    const hasMaxWidth = rule.maxWidth != null && rule.maxWidth !== '' && parseFloat(rule.maxWidth) > 0;
+    const hasSizeConstraints = hasMinSize || hasMaxSize;
+    const hasWidthConstraints = hasMinWidth || hasMaxWidth;
+
+    if (!hasSizeConstraints && !hasWidthConstraints) {
+      if (!bestGeneralRule || parseFloat(rule.minimum) > parseFloat(bestGeneralRule.minimum)) bestGeneralRule = rule;
+      continue;
+    }
+
+    let sizeOk = true;
+    if (hasSizeConstraints) {
+      if (partSize <= 0) sizeOk = false;
+      else {
+        if (hasMinSize && partSize < parseFloat(rule.minSize)) sizeOk = false;
+        if (hasMaxSize && partSize > parseFloat(rule.maxSize)) sizeOk = false;
+      }
+    }
+    let widthOk = true;
+    if (hasWidthConstraints) {
+      if (partWidth <= 0) widthOk = false;
+      else {
+        if (hasMinWidth && partWidth < parseFloat(rule.minWidth)) widthOk = false;
+        if (hasMaxWidth && partWidth > parseFloat(rule.maxWidth)) widthOk = false;
+      }
+    }
+    if (sizeOk && widthOk) {
+      if (!bestSpecificRule || parseFloat(rule.minimum) > parseFloat(bestSpecificRule.minimum)) bestSpecificRule = rule;
+    }
+  }
+  return bestSpecificRule || bestGeneralRule || bestFallbackRule;
+}
+
+function roundUpMaterial(amount, rounding) {
+  if (!amount || amount <= 0) return amount;
+  if (rounding === 'dollar') return Math.ceil(amount);
+  if (rounding === 'five') return Math.ceil(amount / 5) * 5;
+  return amount;
+}
+
+function getMinimumInfo(parts, minimumOverride, laborMinimums) {
+  let totalLabor = 0, totalMaterial = 0, highestMinimum = 0, highestMinRule = null;
   parts.forEach(part => {
-    partsSubtotal += parseFloat(part.partTotal) || 0;
+    if (!EA_PRICED_TYPES.includes(part.partType)) return;
+    const fd = (part.formData && typeof part.formData === 'object') ? part.formData : {};
+    const laborEach = parseFloat(part.laborTotal) || 0;
+    const materialCost = parseFloat(part.materialTotal) || 0;
+    const materialMarkup = parseFloat(part.materialMarkupPercent) || parseFloat(fd.materialMarkupPercent) || 0;
+    const materialEachRaw = materialCost * (1 + materialMarkup / 100);
+    const materialEach = roundUpMaterial(materialEachRaw, fd._materialRounding || part._materialRounding);
+    const qty = parseInt(part.quantity) || 1;
+    totalLabor += laborEach * qty;
+    totalMaterial += materialEach * qty;
+
+    const rule = getLaborMinimum(part, laborMinimums);
+    if (rule && parseFloat(rule.minimum) > highestMinimum) {
+      highestMinimum = parseFloat(rule.minimum);
+      highestMinRule = rule;
+    }
   });
+
+  const minimumApplies = !minimumOverride && highestMinimum > 0 && totalLabor > 0 && totalLabor < highestMinimum;
+  const adjustedLabor = minimumApplies ? highestMinimum : totalLabor;
+  const laborDifference = minimumApplies ? (highestMinimum - totalLabor) : 0;
+  return { totalLabor, totalMaterial, highestMinimum, highestMinRule, minimumApplies, adjustedLabor, laborDifference };
+}
+
+async function loadLaborMinimums() {
+  const defaults = [
+    { partType: 'plate_roll', label: 'Plate \u2264 3/8"', sizeField: 'thickness', maxSize: 0.375, minWidth: '', maxWidth: '', minimum: 125 },
+    { partType: 'plate_roll', label: 'Plate \u2264 3/8" (24-60" wide)', sizeField: 'thickness', maxSize: 0.375, minWidth: 24, maxWidth: 60, minimum: 150 },
+    { partType: 'plate_roll', label: 'Plate > 3/8"', sizeField: 'thickness', minSize: 0.376, minWidth: '', maxWidth: '', minimum: 200 },
+    { partType: 'angle_roll', label: 'Angle \u2264 2x2', sizeField: 'angleSize', maxSize: 2, minWidth: '', maxWidth: '', minimum: 150 },
+    { partType: 'angle_roll', label: 'Angle > 2x2', sizeField: 'angleSize', minSize: 2.01, minWidth: '', maxWidth: '', minimum: 250 },
+  ];
+  try {
+    const setting = await AppSettings.findOne({ where: { key: 'labor_minimums' } });
+    if (setting && setting.value) {
+      const parsed = typeof setting.value === 'string' ? JSON.parse(setting.value) : setting.value;
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch (e) { /* use defaults */ }
+  return defaults;
+}
+
+function calculateEstimateTotals(parts, truckingCost, taxRate, taxExempt = false, discountPercent = 0, discountAmount = 0, minInfo = null) {
+  let partsSubtotal = 0;
+
+  if (minInfo && minInfo.minimumApplies) {
+    // When minimum applies: sum ea-priced material + adjusted labor, plus non-ea parts
+    let nonEaTotal = 0;
+    parts.forEach(part => {
+      if (EA_PRICED_TYPES.includes(part.partType) || part.partType === 'rush_service') return;
+      nonEaTotal += parseFloat(part.partTotal) || 0;
+    });
+    partsSubtotal = nonEaTotal + minInfo.totalMaterial + minInfo.adjustedLabor;
+  } else {
+    parts.forEach(part => {
+      if (part.partType === 'rush_service') return; // rush calculated separately below
+      partsSubtotal += parseFloat(part.partTotal) || 0;
+    });
+  }
+
+  // Rush service amounts
+  let expediteAmount = 0, emergencyAmount = 0;
+  const rushPart = parts.find(p => p.partType === 'rush_service');
+  if (rushPart) {
+    const fd = (rushPart.formData && typeof rushPart.formData === 'object') ? rushPart.formData : rushPart;
+    if (fd._expediteEnabled) {
+      if (fd._expediteType === 'custom_amt') {
+        expediteAmount = parseFloat(fd._expediteCustomAmt) || 0;
+      } else {
+        let pct = parseFloat(fd._expediteType) || 0;
+        if (fd._expediteType === 'custom_pct') pct = parseFloat(fd._expediteCustomPct) || 0;
+        expediteAmount = partsSubtotal * (pct / 100);
+      }
+    }
+    if (fd._emergencyEnabled) {
+      const emergOpts = { 'Saturday': 600, 'Saturday Night': 800, 'Sunday': 600, 'Sunday Night': 800 };
+      emergencyAmount = emergOpts[fd._emergencyDay] || 0;
+    }
+  }
+  partsSubtotal += expediteAmount + emergencyAmount;
 
   // Apply discount
   let discountAmt = 0;
@@ -218,6 +389,16 @@ function calculateEstimateTotals(parts, truckingCost, taxRate, taxExempt = false
     taxAmount: taxAmount.toFixed(2),
     grandTotal: grandTotal.toFixed(2)
   };
+}
+
+// Async wrapper that loads labor minimums and applies them
+async function calculateEstimateTotalsWithMinimums(parts, estimate) {
+  const laborMinimums = await loadLaborMinimums();
+  const minInfo = getMinimumInfo(parts, estimate.minimumOverride, laborMinimums);
+  return calculateEstimateTotals(
+    parts, estimate.truckingCost, estimate.taxRate, estimate.taxExempt,
+    estimate.discountPercent, estimate.discountAmount, minInfo
+  );
 }
 
 // GET /api/estimates/check-orphaned - Find estimates that point to non-existent work orders (MUST BE BEFORE /:id routes)
@@ -359,7 +540,13 @@ router.post('/', async (req, res, next) => {
       useCustomTax,
       customTaxReason,
       truckingDescription,
-      truckingCost
+      truckingCost,
+      taxExempt,
+      taxExemptReason,
+      taxExemptCertNumber,
+      discountPercent,
+      discountAmount,
+      discountReason
     } = req.body;
 
     if (!clientName) {
@@ -401,6 +588,12 @@ router.post('/', async (req, res, next) => {
       customTaxReason,
       truckingDescription,
       truckingCost: parseFloat(truckingCost) || 0,
+      taxExempt: taxExempt || false,
+      taxExemptReason: taxExemptReason || null,
+      taxExemptCertNumber: taxExemptCertNumber || null,
+      discountPercent: parseFloat(discountPercent) || 0,
+      discountAmount: parseFloat(discountAmount) || 0,
+      discountReason: discountReason || null,
       status: 'draft'
     });
 
@@ -472,16 +665,9 @@ router.put('/:id', async (req, res, next) => {
 
     await estimate.update(updates);
 
-    // Recalculate totals
+    // Recalculate totals with minimum charge logic
     const parts = await EstimatePart.findAll({ where: { estimateId: estimate.id } });
-    const totals = calculateEstimateTotals(
-      parts, 
-      updates.truckingCost ?? estimate.truckingCost, 
-      updates.taxRate ?? estimate.taxRate,
-      updates.taxExempt ?? estimate.taxExempt,
-      updates.discountPercent ?? estimate.discountPercent,
-      updates.discountAmount ?? estimate.discountAmount
-    );
+    const totals = await calculateEstimateTotalsWithMinimums(parts, estimate);
     await estimate.update(totals);
 
     const updatedEstimate = await Estimate.findByPk(estimate.id, {
@@ -565,7 +751,7 @@ router.post('/:id/parts', async (req, res, next) => {
 
     // Recalculate estimate totals
     const allParts = await EstimatePart.findAll({ where: { estimateId: estimate.id } });
-    const estimateTotals = calculateEstimateTotals(allParts, estimate.truckingCost, estimate.taxRate, estimate.taxExempt, estimate.discountPercent, estimate.discountAmount);
+    const estimateTotals = await calculateEstimateTotalsWithMinimums(allParts, estimate);
     await estimate.update(estimateTotals);
 
     res.status(201).json({
@@ -608,7 +794,7 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     // Recalculate estimate totals
     const estimate = await Estimate.findByPk(req.params.id);
     const allParts = await EstimatePart.findAll({ where: { estimateId: estimate.id } });
-    const estimateTotals = calculateEstimateTotals(allParts, estimate.truckingCost, estimate.taxRate, estimate.taxExempt, estimate.discountPercent, estimate.discountAmount);
+    const estimateTotals = await calculateEstimateTotalsWithMinimums(allParts, estimate);
     await estimate.update(estimateTotals);
 
     res.json({
@@ -647,7 +833,7 @@ router.delete('/:id/parts/:partId', async (req, res, next) => {
     // Recalculate estimate totals
     const estimate = await Estimate.findByPk(req.params.id);
     const allParts = await EstimatePart.findAll({ where: { estimateId: estimate.id } });
-    const estimateTotals = calculateEstimateTotals(allParts, estimate.truckingCost, estimate.taxRate, estimate.taxExempt, estimate.discountPercent, estimate.discountAmount);
+    const estimateTotals = await calculateEstimateTotalsWithMinimums(allParts, estimate);
     await estimate.update(estimateTotals);
 
     res.json({ message: 'Part deleted' });
@@ -1573,7 +1759,7 @@ router.post('/:id/duplicate', async (req, res, next) => {
 
     // Recalculate totals
     const parts = await EstimatePart.findAll({ where: { estimateId: newEstimate.id } });
-    const estimateTotals = calculateEstimateTotals(parts, newEstimate.truckingCost, newEstimate.taxRate, newEstimate.taxExempt, newEstimate.discountPercent, newEstimate.discountAmount);
+    const estimateTotals = await calculateEstimateTotalsWithMinimums(parts, newEstimate);
     await newEstimate.update(estimateTotals);
 
     // Reload with parts
@@ -1637,6 +1823,17 @@ router.get('/:id/pdf', async (req, res, next) => {
     if (!estimate) {
       return res.status(404).json({ error: { message: 'Estimate not found' } });
     }
+
+    // Recalculate totals with minimum charge logic (stored values may not include minimums)
+    const pdfTotals = await calculateEstimateTotalsWithMinimums(estimate.parts, estimate);
+    // Override stored totals with recalculated values for PDF rendering
+    estimate.partsSubtotal = pdfTotals.partsSubtotal;
+    estimate.taxAmount = pdfTotals.taxAmount;
+    estimate.grandTotal = pdfTotals.grandTotal;
+
+    // Also compute minimum info for display on PDF
+    const pdfLaborMinimums = await loadLaborMinimums();
+    const pdfMinInfo = getMinimumInfo(estimate.parts, estimate.minimumOverride, pdfLaborMinimums);
 
     // Square fees are hardcoded: In-Person 2.6% + $0.15, Manual 3.5% + $0.15
 
@@ -1804,6 +2001,11 @@ router.get('/:id/pdf', async (req, res, next) => {
     });
     servicePartsArr.forEach(sp => { if (!usedSvcIds.has(sp.id)) sortedParts.push(sp); });
     
+    // If minimum applies, pre-calculate the labor adjustment ratio
+    const laborAdjustRatio = (pdfMinInfo.minimumApplies && pdfMinInfo.totalLabor > 0)
+      ? pdfMinInfo.adjustedLabor / pdfMinInfo.totalLabor
+      : 1;
+
     for (const part of sortedParts) {
       if (yPos > 680) { doc.addPage(); yPos = 50; }
 
@@ -1817,9 +2019,13 @@ router.get('/:id/pdf', async (req, res, next) => {
       let matEach = matEachRaw;
       if (rounding === 'dollar' && matEach > 0) matEach = Math.ceil(matEach);
       if (rounding === 'five' && matEach > 0) matEach = Math.ceil(matEach / 5) * 5;
-      const labEach = parseFloat(part.laborTotal) || 0;
+      const labEachOriginal = parseFloat(part.laborTotal) || 0;
+      // Apply minimum labor adjustment proportionally across parts
+      const labEach = EA_PRICED_TYPES.includes(part.partType)
+        ? labEachOriginal * laborAdjustRatio
+        : labEachOriginal;
       const unitPrice = matEach + labEach;
-      const lineTotal = parseFloat(part.partTotal) || (unitPrice * qty);
+      const lineTotal = unitPrice * qty;
 
       // Build clean description lines
       const descLines = [];
@@ -1987,6 +2193,17 @@ router.get('/:id/pdf', async (req, res, next) => {
     yPos += 10;
     doc.strokeColor(lightGray).lineWidth(1).moveTo(350, yPos).lineTo(562, yPos).stroke();
     yPos += 15;
+
+    // Minimum charge indicator
+    if (pdfMinInfo.minimumApplies) {
+      doc.fontSize(8).fillColor('#e65100').text(
+        `Minimum Labor Charge Applied (${pdfMinInfo.highestMinRule?.label || ''})`,
+        350, yPos, { lineBreak: false }
+      );
+      doc.text(formatCurrency(pdfMinInfo.adjustedLabor), 480, yPos, { align: 'right', width: 82, lineBreak: false });
+      doc.fillColor(darkColor);
+      yPos += 16;
+    }
 
     // Subtotal
     doc.fontSize(10).fillColor(grayColor).text('Subtotal:', 350, yPos, { lineBreak: false });

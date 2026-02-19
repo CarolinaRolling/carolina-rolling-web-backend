@@ -2177,6 +2177,12 @@ router.get('/:id/pdf', async (req, res, next) => {
         descLines.push(`${part._ringsNeeded} complete ring(s) required`);
       }
 
+      // Orientation option text
+      if ((part.partType === 'angle_roll' || part.partType === 'channel_roll') && part._orientationOption) {
+        const combo = part.rollType === 'easy_way' ? 'EW-OD' : 'HW-ID';
+        descLines.push(`Orientation: ${combo} Option ${part._orientationOption}`);
+      }
+
       // Cone info: type + segments + layout file
       if (part.partType === 'cone_roll') {
         const cType = part._coneType || 'concentric';
@@ -2261,6 +2267,26 @@ router.get('/:id/pdf', async (req, res, next) => {
       doc.font('Helvetica');
 
       yPos += rowHeight + 4;
+
+      // Orientation diagram image for angle/channel rolls
+      if ((part.partType === 'angle_roll' || part.partType === 'channel_roll') && part._orientationOption) {
+        const imgPrefix = part.partType === 'channel_roll' ? 'Channel' : '';
+        const imgFile = part.rollType === 'easy_way' 
+          ? `${imgPrefix}EWODOp${part._orientationOption}.png` 
+          : `${imgPrefix}HWIDOp${part._orientationOption}.png`;
+        const imgPath = path.join(__dirname, '..', 'assets', 'angle-orientation', imgFile);
+        try {
+          if (fs.existsSync(imgPath)) {
+            if (yPos + 90 > 700) { doc.addPage(); yPos = 50; }
+            doc.image(imgPath, 85, yPos, { width: 160 });
+            doc.fontSize(7).fillColor(grayColor).text(
+              `${part.rollType === 'easy_way' ? 'EW-OD' : 'HW-ID'} Option ${part._orientationOption}`,
+              85, yPos + 72, { width: 160, align: 'center' }
+            );
+            yPos += 88;
+          }
+        } catch (e) { /* image not found, skip */ }
+      }
       
       // Light divider
       doc.strokeColor('#eee').lineWidth(0.5).moveTo(85, yPos).lineTo(562, yPos).stroke();

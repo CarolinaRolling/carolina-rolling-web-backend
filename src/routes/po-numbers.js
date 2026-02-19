@@ -92,6 +92,59 @@ router.post('/:poNumber/void', async (req, res, next) => {
   }
 });
 
+// PUT /api/po-numbers/:poNumber/reassign - Change a PO number to a different number
+router.put('/:poNumber/reassign', async (req, res, next) => {
+  try {
+    const { PONumber, WorkOrderPart, InboundOrder, sequelize } = require('../models');
+    const oldPO = parseInt(req.params.poNumber);
+    const newPO = parseInt(req.body.newPoNumber);
+
+    if (!newPO || newPO < 1) {
+      return res.status(400).json({ error: { message: 'Invalid new PO number' } });
+    }
+    if (oldPO === newPO) {
+      return res.json({ message: 'No change' });
+    }
+
+    const poEntry = await PONumber.findOne({ where: { poNumber: oldPO } });
+    if (!poEntry) {
+      return res.status(404).json({ error: { message: `PO${oldPO} not found` } });
+    }
+
+    // Check if new number already exists
+    const existing = await PONumber.findOne({ where: { poNumber: newPO } });
+    if (existing) {
+      return res.status(409).json({ error: { message: `PO${newPO} already exists` } });
+    }
+
+    const transaction = await sequelize.transaction();
+    try {
+      // Update the PO record
+      await poEntry.update({ poNumber: newPO }, { transaction });
+
+      // Update any work order parts that reference the old PO number
+      await WorkOrderPart.update(
+        { materialPurchaseOrderNumber: `PO${newPO}` },
+        { where: { materialPurchaseOrderNumber: `PO${oldPO}` }, transaction }
+      );
+
+      // Update any inbound orders that reference the old PO number
+      await InboundOrder.update(
+        { poNumber: `PO${newPO}` },
+        { where: { poNumber: `PO${oldPO}` }, transaction }
+      );
+
+      await transaction.commit();
+      res.json({ data: poEntry.toJSON(), message: `PO number changed from PO${oldPO} to PO${newPO}` });
+    } catch (err) {
+      await transaction.rollback();
+      throw err;
+    }
+  } catch (error) {
+    next(error);
+  }
+});
+
 // DELETE /api/po-numbers/:poNumber/release - Release a PO number (delete entry so it can be reused)
 router.delete('/:poNumber/release', async (req, res, next) => {
   try {

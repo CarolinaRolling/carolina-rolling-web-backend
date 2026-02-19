@@ -2330,13 +2330,31 @@ router.post('/:id/print-package', async (req, res, next) => {
 
         if (chromePath) {
           console.log(`[print-package] Rendering HTML with Chrome: ${chromePath}`);
+          
+          // Convert local image references to base64 data URIs so Puppeteer can render them
+          let processedHtml = workOrderHtml;
+          const imgRegex = /src="\/images\/angle-orientation\/([^"]+)"/g;
+          let match;
+          while ((match = imgRegex.exec(workOrderHtml)) !== null) {
+            const imgFilename = match[1];
+            const imgPath = path.join(__dirname, '..', 'assets', 'angle-orientation', imgFilename);
+            try {
+              if (fs.existsSync(imgPath)) {
+                const imgData = fs.readFileSync(imgPath).toString('base64');
+                const dataUri = `data:image/png;base64,${imgData}`;
+                processedHtml = processedHtml.split(`/images/angle-orientation/${imgFilename}`).join(dataUri);
+                console.log(`[print-package] Embedded image: ${imgFilename}`);
+              }
+            } catch (e) { console.warn(`[print-package] Could not embed image ${imgFilename}:`, e.message); }
+          }
+          
           const browser = await puppeteer.launch({
             executablePath: chromePath,
             headless: 'new',
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
           });
           const page = await browser.newPage();
-          await page.setContent(workOrderHtml, { waitUntil: 'load', timeout: 15000 });
+          await page.setContent(processedHtml, { waitUntil: 'load', timeout: 15000 });
           woPagesPdf = await page.pdf({
             format: 'Letter',
             margin: { top: '0.4in', bottom: '0.4in', left: '0.4in', right: '0.4in' },

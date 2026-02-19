@@ -42,6 +42,9 @@ app.use(express.urlencoded({ extended: true }));
 // Serve uploaded files
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
+// Serve static assets (orientation diagrams, etc.)
+app.use('/assets', express.static(path.join(__dirname, 'assets')));
+
 // Health check
 app.get('/', (req, res) => {
   res.json({ 

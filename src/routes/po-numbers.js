@@ -92,6 +92,40 @@ router.post('/:poNumber/void', async (req, res, next) => {
   }
 });
 
+// DELETE /api/po-numbers/:poNumber/release - Release a PO number (delete entry so it can be reused)
+router.delete('/:poNumber/release', async (req, res, next) => {
+  try {
+    const { PONumber, InboundOrder, WorkOrderPart } = require('../models');
+    const poNumber = parseInt(req.params.poNumber);
+    const poEntry = await PONumber.findOne({ where: { poNumber } });
+    
+    if (!poEntry) {
+      return res.status(404).json({ error: { message: `PO${poNumber} not found` } });
+    }
+
+    // Clear PO reference from any work order parts
+    await WorkOrderPart.update(
+      { materialPurchaseOrderNumber: null, materialOrdered: false, inboundOrderId: null },
+      { where: { materialPurchaseOrderNumber: `PO${poNumber}` } }
+    );
+
+    // Clear PO from linked inbound order if exists
+    if (poEntry.inboundOrderId) {
+      await InboundOrder.update(
+        { poNumber: null },
+        { where: { id: poEntry.inboundOrderId } }
+      );
+    }
+
+    // Delete the PO entry entirely
+    await poEntry.destroy();
+
+    res.json({ message: `PO${poNumber} has been released and can be reused` });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // DELETE /api/po-numbers/:id - Delete a PO number
 router.delete('/:id', async (req, res, next) => {
   try {

@@ -149,6 +149,47 @@ router.post('/assign', async (req, res, next) => {
   }
 });
 
+// DELETE /api/dr-numbers/:drNumber/release - Release a DR number (delete entry so it can be reused)
+router.delete('/:drNumber/release', async (req, res, next) => {
+  try {
+    const drNumber = parseInt(req.params.drNumber);
+    const drEntry = await DRNumber.findOne({ where: { drNumber } });
+    
+    if (!drEntry) {
+      return res.status(404).json({ error: { message: `DR-${drNumber} not found` } });
+    }
+
+    // If it has a linked work order, just clear the reference (don't delete the WO)
+    if (drEntry.workOrderId) {
+      const wo = await WorkOrder.findByPk(drEntry.workOrderId);
+      if (wo) {
+        await wo.update({ drNumber: null });
+      }
+    }
+
+    // If it has a linked estimate, clear the reference
+    if (drEntry.estimateId) {
+      await Estimate.update({ workOrderId: null }, { where: { id: drEntry.estimateId } });
+    }
+
+    // Delete the DR entry entirely
+    await drEntry.destroy();
+
+    await logActivity(
+      'deleted',
+      'dr_number',
+      drEntry.id,
+      `DR-${drNumber}`,
+      drEntry.clientName,
+      `DR-${drNumber} released/deleted`
+    );
+
+    res.json({ message: `DR-${drNumber} has been released and can be reused` });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // POST /api/dr-numbers/:drNumber/void - Void a DR number
 router.post('/:drNumber/void', async (req, res, next) => {
   const transaction = await sequelize.transaction();

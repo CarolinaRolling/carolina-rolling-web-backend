@@ -722,6 +722,10 @@ router.put('/:id', async (req, res, next) => {
         return res.status(409).json({ error: { message: `Estimate number "${newNum}" is already in use` } });
       }
       updates.estimateNumber = newNum;
+      // Sync to linked work order if exists
+      if (estimate.workOrderId) {
+        await WorkOrder.update({ estimateNumber: newNum }, { where: { id: estimate.workOrderId } });
+      }
     }
 
     if (updates.status) {

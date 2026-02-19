@@ -7,7 +7,7 @@ const http = require('http');
 const { v4: uuidv4 } = require('uuid');
 const cloudinary = require('cloudinary').v2;
 const { Op } = require('sequelize');
-const { Estimate, EstimatePart, EstimatePartFile, EstimateFile, WorkOrder, WorkOrderPart, WorkOrderPartFile, InboundOrder, AppSettings, DRNumber, PONumber, DailyActivity, sequelize } = require('../models');
+const { Estimate, EstimatePart, EstimatePartFile, EstimateFile, WorkOrder, WorkOrderPart, WorkOrderPartFile, InboundOrder, AppSettings, DRNumber, PONumber, DailyActivity, Client, sequelize } = require('../models');
 
 const router = express.Router();
 
@@ -332,6 +332,17 @@ async function loadLaborMinimums() {
   return defaults;
 }
 
+// Check if a client is tax exempt by looking up the Client record directly
+async function isClientTaxExempt(clientName) {
+  if (!clientName) return false;
+  try {
+    const client = await Client.findOne({ where: { name: clientName } });
+    if (!client) return false;
+    return client.taxStatus === 'resale' || client.taxStatus === 'exempt' ||
+      (!!client.resaleCertificate && client.permitStatus === 'active');
+  } catch (e) { return false; }
+}
+
 function calculateEstimateTotals(parts, truckingCost, taxRate, taxExempt = false, discountPercent = 0, discountAmount = 0, minInfo = null) {
   // Ensure taxExempt is boolean (SQLite may store as 0/1)
   const isExempt = taxExempt === true || taxExempt === 1 || taxExempt === '1' || taxExempt === 'true';
@@ -440,6 +451,30 @@ router.get('/check-orphaned', async (req, res, next) => {
   }
 });
 
+// POST /api/estimates/recalculate-all - Recalculate totals for all estimates (fixes tax-exempt totals)
+router.post('/recalculate-all', async (req, res, next) => {
+  try {
+    const estimates = await Estimate.findAll({
+      include: [{ model: EstimatePart, as: 'parts' }]
+    });
+    let fixed = 0;
+    for (const estimate of estimates) {
+      try {
+        const totals = await calculateEstimateTotalsWithMinimums(estimate.parts, estimate);
+        const oldGT = parseFloat(estimate.grandTotal) || 0;
+        const newGT = parseFloat(totals.grandTotal) || 0;
+        if (Math.abs(oldGT - newGT) > 0.01) {
+          await estimate.update(totals);
+          fixed++;
+        }
+      } catch (e) { /* skip */ }
+    }
+    res.json({ message: `Recalculated ${estimates.length} estimates, ${fixed} had changed totals` });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // GET /api/estimates - Get all estimates
 router.get('/', async (req, res, next) => {
   try {
@@ -471,6 +506,40 @@ router.get('/', async (req, res, next) => {
       limit: parseInt(limit),
       offset: parseInt(offset)
     });
+
+    // Recalculate totals on-the-fly to ensure tax-exempt estimates show correct values
+    const laborMinimums = await loadLaborMinimums();
+    // Build a cache of client tax-exempt status to avoid repeated DB queries
+    const clientNames = [...new Set(estimates.rows.map(e => e.clientName).filter(Boolean))];
+    const clientExemptMap = {};
+    for (const name of clientNames) {
+      clientExemptMap[name] = await isClientTaxExempt(name);
+    }
+    for (const estimate of estimates.rows) {
+      let isExempt = estimate.taxExempt === true || estimate.taxExempt === 1 || estimate.taxExempt === '1' || estimate.taxExempt === 'true';
+      // Also check client record directly
+      if (!isExempt && clientExemptMap[estimate.clientName]) {
+        isExempt = true;
+        // Fix the DB (fire-and-forget)
+        Estimate.update({ taxExempt: true, taxExemptReason: 'Resale' }, { where: { id: estimate.id } }).catch(() => {});
+      }
+      const minInfo = getMinimumInfo(estimate.parts, estimate.minimumOverride, laborMinimums);
+      const totals = calculateEstimateTotals(
+        estimate.parts, estimate.truckingCost, estimate.taxRate, isExempt,
+        estimate.discountPercent, estimate.discountAmount, minInfo
+      );
+      // Check if totals changed before overwriting
+      const storedGT = parseFloat(estimate.grandTotal) || 0;
+      const needsUpdate = Math.abs(storedGT - parseFloat(totals.grandTotal)) > 0.01;
+      // Update display values
+      estimate.partsSubtotal = totals.partsSubtotal;
+      estimate.taxAmount = totals.taxAmount;
+      estimate.grandTotal = totals.grandTotal;
+      // Persist if different (fire-and-forget)
+      if (needsUpdate) {
+        Estimate.update(totals, { where: { id: estimate.id } }).catch(() => {});
+      }
+    }
 
     res.json({
       data: estimates.rows,
@@ -1834,7 +1903,16 @@ router.get('/:id/pdf', async (req, res, next) => {
     }
 
     // Ensure taxExempt is a proper boolean (SQLite stores as 0/1)
-    const isTaxExempt = estimate.taxExempt === true || estimate.taxExempt === 1 || estimate.taxExempt === '1' || estimate.taxExempt === 'true';
+    let isTaxExempt = estimate.taxExempt === true || estimate.taxExempt === 1 || estimate.taxExempt === '1' || estimate.taxExempt === 'true';
+    
+    // Also check the Client record directly - this is the authoritative source
+    if (!isTaxExempt) {
+      isTaxExempt = await isClientTaxExempt(estimate.clientName);
+      if (isTaxExempt) {
+        // Fix the DB while we're at it
+        await estimate.update({ taxExempt: true, taxExemptReason: 'Resale' });
+      }
+    }
     estimate.taxExempt = isTaxExempt;
 
     console.log(`[PDF] Estimate ${estimate.estimateNumber}: taxExempt=${isTaxExempt}, taxRate=${estimate.taxRate}`);

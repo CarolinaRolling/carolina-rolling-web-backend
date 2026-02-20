@@ -355,15 +355,19 @@ const upload = multer({
       'application/stp',
       'application/step',
       'model/step',
-      'application/octet-stream' // STEP files often come as this
+      'application/octet-stream', // STEP files often come as this
+      'image/png', 'image/jpeg', 'image/gif', 'image/webp',
+      'application/dxf', 'image/vnd.dxf', 'image/x-dxf',
+      'application/acad', 'image/vnd.dwg',
+      'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
     ];
-    const allowedExtensions = ['.pdf', '.stp', '.step'];
+    const allowedExtensions = ['.pdf', '.stp', '.step', '.dxf', '.dwg', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.doc', '.docx'];
     const ext = path.extname(file.originalname).toLowerCase();
     
     if (allowedTypes.includes(file.mimetype) || allowedExtensions.includes(ext)) {
       cb(null, true);
     } else {
-      cb(new Error('Invalid file type. Only PDF and STEP files are allowed.'));
+      cb(new Error('Invalid file type. Allowed: PDF, STEP, DXF, DWG, images, Word docs.'));
     }
   }
 });
@@ -1431,6 +1435,9 @@ router.post('/:id/parts/:partId/files', upload.array('files', 10), async (req, r
         let fileType = 'other';
         if (ext === '.pdf') fileType = 'pdf_print';
         else if (ext === '.stp' || ext === '.step') fileType = 'step_file';
+        else if (ext === '.dxf' || ext === '.dwg') fileType = 'drawing';
+        else if (['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(ext)) fileType = 'drawing';
+        else if (ext === '.doc' || ext === '.docx') fileType = 'specification';
 
         // Upload to Cloudinary
         const cloudinaryResult = await cloudinary.uploader.upload(file.path, {

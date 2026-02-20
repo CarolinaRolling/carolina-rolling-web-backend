@@ -547,6 +547,31 @@ router.get('/:id', async (req, res, next) => {
     // Rewrite file URLs to use download proxy (handles resource_type mismatches transparently)
     const woJson = workOrder.toJSON();
     const baseUrl = `${req.protocol}://${req.get('host')}`;
+
+    // Attach linked shipment data (location, photos)
+    try {
+      const linkedShipment = await Shipment.findOne({
+        where: { workOrderId: woJson.id },
+        include: [{ model: ShipmentPhoto, as: 'photos' }]
+      });
+      if (linkedShipment) {
+        woJson.shipment = {
+          id: linkedShipment.id,
+          location: linkedShipment.location,
+          status: linkedShipment.status,
+          description: linkedShipment.description,
+          receivedAt: linkedShipment.receivedAt,
+          photos: (linkedShipment.photos || []).map(p => ({
+            id: p.id,
+            url: p.url,
+            caption: p.caption
+          }))
+        };
+      }
+    } catch (e) {
+      console.error('Error fetching shipment for WO detail:', e);
+    }
+
     if (woJson.parts) {
       for (const part of woJson.parts) {
         if (part.files) {
@@ -786,6 +811,90 @@ router.post('/:id/mark-complete', async (req, res, next) => {
     });
     
     res.json({ data: workOrder, message: 'Order marked complete and moved to Stored' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /:id/pickup - Record a pickup (full or partial)
+router.post('/:id/pickup', async (req, res, next) => {
+  try {
+    const { type, pickedUpBy, items } = req.body; // type: 'full' | 'partial', items: [{ partId, partNumber, description, quantity }]
+    
+    const workOrder = await WorkOrder.findByPk(req.params.id, {
+      include: [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }]
+    });
+    if (!workOrder) {
+      return res.status(404).json({ error: { message: 'Work order not found' } });
+    }
+
+    const now = new Date().toISOString();
+    const history = workOrder.pickupHistory || [];
+    
+    if (type === 'full') {
+      // Full pickup: mark all parts as picked up
+      const pickupItems = workOrder.parts.map(p => ({
+        partId: p.id,
+        partNumber: p.partNumber,
+        partType: p.partType,
+        description: p.materialDescription || p.sectionSize || p.partType,
+        quantity: p.quantity || 1
+      }));
+      
+      history.push({
+        date: now,
+        pickedUpBy: pickedUpBy || 'unknown',
+        type: 'full',
+        items: pickupItems
+      });
+      
+      await workOrder.update({
+        status: 'picked_up',
+        pickedUpAt: now,
+        pickedUpBy: pickedUpBy || 'unknown',
+        pickupHistory: history
+      });
+    } else {
+      // Partial pickup: only selected items
+      if (!items || items.length === 0) {
+        return res.status(400).json({ error: { message: 'No items selected for partial pickup' } });
+      }
+      
+      history.push({
+        date: now,
+        pickedUpBy: pickedUpBy || 'unknown',
+        type: 'partial',
+        items: items
+      });
+
+      // Calculate total picked up across all history entries for each part
+      const totalPickedByPart = {};
+      history.forEach(entry => {
+        (entry.items || []).forEach(item => {
+          const key = item.partId || item.partNumber;
+          totalPickedByPart[key] = (totalPickedByPart[key] || 0) + (item.quantity || 0);
+        });
+      });
+
+      // Check if everything has been picked up
+      const allPickedUp = workOrder.parts.every(p => {
+        const picked = (totalPickedByPart[p.id] || 0) + (totalPickedByPart[p.partNumber] || 0);
+        return picked >= (p.quantity || 1);
+      });
+
+      const updateData = { pickupHistory: history };
+      if (allPickedUp) {
+        updateData.status = 'picked_up';
+        updateData.pickedUpAt = now;
+        updateData.pickedUpBy = pickedUpBy || 'unknown';
+      }
+      
+      await workOrder.update(updateData);
+    }
+    
+    // Reload and return
+    await workOrder.reload({ include: [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }] });
+    res.json({ data: workOrder.toJSON(), message: type === 'full' ? 'Full pickup recorded' : 'Partial pickup recorded' });
   } catch (error) {
     next(error);
   }

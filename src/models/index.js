@@ -481,6 +481,11 @@ const WorkOrder = sequelize.define('WorkOrder', {
     type: DataTypes.STRING,
     allowNull: true
   },
+  pickupHistory: {
+    type: DataTypes.JSONB,
+    defaultValue: [],
+    allowNull: true
+  },
   signatureData: {
     type: DataTypes.TEXT,
     allowNull: true

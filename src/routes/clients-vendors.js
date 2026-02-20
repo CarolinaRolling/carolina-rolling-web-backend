@@ -33,12 +33,14 @@ router.get('/clients', async (req, res, next) => {
 router.get('/clients/search', async (req, res, next) => {
   try {
     const { q } = req.query;
-    if (!q || q.length < 1) {
-      return res.json({ data: [] });
+    
+    const whereClause = { isActive: true };
+    if (q && q.length >= 1) {
+      whereClause.name = { [Op.iLike]: `%${q}%` };
     }
 
     const clients = await Client.findAll({
-      where: { isActive: true, name: { [Op.iLike]: `%${q}%` } },
+      where: whereClause,
       limit: 20,
       order: [['name', 'ASC']]
     });

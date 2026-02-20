@@ -74,7 +74,16 @@ app.use('/api', permitVerificationRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  console.error('Error:', err);
+  console.error('Error:', err.message || err);
+  
+  // Handle Sequelize validation errors
+  if (err.name === 'SequelizeValidationError' || err.name === 'SequelizeUniqueConstraintError') {
+    const messages = err.errors?.map(e => e.message).join(', ') || err.message;
+    return res.status(400).json({
+      error: { message: messages }
+    });
+  }
+  
   res.status(err.status || 500).json({
     error: {
       message: err.message || 'Internal server error',

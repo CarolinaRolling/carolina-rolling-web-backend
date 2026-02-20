@@ -103,28 +103,46 @@ router.post('/clients', async (req, res, next) => {
       return res.status(400).json({ error: { message: 'Client name is required' } });
     }
     
-    // Check for duplicate
-    const existing = await Client.findOne({ where: { name: { [Op.iLike]: name } } });
+    // Check for duplicate (active)
+    const existing = await Client.findOne({ where: { name: { [Op.iLike]: name.trim() } } });
     if (existing) {
-      return res.status(400).json({ error: { message: 'A client with this name already exists' } });
+      if (!existing.isActive) {
+        // Reactivate the inactive client instead of blocking
+        await existing.update({
+          isActive: true,
+          contactName: contactName || existing.contactName,
+          contactPhone: contactPhone || existing.contactPhone,
+          contactEmail: contactEmail || existing.contactEmail,
+          address: address || existing.address,
+          taxStatus: taxStatus || existing.taxStatus,
+          resaleCertificate: resaleCertificate || existing.resaleCertificate,
+          customTaxRate: (customTaxRate && customTaxRate !== '' && !isNaN(parseFloat(customTaxRate))) ? parseFloat(customTaxRate) : existing.customTaxRate,
+          notes: notes || existing.notes,
+          noTag: noTag !== undefined ? noTag : existing.noTag,
+          paymentTerms: paymentTerms || existing.paymentTerms
+        });
+        return res.status(201).json({ data: existing, message: `Client "${existing.name}" reactivated` });
+      }
+      return res.status(400).json({ error: { message: `A client named "${existing.name}" already exists` } });
     }
     
     const client = await Client.create({
-      name,
-      contactName,
-      contactPhone,
-      contactEmail,
-      address,
+      name: name.trim(),
+      contactName: contactName || null,
+      contactPhone: contactPhone || null,
+      contactEmail: contactEmail || null,
+      address: address || null,
       taxStatus: taxStatus || 'taxable',
-      resaleCertificate,
-      customTaxRate: customTaxRate ? parseFloat(customTaxRate) : null,
-      notes,
+      resaleCertificate: resaleCertificate || null,
+      customTaxRate: (customTaxRate && customTaxRate !== '' && !isNaN(parseFloat(customTaxRate))) ? parseFloat(customTaxRate) : null,
+      notes: notes || null,
       noTag: noTag || false,
       paymentTerms: paymentTerms || null
     });
     
     res.status(201).json({ data: client, message: 'Client created successfully' });
   } catch (error) {
+    console.error('Client creation error:', error.message, error.errors?.map(e => e.message));
     next(error);
   }
 });
@@ -174,8 +192,8 @@ router.put('/clients/:id', async (req, res, next) => {
       address: address !== undefined ? address : client.address,
       taxStatus: taxStatus !== undefined ? taxStatus : client.taxStatus,
       resaleCertificate: resaleCertificate !== undefined ? resaleCertificate : client.resaleCertificate,
-      customTaxRate: customTaxRate !== undefined ? (customTaxRate ? parseFloat(customTaxRate) : null) : client.customTaxRate,
-      notes: notes !== undefined ? notes : client.notes,
+      customTaxRate: customTaxRate !== undefined ? ((customTaxRate && customTaxRate !== '' && !isNaN(parseFloat(customTaxRate))) ? parseFloat(customTaxRate) : null) : client.customTaxRate,
+      notes: notes !== undefined ? (notes || null) : client.notes,
       isActive: isActive !== undefined ? isActive : client.isActive,
       noTag: noTag !== undefined ? noTag : client.noTag,
       paymentTerms: paymentTerms !== undefined ? (paymentTerms || null) : client.paymentTerms
@@ -183,6 +201,7 @@ router.put('/clients/:id', async (req, res, next) => {
     
     res.json({ data: client, message: 'Client updated successfully' });
   } catch (error) {
+    console.error('Client update error:', error.message, error.errors?.map(e => e.message));
     next(error);
   }
 });

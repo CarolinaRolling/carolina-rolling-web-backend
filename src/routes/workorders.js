@@ -2092,7 +2092,8 @@ router.post('/:id/documents', documentUpload.array('documents', 10), async (req,
           mimeType: file.mimetype,
           size: file.size,
           url: result.secure_url,
-          cloudinaryId: result.public_id
+          cloudinaryId: result.public_id,
+          documentType: req.body.documentType || null
         });
 
         documents.push(document);
@@ -2507,7 +2508,7 @@ router.post('/:id/print-package', async (req, res, next) => {
 
     // Full mode: add order documents and purchase orders
     if (mode === 'full' && workOrder.documents) {
-      for (const doc of workOrder.documents.filter(d => d.documentType !== 'purchase_order')) {
+      for (const doc of workOrder.documents.filter(d => d.documentType !== 'purchase_order' && d.documentType !== 'mtr')) {
         if (doc.mimeType === 'application/pdf' || (doc.originalName || '').toLowerCase().endsWith('.pdf')) {
           pdfSources.push({
             label: `Doc: ${doc.originalName}`,

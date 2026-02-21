@@ -1826,6 +1826,51 @@ PONumber.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
 Client.hasMany(DRNumber, { foreignKey: 'clientId', as: 'drNumbers' });
 DRNumber.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
 
+// ApiKey Model - for portal/external API access
+const ApiKey = sequelize.define('ApiKey', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  name: {
+    type: DataTypes.STRING,
+    allowNull: false // e.g. "Customer Portal", "GNB Portal"
+  },
+  key: {
+    type: DataTypes.STRING,
+    allowNull: false,
+    unique: true
+  },
+  clientName: {
+    type: DataTypes.STRING,
+    allowNull: true // null = full access, set = scoped to that client's data
+  },
+  permissions: {
+    type: DataTypes.STRING,
+    defaultValue: 'read' // 'read', 'read_write', 'admin'
+  },
+  isActive: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: true
+  },
+  lastUsedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  expiresAt: {
+    type: DataTypes.DATE,
+    allowNull: true // null = never expires
+  },
+  createdBy: {
+    type: DataTypes.STRING,
+    allowNull: true
+  }
+}, {
+  tableName: 'api_keys',
+  timestamps: true
+});
+
 module.exports = {
   sequelize,
   User,
@@ -1848,5 +1893,6 @@ module.exports = {
   EmailLog,
   DailyActivity,
   Client,
-  Vendor
+  Vendor,
+  ApiKey
 };

@@ -60,17 +60,20 @@ app.get('/health', (req, res) => {
 
 // API Routes
 app.use('/api/auth', authRoutes);
-app.use('/api/shipments', shipmentRoutes);
-app.use('/api/settings', settingsRoutes);
-app.use('/api/inbound', inboundRoutes);
-app.use('/api/workorders', workordersRoutes);
-app.use('/api/estimates', estimatesRoutes);
-app.use('/api/backup', backupRoutes);
-app.use('/api/dr-numbers', drNumbersRoutes);
-app.use('/api/po-numbers', poNumbersRoutes);
-app.use('/api/email', emailRoutes);
-app.use('/api', clientsVendorsRoutes);
-app.use('/api', permitVerificationRoutes);
+
+// All other routes require authentication (JWT token or API key)
+const { authenticate } = require('./routes/auth');
+app.use('/api/shipments', authenticate, shipmentRoutes);
+app.use('/api/settings', authenticate, settingsRoutes);
+app.use('/api/inbound', authenticate, inboundRoutes);
+app.use('/api/workorders', authenticate, workordersRoutes);
+app.use('/api/estimates', authenticate, estimatesRoutes);
+app.use('/api/backup', authenticate, backupRoutes);
+app.use('/api/dr-numbers', authenticate, drNumbersRoutes);
+app.use('/api/po-numbers', authenticate, poNumbersRoutes);
+app.use('/api/email', authenticate, emailRoutes);
+app.use('/api', authenticate, clientsVendorsRoutes);
+app.use('/api', authenticate, permitVerificationRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {

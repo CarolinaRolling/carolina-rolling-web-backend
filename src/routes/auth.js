@@ -1,6 +1,7 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
-const { User, ActivityLog } = require('../models');
+const crypto = require('crypto');
+const { User, ActivityLog, ApiKey } = require('../models');
 
 const router = express.Router();
 
@@ -32,10 +33,63 @@ const authenticateToken = async (req, res, next) => {
 
 // Middleware to check admin role
 const requireAdmin = (req, res, next) => {
-  if (req.user.role !== 'admin') {
+  if (req.user?.role !== 'admin' && !req.apiKey) {
+    return res.status(403).json({ error: { message: 'Admin access required' } });
+  }
+  // API keys with admin permissions also pass
+  if (req.apiKey && req.apiKey.permissions !== 'admin') {
     return res.status(403).json({ error: { message: 'Admin access required' } });
   }
   next();
+};
+
+// Unified auth middleware: accepts JWT Bearer token OR X-API-Key header
+const authenticate = async (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const apiKeyHeader = req.headers['x-api-key'];
+
+  // Option 1: JWT Bearer token (main app)
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.split(' ')[1];
+    try {
+      const decoded = jwt.verify(token, JWT_SECRET);
+      const user = await User.findByPk(decoded.userId);
+      if (user && user.isActive) {
+        req.user = user;
+        return next();
+      }
+    } catch (e) {}
+    return res.status(401).json({ error: { message: 'Invalid or expired token' } });
+  }
+
+  // Option 2: API Key (portal/external apps)
+  if (apiKeyHeader) {
+    try {
+      const apiKey = await ApiKey.findOne({ where: { key: apiKeyHeader, isActive: true } });
+      if (!apiKey) {
+        return res.status(401).json({ error: { message: 'Invalid API key' } });
+      }
+      // Check expiration
+      if (apiKey.expiresAt && new Date(apiKey.expiresAt) < new Date()) {
+        return res.status(401).json({ error: { message: 'API key expired' } });
+      }
+      // Attach key info to request so routes can scope data
+      req.apiKey = apiKey;
+      // Update last used timestamp (fire and forget)
+      apiKey.update({ lastUsedAt: new Date() }).catch(() => {});
+      
+      // Enforce read-only permission — block write operations
+      if (apiKey.permissions === 'read' && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+        return res.status(403).json({ error: { message: 'API key has read-only permission' } });
+      }
+      
+      return next();
+    } catch (e) {
+      return res.status(500).json({ error: { message: 'Auth error' } });
+    }
+  }
+
+  return res.status(401).json({ error: { message: 'Authentication required. Provide Bearer token or X-API-Key header.' } });
 };
 
 // Helper to log activity
@@ -277,4 +331,78 @@ const initializeAdmin = async () => {
   }
 };
 
-module.exports = { router, authenticateToken, requireAdmin, logActivity, initializeAdmin };
+module.exports = { router, authenticateToken, requireAdmin, logActivity, initializeAdmin, authenticate };
+
+// ==================== API KEY MANAGEMENT ====================
+
+// POST /api/auth/api-keys - Create new API key (admin only)
+router.post('/api-keys', authenticateToken, requireAdmin, async (req, res, next) => {
+  try {
+    const { name, clientName, permissions, expiresAt } = req.body;
+    if (!name) {
+      return res.status(400).json({ error: { message: 'API key name is required' } });
+    }
+
+    // Generate a secure random key: crm_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+    const rawKey = crypto.randomBytes(32).toString('hex');
+    const key = `crm_${rawKey}`;
+
+    const apiKey = await ApiKey.create({
+      name,
+      key,
+      clientName: clientName || null,
+      permissions: permissions || 'read',
+      expiresAt: expiresAt || null,
+      createdBy: req.user.username
+    });
+
+    // Return the key - this is the ONLY time the full key is shown
+    res.status(201).json({
+      data: {
+        id: apiKey.id,
+        name: apiKey.name,
+        key: apiKey.key, // Only shown on creation
+        clientName: apiKey.clientName,
+        permissions: apiKey.permissions,
+        expiresAt: apiKey.expiresAt,
+        createdAt: apiKey.createdAt
+      },
+      message: 'API key created. Save this key — it won\'t be shown again.'
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/auth/api-keys - List all API keys (admin only)
+router.get('/api-keys', authenticateToken, requireAdmin, async (req, res, next) => {
+  try {
+    const apiKeys = await ApiKey.findAll({
+      attributes: ['id', 'name', 'clientName', 'permissions', 'isActive', 'lastUsedAt', 'expiresAt', 'createdBy', 'createdAt'],
+      order: [['createdAt', 'DESC']]
+    });
+    // Key value is NOT returned in list — only prefix for identification
+    const keysWithPrefix = apiKeys.map(k => {
+      const data = k.toJSON();
+      data.keyPrefix = 'crm_****';
+      return data;
+    });
+    res.json({ data: keysWithPrefix });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// DELETE /api/auth/api-keys/:id - Revoke an API key (admin only)
+router.delete('/api-keys/:id', authenticateToken, requireAdmin, async (req, res, next) => {
+  try {
+    const apiKey = await ApiKey.findByPk(req.params.id);
+    if (!apiKey) {
+      return res.status(404).json({ error: { message: 'API key not found' } });
+    }
+    await apiKey.update({ isActive: false });
+    res.json({ message: `API key "${apiKey.name}" revoked` });
+  } catch (error) {
+    next(error);
+  }
+});

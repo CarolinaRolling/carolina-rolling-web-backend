@@ -415,6 +415,11 @@ router.get('/', async (req, res, next) => {
     if (clientName) where.clientName = { [Op.iLike]: `%${clientName}%` };
     if (drNumber) where.drNumber = parseInt(drNumber);
 
+    // API key client scoping — force filter to the key's allowed client
+    if (req.apiKey && req.apiKey.clientName) {
+      where.clientName = { [Op.iLike]: `%${req.apiKey.clientName}%` };
+    }
+
     const workOrders = await WorkOrder.findAndCountAll({
       where,
       include: [{
@@ -543,6 +548,13 @@ router.get('/:id', async (req, res, next) => {
 
     if (!workOrder) {
       return res.status(404).json({ error: { message: 'Work order not found' } });
+    }
+
+    // API key client scoping — deny access if key is scoped to a different client
+    if (req.apiKey && req.apiKey.clientName) {
+      if (!workOrder.clientName || !workOrder.clientName.toLowerCase().includes(req.apiKey.clientName.toLowerCase())) {
+        return res.status(403).json({ error: { message: 'Access denied — API key does not have access to this work order' } });
+      }
     }
 
     // Rewrite file URLs to use download proxy (handles resource_type mismatches transparently)
@@ -2158,6 +2170,14 @@ router.get('/:id/documents/:documentId/download', async (req, res, next) => {
 
     if (!document) {
       return res.status(404).json({ error: { message: 'Document not found' } });
+    }
+
+    // API key client scoping
+    if (req.apiKey && req.apiKey.clientName) {
+      const wo = await WorkOrder.findByPk(req.params.id, { attributes: ['clientName'] });
+      if (!wo || !wo.clientName || !wo.clientName.toLowerCase().includes(req.apiKey.clientName.toLowerCase())) {
+        return res.status(403).json({ error: { message: 'Access denied' } });
+      }
     }
 
     const cloudName = process.env.CLOUDINARY_CLOUD_NAME;

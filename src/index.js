@@ -254,6 +254,13 @@ async function startServer() {
       console.error('Database sync warning (non-fatal):', syncErr.message);
       console.log('Continuing with existing schema - run migrations manually if needed');
     }
+
+    // Migrate picked_up status to shipped (consolidated statuses)
+    try {
+      const [results] = await sequelize.query(`UPDATE work_orders SET status = 'shipped' WHERE status = 'picked_up'`);
+      const count = results?.rowCount || results?.length || 0;
+      if (count > 0) console.log(`Migrated ${count} work orders from picked_up to shipped`);
+    } catch (e) { /* ignore */ }
     
     // Ensure critical columns exist (sync may fail silently with enum conflicts)
     try {

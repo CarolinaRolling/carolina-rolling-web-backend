@@ -402,13 +402,13 @@ router.get('/', async (req, res, next) => {
     
     // By default, exclude archived/shipped/picked_up unless specifically requested
     if (archived === 'true') {
-      where.status = { [Op.in]: ['archived', 'shipped', 'picked_up'] };
+      where.status = { [Op.in]: ['archived', 'shipped'] };
     } else if (archived === 'only') {
       where.status = 'archived';
     } else if (status) {
       where.status = status;
     } else {
-      where.status = { [Op.notIn]: ['archived', 'shipped', 'picked_up'] };
+      where.status = { [Op.notIn]: ['archived', 'shipped'] };
     }
     
     if (clientName) where.clientName = { [Op.iLike]: `%${clientName}%` };
@@ -849,7 +849,7 @@ router.post('/:id/pickup', async (req, res, next) => {
       });
       
       await workOrder.update({
-        status: 'picked_up',
+        status: 'shipped',
         pickedUpAt: now,
         pickedUpBy: pickedUpBy || 'unknown',
         pickupHistory: history
@@ -884,7 +884,7 @@ router.post('/:id/pickup', async (req, res, next) => {
 
       const updateData = { pickupHistory: history };
       if (allPickedUp) {
-        updateData.status = 'picked_up';
+        updateData.status = 'shipped';
         updateData.pickedUpAt = now;
         updateData.pickedUpBy = pickedUpBy || 'unknown';
       }
@@ -1047,7 +1047,7 @@ router.put('/:id', async (req, res, next) => {
       if (status === 'completed' && !workOrder.completedAt) {
         updates.completedAt = new Date();
       }
-      if (status === 'picked_up') {
+      if (status === 'shipped') {
         updates.pickedUpAt = new Date();
         if (pickedUpBy) updates.pickedUpBy = pickedUpBy;
         if (signatureData) updates.signatureData = signatureData;
@@ -1887,7 +1887,7 @@ router.get('/archived', async (req, res, next) => {
   try {
     const { clientName, drNumber, limit = 50, offset = 0 } = req.query;
     
-    const where = { status: { [Op.in]: ['archived', 'shipped', 'picked_up'] } };
+    const where = { status: { [Op.in]: ['archived', 'shipped'] } };
     if (clientName) where.clientName = { [Op.iLike]: `%${clientName}%` };
     if (drNumber) where.drNumber = parseInt(drNumber);
 

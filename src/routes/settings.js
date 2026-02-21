@@ -393,7 +393,7 @@ async function sendScheduleEmail() {
 
   // 2. Active work orders
   const activeWOs = await WorkOrder.findAll({
-    where: { status: { [Op.notIn]: ['archived', 'shipped', 'picked_up'] } },
+    where: { status: { [Op.notIn]: ['archived', 'shipped'] } },
     include: [{ model: WorkOrderPart, as: 'parts' }]
   });
 

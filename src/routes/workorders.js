@@ -23,11 +23,12 @@ function fetchWithRedirects(url, maxRedirects = 5, timeoutMs = 15000) {
       } else if (resp.statusCode === 200) {
         resolve(resp);
       } else {
+        console.log(`[doc-proxy] HTTP ${resp.statusCode} for ${url.substring(0, 100)}`);
         resp.resume();
         resolve(null);
       }
     });
-    req.on('error', () => resolve(null));
+    req.on('error', (e) => { console.log(`[doc-proxy] fetch error: ${e.message}`); resolve(null); });
     req.setTimeout(timeoutMs, () => { req.destroy(); resolve(null); });
   });
 }
@@ -2161,7 +2162,12 @@ router.get('/:id/documents/:documentId/download', async (req, res, next) => {
     const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
     const pubId = document.cloudinaryId;
 
-    // Strategy 1: Use Cloudinary Admin API to find the resource and get its actual type
+    console.log(`[doc-proxy] === Downloading document ${document.id} ===`);
+    console.log(`[doc-proxy] cloudinaryId: ${pubId}`);
+    console.log(`[doc-proxy] storedUrl: ${document.url}`);
+    console.log(`[doc-proxy] mimeType: ${document.mimeType}`);
+
+    // Strategy 1: Use Cloudinary Admin API to find the resource, then try ALL download methods
     if (pubId) {
       const pubIdNoExt = pubId.replace(/\.[^/.]+$/, '');
       
@@ -2170,39 +2176,49 @@ router.get('/:id/documents/:documentId/download', async (req, res, next) => {
           try {
             const resource = await cloudinary.api.resource(pid, { resource_type: resType });
             if (resource && resource.secure_url) {
-              console.log(`[doc-proxy] Found via API: type=${resType}, id=${pid}`);
+              console.log(`[doc-proxy] Found via API: type=${resType}, id=${pid}, access_mode=${resource.access_mode}, format=${resource.format}`);
               
-              // For authenticated resources, generate a signed URL
-              let downloadUrl;
-              if (resource.access_mode === 'authenticated') {
-                try {
-                  downloadUrl = cloudinary.utils.private_download_url(pid, resource.format || 'pdf', { 
-                    resource_type: resType, 
-                    expires_at: Math.floor(Date.now() / 1000) + 3600 
-                  });
-                } catch (e) {
-                  // Fallback: signed URL
-                  downloadUrl = cloudinary.url(pid, { 
-                    resource_type: resType, 
-                    type: 'authenticated', 
-                    sign_url: true, 
-                    secure: true 
-                  });
+              // Build ALL possible download URLs — don't trust access_mode
+              const downloadUrls = [];
+              const fmt = resource.format || (document.originalName?.match(/\.(\w+)$/)?.[1]) || 'pdf';
+              
+              // Method 1: private_download_url (designed for authenticated resources)
+              try {
+                downloadUrls.push({ label: 'private_download_url', url: cloudinary.utils.private_download_url(pid, fmt, { 
+                  resource_type: resType, expires_at: Math.floor(Date.now() / 1000) + 3600 
+                })});
+              } catch (e) { console.log(`[doc-proxy] private_download_url build error: ${e.message}`); }
+              
+              // Method 2: Signed URL with authenticated type
+              try {
+                downloadUrls.push({ label: 'signed-authenticated', url: cloudinary.url(pid, { 
+                  resource_type: resType, type: 'authenticated', sign_url: true, secure: true 
+                })});
+              } catch (e) {}
+              
+              // Method 3: Signed URL with upload type
+              try {
+                downloadUrls.push({ label: 'signed-upload', url: cloudinary.url(pid, { 
+                  resource_type: resType, type: 'upload', sign_url: true, secure: true 
+                })});
+              } catch (e) {}
+              
+              // Method 4: Direct secure_url
+              downloadUrls.push({ label: 'secure_url', url: resource.secure_url });
+              
+              for (const { label, url: downloadUrl } of downloadUrls) {
+                console.log(`[doc-proxy] Trying ${label}: ${downloadUrl.substring(0, 150)}`);
+                const upstream = await fetchWithRedirects(downloadUrl);
+                if (upstream) {
+                  console.log(`[doc-proxy] SUCCESS via ${label} for document ${document.id}`);
+                  const contentType = document.mimeType || upstream.headers['content-type'] || 'application/pdf';
+                  res.setHeader('Content-Type', contentType);
+                  if (upstream.headers['content-length']) res.setHeader('Content-Length', upstream.headers['content-length']);
+                  res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(document.originalName || 'document.pdf')}"`);
+                  upstream.pipe(res);
+                  return;
                 }
-              } else {
-                downloadUrl = resource.secure_url;
-              }
-              
-              console.log(`[doc-proxy] Fetching: ${downloadUrl.substring(0, 120)}...`);
-              const upstream = await fetchWithRedirects(downloadUrl);
-              if (upstream) {
-                console.log(`[doc-proxy] SUCCESS for document ${document.id}`);
-                const contentType = document.mimeType || upstream.headers['content-type'] || 'application/pdf';
-                res.setHeader('Content-Type', contentType);
-                if (upstream.headers['content-length']) res.setHeader('Content-Length', upstream.headers['content-length']);
-                res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(document.originalName || 'document.pdf')}"`);
-                upstream.pipe(res);
-                return;
+                console.log(`[doc-proxy] ${label} FAILED`);
               }
             }
           } catch (e) {

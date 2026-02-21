@@ -2081,8 +2081,7 @@ router.post('/:id/documents', documentUpload.array('documents', 10), async (req,
         // Upload to Cloudinary
         const result = await cloudinary.uploader.upload(file.path, {
           folder: `work-orders/${workOrder.id}/documents`,
-          resource_type: 'auto',
-          access_mode: 'authenticated'
+          resource_type: 'raw'
         });
 
         // Create document record
@@ -2163,39 +2162,35 @@ router.get('/:id/documents/:documentId/download', async (req, res, next) => {
     const urlsToTry = [];
     const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
     
-    // Try stored URL first — it came directly from Cloudinary upload response
-    if (document.url) urlsToTry.push(document.url);
-    
     if (document.cloudinaryId && cloudName) {
       const pubId = document.cloudinaryId;
-      const hasPdfExt = pubId.toLowerCase().endsWith('.pdf');
       
-      if (hasPdfExt) {
-        urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}`);
-        urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId.replace(/\.pdf$/i, '')}`);
-      } else {
-        urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}.pdf`);
-        urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}`);
-      }
-      
-      try { urlsToTry.push(cloudinary.url(pubId, { resource_type: 'raw', type: 'private', sign_url: true, secure: true })); } catch (e) {}
-      if (hasPdfExt) {
-        try { urlsToTry.push(cloudinary.url(pubId.replace(/\.pdf$/i, ''), { resource_type: 'raw', type: 'private', sign_url: true, secure: true })); } catch (e) {}
-      }
-      try { urlsToTry.push(cloudinary.url(pubId, { resource_type: 'raw', sign_url: true, secure: true })); } catch (e) {}
-      
-      const versionMatch = document.url?.match(/\/v(\d+)\//);
-      const version = versionMatch ? `/v${versionMatch[1]}` : '';
-      if (version) {
-        if (hasPdfExt) {
-          urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload${version}/${pubId}`);
-          urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload${version}/${pubId.replace(/\.pdf$/i, '')}`);
-        } else {
-          urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload${version}/${pubId}.pdf`);
-          urlsToTry.push(`https://res.cloudinary.com/${cloudName}/raw/upload${version}/${pubId}`);
+      // Priority 1: Signed URLs (required for access_mode: 'authenticated')
+      // Try both 'image' and 'raw' resource types — Cloudinary 'auto' upload may pick either
+      for (const resType of ['image', 'raw']) {
+        for (const accessType of ['authenticated', 'upload']) {
+          try {
+            urlsToTry.push(cloudinary.url(pubId, { 
+              resource_type: resType, 
+              type: accessType, 
+              sign_url: true, 
+              secure: true 
+            }));
+          } catch (e) {}
         }
       }
+      
+      // Priority 2: Direct URLs with version (for 'upload' access mode resources)
+      const versionMatch = document.url?.match(/\/v(\d+)\//);
+      const version = versionMatch ? `v${versionMatch[1]}/` : '';
+      for (const resType of ['image', 'raw']) {
+        urlsToTry.push(`https://res.cloudinary.com/${cloudName}/${resType}/upload/${version}${pubId}`);
+        urlsToTry.push(`https://res.cloudinary.com/${cloudName}/${resType}/upload/${version}${pubId}.pdf`);
+      }
     }
+    
+    // Priority 3: Stored URL from Cloudinary upload response
+    if (document.url) urlsToTry.push(document.url);
     
     const uniqueUrls = [...new Set(urlsToTry)];
     

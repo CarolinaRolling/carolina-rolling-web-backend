@@ -2158,51 +2158,66 @@ router.get('/:id/documents/:documentId/download', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Document not found' } });
     }
 
-    // Build list of candidate URLs to try
-    const urlsToTry = [];
     const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
-    
-    if (document.cloudinaryId && cloudName) {
-      const pubId = document.cloudinaryId;
+    const pubId = document.cloudinaryId;
+
+    // Strategy 1: Use Cloudinary Admin API to find the resource and get its actual type
+    if (pubId) {
+      const pubIdNoExt = pubId.replace(/\.[^/.]+$/, '');
       
-      // Priority 1: Signed URLs (required for access_mode: 'authenticated')
-      // Try both 'image' and 'raw' resource types — Cloudinary 'auto' upload may pick either
-      for (const resType of ['image', 'raw']) {
-        for (const accessType of ['authenticated', 'upload']) {
+      for (const resType of ['raw', 'image', 'video']) {
+        for (const pid of [pubId, pubIdNoExt]) {
           try {
-            urlsToTry.push(cloudinary.url(pubId, { 
-              resource_type: resType, 
-              type: accessType, 
-              sign_url: true, 
-              secure: true 
-            }));
-          } catch (e) {}
+            const resource = await cloudinary.api.resource(pid, { resource_type: resType });
+            if (resource && resource.secure_url) {
+              console.log(`[doc-proxy] Found via API: type=${resType}, id=${pid}`);
+              
+              // For authenticated resources, generate a signed URL
+              let downloadUrl;
+              if (resource.access_mode === 'authenticated') {
+                try {
+                  downloadUrl = cloudinary.utils.private_download_url(pid, resource.format || 'pdf', { 
+                    resource_type: resType, 
+                    expires_at: Math.floor(Date.now() / 1000) + 3600 
+                  });
+                } catch (e) {
+                  // Fallback: signed URL
+                  downloadUrl = cloudinary.url(pid, { 
+                    resource_type: resType, 
+                    type: 'authenticated', 
+                    sign_url: true, 
+                    secure: true 
+                  });
+                }
+              } else {
+                downloadUrl = resource.secure_url;
+              }
+              
+              console.log(`[doc-proxy] Fetching: ${downloadUrl.substring(0, 120)}...`);
+              const upstream = await fetchWithRedirects(downloadUrl);
+              if (upstream) {
+                console.log(`[doc-proxy] SUCCESS for document ${document.id}`);
+                const contentType = document.mimeType || upstream.headers['content-type'] || 'application/pdf';
+                res.setHeader('Content-Type', contentType);
+                if (upstream.headers['content-length']) res.setHeader('Content-Length', upstream.headers['content-length']);
+                res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(document.originalName || 'document.pdf')}"`);
+                upstream.pipe(res);
+                return;
+              }
+            }
+          } catch (e) {
+            // Resource not found with this type/id combo, try next
+          }
         }
       }
-      
-      // Priority 2: Direct URLs with version (for 'upload' access mode resources)
-      const versionMatch = document.url?.match(/\/v(\d+)\//);
-      const version = versionMatch ? `v${versionMatch[1]}/` : '';
-      for (const resType of ['image', 'raw']) {
-        urlsToTry.push(`https://res.cloudinary.com/${cloudName}/${resType}/upload/${version}${pubId}`);
-        urlsToTry.push(`https://res.cloudinary.com/${cloudName}/${resType}/upload/${version}${pubId}.pdf`);
-      }
     }
-    
-    // Priority 3: Stored URL from Cloudinary upload response
-    if (document.url) urlsToTry.push(document.url);
-    
-    const uniqueUrls = [...new Set(urlsToTry)];
-    
-    console.log(`[doc-proxy] Trying ${uniqueUrls.length} URLs for document ${document.id} (${document.originalName}), stored url: ${document.url || 'NULL'}`);
 
-    // Try each URL - stream the first one that works
-    for (let i = 0; i < uniqueUrls.length; i++) {
-      const url = uniqueUrls[i];
-      console.log(`[doc-proxy] Attempt ${i + 1}: ${url.substring(0, 120)}...`);
-      const upstream = await fetchWithRedirects(url);
+    // Strategy 2: Try stored URL directly (works for public/upload resources)
+    if (document.url) {
+      console.log(`[doc-proxy] Trying stored URL: ${document.url.substring(0, 120)}...`);
+      const upstream = await fetchWithRedirects(document.url);
       if (upstream) {
-        console.log(`[doc-proxy] SUCCESS on attempt ${i + 1} for document ${document.id}`);
+        console.log(`[doc-proxy] SUCCESS via stored URL for document ${document.id}`);
         const contentType = document.mimeType || upstream.headers['content-type'] || 'application/pdf';
         res.setHeader('Content-Type', contentType);
         if (upstream.headers['content-length']) res.setHeader('Content-Length', upstream.headers['content-length']);
@@ -2263,10 +2278,10 @@ router.get('/:id/documents/:documentId/download', async (req, res, next) => {
       }
     }
 
-    console.error(`[doc-proxy] ALL URLs failed for document ${document.id}, no fallback available`);
+    console.error(`[doc-proxy] ALL strategies failed for document ${document.id} (cloudinaryId: ${document.cloudinaryId})`);
     res.status(502).json({ 
       error: { message: 'Unable to retrieve document from storage.' },
-      debug: { urlsTried: uniqueUrls.length, cloudinaryId: document.cloudinaryId, storedUrl: document.url ? 'present' : 'NULL' }
+      debug: { cloudinaryId: document.cloudinaryId, storedUrl: document.url ? 'present' : 'NULL' }
     });
   } catch (error) {
     next(error);

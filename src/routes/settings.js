@@ -387,7 +387,7 @@ async function sendScheduleEmail() {
 
   // 1. Active shipments for schedule — exclude all terminal statuses
   const activeShipments = await Shipment.findAll({
-    where: { status: { [Op.notIn]: ['shipped', 'archived', 'stored', 'completed', 'picked_up'] } },
+    where: { status: { [Op.notIn]: ['shipped', 'archived', 'stored'] } },
     include: [{ model: WorkOrder, as: 'workOrder', attributes: ['status'], required: false }],
     order: [['promisedDate', 'ASC']]
   });

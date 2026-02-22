@@ -385,10 +385,17 @@ async function sendScheduleEmail() {
 
   // ==================== GATHER DATA ====================
 
-  // 1. Active shipments for schedule
+  // 1. Active shipments for schedule — exclude all terminal statuses
   const activeShipments = await Shipment.findAll({
-    where: { status: { [Op.notIn]: ['shipped', 'archived'] } },
+    where: { status: { [Op.notIn]: ['shipped', 'archived', 'stored', 'completed', 'picked_up'] } },
+    include: [{ model: WorkOrder, as: 'workOrder', attributes: ['status'], required: false }],
     order: [['promisedDate', 'ASC']]
+  });
+
+  // Also filter out shipments whose linked work order is already shipped/archived/stored
+  const trulyActiveShipments = activeShipments.filter(s => {
+    if (s.workOrder && ['shipped', 'archived', 'stored'].includes(s.workOrder.status)) return false;
+    return true;
   });
 
   // 2. Active work orders
@@ -431,9 +438,9 @@ async function sendScheduleEmail() {
   const upcomingPromised = [];
   const overdueRequested = [];
   const upcomingRequested = [];
-  const unlinkedShipments = activeShipments.filter(s => !s.workOrderId);
+  const unlinkedShipments = trulyActiveShipments.filter(s => !s.workOrderId);
 
-  activeShipments.forEach(s => {
+  trulyActiveShipments.forEach(s => {
     const promisedDays = getDaysUntil(s.promisedDate);
     const requestedDays = getDaysUntil(s.requestedDueDate);
     if (promisedDays !== null) {
@@ -480,8 +487,8 @@ async function sendScheduleEmail() {
     const bgColor = isOverdue ? '#ffebee' : '#e3f2fd';
     let html = `<h3 style="color: ${hdrColor}; margin: 16px 0 8px; padding: 6px 10px; background: ${bgColor}; border-radius: 4px; font-size: 14px;">${title} (${items.length})</h3>`;
     html += `<table style="width: 100%; border-collapse: collapse; font-size: 13px;"><thead><tr style="background: #f5f5f5;">
+      <th style="padding: 8px; text-align: left; border-bottom: 2px solid #ddd;">DR#</th>
       <th style="padding: 8px; text-align: left; border-bottom: 2px solid #ddd;">Client</th>
-      <th style="padding: 8px; text-align: left; border-bottom: 2px solid #ddd;">PO#</th>
       <th style="padding: 8px; text-align: left; border-bottom: 2px solid #ddd;">Promised</th>
       <th style="padding: 8px; text-align: left; border-bottom: 2px solid #ddd;">Requested</th>
       <th style="padding: 8px; text-align: left; border-bottom: 2px solid #ddd;">${isOverdue ? 'Overdue' : 'Due In'}</th>
@@ -489,9 +496,10 @@ async function sendScheduleEmail() {
     items.forEach((item, i) => {
       const days = isOverdue ? item.daysOverdue : item.daysUntil;
       const daysColor = isOverdue ? '#c62828' : (days <= 1 ? '#e65100' : '#333');
+      const drLabel = item.drNumber ? `DR-${item.drNumber}` : '—';
       html += `<tr style="background: ${i % 2 ? '#fafafa' : '#fff'};">
+        <td style="padding: 8px; border-bottom: 1px solid #eee; font-weight: 700; color: #1565c0;">${drLabel}</td>
         <td style="padding: 8px; border-bottom: 1px solid #eee; font-weight: 600;">${item.clientName || '—'}</td>
-        <td style="padding: 8px; border-bottom: 1px solid #eee;">${item.clientPurchaseOrderNumber || '—'}</td>
         <td style="padding: 8px; border-bottom: 1px solid #eee;">${fmtDate(item.promisedDate)}</td>
         <td style="padding: 8px; border-bottom: 1px solid #eee;">${fmtDate(item.requestedDueDate)}</td>
         <td style="padding: 8px; border-bottom: 1px solid #eee; color: ${daysColor}; font-weight: 600;">${isOverdue ? days + ' days' : (days === 0 ? 'TODAY' : days + ' days')}</td>
@@ -525,7 +533,7 @@ async function sendScheduleEmail() {
   html += statBox(totalOverdue, 'Overdue', totalOverdue > 0 ? 'c62828' : '888', totalOverdue > 0 ? 'ffebee' : 'f5f5f5');
   html += statBox(upcomingPromised.length, 'Due This Week', upcomingPromised.length > 0 ? '1565c0' : '888', upcomingPromised.length > 0 ? 'e3f2fd' : 'f5f5f5');
   html += statBox(activeWOs.length, 'Active WOs', '2e7d32', 'e8f5e9');
-  html += statBox(activeShipments.length, 'Active Shipments', 'e65100', 'fff3e0');
+  html += statBox(trulyActiveShipments.length, 'Active Shipments', 'e65100', 'fff3e0');
   html += statBox(activeEstimates.length, 'Open Estimates', '7b1fa2', 'f3e5f5');
   html += `</div>`;
 

@@ -397,10 +397,25 @@ function generateOrderNumber() {
 // GET /api/workorders - Get all work orders
 router.get('/', async (req, res, next) => {
   try {
-    const { status, clientName, archived, drNumber, limit = 50, offset = 0 } = req.query;
+    const { status, clientName, archived, drNumber, search, limit = 50, offset = 0 } = req.query;
     
     const where = {};
     
+    // If searching, search across ALL statuses (including shipped/archived)
+    if (search) {
+      const searchLower = `%${search}%`;
+      where[Op.or] = [
+        { clientName: { [Op.iLike]: searchLower } },
+        { orderNumber: { [Op.iLike]: searchLower } },
+        { clientPurchaseOrderNumber: { [Op.iLike]: searchLower } },
+        { contactName: { [Op.iLike]: searchLower } }
+      ];
+      // Also try numeric DR search
+      const drParsed = parseInt(search.replace(/^dr-?/i, ''));
+      if (!isNaN(drParsed)) {
+        where[Op.or].push({ drNumber: drParsed });
+      }
+    } else {
     // By default, exclude archived/shipped/picked_up unless specifically requested
     if (archived === 'true') {
       where.status = { [Op.in]: ['archived', 'shipped'] };
@@ -414,6 +429,7 @@ router.get('/', async (req, res, next) => {
     
     if (clientName) where.clientName = { [Op.iLike]: `%${clientName}%` };
     if (drNumber) where.drNumber = parseInt(drNumber);
+    }
 
     // API key client scoping — force filter to the key's allowed client
     if (req.apiKey && req.apiKey.clientName) {

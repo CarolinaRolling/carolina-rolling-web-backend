@@ -2104,7 +2104,10 @@ router.get('/:id/pdf', async (req, res, next) => {
     for (const part of sortedParts) {
       if (yPos > 680) { doc.addPage(); yPos = 50; }
 
-      const partLabel = PART_LABELS[part.partType] || part.partType;
+      let partLabel = PART_LABELS[part.partType] || part.partType;
+      if (part.partType === 'flat_bar' && (part.formData?._barShape === 'square' || part._barShape === 'square')) {
+        partLabel = 'Square Bar Roll';
+      }
       const qty = parseInt(part.quantity) || 1;
       const matCost = parseFloat(part.materialTotal) || 0;
       const matMarkup = parseFloat(part.materialMarkupPercent) || 0;

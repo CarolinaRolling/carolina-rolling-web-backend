@@ -2246,15 +2246,15 @@ router.get('/:id/pdf', async (req, res, next) => {
 
       // Service background tint
       if (isLinkedSvc) {
-        doc.save().rect(50 + xOffset, yPos - 2, 512 - xOffset, rowHeight + 4).fill('#fce4ec').restore();
+        doc.save().rect(50 + xOffset, yPos - 2, 512 - xOffset, rowHeight + 4).fill('#e0e0e0').restore();
       }
 
       // Part number
-      doc.fontSize(9).fillColor(isLinkedSvc ? '#7b1fa2' : primaryColor).font('Helvetica-Bold');
-      doc.text(isLinkedSvc ? '>' : `#${part.partNumber}`, 50 + xOffset, yPos, { lineBreak: false });
+      doc.fontSize(9).fillColor(isLinkedSvc ? '#444' : primaryColor).font('Helvetica-Bold');
+      doc.text(isLinkedSvc ? '+' : `#${part.partNumber}`, 50 + xOffset, yPos, { lineBreak: false });
 
       // Part type + description  
-      doc.fontSize(8).fillColor(isLinkedSvc ? '#7b1fa2' : darkColor).font('Helvetica-Bold');
+      doc.fontSize(8).fillColor(isLinkedSvc ? '#444' : darkColor).font('Helvetica-Bold');
       doc.text(partLabel + (isLinkedSvc && linkedParentPart ? ` (for Part #${linkedParentPart.partNumber})` : ''), 85 + xOffset, yPos, { lineBreak: false });
       doc.font('Helvetica').fillColor(grayColor);
       doc.text(description, 85 + xOffset, yPos + 11, { width: 300 - xOffset });

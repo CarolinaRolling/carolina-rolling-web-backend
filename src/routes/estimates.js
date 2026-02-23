@@ -2251,7 +2251,7 @@ router.get('/:id/pdf', async (req, res, next) => {
 
       // Part number
       doc.fontSize(9).fillColor(isLinkedSvc ? '#7b1fa2' : primaryColor).font('Helvetica-Bold');
-      doc.text(isLinkedSvc ? '\u21B3' : `#${part.partNumber}`, 50 + xOffset, yPos, { lineBreak: false });
+      doc.text(isLinkedSvc ? '>' : `#${part.partNumber}`, 50 + xOffset, yPos, { lineBreak: false });
 
       // Part type + description  
       doc.fontSize(8).fillColor(isLinkedSvc ? '#7b1fa2' : darkColor).font('Helvetica-Bold');

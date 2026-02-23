@@ -2128,6 +2128,11 @@ router.get('/:id/pdf', async (req, res, next) => {
       // Build clean description lines
       const descLines = [];
 
+      // Client part number
+      if (part.clientPartNumber) {
+        descLines.push(`Client Part#: ${part.clientPartNumber}`);
+      }
+
       // Material description - for cones, always rebuild from fields to avoid stale/garbled data
       if (part.partType === 'cone_roll') {
         const fd = part.formData || {};

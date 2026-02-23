@@ -2466,7 +2466,7 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
       return res.status(400).json({ error: { message: 'Estimate has already been converted to a work order' } });
     }
 
-    const { clientPurchaseOrderNumber, requestedDueDate, promisedDate, notes } = req.body;
+    const { clientPurchaseOrderNumber, requestedDueDate, promisedDate, notes, materialReceived } = req.body;
 
     // Get next DR number using the admin setting helper
     const nextDRNumber = await getNextDRNumber(transaction);
@@ -2495,7 +2495,9 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
       contactEmail: estimate.contactEmail,
       clientPurchaseOrderNumber: clientPurchaseOrderNumber || null,
       notes: notes || estimate.notes,
-      status: 'waiting_for_materials',
+      status: materialReceived ? 'received' : 'waiting_for_materials',
+      receivedAt: materialReceived ? new Date() : null,
+      allMaterialReceived: materialReceived ? true : false,
       estimateId: estimate.id,
       estimateNumber: estimate.estimateNumber,
       estimateTotal: estimate.grandTotal,

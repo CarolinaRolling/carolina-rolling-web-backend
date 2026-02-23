@@ -643,7 +643,8 @@ router.post('/', async (req, res, next) => {
       promisedDate,
       status = 'received',
       shipmentIds = [],
-      assignDRNumber = false
+      assignDRNumber = false,
+      customDRNumber = null
     } = req.body;
 
     if (!clientName && !clientId) {
@@ -703,7 +704,25 @@ router.post('/', async (req, res, next) => {
 
       // Assign DR number if requested
       let drNumber = null;
-      if (assignDRNumber) {
+      if (customDRNumber) {
+        // Use custom DR number — do NOT advance the sequence
+        drNumber = parseInt(customDRNumber);
+        // Check if custom DR is already used
+        const existingDR = await DRNumber.findOne({ where: { drNumber }, transaction });
+        const existingWO = await WorkOrder.findOne({ where: { drNumber, id: { [Op.ne]: workOrder.id } }, transaction });
+        if (existingDR || existingWO) {
+          await transaction.rollback();
+          return res.status(400).json({ error: { message: `DR-${drNumber} is already in use` } });
+        }
+        await workOrder.update({ drNumber }, { transaction });
+        await DRNumber.create({
+          drNumber,
+          workOrderId: workOrder.id,
+          clientName: resolvedClientName,
+          assignedAt: new Date(),
+          assignedBy: req.user?.username || 'system'
+        }, { transaction });
+      } else if (assignDRNumber) {
         // Check admin setting for next DR number first
         const drSetting = await AppSettings.findOne({ where: { key: 'next_dr_number' }, transaction });
         
@@ -1019,6 +1038,9 @@ router.put('/:id', async (req, res, next) => {
       truckingDescription,
       truckingCost,
       taxRate,
+      taxExempt,
+      taxExemptReason,
+      taxExemptCertNumber,
       // Minimum override
       minimumOverride,
       minimumOverrideReason
@@ -1063,6 +1085,9 @@ router.put('/:id', async (req, res, next) => {
     if (truckingDescription !== undefined) updates.truckingDescription = truckingDescription || null;
     if (truckingCost !== undefined) updates.truckingCost = truckingCost || null;
     if (taxRate !== undefined) updates.taxRate = taxRate || null;
+    if (taxExempt !== undefined) updates.taxExempt = taxExempt;
+    if (taxExemptReason !== undefined) updates.taxExemptReason = taxExemptReason || null;
+    if (taxExemptCertNumber !== undefined) updates.taxExemptCertNumber = taxExemptCertNumber || null;
     if (minimumOverride !== undefined) updates.minimumOverride = minimumOverride;
     if (minimumOverrideReason !== undefined) updates.minimumOverrideReason = minimumOverrideReason || null;
 

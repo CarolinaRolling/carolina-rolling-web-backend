@@ -496,6 +496,11 @@ router.get('/', async (req, res, next) => {
       where.clientName = { [Op.iLike]: `%${clientName}%` };
     }
 
+    // API key client scoping — restrict to key's allowed client
+    if (req.apiKey && req.apiKey.clientName) {
+      where.clientName = { [Op.iLike]: `%${req.apiKey.clientName}%` };
+    }
+
     const estimates = await Estimate.findAndCountAll({
       where,
       include: [
@@ -569,6 +574,13 @@ router.get('/:id', async (req, res, next) => {
 
     if (!estimate) {
       return res.status(404).json({ error: { message: 'Estimate not found' } });
+    }
+
+    // API key client scoping
+    if (req.apiKey && req.apiKey.clientName) {
+      if (!estimate.clientName || !estimate.clientName.toLowerCase().includes(req.apiKey.clientName.toLowerCase())) {
+        return res.status(403).json({ error: { message: 'Access denied' } });
+      }
     }
 
     // Merge formData fields back into parts for frontend
@@ -1440,6 +1452,14 @@ router.get('/:id/files/:fileId/signed-url', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'File not found' } });
     }
 
+    // API key client scoping
+    if (req.apiKey && req.apiKey.clientName) {
+      const estimate = await Estimate.findByPk(req.params.id);
+      if (!estimate || !estimate.clientName || !estimate.clientName.toLowerCase().includes(req.apiKey.clientName.toLowerCase())) {
+        return res.status(403).json({ error: { message: 'Access denied' } });
+      }
+    }
+
     // Return proxy download URL for consistent file serving
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     const url = `${baseUrl}/api/estimates/${req.params.id}/files/${req.params.fileId}/download`;
@@ -1461,6 +1481,14 @@ router.get('/:id/files/:fileId/download', async (req, res, next) => {
 
     if (!file) {
       return res.status(404).json({ error: { message: 'File not found' } });
+    }
+
+    // API key client scoping
+    if (req.apiKey && req.apiKey.clientName) {
+      const estimate = await Estimate.findByPk(req.params.id);
+      if (!estimate || !estimate.clientName || !estimate.clientName.toLowerCase().includes(req.apiKey.clientName.toLowerCase())) {
+        return res.status(403).json({ error: { message: 'Access denied' } });
+      }
     }
 
     const urlsToTry = [];
@@ -1904,6 +1932,13 @@ router.get('/:id/pdf', async (req, res, next) => {
 
     if (!estimate) {
       return res.status(404).json({ error: { message: 'Estimate not found' } });
+    }
+
+    // API key client scoping
+    if (req.apiKey && req.apiKey.clientName) {
+      if (!estimate.clientName || !estimate.clientName.toLowerCase().includes(req.apiKey.clientName.toLowerCase())) {
+        return res.status(403).json({ error: { message: 'Access denied' } });
+      }
     }
 
     // Ensure taxExempt is a proper boolean (SQLite stores as 0/1)

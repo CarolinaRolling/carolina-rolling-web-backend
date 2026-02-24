@@ -43,16 +43,18 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 
-// Unified auth middleware: accepts JWT Bearer token OR X-API-Key header
+// Unified auth middleware: accepts JWT Bearer token OR X-API-Key header OR query params
 const authenticate = async (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const apiKeyHeader = req.headers['x-api-key'];
 
-  // Option 1: JWT Bearer token (main app)
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.split(' ')[1];
+  // Option 1: JWT Bearer token (main app) - header or ?token= query param
+  const jwtToken = (authHeader && authHeader.startsWith('Bearer ')) 
+    ? authHeader.split(' ')[1] 
+    : req.query.token;
+  if (jwtToken) {
     try {
-      const decoded = jwt.verify(token, JWT_SECRET);
+      const decoded = jwt.verify(jwtToken, JWT_SECRET);
       const user = await User.findByPk(decoded.userId);
       if (user && user.isActive) {
         req.user = user;
@@ -62,10 +64,11 @@ const authenticate = async (req, res, next) => {
     return res.status(401).json({ error: { message: 'Invalid or expired token' } });
   }
 
-  // Option 2: API Key (portal/external apps)
-  if (apiKeyHeader) {
+  // Option 2: API Key (portal/external apps) - header or query param
+  const apiKeyValue = apiKeyHeader || req.query.apikey;
+  if (apiKeyValue) {
     try {
-      const apiKey = await ApiKey.findOne({ where: { key: apiKeyHeader, isActive: true } });
+      const apiKey = await ApiKey.findOne({ where: { key: apiKeyValue, isActive: true } });
       if (!apiKey) {
         return res.status(401).json({ error: { message: 'Invalid API key' } });
       }

@@ -2506,14 +2506,26 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
       return res.status(400).json({ error: { message: 'Estimate has already been converted to a work order' } });
     }
 
-    const { clientPurchaseOrderNumber, requestedDueDate, promisedDate, notes, materialReceived } = req.body;
+    const { clientPurchaseOrderNumber, requestedDueDate, promisedDate, notes, materialReceived, customDRNumber } = req.body;
 
-    // Get next DR number using the admin setting helper
-    const nextDRNumber = await getNextDRNumber(transaction);
+    // Get DR number - custom or auto
+    let drNumber;
+    if (customDRNumber) {
+      // Check if custom DR already exists
+      const existingDR = await DRNumber.findOne({ where: { drNumber: parseInt(customDRNumber) }, transaction });
+      const existingWO = await WorkOrder.findOne({ where: { drNumber: parseInt(customDRNumber) }, transaction });
+      if (existingDR || existingWO) {
+        await transaction.rollback();
+        return res.status(400).json({ error: { message: `DR-${customDRNumber} already exists` } });
+      }
+      drNumber = parseInt(customDRNumber);
+    } else {
+      drNumber = await getNextDRNumber(transaction);
+    }
 
     // Create DR number record
     const drRecord = await DRNumber.create({
-      drNumber: nextDRNumber,
+      drNumber,
       status: 'active'
     }, { transaction });
 
@@ -2528,7 +2540,7 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
     // Create work order from estimate
     const workOrder = await WorkOrder.create({
       orderNumber,
-      drNumber: nextDRNumber,
+      drNumber: drNumber,
       clientName: estimate.clientName,
       contactName: estimate.contactName,
       contactPhone: estimate.contactPhone,
@@ -2654,7 +2666,7 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
       'created',
       'work_order',
       workOrder.id,
-      `DR-${nextDRNumber}`,
+      `DR-${drNumber}`,
       estimate.clientName,
       `Work order created from estimate ${estimate.estimateNumber}`,
       { estimateNumber: estimate.estimateNumber, partsCount: estimate.parts.length }
@@ -2669,7 +2681,7 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
       data: {
         workOrder: completeWorkOrder
       },
-      message: `Work order DR-${nextDRNumber} created successfully`
+      message: `Work order DR-${drNumber} created successfully`
     });
   } catch (error) {
     await transaction.rollback();

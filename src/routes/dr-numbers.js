@@ -36,8 +36,22 @@ router.get('/', async (req, res, next) => {
       offset: parseInt(offset)
     });
 
+    // Enrich with work order clientName (authoritative source)
+    const enriched = await Promise.all(drNumbers.rows.map(async (dr) => {
+      const data = dr.toJSON();
+      if (data.workOrderId) {
+        try {
+          const wo = await WorkOrder.findByPk(data.workOrderId, { attributes: ['clientName'] });
+          if (wo && wo.clientName) {
+            data.clientName = wo.clientName;
+          }
+        } catch (_) {}
+      }
+      return data;
+    }));
+
     res.json({
-      data: drNumbers.rows,
+      data: enriched,
       total: drNumbers.count
     });
   } catch (error) {

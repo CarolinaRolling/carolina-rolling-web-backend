@@ -179,6 +179,42 @@ router.get('/', async (req, res, next) => {
       offset: parseInt(offset)
     });
 
+    // Sync shipment status with linked work order status (fire-and-forget)
+    // If a WO is shipped/archived, the shipment should be archived too
+    try {
+      const { WorkOrder } = require('../models');
+      const linkedShipments = shipments.rows.filter(s => s.workOrderId && s.status !== 'archived');
+      if (linkedShipments.length > 0) {
+        const woIds = [...new Set(linkedShipments.map(s => s.workOrderId))];
+        const workOrders = await WorkOrder.findAll({
+          where: { id: { [Op.in]: woIds } },
+          attributes: ['id', 'status']
+        });
+        const woStatusMap = {};
+        workOrders.forEach(wo => { woStatusMap[wo.id] = wo.status; });
+        
+        for (const shipment of linkedShipments) {
+          const woStatus = woStatusMap[shipment.workOrderId];
+          if (['shipped', 'archived'].includes(woStatus)) {
+            shipment.status = 'archived';
+            shipment.update({ status: 'archived' }).catch(() => {});
+          } else if (woStatus === 'stored' || woStatus === 'completed') {
+            if (shipment.status !== 'stored') {
+              shipment.status = 'stored';
+              shipment.update({ status: 'stored' }).catch(() => {});
+            }
+          } else if (woStatus === 'processing' || woStatus === 'in_progress') {
+            if (shipment.status === 'received') {
+              shipment.status = 'processing';
+              shipment.update({ status: 'processing' }).catch(() => {});
+            }
+          }
+        }
+      }
+    } catch (syncErr) {
+      console.error('[shipment-sync] Failed:', syncErr.message);
+    }
+
     res.json({
       data: shipments.rows.map(transformShipment),
       total: shipments.count,
@@ -258,6 +294,18 @@ router.get('/:id', async (req, res, next) => {
           data.workOrderDR = wo.drNumber;
           data.workOrderClientName = wo.clientName;
           data.workOrderStatus = wo.status;
+          
+          // Sync shipment status with WO status
+          if (['shipped', 'archived'].includes(wo.status) && shipment.status !== 'archived') {
+            shipment.update({ status: 'archived' }).catch(() => {});
+            data.status = 'archived';
+          } else if (['stored', 'completed'].includes(wo.status) && shipment.status !== 'stored') {
+            shipment.update({ status: 'stored' }).catch(() => {});
+            data.status = 'stored';
+          } else if (['processing', 'in_progress'].includes(wo.status) && shipment.status === 'received') {
+            shipment.update({ status: 'processing' }).catch(() => {});
+            data.status = 'processing';
+          }
         }
       } catch (e) { console.error('Failed to fetch linked WO:', e.message); }
     }

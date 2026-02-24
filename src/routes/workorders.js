@@ -394,6 +394,21 @@ function generateOrderNumber() {
   return `WO-${year}${month}${day}-${random}`;
 }
 
+// Auto-archive any shipments linked to a work order when it's shipped
+async function archiveLinkedShipments(workOrderId) {
+  try {
+    const shipments = await Shipment.findAll({ where: { workOrderId } });
+    for (const shipment of shipments) {
+      if (shipment.status !== 'archived' && shipment.status !== 'shipped') {
+        await shipment.update({ status: 'archived' });
+        console.log(`[auto-archive] Shipment ${shipment.id} archived (WO ${workOrderId} shipped)`);
+      }
+    }
+  } catch (err) {
+    console.error('[auto-archive] Failed to archive shipments:', err.message);
+  }
+}
+
 // GET /api/workorders - Get all work orders
 router.get('/', async (req, res, next) => {
   try {
@@ -942,6 +957,12 @@ router.post('/:id/pickup', async (req, res, next) => {
     
     // Reload and return
     await workOrder.reload({ include: [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }] });
+    
+    // Auto-archive linked shipments if order is now shipped
+    if (workOrder.status === 'shipped') {
+      await archiveLinkedShipments(workOrder.id);
+    }
+    
     res.json({ data: workOrder.toJSON(), message: type === 'full' ? 'Full pickup recorded' : 'Partial pickup recorded' });
   } catch (error) {
     next(error);
@@ -1109,6 +1130,11 @@ router.put('/:id', async (req, res, next) => {
     }
 
     await workOrder.update(updates);
+
+    // Auto-archive linked shipments when shipped
+    if (status === 'shipped') {
+      await archiveLinkedShipments(workOrder.id);
+    }
 
     // Reload with parts
     const updatedOrder = await WorkOrder.findByPk(workOrder.id, {
@@ -1903,6 +1929,9 @@ router.post('/:id/ship', async (req, res, next) => {
       workOrder.clientName,
       `${workOrder.drNumber ? `DR-${workOrder.drNumber}` : workOrder.orderNumber} shipped to customer`
     );
+
+    // Auto-archive linked shipments
+    await archiveLinkedShipments(workOrder.id);
 
     res.json({
       data: workOrder,

@@ -166,6 +166,11 @@ async function cleanupOldShippedItems() {
 
 // Database sync and server start
 async function startServer() {
+  // Start listening IMMEDIATELY so Heroku doesn't kill us during DB sync
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+
   try {
     await sequelize.authenticate();
     console.log('Database connected successfully');
@@ -630,12 +635,8 @@ async function startServer() {
     });
     console.log('Annual CDTFA permit verification configured for January 2nd at 3:00 AM Pacific');
 
-    app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
-    });
   } catch (error) {
-    console.error('Failed to start server:', error);
-    process.exit(1);
+    console.error('Startup error (server still running):', error.message);
   }
 }
 

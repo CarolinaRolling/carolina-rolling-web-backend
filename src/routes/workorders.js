@@ -1526,6 +1526,19 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
 
     await part.update(updates);
 
+    // Auto-advance work order status to "processing" if a part status changed
+    if (status !== undefined) {
+      try {
+        const workOrder = await WorkOrder.findByPk(req.params.id);
+        if (workOrder && ['received', 'quoted', 'work_order_generated'].includes(workOrder.status)) {
+          await workOrder.update({ status: 'processing' });
+          console.log(`[auto-status] WO ${workOrder.drNumber || workOrder.orderNumber} → processing (part status changed)`);
+        }
+      } catch (woErr) {
+        console.error('[auto-status] Failed to update WO status:', woErr.message);
+      }
+    }
+
     // Reload with files
     const updatedPart = await WorkOrderPart.findByPk(part.id, {
       include: [{

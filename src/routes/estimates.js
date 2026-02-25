@@ -2578,6 +2578,8 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
     await drRecord.update({ workOrderId: workOrder.id }, { transaction });
 
     // Create work order parts from estimate parts
+    // First pass: create all parts and build ID mapping (estimate part ID → WO part ID)
+    const estimateToWoPartIdMap = {};
     for (const estimatePart of estimate.parts) {
       try {
         const workOrderPart = await WorkOrderPart.create({
@@ -2624,6 +2626,9 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
           formData: estimatePart.formData || null
         }, { transaction });
 
+        // Track estimate part ID → work order part ID mapping
+        estimateToWoPartIdMap[estimatePart.id] = workOrderPart.id;
+
         // Copy part files to work order part files
         if (estimatePart.files && estimatePart.files.length > 0) {
           for (const file of estimatePart.files) {
@@ -2654,6 +2659,22 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
         console.error(`Failed to create WO part #${estimatePart.partNumber} (type: ${estimatePart.partType}):`, partErr.message);
         if (partErr.errors) partErr.errors.forEach(e => console.error(`  Validation: ${e.path} - ${e.message}`));
         throw new Error(`Failed on part #${estimatePart.partNumber} (${estimatePart.partType}): ${partErr.message}`);
+      }
+    }
+
+    // Second pass: remap _linkedPartId in formData for service parts
+    // The estimate's _linkedPartId points to estimate part IDs - we need to update to WO part IDs
+    for (const estimatePart of estimate.parts) {
+      const fd = estimatePart.formData && typeof estimatePart.formData === 'object' ? estimatePart.formData : {};
+      if (fd._linkedPartId && estimateToWoPartIdMap[fd._linkedPartId]) {
+        const woPartId = estimateToWoPartIdMap[estimatePart.id];
+        const newLinkedId = estimateToWoPartIdMap[fd._linkedPartId];
+        const updatedFormData = { ...fd, _linkedPartId: newLinkedId };
+        await WorkOrderPart.update(
+          { formData: updatedFormData },
+          { where: { id: woPartId }, transaction }
+        );
+        console.log(`[convert] Remapped _linkedPartId for part #${estimatePart.partNumber}: ${fd._linkedPartId} → ${newLinkedId}`);
       }
     }
 

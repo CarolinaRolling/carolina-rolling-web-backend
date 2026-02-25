@@ -1526,6 +1526,85 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
 
     await part.update(updates);
 
+    // Auto-complete linked services when a parent part is marked complete
+    if (status === 'completed') {
+      try {
+        const allParts = await WorkOrderPart.findAll({ where: { workOrderId: req.params.id } });
+        
+        // 1. Auto-complete fab_service/shop_rate parts linked to this part
+        // Primary: match by _linkedPartId, Fallback: match by part number adjacency
+        const serviceParts = allParts.filter(p => ['fab_service', 'shop_rate'].includes(p.partType));
+        const regularPartIds = new Set(allParts.filter(p => !['fab_service', 'shop_rate', 'rush_service'].includes(p.partType)).map(p => p.id));
+        
+        const linkedServices = serviceParts.filter(p => {
+          const fd = p.formData && typeof p.formData === 'object' ? p.formData : {};
+          // Direct match
+          if (String(fd._linkedPartId) === String(part.id)) return true;
+          // Fallback: if _linkedPartId doesn't match any WO part, use part number adjacency
+          if (fd._linkedPartId && !regularPartIds.has(fd._linkedPartId)) {
+            // Find the closest regular part before this service by part number
+            const regularBefore = allParts
+              .filter(rp => !['fab_service', 'shop_rate', 'rush_service'].includes(rp.partType) && rp.partNumber < p.partNumber)
+              .sort((a, b) => b.partNumber - a.partNumber);
+            if (regularBefore.length > 0 && regularBefore[0].id === part.id) return true;
+          }
+          return false;
+        });
+        
+        for (const svc of linkedServices) {
+          if (svc.status !== 'completed') {
+            await svc.update({ status: 'completed', completedAt: new Date() });
+            console.log(`[auto-complete] Service #${svc.partNumber} (${svc.partType}) auto-completed with parent #${part.partNumber}`);
+          }
+        }
+        
+        // 2. Auto-complete rush_service when all regular parts are done
+        const SERVICE_TYPES = ['fab_service', 'shop_rate', 'rush_service'];
+        const regularParts = allParts.filter(p => !SERVICE_TYPES.includes(p.partType));
+        const allRegularDone = regularParts.length > 0 && regularParts.every(p => 
+          p.id === part.id ? true : p.status === 'completed'  // include the part we just updated
+        );
+        if (allRegularDone) {
+          const rushParts = allParts.filter(p => p.partType === 'rush_service' && p.status !== 'completed');
+          for (const rush of rushParts) {
+            await rush.update({ status: 'completed', completedAt: new Date() });
+            console.log(`[auto-complete] Rush service #${rush.partNumber} auto-completed (all regular parts done)`);
+          }
+        }
+      } catch (autoErr) {
+        console.error('[auto-complete] Error auto-completing linked parts:', autoErr.message);
+      }
+    }
+    
+    // When undoing completion, also undo linked services
+    if (status === 'pending') {
+      try {
+        const allParts = await WorkOrderPart.findAll({ where: { workOrderId: req.params.id } });
+        const serviceParts = allParts.filter(p => ['fab_service', 'shop_rate'].includes(p.partType));
+        const regularPartIds = new Set(allParts.filter(p => !['fab_service', 'shop_rate', 'rush_service'].includes(p.partType)).map(p => p.id));
+        
+        const linkedServices = serviceParts.filter(p => {
+          const fd = p.formData && typeof p.formData === 'object' ? p.formData : {};
+          if (String(fd._linkedPartId) === String(part.id)) return true;
+          if (fd._linkedPartId && !regularPartIds.has(fd._linkedPartId)) {
+            const regularBefore = allParts
+              .filter(rp => !['fab_service', 'shop_rate', 'rush_service'].includes(rp.partType) && rp.partNumber < p.partNumber)
+              .sort((a, b) => b.partNumber - a.partNumber);
+            if (regularBefore.length > 0 && regularBefore[0].id === part.id) return true;
+          }
+          return false;
+        });
+        for (const svc of linkedServices) {
+          if (svc.status === 'completed') {
+            await svc.update({ status: 'pending', completedAt: null });
+            console.log(`[auto-complete] Service #${svc.partNumber} reverted to pending with parent #${part.partNumber}`);
+          }
+        }
+      } catch (autoErr) {
+        console.error('[auto-complete] Error reverting linked parts:', autoErr.message);
+      }
+    }
+
     // Auto-advance work order status to "processing" if a part status changed
     if (status !== undefined) {
       try {

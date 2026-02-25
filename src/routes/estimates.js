@@ -1963,11 +1963,20 @@ router.get('/:id/pdf', async (req, res, next) => {
     estimate.taxAmount = pdfTotals.taxAmount;
     estimate.grandTotal = pdfTotals.grandTotal;
 
-    console.log(`[PDF] Recalculated: taxAmount=${pdfTotals.taxAmount}, grandTotal=${pdfTotals.grandTotal}`);
+    console.log(`[PDF] Recalculated: subtotal=${pdfTotals.partsSubtotal}, taxAmount=${pdfTotals.taxAmount}, grandTotal=${pdfTotals.grandTotal}`);
 
     // Also compute minimum info for display on PDF
     const pdfLaborMinimums = await loadLaborMinimums();
     const pdfMinInfo = getMinimumInfo(estimate.parts, estimate.minimumOverride, pdfLaborMinimums);
+
+    // Debug: log minimum calculation details
+    console.log(`[PDF] Minimum check: totalLabor=${pdfMinInfo.totalLabor}, highestMinimum=${pdfMinInfo.highestMinimum}, minimumApplies=${pdfMinInfo.minimumApplies}, override=${estimate.minimumOverride}`);
+    if (pdfMinInfo.minimumApplies) {
+      console.log(`[PDF] Minimum adjustment: adjustedLabor=${pdfMinInfo.adjustedLabor}, laborDifference=${pdfMinInfo.laborDifference}, rule=${pdfMinInfo.highestMinRule?.label}`);
+    }
+    estimate.parts.forEach(p => {
+      console.log(`[PDF] Part ${p.partNumber}: type=${p.partType}, laborTotal=${p.laborTotal}, materialTotal=${p.materialTotal}, partTotal=${p.partTotal}, qty=${p.quantity}`);
+    });
 
     // Square fees are hardcoded: In-Person 2.6% + $0.15, Manual 3.5% + $0.15
 
@@ -2130,11 +2139,6 @@ router.get('/:id/pdf', async (req, res, next) => {
       });
     });
     servicePartsArr.forEach(sp => { if (!usedSvcIds.has(sp.id)) sortedParts.push(sp); });
-    
-    // If minimum applies, pre-calculate the labor adjustment ratio
-    const laborAdjustRatio = (pdfMinInfo.minimumApplies && pdfMinInfo.totalLabor > 0)
-      ? pdfMinInfo.adjustedLabor / pdfMinInfo.totalLabor
-      : 1;
 
     for (const part of sortedParts) {
       if (yPos > 680) { doc.addPage(); yPos = 50; }
@@ -2152,11 +2156,8 @@ router.get('/:id/pdf', async (req, res, next) => {
       let matEach = matEachRaw;
       if (rounding === 'dollar' && matEach > 0) matEach = Math.ceil(matEach);
       if (rounding === 'five' && matEach > 0) matEach = Math.ceil(matEach / 5) * 5;
-      const labEachOriginal = parseFloat(part.laborTotal) || 0;
-      // Apply minimum labor adjustment proportionally across parts
-      const labEach = EA_PRICED_TYPES.includes(part.partType)
-        ? labEachOriginal * laborAdjustRatio
-        : labEachOriginal;
+      // Show original labor per unit (no minimum adjustment on line items)
+      const labEach = parseFloat(part.laborTotal) || 0;
       const unitPrice = matEach + labEach;
       const lineTotal = unitPrice * qty;
 
@@ -2358,13 +2359,13 @@ router.get('/:id/pdf', async (req, res, next) => {
     doc.strokeColor(lightGray).lineWidth(1).moveTo(350, yPos).lineTo(562, yPos).stroke();
     yPos += 15;
 
-    // Minimum charge indicator
-    if (pdfMinInfo.minimumApplies) {
+    // Minimum charge adjustment (the difference between minimum and actual labor)
+    if (pdfMinInfo.minimumApplies && pdfMinInfo.laborDifference > 0) {
       doc.fontSize(8).fillColor('#e65100').text(
-        `Minimum Labor Charge Applied (${pdfMinInfo.highestMinRule?.label || ''})`,
+        `Minimum Labor Charge (${pdfMinInfo.highestMinRule?.label || ''})`,
         350, yPos, { lineBreak: false }
       );
-      doc.text(formatCurrency(pdfMinInfo.adjustedLabor), 480, yPos, { align: 'right', width: 82, lineBreak: false });
+      doc.text(`+${formatCurrency(pdfMinInfo.laborDifference)}`, 480, yPos, { align: 'right', width: 82, lineBreak: false });
       doc.fillColor(darkColor);
       yPos += 16;
     }

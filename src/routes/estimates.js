@@ -216,8 +216,10 @@ function parseDimension(val) {
 }
 
 function getPartSize(part) {
-  const fd = (part.formData && typeof part.formData === 'object') ? part.formData : {};
-  const merged = { ...part, ...fd };
+  // Handle Sequelize model instances - use dataValues for plain object spread
+  const raw = part.dataValues ? part.dataValues : part;
+  const fd = (raw.formData && typeof raw.formData === 'object') ? raw.formData : {};
+  const merged = { ...raw, ...fd };
   if (merged.partType === 'plate_roll' || merged.partType === 'flat_stock') return parseDimension(merged.thickness);
   if (merged.partType === 'angle_roll') return parseDimension(merged._angleSize || merged.sectionSize || '');
   if (merged.partType === 'pipe_roll') return parseDimension(merged.outerDiameter);
@@ -231,19 +233,19 @@ function getPartSize(part) {
 }
 
 function getPartWidth(part) {
-  const fd = (part.formData && typeof part.formData === 'object') ? part.formData : {};
-  return parseDimension(fd.width || part.width);
+  const raw = part.dataValues ? part.dataValues : part;
+  const fd = (raw.formData && typeof raw.formData === 'object') ? raw.formData : {};
+  return parseDimension(fd.width || raw.width);
 }
 
 function getLaborMinimum(part, laborMinimums) {
   if (!laborMinimums || !laborMinimums.length) return null;
   const partSize = getPartSize(part);
   const partWidth = getPartWidth(part);
-  let bestSpecificRule = null, bestGeneralRule = null, bestFallbackRule = null;
+  let bestSpecificRule = null, bestGeneralRule = null;
 
   for (const rule of laborMinimums) {
     if (rule.partType !== part.partType) continue;
-    if (!bestFallbackRule || parseFloat(rule.minimum) > parseFloat(bestFallbackRule.minimum)) bestFallbackRule = rule;
 
     const hasMinSize = rule.minSize != null && rule.minSize !== '' && parseFloat(rule.minSize) > 0;
     const hasMaxSize = rule.maxSize != null && rule.maxSize !== '' && parseFloat(rule.maxSize) > 0;
@@ -277,7 +279,9 @@ function getLaborMinimum(part, laborMinimums) {
       if (!bestSpecificRule || parseFloat(rule.minimum) > parseFloat(bestSpecificRule.minimum)) bestSpecificRule = rule;
     }
   }
-  return bestSpecificRule || bestGeneralRule || bestFallbackRule;
+  // Only return a specific match or a general (no-constraints) match
+  // Never fall back to a constrained rule that didn't match - that causes wrong minimums
+  return bestSpecificRule || bestGeneralRule || null;
 }
 
 function roundUpMaterial(amount, rounding) {
@@ -1975,7 +1979,9 @@ router.get('/:id/pdf', async (req, res, next) => {
       console.log(`[PDF] Minimum adjustment: adjustedLabor=${pdfMinInfo.adjustedLabor}, laborDifference=${pdfMinInfo.laborDifference}, rule=${pdfMinInfo.highestMinRule?.label}`);
     }
     estimate.parts.forEach(p => {
-      console.log(`[PDF] Part ${p.partNumber}: type=${p.partType}, laborTotal=${p.laborTotal}, materialTotal=${p.materialTotal}, partTotal=${p.partTotal}, qty=${p.quantity}`);
+      const size = getPartSize(p);
+      const matchedRule = getLaborMinimum(p, pdfLaborMinimums);
+      console.log(`[PDF] Part ${p.partNumber}: type=${p.partType}, size=${size}, laborTotal=${p.laborTotal}, partTotal=${p.partTotal}, qty=${p.quantity}, matchedRule=${matchedRule?.label || 'none'} (min=${matchedRule?.minimum || 'N/A'})`);
     });
 
     // Square fees are hardcoded: In-Person 2.6% + $0.15, Manual 3.5% + $0.15

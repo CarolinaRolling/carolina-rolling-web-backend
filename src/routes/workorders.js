@@ -1336,6 +1336,7 @@ router.post('/:id/parts', async (req, res, next) => {
       materialSource,
       vendorId,
       supplierName,
+      vendorEstimateNumber,
       materialDescription
     } = req.body;
 
@@ -1379,6 +1380,7 @@ router.post('/:id/parts', async (req, res, next) => {
       materialSource: materialSource || 'customer_supplied',
       vendorId: resolvedVendorId,
       supplierName: resolvedSupplierName,
+      vendorEstimateNumber: vendorEstimateNumber || null,
       materialDescription: materialDescription || null,
       // Form display data
       formData: formDataJson,
@@ -1463,6 +1465,7 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
       materialSource,
       vendorId,
       supplierName,
+      vendorEstimateNumber,
       materialDescription
     } = req.body;
 
@@ -1499,6 +1502,7 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
         updates.supplierName = null;
       }
     }
+    if (vendorEstimateNumber !== undefined) updates.vendorEstimateNumber = vendorEstimateNumber;
     if (materialDescription !== undefined) updates.materialDescription = materialDescription;
     
     // Update formData if underscore-prefixed fields were sent

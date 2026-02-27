@@ -252,6 +252,25 @@ async function startServer() {
     } catch (enumErr) {
       console.log('Pre-sync rush_service enum addition:', enumErr.message);
     }
+
+    // Add on_edge to rollType ENUMs BEFORE sync (for channel rolls)
+    try {
+      for (const table of ['work_order_parts', 'estimate_parts']) {
+        const [typeInfo] = await sequelize.query(
+          `SELECT udt_name FROM information_schema.columns WHERE table_name = '${table}' AND column_name = 'rollType'`
+        );
+        if (typeInfo.length > 0) {
+          const enumName = typeInfo[0].udt_name;
+          const [vals] = await sequelize.query(`SELECT unnest(enum_range(NULL::${enumName}))::text as val`);
+          if (!vals.some(v => v.val === 'on_edge')) {
+            await sequelize.query(`ALTER TYPE ${enumName} ADD VALUE IF NOT EXISTS 'on_edge'`);
+            console.log(`Added on_edge to ${enumName}`);
+          }
+        }
+      }
+    } catch (enumErr) {
+      console.log('Pre-sync on_edge enum addition:', enumErr.message);
+    }
     
     // Sync models - use alter to add new columns
     // This is safe for adding new nullable columns
@@ -634,6 +653,25 @@ async function startServer() {
       timezone: 'America/Los_Angeles'
     });
     console.log('Annual CDTFA permit verification configured for January 2nd at 3:00 AM Pacific');
+
+    // Auto-backup to Cloudinary every 3 days at midnight Pacific
+    const { runAutoBackup } = require('./routes/backup');
+    cron.schedule('0 0 */3 * *', async () => {
+      console.log('[CRON] Running scheduled auto-backup...');
+      try {
+        const result = await runAutoBackup();
+        if (result.success) {
+          console.log(`[CRON] Auto-backup successful: ${(result.size / 1024).toFixed(0)}KB`);
+        } else {
+          console.error('[CRON] Auto-backup failed:', result.error);
+        }
+      } catch (err) {
+        console.error('[CRON] Auto-backup error:', err.message);
+      }
+    }, {
+      timezone: 'America/Los_Angeles'
+    });
+    console.log('Auto-backup configured for every 3 days at midnight Pacific');
 
   } catch (error) {
     console.error('Startup error (server still running):', error.message);

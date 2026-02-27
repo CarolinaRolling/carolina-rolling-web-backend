@@ -643,7 +643,7 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
   },
   // Rolling specifications
   rollType: {
-    type: DataTypes.ENUM('easy_way', 'hard_way'),
+    type: DataTypes.ENUM('easy_way', 'hard_way', 'on_edge'),
     allowNull: true
   },
   radius: {
@@ -719,6 +719,10 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
     allowNull: true,
   },
   supplierName: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  vendorEstimateNumber: {
     type: DataTypes.STRING,
     allowNull: true
   },
@@ -1136,6 +1140,10 @@ const EstimatePart = sequelize.define('EstimatePart', {
     type: DataTypes.STRING,
     allowNull: true
   },
+  vendorEstimateNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
   materialUnitCost: {
     type: DataTypes.DECIMAL(10, 2),
     defaultValue: 0
@@ -1212,7 +1220,7 @@ const EstimatePart = sequelize.define('EstimatePart', {
     allowNull: true
   },
   rollType: {
-    type: DataTypes.ENUM('easy_way', 'hard_way'),
+    type: DataTypes.ENUM('easy_way', 'hard_way', 'on_edge'),
     allowNull: true
   },
   radius: {

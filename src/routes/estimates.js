@@ -1726,6 +1726,7 @@ router.post('/:id/convert', async (req, res, next) => {
           awaitingPONumber: estPart.materialPurchaseOrderNumber,
           supplierName: estPart.supplierName,
           vendorId: estPart.vendorId || null,
+          vendorEstimateNumber: estPart.vendorEstimateNumber || null,
           materialDescription: estPart.materialDescription,
           formData: estPart.formData || null,
           // Copy pricing fields
@@ -1839,6 +1840,7 @@ router.post('/:id/duplicate', async (req, res, next) => {
         quantity: origPart.quantity,
         materialDescription: origPart.materialDescription,
         supplierName: origPart.supplierName,
+        vendorEstimateNumber: origPart.vendorEstimateNumber,
         materialUnitCost: origPart.materialUnitCost,
         materialMarkupPercent: origPart.materialMarkupPercent,
         rollingCost: origPart.rollingCost,
@@ -2608,6 +2610,7 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
           // Copy supplier info for material ordering
           supplierName: estimatePart.supplierName,
           vendorId: estimatePart.vendorId || null,
+          vendorEstimateNumber: estimatePart.vendorEstimateNumber || null,
           // Set materialSource - prefer estimate's materialSource, fall back to weSupplyMaterial flag
           // For service types (fab_service, shop_rate), default to customer_supplied since no material is involved
           materialSource: estimatePart.materialSource || 

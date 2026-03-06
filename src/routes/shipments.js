@@ -765,7 +765,7 @@ router.post('/:id/unlink-workorder', async (req, res, next) => {
 // PUT /api/shipments/:id - Update shipment
 router.put('/:id', async (req, res, next) => {
   try {
-    console.log('PUT /api/shipments/:id - Request body:', JSON.stringify(req.body, null, 2));
+    // verbose logging removed
     
     const shipment = await Shipment.findByPk(req.params.id);
 
@@ -790,7 +790,7 @@ router.put('/:id', async (req, res, next) => {
       }
     });
     
-    console.log('Updates to apply:', JSON.stringify(updates, null, 2));
+    // verbose logging removed
     
     // Handle shippedAt timestamp
     if (updates.status === 'shipped' && shipment.status !== 'shipped') {

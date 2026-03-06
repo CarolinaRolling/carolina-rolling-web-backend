@@ -1064,7 +1064,9 @@ router.put('/:id', async (req, res, next) => {
       taxExemptCertNumber,
       // Minimum override
       minimumOverride,
-      minimumOverrideReason
+      minimumOverrideReason,
+      // Priority
+      priority
     } = req.body;
 
     // Helper to check if value was provided (including empty string)
@@ -1097,6 +1099,7 @@ router.put('/:id', async (req, res, next) => {
       contactPhone: getValue(contactPhone, workOrder.contactPhone),
       contactEmail: getValue(contactEmail, workOrder.contactEmail),
       notes: getValue(notes, workOrder.notes),
+      priority: getValue(priority, workOrder.priority),
       receivedBy: getValue(receivedBy, workOrder.receivedBy),
       requestedDueDate: getDateValue(requestedDueDate, workOrder.requestedDueDate),
       promisedDate: getDateValue(promisedDate, workOrder.promisedDate)
@@ -1290,8 +1293,7 @@ router.delete('/:id', async (req, res, next) => {
 // POST /api/workorders/:id/parts - Add a part to work order
 router.post('/:id/parts', async (req, res, next) => {
   try {
-    console.log('Adding part to work order:', req.params.id);
-    console.log('Part data:', JSON.stringify(req.body, null, 2));
+    console.log('Adding part to work order:', req.params.id, 'type:', req.body.partType);
     
     const workOrder = await WorkOrder.findByPk(req.params.id);
 
@@ -1352,8 +1354,6 @@ router.post('/:id/parts', async (req, res, next) => {
       if (vendor) resolvedSupplierName = vendor.name;
     }
 
-    console.log('Creating part with vendorId:', resolvedVendorId, 'supplierName:', resolvedSupplierName);
-
     const part = await WorkOrderPart.create({
       workOrderId: workOrder.id,
       partNumber,
@@ -1394,8 +1394,6 @@ router.post('/:id/parts', async (req, res, next) => {
       otherCharges: cleanedData.otherCharges,
       partTotal: cleanedData.partTotal
     });
-
-    console.log('Created part:', part.id, 'vendorId:', part.vendorId);
 
     // Reload with files
     const createdPart = await WorkOrderPart.findByPk(part.id, {
@@ -1531,8 +1529,11 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     await part.update(updates);
 
     // Auto-complete linked services when a parent part is marked complete
+    // Only run for orders in processing status to avoid unnecessary queries
     if (status === 'completed') {
       try {
+        const workOrder = await WorkOrder.findByPk(req.params.id, { attributes: ['id', 'status'] });
+        if (workOrder && ['processing', 'in_progress', 'received'].includes(workOrder.status)) {
         const allParts = await WorkOrderPart.findAll({ where: { workOrderId: req.params.id } });
         
         // 1. Auto-complete fab_service/shop_rate parts linked to this part
@@ -1575,14 +1576,17 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
             console.log(`[auto-complete] Rush service #${rush.partNumber} auto-completed (all regular parts done)`);
           }
         }
+        }
       } catch (autoErr) {
         console.error('[auto-complete] Error auto-completing linked parts:', autoErr.message);
       }
     }
     
-    // When undoing completion, also undo linked services
+    // When undoing completion, also undo linked services (only for processing orders)
     if (status === 'pending') {
       try {
+        const workOrder = await WorkOrder.findByPk(req.params.id, { attributes: ['id', 'status'] });
+        if (workOrder && ['processing', 'in_progress', 'received'].includes(workOrder.status)) {
         const allParts = await WorkOrderPart.findAll({ where: { workOrderId: req.params.id } });
         const serviceParts = allParts.filter(p => ['fab_service', 'shop_rate'].includes(p.partType));
         const regularPartIds = new Set(allParts.filter(p => !['fab_service', 'shop_rate', 'rush_service'].includes(p.partType)).map(p => p.id));
@@ -1603,6 +1607,7 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
             await svc.update({ status: 'pending', completedAt: null });
             console.log(`[auto-complete] Service #${svc.partNumber} reverted to pending with parent #${part.partNumber}`);
           }
+        }
         }
       } catch (autoErr) {
         console.error('[auto-complete] Error reverting linked parts:', autoErr.message);

@@ -440,17 +440,52 @@ async function sendScheduleEmail() {
   const upcomingRequested = [];
   const unlinkedShipments = trulyActiveShipments.filter(s => !s.workOrderId);
 
+  // Include both shipments AND work orders in schedule
+  // Build unified schedule items from shipments
   trulyActiveShipments.forEach(s => {
     const promisedDays = getDaysUntil(s.promisedDate);
     const requestedDays = getDaysUntil(s.requestedDueDate);
     if (promisedDays !== null) {
-      if (promisedDays < 0) overduePromised.push({ ...s.toJSON(), daysOverdue: Math.abs(promisedDays) });
-      else if (promisedDays <= 7) upcomingPromised.push({ ...s.toJSON(), daysUntil: promisedDays });
+      if (promisedDays < 0) overduePromised.push({ ...s.toJSON(), daysOverdue: Math.abs(promisedDays), source: 'shipment' });
+      else if (promisedDays <= 14) upcomingPromised.push({ ...s.toJSON(), daysUntil: promisedDays, source: 'shipment' });
     }
     if (requestedDays !== null) {
-      if (requestedDays < 0) overdueRequested.push({ ...s.toJSON(), daysOverdue: Math.abs(requestedDays) });
-      else if (requestedDays <= 7) upcomingRequested.push({ ...s.toJSON(), daysUntil: requestedDays });
+      if (requestedDays < 0) overdueRequested.push({ ...s.toJSON(), daysOverdue: Math.abs(requestedDays), source: 'shipment' });
+      else if (requestedDays <= 14) upcomingRequested.push({ ...s.toJSON(), daysUntil: requestedDays, source: 'shipment' });
     }
+  });
+
+  // Also include work orders that have dates but no linked shipment
+  const shipmentWoIds = new Set(trulyActiveShipments.map(s => s.workOrderId).filter(Boolean));
+  activeWOs.forEach(wo => {
+    if (shipmentWoIds.has(wo.id)) return; // already covered by shipment
+    const promisedDays = getDaysUntil(wo.promisedDate);
+    const requestedDays = getDaysUntil(wo.requestedDueDate);
+    const item = { ...wo.toJSON(), source: 'workorder' };
+    if (promisedDays !== null) {
+      if (promisedDays < 0) overduePromised.push({ ...item, daysOverdue: Math.abs(promisedDays) });
+      else if (promisedDays <= 14) upcomingPromised.push({ ...item, daysUntil: promisedDays });
+    }
+    if (requestedDays !== null) {
+      if (requestedDays < 0) overdueRequested.push({ ...item, daysOverdue: Math.abs(requestedDays) });
+      else if (requestedDays <= 14) upcomingRequested.push({ ...item, daysUntil: requestedDays });
+    }
+  });
+
+  // Sort by urgency
+  overduePromised.sort((a, b) => b.daysOverdue - a.daysOverdue);
+  upcomingPromised.sort((a, b) => a.daysUntil - b.daysUntil);
+  overdueRequested.sort((a, b) => b.daysOverdue - a.daysOverdue);
+  upcomingRequested.sort((a, b) => a.daysUntil - b.daysUntil);
+
+  // Material needs ordering - WOs with parts where materialSource='we_order' and not yet ordered
+  const SERVICE_TYPES = ['fab_service', 'shop_rate', 'rush_service'];
+  const needsMaterialOrdering = activeWOs.filter(wo => {
+    return wo.parts?.some(p => 
+      p.materialSource === 'we_order' && 
+      !p.materialOrdered && 
+      !SERVICE_TYPES.includes(p.partType)
+    );
   });
 
   // Categorize activities
@@ -531,9 +566,9 @@ async function sendScheduleEmail() {
   const totalOverdue = overduePromised.length + overdueRequested.length;
   html += `<div style="display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap;">`;
   html += statBox(totalOverdue, 'Overdue', totalOverdue > 0 ? 'c62828' : '888', totalOverdue > 0 ? 'ffebee' : 'f5f5f5');
-  html += statBox(upcomingPromised.length, 'Due This Week', upcomingPromised.length > 0 ? '1565c0' : '888', upcomingPromised.length > 0 ? 'e3f2fd' : 'f5f5f5');
+  html += statBox(upcomingPromised.length, 'Due Soon', upcomingPromised.length > 0 ? '1565c0' : '888', upcomingPromised.length > 0 ? 'e3f2fd' : 'f5f5f5');
+  html += statBox(needsMaterialOrdering.length, 'Need Material', needsMaterialOrdering.length > 0 ? 'e65100' : '888', needsMaterialOrdering.length > 0 ? 'fff3e0' : 'f5f5f5');
   html += statBox(activeWOs.length, 'Active WOs', '2e7d32', 'e8f5e9');
-  html += statBox(trulyActiveShipments.length, 'Active Shipments', 'e65100', 'fff3e0');
   html += statBox(activeEstimates.length, 'Open Estimates', '7b1fa2', 'f3e5f5');
   html += `</div>`;
 
@@ -544,15 +579,38 @@ async function sendScheduleEmail() {
     html += `<div style="text-align: center; padding: 20px; color: #888;"><span style="font-size: 32px;">✅</span><br>No urgent deadlines this week</div>`;
   } else {
     html += buildScheduleTable('⚠️ Overdue — Promised Date', overduePromised, true);
-    html += buildScheduleTable('📅 Due This Week — Promised Date', upcomingPromised, false);
+    html += buildScheduleTable('📅 Upcoming — Promised Date', upcomingPromised, false);
     html += buildScheduleTable('⚠️ Overdue — Requested Date', overdueRequested, true);
-    html += buildScheduleTable('📅 Due This Week — Requested Date', upcomingRequested, false);
+    html += buildScheduleTable('📅 Upcoming — Requested Date', upcomingRequested, false);
   }
 
   if (unlinkedShipments.length > 0) {
     html += `<div style="margin-top: 12px; padding: 10px; background: #fff3e0; border-left: 4px solid #ff9800; border-radius: 4px; font-size: 13px;">
       <strong style="color: #e65100;">⏳ ${unlinkedShipments.length} shipment${unlinkedShipments.length > 1 ? 's' : ''} waiting for instructions</strong> (no work order linked)
     </div>`;
+  }
+
+  // ===== SECTION 1.5: MATERIAL NEEDS ORDERING =====
+  if (needsMaterialOrdering.length > 0) {
+    html += sectionHeader('⚠️', `Material Needs Ordering (${needsMaterialOrdering.length})`, '#e65100');
+    html += `<table style="width: 100%; border-collapse: collapse; font-size: 13px;"><thead><tr style="background: #fff3e0;">
+      <th style="padding: 8px; text-align: left; border-bottom: 2px solid #ffcc80;">DR#</th>
+      <th style="padding: 8px; text-align: left; border-bottom: 2px solid #ffcc80;">Client</th>
+      <th style="padding: 8px; text-align: left; border-bottom: 2px solid #ffcc80;">Parts Need Material</th>
+      <th style="padding: 8px; text-align: left; border-bottom: 2px solid #ffcc80;">Vendor</th>
+    </tr></thead><tbody>`;
+    needsMaterialOrdering.forEach((wo, i) => {
+      const unordered = wo.parts.filter(p => p.materialSource === 'we_order' && !p.materialOrdered && !SERVICE_TYPES.includes(p.partType));
+      const vendors = [...new Set(unordered.map(p => p.supplierName).filter(Boolean))];
+      const drLabel = wo.drNumber ? `DR-${wo.drNumber}` : (wo.orderNumber || '—');
+      html += `<tr style="background: ${i % 2 ? '#fff8e1' : '#fff'};">
+        <td style="padding: 8px; border-bottom: 1px solid #eee; font-weight: 700; color: #1565c0;">${drLabel}</td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee; font-weight: 600;">${wo.clientName || '—'}</td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;">${unordered.length} part${unordered.length > 1 ? 's' : ''}</td>
+        <td style="padding: 8px; border-bottom: 1px solid #eee;">${vendors.length > 0 ? vendors.join(', ') : '<span style="color:#999;">No vendor set</span>'}</td>
+      </tr>`;
+    });
+    html += '</tbody></table>';
   }
 
   // ===== SECTION 2: YESTERDAY'S ACTIVITY =====
@@ -677,7 +735,7 @@ async function sendScheduleEmail() {
     auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
   });
 
-  const subject = `${totalOverdue > 0 ? '⚠️' : '☀️'} Daily Digest — ${today}${totalOverdue > 0 ? ` (${totalOverdue} overdue)` : ''}`;
+  const subject = `${totalOverdue > 0 ? '⚠️' : needsMaterialOrdering.length > 0 ? '📦' : '☀️'} Daily Digest — ${today}${totalOverdue > 0 ? ` (${totalOverdue} overdue)` : ''}${needsMaterialOrdering.length > 0 ? ` (${needsMaterialOrdering.length} need material)` : ''}`;
 
   await transporter.sendMail({
     from: process.env.SMTP_FROM || process.env.SMTP_USER,

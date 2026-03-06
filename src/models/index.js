@@ -441,6 +441,11 @@ const WorkOrder = sequelize.define('WorkOrder', {
     type: DataTypes.STRING,
     defaultValue: 'received'
   },
+  priority: {
+    type: DataTypes.STRING,
+    defaultValue: 'normal',
+    allowNull: false
+  },
   notes: {
     type: DataTypes.TEXT,
     allowNull: true

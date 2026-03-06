@@ -412,7 +412,7 @@ async function archiveLinkedShipments(workOrderId) {
 // GET /api/workorders - Get all work orders
 router.get('/', async (req, res, next) => {
   try {
-    const { status, clientName, archived, drNumber, search, limit = 50, offset = 0 } = req.query;
+    const { status, clientName, archived, drNumber, search, limit = 50, offset = 0, view } = req.query;
     
     const where = {};
     
@@ -451,16 +451,14 @@ router.get('/', async (req, res, next) => {
       where.clientName = { [Op.iLike]: `%${req.apiKey.clientName}%` };
     }
 
+    // For list views, skip file includes to speed up query significantly
+    const partInclude = view === 'list' 
+      ? [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'quantity', 'status', 'materialSource', 'materialOrdered', 'supplierName', 'materialDescription', 'formData'] }]
+      : [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }];
+
     const workOrders = await WorkOrder.findAndCountAll({
       where,
-      include: [{
-        model: WorkOrderPart,
-        as: 'parts',
-        include: [{
-          model: WorkOrderPartFile,
-          as: 'files'
-        }]
-      }],
+      include: partInclude,
       order: [['createdAt', 'DESC']],
       limit: parseInt(limit),
       offset: parseInt(offset)

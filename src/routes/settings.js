@@ -456,9 +456,12 @@ async function sendScheduleEmail() {
   });
 
   // Also include work orders that have dates but no linked shipment
+  // Exclude stored/completed — those are done, just waiting for client pickup
+  const DONE_WO_STATUSES = ['stored', 'completed', 'shipped', 'archived'];
   const shipmentWoIds = new Set(trulyActiveShipments.map(s => s.workOrderId).filter(Boolean));
   activeWOs.forEach(wo => {
     if (shipmentWoIds.has(wo.id)) return; // already covered by shipment
+    if (DONE_WO_STATUSES.includes(wo.status)) return; // stored/completed — work is done
     const promisedDays = getDaysUntil(wo.promisedDate);
     const requestedDays = getDaysUntil(wo.requestedDueDate);
     const item = { ...wo.toJSON(), source: 'workorder' };
@@ -478,9 +481,10 @@ async function sendScheduleEmail() {
   overdueRequested.sort((a, b) => b.daysOverdue - a.daysOverdue);
   upcomingRequested.sort((a, b) => a.daysUntil - b.daysUntil);
 
-  // Material needs ordering - WOs with parts where materialSource='we_order' and not yet ordered
+  // Material needs ordering - exclude stored/completed (work is done, no need to order)
   const SERVICE_TYPES = ['fab_service', 'shop_rate', 'rush_service'];
   const needsMaterialOrdering = activeWOs.filter(wo => {
+    if (DONE_WO_STATUSES.includes(wo.status)) return false;
     return wo.parts?.some(p => 
       p.materialSource === 'we_order' && 
       !p.materialOrdered && 

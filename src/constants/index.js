@@ -55,7 +55,8 @@ const INBOUND_STATUSES = {
 // PO Number Statuses
 const PO_STATUSES = {
   ACTIVE: 'active',
-  VOID: 'void'
+  VOID: 'void',
+  ARCHIVED: 'archived'
 };
 
 // DR Number Statuses

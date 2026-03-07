@@ -271,6 +271,20 @@ async function startServer() {
     } catch (enumErr) {
       console.log('Pre-sync on_edge enum addition:', enumErr.message);
     }
+
+    // Convert po_numbers status from ENUM to VARCHAR (to support 'archived')
+    try {
+      const [poCol] = await sequelize.query(
+        `SELECT data_type FROM information_schema.columns WHERE table_name = 'po_numbers' AND column_name = 'status'`
+      );
+      if (poCol.length > 0 && poCol[0].data_type === 'USER-DEFINED') {
+        await sequelize.query(`ALTER TABLE po_numbers ALTER COLUMN status TYPE VARCHAR(255) USING status::text`);
+        await sequelize.query(`DROP TYPE IF EXISTS "enum_po_numbers_status"`);
+        console.log('Converted po_numbers.status from ENUM to VARCHAR');
+      }
+    } catch (enumErr) {
+      console.log('PO status pre-sync conversion:', enumErr.message);
+    }
     
     // Sync models - use alter to add new columns
     // This is safe for adding new nullable columns

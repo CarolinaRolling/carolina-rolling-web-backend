@@ -216,4 +216,32 @@ router.get('/voided', async (req, res, next) => {
   }
 });
 
+// POST /api/po-numbers/:id/archive - Archive a PO
+router.post('/:id/archive', async (req, res, next) => {
+  try {
+    const { PONumber } = require('../models');
+    const po = await PONumber.findByPk(req.params.id);
+    if (!po) return res.status(404).json({ error: { message: 'PO not found' } });
+    if (po.status === 'void') return res.status(400).json({ error: { message: 'Cannot archive a voided PO' } });
+    await po.update({ status: 'archived' });
+    res.json({ data: po, message: `PO${po.poNumber} archived` });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/po-numbers/:id/unarchive - Restore archived PO to active
+router.post('/:id/unarchive', async (req, res, next) => {
+  try {
+    const { PONumber } = require('../models');
+    const po = await PONumber.findByPk(req.params.id);
+    if (!po) return res.status(404).json({ error: { message: 'PO not found' } });
+    if (po.status !== 'archived') return res.status(400).json({ error: { message: 'PO is not archived' } });
+    await po.update({ status: 'active' });
+    res.json({ data: po, message: `PO${po.poNumber} restored to active` });
+  } catch (error) {
+    next(error);
+  }
+});
+
 module.exports = router;

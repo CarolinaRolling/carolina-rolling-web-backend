@@ -1540,7 +1540,7 @@ const PONumber = sequelize.define('PONumber', {
     allowNull: false
   },
   status: {
-    type: DataTypes.ENUM('active', 'void'),
+    type: DataTypes.STRING,
     defaultValue: 'active'
   },
   supplier: {

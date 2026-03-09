@@ -768,6 +768,10 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
     type: DataTypes.DECIMAL(10, 2),
     allowNull: true
   },
+  materialMarkupPercent: {
+    type: DataTypes.DECIMAL(5, 2),
+    allowNull: true
+  },
   materialTotal: {
     type: DataTypes.DECIMAL(10, 2),
     allowNull: true

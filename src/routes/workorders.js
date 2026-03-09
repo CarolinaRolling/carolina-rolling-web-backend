@@ -1305,7 +1305,7 @@ router.post('/:id/parts', async (req, res, next) => {
 
     // Clean numeric fields - convert empty strings to null
     const numericFields = ['laborRate', 'laborHours', 'laborTotal', 'materialUnitCost', 
-                          'materialTotal', 'setupCharge', 'otherCharges', 'partTotal'];
+                          'materialMarkupPercent', 'materialTotal', 'setupCharge', 'otherCharges', 'partTotal'];
     const cleanedData = cleanNumericFields(req.body, numericFields);
     
     // Extract underscore-prefixed fields into formData JSONB
@@ -1387,6 +1387,7 @@ router.post('/:id/parts', async (req, res, next) => {
       laborHours: cleanedData.laborHours,
       laborTotal: cleanedData.laborTotal,
       materialUnitCost: cleanedData.materialUnitCost,
+      materialMarkupPercent: cleanedData.materialMarkupPercent,
       materialTotal: cleanedData.materialTotal,
       setupCharge: cleanedData.setupCharge,
       otherCharges: cleanedData.otherCharges,
@@ -1427,7 +1428,7 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
 
     // Clean numeric fields - convert empty strings to null
     const numericFields = ['laborRate', 'laborHours', 'laborTotal', 'materialUnitCost', 
-                          'materialTotal', 'setupCharge', 'otherCharges', 'partTotal'];
+                          'materialMarkupPercent', 'materialTotal', 'setupCharge', 'otherCharges', 'partTotal'];
     const cleanedData = cleanNumericFields(req.body, numericFields);
     
     // Extract underscore-prefixed fields into formData JSONB
@@ -1511,6 +1512,7 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     if (cleanedData.laborHours !== undefined) updates.laborHours = cleanedData.laborHours;
     if (cleanedData.laborTotal !== undefined) updates.laborTotal = cleanedData.laborTotal;
     if (cleanedData.materialUnitCost !== undefined) updates.materialUnitCost = cleanedData.materialUnitCost;
+    if (cleanedData.materialMarkupPercent !== undefined) updates.materialMarkupPercent = cleanedData.materialMarkupPercent;
     if (cleanedData.materialTotal !== undefined) updates.materialTotal = cleanedData.materialTotal;
     if (cleanedData.setupCharge !== undefined) updates.setupCharge = cleanedData.setupCharge;
     if (cleanedData.otherCharges !== undefined) updates.otherCharges = cleanedData.otherCharges;

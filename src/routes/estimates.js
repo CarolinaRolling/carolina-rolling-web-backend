@@ -1625,12 +1625,12 @@ router.post('/:id/convert', async (req, res, next) => {
 
     const { clientPurchaseOrderNumber, promisedDate, storageLocation, customDRNumber } = req.body;
 
-    // Check if all parts are customer supplied
-    const allCustomerSupplied = estimate.parts.every(p => p.materialSource === 'customer_supplied');
+    // Check if all parts have material on hand (customer supplied or in stock)
+    const allMaterialOnHand = estimate.parts.every(p => ['customer_supplied', 'in_stock'].includes(p.materialSource));
     const hasOrderedMaterial = estimate.parts.some(p => p.materialSource === 'we_order' && p.materialOrdered);
 
     // For we_order materials that haven't been ordered yet, don't allow direct conversion
-    if (!allCustomerSupplied && !hasOrderedMaterial) {
+    if (!allMaterialOnHand && !hasOrderedMaterial) {
       const needsOrdering = estimate.parts.filter(p => p.materialSource === 'we_order' && !p.materialOrdered);
       if (needsOrdering.length > 0) {
         await transaction.rollback();
@@ -1643,9 +1643,9 @@ router.post('/:id/convert', async (req, res, next) => {
       }
     }
 
-    // Assign DR number (for customer supplied, assign immediately)
+    // Assign DR number (for material on hand, assign immediately)
     let drNumber;
-    if (allCustomerSupplied) {
+    if (allMaterialOnHand) {
       if (customDRNumber) {
         const existingDR = await DRNumber.findOne({ where: { drNumber: customDRNumber }, transaction });
         if (existingDR) {
@@ -1678,14 +1678,17 @@ router.post('/:id/convert', async (req, res, next) => {
       estimateId: estimate.id,
       estimateNumber: estimate.estimateNumber,
       estimateTotal: estimate.grandTotal,
-      allMaterialReceived: allCustomerSupplied,
-      pendingInboundCount: allCustomerSupplied ? 0 : estimate.parts.filter(p => p.materialSource === 'we_order' && !p.materialReceived).length,
+      allMaterialReceived: allMaterialOnHand,
+      pendingInboundCount: allMaterialOnHand ? 0 : estimate.parts.filter(p => p.materialSource === 'we_order' && !p.materialReceived).length,
       // Copy order-level pricing
       truckingDescription: estimate.truckingDescription,
       truckingCost: estimate.truckingCost,
       taxRate: estimate.taxRate,
+      taxExempt: estimate.taxExempt || false,
+      taxExemptReason: estimate.taxExemptReason || null,
+      taxExemptCertNumber: estimate.taxExemptCertNumber || null,
       taxAmount: estimate.taxAmount,
-      subtotal: estimate.subtotal,
+      subtotal: estimate.partsSubtotal,
       grandTotal: estimate.grandTotal,
       // Copy minimum charge settings
       minimumOverride: estimate.minimumOverride || false,
@@ -1720,8 +1723,8 @@ router.post('/:id/convert', async (req, res, next) => {
           materialSource: estPart.materialSource || 
             (['fab_service', 'shop_rate'].includes(estPart.partType) ? 'customer_supplied' :
             (estPart.weSupplyMaterial ? 'we_order' : 'customer_supplied')),
-          materialReceived: estPart.materialSource === 'customer_supplied' || estPart.materialReceived,
-          materialReceivedAt: estPart.materialSource === 'customer_supplied' ? new Date() : estPart.materialReceivedAt,
+          materialReceived: ['customer_supplied', 'in_stock'].includes(estPart.materialSource) || estPart.materialReceived,
+          materialReceivedAt: ['customer_supplied', 'in_stock'].includes(estPart.materialSource) ? new Date() : estPart.materialReceivedAt,
           awaitingInboundId: estPart.inboundOrderId,
           awaitingPONumber: estPart.materialPurchaseOrderNumber,
           supplierName: estPart.supplierName,
@@ -1734,6 +1737,7 @@ router.post('/:id/convert', async (req, res, next) => {
           laborHours: estPart.laborHours,
           laborTotal: estPart.laborTotal,
           materialUnitCost: estPart.materialUnitCost,
+          materialMarkupPercent: estPart.materialMarkupPercent,
           materialTotal: estPart.materialTotal,
           setupCharge: estPart.setupCharge,
           otherCharges: estPart.otherCharges,
@@ -1763,7 +1767,7 @@ router.post('/:id/convert', async (req, res, next) => {
       acceptedAt: new Date(),
       workOrderId: workOrder.id,
       drNumber,
-      allCustomerSupplied
+      allCustomerSupplied: allMaterialOnHand
     }, { transaction });
 
     // Log activity
@@ -2255,6 +2259,8 @@ router.get('/:id/pdf', async (req, res, next) => {
       if (!['fab_service', 'shop_rate'].includes(part.partType)) {
         if (part.materialSource === 'customer_supplied') {
           descLines.push(`Material supplied by: ${estimate.clientName || 'Customer'}`);
+        } else if (part.materialSource === 'in_stock') {
+          descLines.push('Material supplied by: Carolina Rolling Company');
         } else {
           descLines.push('Material supplied by: Carolina Rolling Company');
         }
@@ -2551,6 +2557,7 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
       orderNumber,
       drNumber: drNumber,
       clientName: estimate.clientName,
+      clientId: estimate.clientId || null,
       contactName: estimate.contactName,
       contactPhone: estimate.contactPhone,
       contactEmail: estimate.contactEmail,
@@ -2568,8 +2575,11 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
       truckingDescription: estimate.truckingDescription,
       truckingCost: estimate.truckingCost,
       taxRate: estimate.taxRate,
+      taxExempt: estimate.taxExempt || false,
+      taxExemptReason: estimate.taxExemptReason || null,
+      taxExemptCertNumber: estimate.taxExemptCertNumber || null,
       taxAmount: estimate.taxAmount,
-      subtotal: estimate.subtotal,
+      subtotal: estimate.partsSubtotal,
       grandTotal: estimate.grandTotal,
       // Copy minimum charge settings
       minimumOverride: estimate.minimumOverride || false,
@@ -2584,6 +2594,17 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
     const estimateToWoPartIdMap = {};
     for (const estimatePart of estimate.parts) {
       try {
+        // Get pricing from top-level columns, fall back to formData if stored there
+        const fd = estimatePart.formData && typeof estimatePart.formData === 'object' ? estimatePart.formData : {};
+        const getPricing = (field) => {
+          const val = estimatePart[field];
+          if (val !== null && val !== undefined && val !== '' && val !== 0) return val;
+          if (fd[field] !== undefined && fd[field] !== null && fd[field] !== '') return fd[field];
+          return val;
+        };
+
+        console.log(`[convert] Part #${estimatePart.partNumber} (${estimatePart.partType}): labor=${estimatePart.laborTotal}, material=${estimatePart.materialTotal}, markup=${estimatePart.materialMarkupPercent}, total=${estimatePart.partTotal}`);
+
         const workOrderPart = await WorkOrderPart.create({
           workOrderId: workOrder.id,
           partNumber: estimatePart.partNumber || 1,
@@ -2616,15 +2637,16 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
           materialSource: estimatePart.materialSource || 
             (['fab_service', 'shop_rate'].includes(estimatePart.partType) ? 'customer_supplied' :
             (estimatePart.weSupplyMaterial ? 'we_order' : 'customer_supplied')),
-          // Copy pricing fields
-          laborRate: estimatePart.laborRate,
-          laborHours: estimatePart.laborHours,
-          laborTotal: estimatePart.laborTotal,
-          materialUnitCost: estimatePart.materialUnitCost,
-          materialTotal: estimatePart.materialTotal,
-          setupCharge: estimatePart.setupCharge,
-          otherCharges: estimatePart.otherCharges,
-          partTotal: estimatePart.partTotal,
+          // Copy pricing fields (with formData fallback)
+          laborRate: getPricing('laborRate'),
+          laborHours: getPricing('laborHours'),
+          laborTotal: getPricing('laborTotal'),
+          materialUnitCost: getPricing('materialUnitCost'),
+          materialMarkupPercent: getPricing('materialMarkupPercent'),
+          materialTotal: getPricing('materialTotal'),
+          setupCharge: getPricing('setupCharge'),
+          otherCharges: getPricing('otherCharges'),
+          partTotal: getPricing('partTotal'),
           // Copy form display data (rolling descriptions, specs, etc.)
           formData: estimatePart.formData || null
         }, { transaction });

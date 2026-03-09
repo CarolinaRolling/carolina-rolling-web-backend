@@ -35,9 +35,13 @@ function fetchWithRedirects(url, maxRedirects = 5, timeoutMs = 15000) {
 function extractFormData(data) {
   const formData = {};
   const cleaned = {};
+  // UI-only fields that should never be stored in formData
+  const excludeFromFormData = ['_vendorSearch', '_shapeFile'];
   for (const [key, value] of Object.entries(data)) {
     if (key.startsWith('_')) {
-      formData[key] = value;
+      if (!excludeFromFormData.includes(key)) {
+        formData[key] = value;
+      }
     } else {
       cleaned[key] = value;
     }

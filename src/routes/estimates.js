@@ -486,14 +486,14 @@ router.post('/recalculate-all', async (req, res, next) => {
 // GET /api/estimates - Get all estimates
 router.get('/', async (req, res, next) => {
   try {
-    const { status, archived, clientName, limit = 50, offset = 0 } = req.query;
+    const { status, archived, clientName, limit = 200, offset = 0 } = req.query;
     
     const where = {};
     
     if (archived === 'true') {
-      where.status = 'archived';
+      where.status = { [Op.in]: ['archived', 'accepted'] };
     } else if (archived === 'false' || !archived) {
-      where.status = { [Op.ne]: 'archived' };
+      where.status = { [Op.notIn]: ['archived', 'accepted'] };
     }
     
     if (status && status !== 'all') {

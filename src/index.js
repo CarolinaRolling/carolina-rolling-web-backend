@@ -4,7 +4,7 @@ const cors = require('cors');
 const path = require('path');
 const cloudinary = require('cloudinary').v2;
 const cron = require('node-cron');
-const { sequelize, Shipment, ShipmentPhoto, ShipmentDocument, User, AppSettings, WorkOrder, Client, DailyActivity } = require('./models');
+const { sequelize, Shipment, ShipmentPhoto, ShipmentDocument, User, AppSettings, WorkOrder, Client, DailyActivity, Estimate } = require('./models');
 const shipmentRoutes = require('./routes/shipments');
 const settingsRoutes = require('./routes/settings');
 const { sendScheduleEmail } = require('./routes/settings');
@@ -19,6 +19,7 @@ const { sendDailyEmail } = require('./routes/email');
 const { router: authRoutes, initializeAdmin } = require('./routes/auth');
 const clientsVendorsRoutes = require('./routes/clients-vendors');
 const permitVerificationRoutes = require('./routes/permit-verification');
+const quickbooksRoutes = require('./routes/quickbooks');
 const { Op } = require('sequelize');
 
 // Configure Cloudinary
@@ -74,6 +75,7 @@ app.use('/api/po-numbers', authenticate, poNumbersRoutes);
 app.use('/api/email', authenticate, emailRoutes);
 app.use('/api', authenticate, clientsVendorsRoutes);
 app.use('/api', authenticate, permitVerificationRoutes);
+app.use('/api/quickbooks', authenticate, quickbooksRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -561,6 +563,17 @@ async function startServer() {
     // Run cleanup on startup
     await cleanupOldShippedItems();
     
+    // Archive old estimates on startup
+    try {
+      const oneMonthAgo = new Date();
+      oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
+      const [archiveCount] = await Estimate.update(
+        { status: 'archived', archivedAt: new Date() },
+        { where: { status: { [Op.notIn]: ['archived', 'accepted'] }, createdAt: { [Op.lt]: oneMonthAgo } } }
+      );
+      if (archiveCount > 0) console.log(`Archived ${archiveCount} estimates older than 1 month`);
+    } catch (e) { console.log('Estimate archive:', e.message); }
+    
     // Run cleanup every 24 hours
     setInterval(cleanupOldShippedItems, 24 * 60 * 60 * 1000);
     
@@ -686,6 +699,23 @@ async function startServer() {
       timezone: 'America/Los_Angeles'
     });
     console.log('Auto-backup configured for every 3 days at midnight Pacific');
+
+    // Auto-archive old estimates daily at 1:00 AM Pacific
+    cron.schedule('0 1 * * *', async () => {
+      try {
+        const { Op } = require('sequelize');
+        const oneMonthAgo = new Date();
+        oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
+        const [count] = await Estimate.update(
+          { status: 'archived', archivedAt: new Date() },
+          { where: { status: { [Op.notIn]: ['archived', 'accepted'] }, createdAt: { [Op.lt]: oneMonthAgo } } }
+        );
+        if (count > 0) console.log(`[auto-archive] Archived ${count} estimates older than 1 month`);
+      } catch (err) {
+        console.error('[auto-archive] Failed:', err.message);
+      }
+    }, { timezone: 'America/Los_Angeles' });
+    console.log('Auto-archive configured for daily at 1:00 AM Pacific');
 
   } catch (error) {
     console.error('Startup error (server still running):', error.message);

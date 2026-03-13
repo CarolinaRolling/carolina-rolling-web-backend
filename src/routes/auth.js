@@ -87,16 +87,20 @@ const authenticate = async (req, res, next) => {
       // === IP ALLOWLIST CHECK ===
       const clientIP = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || req.connection?.remoteAddress || '';
       
-      // Build combined allowlist: per-key IPs + global approved IPs
+      // Build combined allowlist: per-key IPs + global approved IPs (for tablet keys only)
+      // Keys WITHOUT a deviceName are treated as client portals — global IPs don't apply to them
       const perKeyIPs = apiKey.allowedIPs ? apiKey.allowedIPs.split(',').map(ip => ip.trim()).filter(Boolean) : [];
+      const isTabletKey = !!apiKey.deviceName; // Tablet keys have a device name set
       let globalIPs = [];
-      try {
-        const { AppSettings } = require('../models');
-        const globalSetting = await AppSettings.findOne({ where: { key: 'approved_ips' } });
-        if (globalSetting?.value?.ips) {
-          globalIPs = globalSetting.value.ips.map(ip => ip.trim()).filter(Boolean);
-        }
-      } catch (e) { /* ignore */ }
+      if (isTabletKey) {
+        try {
+          const { AppSettings } = require('../models');
+          const globalSetting = await AppSettings.findOne({ where: { key: 'approved_ips' } });
+          if (globalSetting?.value?.ips) {
+            globalIPs = globalSetting.value.ips.map(ip => ip.trim()).filter(Boolean);
+          }
+        } catch (e) { /* ignore */ }
+      }
       
       const allAllowed = [...perKeyIPs, ...globalIPs];
       

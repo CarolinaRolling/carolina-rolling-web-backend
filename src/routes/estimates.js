@@ -2110,7 +2110,7 @@ router.get('/:id/pdf', async (req, res, next) => {
     const logoPath = path.join(__dirname, '../assets/logo.jpg');
     try {
       if (fs.existsSync(logoPath)) {
-        doc.image(logoPath, 50, 35, { width: 70 });
+        doc.image(logoPath, 50, 22, { width: 65 });
       }
     } catch (e) {
       console.log('Logo not found, using text header');

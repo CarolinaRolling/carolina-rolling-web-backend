@@ -627,15 +627,14 @@ router.get('/api-keys/:id/setup-qr', authenticateToken, requireAdmin, async (req
     }
     
     const baseUrl = `${req.protocol}://${req.get('host')}/api/`;
+    const deviceName = apiKey.deviceName || apiKey.name;
     
+    // Compact pipe-delimited format: CFG|apiKey|serverUrl|deviceName
+    // Much shorter than JSON — critical for QR scannability
     res.json({
       data: {
-        qrPayload: `CONFIG-${JSON.stringify({
-          apiKey: apiKey.key,
-          serverUrl: baseUrl,
-          deviceName: apiKey.deviceName || apiKey.name
-        })}`,
-        deviceName: apiKey.deviceName || apiKey.name
+        qrPayload: `CFG|${apiKey.key}|${baseUrl}|${deviceName}`,
+        deviceName
       }
     });
   } catch (error) {
@@ -676,6 +675,25 @@ router.put('/api-keys/:id', authenticateToken, requireAdmin, async (req, res, ne
     await apiKey.update(updates);
     res.json({ data: apiKey, message: 'API key updated' });
   } catch (error) {
+    next(error);
+  }
+});
+
+// DELETE /api/auth/api-keys/:id/permanent - Permanently delete a revoked API key (admin only)
+router.delete('/api-keys/:id/permanent', authenticateToken, requireAdmin, async (req, res, next) => {
+  try {
+    const apiKey = await ApiKey.findByPk(req.params.id);
+    if (!apiKey) {
+      return res.status(404).json({ error: { message: 'API key not found' } });
+    }
+    if (apiKey.isActive) {
+      return res.status(400).json({ error: { message: 'Revoke the key before deleting it' } });
+    }
+    const name = apiKey.name;
+    await apiKey.destroy({ force: true });
+    res.json({ message: `API key "${name}" permanently deleted` });
+  } catch (error) {
+    console.error('[delete-api-key]', error.message);
     next(error);
   }
 });

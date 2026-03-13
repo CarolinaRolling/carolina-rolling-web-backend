@@ -2124,33 +2124,30 @@ router.get('/:id/pdf', async (req, res, next) => {
       }
     } catch (e) {}
     if (hasYellowcake) {
-      doc.fontSize(20).fillColor(darkColor).font('Yellowcake').text('Carolina Rolling Co. Inc.', 130, 38, { lineBreak: false });
+      doc.fontSize(15).fillColor(darkColor).font('Yellowcake').text('Carolina Rolling Co. Inc.', 130, 40, { lineBreak: false });
     } else {
-      doc.fontSize(20).fillColor(darkColor).font('Helvetica-Bold').text('CAROLINA ROLLING CO. INC.', 130, 38, { lineBreak: false });
+      doc.fontSize(15).fillColor(darkColor).font('Helvetica-Bold').text('CAROLINA ROLLING CO. INC.', 130, 40, { lineBreak: false });
     }
     doc.font('Helvetica').fontSize(8.5).fillColor(grayColor);
-    doc.text('9152 Sonrisa St., Bellflower, CA 90706', 130, 62, { lineBreak: false });
-    doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 130, 73, { lineBreak: false });
+    doc.text('9152 Sonrisa St., Bellflower, CA 90706', 130, 60, { lineBreak: false });
+    doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 130, 71, { lineBreak: false });
     
-    // Divider
-    doc.strokeColor(lightGray).lineWidth(1).moveTo(50, 90).lineTo(562, 90).stroke();
-    
-    // ESTIMATE title (smaller) + number and date inline
-    const estInfoY = 98;
-    doc.fontSize(16).fillColor(primaryColor).font('Helvetica-Bold').text('ESTIMATE', 50, estInfoY, { lineBreak: false });
-    doc.font('Helvetica').fontSize(10).fillColor(darkColor);
-    doc.text(estimate.estimateNumber, 145, estInfoY + 2, { lineBreak: false });
-    doc.fontSize(9).fillColor(grayColor);
-    doc.text(`Date: ${formatDate(estimate.createdAt)}`, 145, estInfoY + 15, { lineBreak: false });
+    // ESTIMATE + number + date — top right corner
+    doc.fontSize(16).fillColor(primaryColor).font('Helvetica-Bold');
+    doc.text('ESTIMATE', 350, 32, { width: 212, align: 'right', lineBreak: false });
+    doc.font('Helvetica-Bold').fontSize(10).fillColor(darkColor);
+    doc.text(estimate.estimateNumber, 350, 52, { width: 212, align: 'right', lineBreak: false });
+    doc.font('Helvetica').fontSize(9).fillColor(grayColor);
+    doc.text(`Date: ${formatDate(estimate.createdAt)}`, 350, 65, { width: 212, align: 'right', lineBreak: false });
     if (estimate.validUntil) {
-      doc.text(`Valid Until: ${formatDate(estimate.validUntil)}`, 290, estInfoY + 15, { lineBreak: false });
+      doc.text(`Valid Until: ${formatDate(estimate.validUntil)}`, 350, 76, { width: 212, align: 'right', lineBreak: false });
     }
 
     // Divider line
-    doc.strokeColor(lightGray).lineWidth(1).moveTo(50, estInfoY + 28).lineTo(562, estInfoY + 28).stroke();
+    doc.strokeColor(lightGray).lineWidth(1).moveTo(50, 90).lineTo(562, 90).stroke();
 
     // ========== CLIENT INFO ==========
-    let yPos = estInfoY + 40;
+    let yPos = 102;
     doc.fontSize(10).fillColor(primaryColor).font('Helvetica-Bold').text('PREPARED FOR:', 50, yPos, { lineBreak: false });
     doc.font('Helvetica');
     yPos += 16;
@@ -2167,7 +2164,7 @@ router.get('/:id/pdf', async (req, res, next) => {
     // Tax Exempt Badge (right side)
     if (estimate.taxExempt) {
       doc.fontSize(10).fillColor('#c62828').font('Helvetica-Bold')
-        .text('TAX EXEMPT', 400, yPos - 2, { align: 'right', width: 112, lineBreak: false });
+        .text('TAX EXEMPT', 400, 102, { align: 'right', width: 112, lineBreak: false });
       doc.font('Helvetica');
     }
 

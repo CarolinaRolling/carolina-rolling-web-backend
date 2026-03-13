@@ -1,7 +1,7 @@
 const { Sequelize, DataTypes } = require('sequelize');
 const bcrypt = require('bcryptjs');
 
-// Database connection
+// Database connection with pool config for Heroku
 const sequelize = new Sequelize(process.env.DATABASE_URL, {
   dialect: 'postgres',
   dialectOptions: {
@@ -10,7 +10,13 @@ const sequelize = new Sequelize(process.env.DATABASE_URL, {
       rejectUnauthorized: false
     } : false
   },
-  logging: process.env.NODE_ENV === 'development' ? console.log : false
+  logging: process.env.NODE_ENV === 'development' ? console.log : false,
+  pool: {
+    max: parseInt(process.env.DB_POOL_MAX) || 10,
+    min: parseInt(process.env.DB_POOL_MIN) || 2,
+    acquire: 30000,
+    idle: 10000
+  }
 });
 
 // User Model
@@ -36,6 +42,14 @@ const User = sequelize.define('User', {
   isActive: {
     type: DataTypes.BOOLEAN,
     defaultValue: true
+  },
+  totpSecret: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  totpEnabled: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
   }
 }, {
   tableName: 'users',
@@ -907,9 +921,9 @@ WorkOrderPart.belongsTo(WorkOrder, {
 });
 
 // WorkOrder -> Shipment association (for linked receiving info & photos)
-WorkOrder.hasOne(Shipment, {
+WorkOrder.hasMany(Shipment, {
   foreignKey: 'workOrderId',
-  as: 'shipment'
+  as: 'shipments'
 });
 Shipment.belongsTo(WorkOrder, {
   foreignKey: 'workOrderId',
@@ -1736,6 +1750,10 @@ const Client = sequelize.define('Client', {
     type: DataTypes.BOOLEAN,
     defaultValue: false
   },
+  requiresPartLabels: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
   permitStatus: {
     type: DataTypes.STRING,
     defaultValue: 'unverified' // active, closed, inactive, not_found, error, unverified
@@ -1839,6 +1857,116 @@ InboundOrder.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
 
 Client.hasMany(PONumber, { foreignKey: 'clientId', as: 'poNumbers' });
 PONumber.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
+PONumber.belongsTo(WorkOrder, { foreignKey: 'workOrderId', as: 'workOrder' });
+
+// Shop Supply Model - track consumable shop items
+const ShopSupply = sequelize.define('ShopSupply', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  name: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  description: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  category: {
+    type: DataTypes.STRING,
+    allowNull: true // e.g. "Gas", "Paint", "Safety", "Consumables"
+  },
+  quantity: {
+    type: DataTypes.INTEGER,
+    defaultValue: 0
+  },
+  unit: {
+    type: DataTypes.STRING,
+    defaultValue: 'each' // "tanks", "cans", "boxes", "rolls", "gallons", "each"
+  },
+  minQuantity: {
+    type: DataTypes.INTEGER,
+    defaultValue: 1 // warn when at or below this level
+  },
+  qrCode: {
+    type: DataTypes.STRING,
+    unique: true,
+    allowNull: false
+  },
+  isActive: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: true
+  },
+  lastRefilledAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  lastRefilledBy: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  lastConsumedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  lastConsumedBy: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  lowStockAcknowledged: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false // reset to false when quantity drops to/below min; set true only by refill
+  }
+}, {
+  tableName: 'shop_supplies',
+  timestamps: true
+});
+
+// Shop Supply Log - track consumption/refill history
+const ShopSupplyLog = sequelize.define('ShopSupplyLog', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  shopSupplyId: {
+    type: DataTypes.UUID,
+    allowNull: false,
+    references: { model: 'shop_supplies', key: 'id' }
+  },
+  action: {
+    type: DataTypes.STRING, // 'consume', 'refill', 'adjust'
+    allowNull: false
+  },
+  quantityChange: {
+    type: DataTypes.INTEGER,
+    allowNull: false // negative for consume, positive for refill
+  },
+  quantityAfter: {
+    type: DataTypes.INTEGER,
+    allowNull: false
+  },
+  performedBy: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  deviceName: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  notes: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  }
+}, {
+  tableName: 'shop_supply_logs',
+  timestamps: true
+});
+
+ShopSupply.hasMany(ShopSupplyLog, { foreignKey: 'shopSupplyId', as: 'logs' });
+ShopSupplyLog.belongsTo(ShopSupply, { foreignKey: 'shopSupplyId', as: 'supply' });
 
 Client.hasMany(DRNumber, { foreignKey: 'clientId', as: 'drNumbers' });
 DRNumber.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
@@ -1852,7 +1980,7 @@ const ApiKey = sequelize.define('ApiKey', {
   },
   name: {
     type: DataTypes.STRING,
-    allowNull: false // e.g. "Customer Portal", "GNB Portal"
+    allowNull: false // e.g. "Shop Tablet 1", "Customer Portal"
   },
   key: {
     type: DataTypes.STRING,
@@ -1882,6 +2010,36 @@ const ApiKey = sequelize.define('ApiKey', {
   createdBy: {
     type: DataTypes.STRING,
     allowNull: true
+  },
+  // === IP Security ===
+  allowedIPs: {
+    type: DataTypes.TEXT, // comma-separated IPs or CIDR ranges, null = any IP allowed
+    allowNull: true
+  },
+  lastIP: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  lastIPDate: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  revokedReason: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  revokedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  // === Operator Tracking ===
+  operatorName: {
+    type: DataTypes.STRING,
+    allowNull: true // e.g. "Jesus", "Mike" — fixed per tablet
+  },
+  deviceName: {
+    type: DataTypes.STRING,
+    allowNull: true // e.g. "Shop Tablet 1", "Brake Press Tablet"
   }
 }, {
   tableName: 'api_keys',
@@ -1911,5 +2069,7 @@ module.exports = {
   DailyActivity,
   Client,
   Vendor,
-  ApiKey
+  ApiKey,
+  ShopSupply,
+  ShopSupplyLog
 };

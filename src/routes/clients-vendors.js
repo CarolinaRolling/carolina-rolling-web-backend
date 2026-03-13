@@ -61,7 +61,7 @@ router.get('/clients/check-notag', async (req, res, next) => {
       where: { name: { [Op.iLike]: name.trim() }, isActive: true }
     });
 
-    res.json({ data: { noTag: client?.noTag === true } });
+    res.json({ data: { noTag: client?.noTag === true, requiresPartLabels: client?.requiresPartLabels === true } });
   } catch (error) {
     next(error);
   }

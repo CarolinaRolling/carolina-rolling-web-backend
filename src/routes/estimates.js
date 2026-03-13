@@ -58,7 +58,29 @@ function mergeFormData(part) {
   if (obj.formData && typeof obj.formData === 'object') {
     Object.assign(obj, obj.formData);
   }
-  return obj;
+  return refreshDerivedFields(obj);
+}
+
+/**
+ * Rebuild derived text fields from raw database columns.
+ * Ensures _rollingDescription direction matches actual rollType.
+ */
+function refreshDerivedFields(part) {
+  if (part._rollingDescription && part.rollType) {
+    let dir = '';
+    if (part.partType === 'tee_bar') {
+      dir = part.rollType === 'easy_way' ? 'SO' : part.rollType === 'on_edge' ? 'SU' : 'SI';
+    } else {
+      dir = part.rollType === 'easy_way' ? 'EW' : part.rollType === 'on_edge' ? 'OE' : 'HW';
+    }
+    const allDirs = ['EW', 'HW', 'OE', 'SO', 'SI', 'SU'];
+    const dirRegex = new RegExp('\\b(' + allDirs.join('|') + ')\\b', 'g');
+    const matches = part._rollingDescription.match(dirRegex);
+    if (matches && matches.length > 0 && !matches.includes(dir)) {
+      part._rollingDescription = part._rollingDescription.replace(dirRegex, dir);
+    }
+  }
+  return part;
 }
 
 // Helper to clean numeric fields - convert empty strings to null
@@ -486,10 +508,20 @@ router.post('/recalculate-all', async (req, res, next) => {
 // GET /api/estimates - Get all estimates
 router.get('/', async (req, res, next) => {
   try {
-    const { status, archived, clientName, limit = 200, offset = 0 } = req.query;
+    const { status, archived, clientName, search, limit = 200, offset = 0 } = req.query;
     
     const where = {};
     
+    // If searching, search across ALL statuses (including archived/accepted)
+    if (search) {
+      const searchLower = `%${search}%`;
+      where[Op.or] = [
+        { clientName: { [Op.iLike]: searchLower } },
+        { estimateNumber: { [Op.iLike]: searchLower } },
+        { contactName: { [Op.iLike]: searchLower } },
+        { projectDescription: { [Op.iLike]: searchLower } }
+      ];
+    } else {
     if (archived === 'true') {
       where.status = { [Op.in]: ['archived', 'accepted'] };
     } else if (archived === 'false' || !archived) {
@@ -502,6 +534,7 @@ router.get('/', async (req, res, next) => {
     
     if (clientName) {
       where.clientName = { [Op.iLike]: `%${clientName}%` };
+    }
     }
 
     // API key client scoping — restrict to key's allowed client
@@ -517,7 +550,8 @@ router.get('/', async (req, res, next) => {
       ],
       order: [['createdAt', 'DESC']],
       limit: parseInt(limit),
-      offset: parseInt(offset)
+      offset: parseInt(offset),
+      distinct: true
     });
 
     // Recalculate totals on-the-fly to ensure tax-exempt estimates show correct values
@@ -2000,6 +2034,16 @@ router.get('/:id/pdf', async (req, res, next) => {
     const PDFDocument = require('pdfkit');
     const doc = new PDFDocument({ margin: 50, size: 'LETTER', bufferPages: true });
 
+    // Register custom font for company name
+    const yellowcakePath = path.join(__dirname, '../assets/fonts/Yellowcake-Regular.ttf');
+    try {
+      if (fs.existsSync(yellowcakePath)) {
+        doc.registerFont('Yellowcake', yellowcakePath);
+      }
+    } catch (e) {
+      console.log('Yellowcake font not found, using Helvetica fallback');
+    }
+
     // Set response headers
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="Estimate-${estimate.estimateNumber}.pdf"`);
@@ -2027,7 +2071,7 @@ router.get('/:id/pdf', async (req, res, next) => {
       if (obj.formData && typeof obj.formData === 'object') {
         Object.assign(obj, obj.formData);
       }
-      return obj;
+      return refreshDerivedFields(obj);
     });
 
     // Part type labels
@@ -2066,32 +2110,46 @@ router.get('/:id/pdf', async (req, res, next) => {
     const logoPath = path.join(__dirname, '../assets/logo.jpg');
     try {
       if (fs.existsSync(logoPath)) {
-        doc.image(logoPath, 50, 35, { width: 80 });
+        doc.image(logoPath, 50, 35, { width: 70 });
       }
     } catch (e) {
       console.log('Logo not found, using text header');
     }
 
-    // Company name and info
-    doc.fontSize(18).fillColor(darkColor).font('Helvetica-Bold').text('CAROLINA ROLLING CO. INC.', 140, 40, { lineBreak: false });
-    doc.font('Helvetica').fontSize(9).fillColor(grayColor);
-    doc.text('9152 Sonrisa St., Bellflower, CA 90706', 140, 62, { lineBreak: false });
-    doc.text('Phone: (562) 633-1044', 140, 74, { lineBreak: false });
-    doc.text('Email: keepitrolling@carolinarolling.com', 140, 86, { lineBreak: false });
+    // Company name using custom Yellowcake font
+    let hasYellowcake = false;
+    try {
+      if (fs.existsSync(yellowcakePath)) {
+        hasYellowcake = true;
+      }
+    } catch (e) {}
+    if (hasYellowcake) {
+      doc.fontSize(20).fillColor(darkColor).font('Yellowcake').text('Carolina Rolling Co. Inc.', 130, 38, { lineBreak: false });
+    } else {
+      doc.fontSize(20).fillColor(darkColor).font('Helvetica-Bold').text('CAROLINA ROLLING CO. INC.', 130, 38, { lineBreak: false });
+    }
+    doc.font('Helvetica').fontSize(8.5).fillColor(grayColor);
+    doc.text('9152 Sonrisa St., Bellflower, CA 90706', 130, 62, { lineBreak: false });
+    doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 130, 73, { lineBreak: false });
     
-    // Estimate title and number (right side)
-    doc.fontSize(22).fillColor(primaryColor).font('Helvetica-Bold').text('ESTIMATE', 400, 40, { align: 'right', width: 112, lineBreak: false });
-    doc.font('Helvetica').fontSize(11).fillColor(darkColor).text(estimate.estimateNumber, 400, 68, { align: 'right', width: 112, lineBreak: false });
-    doc.fontSize(9).fillColor(grayColor).text(`Date: ${formatDate(estimate.createdAt)}`, 400, 85, { align: 'right', width: 112, lineBreak: false });
+    // Estimate title and number — left-justified below company info
+    doc.strokeColor(lightGray).lineWidth(1).moveTo(50, 90).lineTo(562, 90).stroke();
+    
+    const estInfoY = 100;
+    doc.fontSize(20).fillColor(primaryColor).font('Helvetica-Bold').text('ESTIMATE', 50, estInfoY, { lineBreak: false });
+    doc.font('Helvetica').fontSize(10).fillColor(darkColor);
+    doc.text(estimate.estimateNumber, 155, estInfoY + 2, { lineBreak: false });
+    doc.fontSize(9).fillColor(grayColor);
+    doc.text(`Date: ${formatDate(estimate.createdAt)}`, 155, estInfoY + 14, { lineBreak: false });
     if (estimate.validUntil) {
-      doc.text(`Valid Until: ${formatDate(estimate.validUntil)}`, 400, 98, { align: 'right', width: 112, lineBreak: false });
+      doc.text(`Valid Until: ${formatDate(estimate.validUntil)}`, 300, estInfoY + 14, { lineBreak: false });
     }
 
     // Divider line
-    doc.strokeColor(lightGray).lineWidth(1).moveTo(50, 120).lineTo(562, 120).stroke();
+    doc.strokeColor(lightGray).lineWidth(1).moveTo(50, estInfoY + 30).lineTo(562, estInfoY + 30).stroke();
 
     // ========== CLIENT INFO ==========
-    let yPos = 135;
+    let yPos = estInfoY + 42;
     doc.fontSize(10).fillColor(primaryColor).font('Helvetica-Bold').text('PREPARED FOR:', 50, yPos, { lineBreak: false });
     doc.font('Helvetica');
     yPos += 16;
@@ -2108,7 +2166,7 @@ router.get('/:id/pdf', async (req, res, next) => {
     // Tax Exempt Badge (right side)
     if (estimate.taxExempt) {
       doc.fontSize(10).fillColor('#c62828').font('Helvetica-Bold')
-        .text('TAX EXEMPT', 400, 135, { align: 'right', width: 112, lineBreak: false });
+        .text('TAX EXEMPT', 400, estInfoY + 42, { align: 'right', width: 112, lineBreak: false });
       doc.font('Helvetica');
     }
 

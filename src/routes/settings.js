@@ -349,7 +349,7 @@ router.post('/schedule-email/send', async (req, res, next) => {
 // Helper function to send schedule email
 async function sendScheduleEmail() {
   const nodemailer = require('nodemailer');
-  const { Shipment, WorkOrder, WorkOrderPart, Estimate, DailyActivity, EmailLog } = require('../models');
+  const { Shipment, WorkOrder, WorkOrderPart, Estimate, DailyActivity, EmailLog, ShopSupply, sequelize } = require('../models');
   const { Op } = require('sequelize');
   
   // Get email settings
@@ -616,6 +616,37 @@ async function sendScheduleEmail() {
     });
     html += '</tbody></table>';
   }
+
+  // ===== SECTION 1.6: SHOP SUPPLIES LOW STOCK =====
+  try {
+    const lowStockSupplies = await ShopSupply.findAll({
+      where: {
+        isActive: true,
+        lowStockAcknowledged: false,
+        quantity: { [Op.lte]: sequelize.col('minQuantity') }
+      },
+      order: [['quantity', 'ASC']]
+    });
+    if (lowStockSupplies.length > 0) {
+      html += sectionHeader('🛒', `Shop Supplies Low Stock (${lowStockSupplies.length})`, '#c2185b');
+      html += `<table style="width: 100%; border-collapse: collapse; font-size: 13px;"><thead><tr style="background: #fce4ec;">
+        <th style="padding: 8px; text-align: left; border-bottom: 2px solid #f48fb1;">Item</th>
+        <th style="padding: 8px; text-align: left; border-bottom: 2px solid #f48fb1;">Category</th>
+        <th style="padding: 8px; text-align: center; border-bottom: 2px solid #f48fb1;">In Stock</th>
+        <th style="padding: 8px; text-align: center; border-bottom: 2px solid #f48fb1;">Min Level</th>
+      </tr></thead><tbody>`;
+      lowStockSupplies.forEach((item, i) => {
+        const isEmpty = item.quantity === 0;
+        html += `<tr style="background: ${isEmpty ? '#ffebee' : i % 2 ? '#fff8e1' : '#fff'};">
+          <td style="padding: 8px; border-bottom: 1px solid #eee; font-weight: 700;">${item.name}</td>
+          <td style="padding: 8px; border-bottom: 1px solid #eee;">${item.category || '—'}</td>
+          <td style="padding: 8px; border-bottom: 1px solid #eee; text-align: center; font-weight: 700; color: ${isEmpty ? '#c62828' : '#e65100'};">${isEmpty ? 'OUT' : item.quantity} ${item.unit}</td>
+          <td style="padding: 8px; border-bottom: 1px solid #eee; text-align: center; color: #888;">${item.minQuantity}</td>
+        </tr>`;
+      });
+      html += '</tbody></table>';
+    }
+  } catch (e) { console.error('Shop supplies digest error:', e.message); }
 
   // ===== SECTION 2: YESTERDAY'S ACTIVITY =====
   html += sectionHeader('📊', 'Last 24 Hours Activity Summary');

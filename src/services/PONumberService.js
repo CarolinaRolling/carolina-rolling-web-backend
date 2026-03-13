@@ -209,7 +209,7 @@ class PONumberService {
 
   // Get all PO numbers with filters
   async getAll(options = {}) {
-    const { PONumber } = this.models;
+    const { PONumber, WorkOrder } = this.models;
     const { status, supplier, limit = 50, offset = 0 } = options;
 
     const where = {};
@@ -218,6 +218,9 @@ class PONumberService {
 
     return PONumber.findAndCountAll({
       where,
+      include: [
+        { model: WorkOrder, as: 'workOrder', attributes: ['id', 'drNumber', 'orderNumber', 'clientName', 'status'], required: false }
+      ],
       order: [['poNumber', 'DESC']],
       limit: parseInt(limit),
       offset: parseInt(offset)

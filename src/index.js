@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const compression = require('compression');
 const path = require('path');
 const cloudinary = require('cloudinary').v2;
 const cron = require('node-cron');
@@ -20,6 +21,7 @@ const { router: authRoutes, initializeAdmin } = require('./routes/auth');
 const clientsVendorsRoutes = require('./routes/clients-vendors');
 const permitVerificationRoutes = require('./routes/permit-verification');
 const quickbooksRoutes = require('./routes/quickbooks');
+const shopSuppliesRoutes = require('./routes/shop-supplies');
 const { Op } = require('sequelize');
 
 // Configure Cloudinary
@@ -36,9 +38,22 @@ const PORT = process.env.PORT || 3000;
 app.set('trust proxy', 1);
 
 // Middleware
+app.use(compression()); // Gzip responses — big win for 80+ part WO JSON
 app.use(cors());
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true }));
+
+// Request timing — logs slow requests to Heroku logs (>2s)
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const ms = Date.now() - start;
+    if (ms > 2000) {
+      console.warn(`[SLOW] ${req.method} ${req.originalUrl} ${ms}ms (${res.statusCode})`);
+    }
+  });
+  next();
+});
 
 // Serve uploaded files
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
@@ -76,6 +91,7 @@ app.use('/api/email', authenticate, emailRoutes);
 app.use('/api', authenticate, clientsVendorsRoutes);
 app.use('/api', authenticate, permitVerificationRoutes);
 app.use('/api/quickbooks', authenticate, quickbooksRoutes);
+app.use('/api/shop-supplies', authenticate, shopSuppliesRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -102,19 +118,58 @@ app.use((req, res) => {
   res.status(404).json({ error: { message: 'Route not found' } });
 });
 
-// Cleanup job: Delete shipped items older than 1 month
+// Cleanup job: Two-phase cleanup for shipped items
+// Phase 1: Delete photos/images from Cloudinary after 3 months (keeps shipment record for reference)
+// Phase 2: Delete entire shipment record after 6 months
 async function cleanupOldShippedItems() {
   try {
-    const oneMonthAgo = new Date();
-    oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
+    // === Phase 1: Strip photos from shipments shipped 3+ months ago ===
+    const threeMonthsAgo = new Date();
+    threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
     
-    // Find old shipped items
-    const oldShipments = await Shipment.findAll({
+    const shipmentsToStrip = await Shipment.findAll({
       where: {
-        status: 'shipped',
-        shippedAt: {
-          [Op.lt]: oneMonthAgo
+        status: { [Op.in]: ['shipped', 'archived'] },
+        [Op.or]: [
+          { shippedAt: { [Op.lt]: threeMonthsAgo } },
+          { shippedAt: null, updatedAt: { [Op.lt]: threeMonthsAgo } }
+        ]
+      },
+      include: [{ model: ShipmentPhoto, as: 'photos' }]
+    });
+    
+    const shipmentsWithPhotos = shipmentsToStrip.filter(s => s.photos && s.photos.length > 0);
+    if (shipmentsWithPhotos.length > 0) {
+      let deletedCount = 0;
+      console.log(`[Cleanup] Stripping photos from ${shipmentsWithPhotos.length} shipments older than 3 months...`);
+      
+      for (const shipment of shipmentsWithPhotos) {
+        for (const photo of shipment.photos) {
+          if (photo.cloudinaryId) {
+            try {
+              await cloudinary.uploader.destroy(photo.cloudinaryId);
+              deletedCount++;
+            } catch (e) {
+              console.error(`[Cleanup] Failed to delete Cloudinary image ${photo.cloudinaryId}:`, e.message);
+            }
+          }
+          await photo.destroy();
         }
+      }
+      console.log(`[Cleanup] Phase 1 complete: Deleted ${deletedCount} photos from ${shipmentsWithPhotos.length} shipments`);
+    }
+
+    // === Phase 2: Delete entire shipment records shipped 6+ months ago ===
+    const sixMonthsAgo = new Date();
+    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+    
+    const shipmentsToDelete = await Shipment.findAll({
+      where: {
+        status: { [Op.in]: ['shipped', 'archived'] },
+        [Op.or]: [
+          { shippedAt: { [Op.lt]: sixMonthsAgo } },
+          { shippedAt: null, updatedAt: { [Op.lt]: sixMonthsAgo } }
+        ]
       },
       include: [
         { model: ShipmentPhoto, as: 'photos' },
@@ -122,56 +177,44 @@ async function cleanupOldShippedItems() {
       ]
     });
     
-    if (oldShipments.length > 0) {
-      console.log(`Cleaning up ${oldShipments.length} shipped items older than 1 month...`);
+    if (shipmentsToDelete.length > 0) {
+      console.log(`[Cleanup] Deleting ${shipmentsToDelete.length} shipment records older than 6 months...`);
       
-      // Delete each shipment and its associated files
-      for (const shipment of oldShipments) {
-        // Delete photos from Cloudinary
+      for (const shipment of shipmentsToDelete) {
+        // Delete any remaining photos from Cloudinary
         for (const photo of shipment.photos) {
           if (photo.cloudinaryId) {
-            try {
-              await cloudinary.uploader.destroy(photo.cloudinaryId);
-              console.log(`Deleted Cloudinary image: ${photo.cloudinaryId}`);
-            } catch (e) {
-              console.error(`Failed to delete Cloudinary image ${photo.cloudinaryId}:`, e.message);
-            }
+            try { await cloudinary.uploader.destroy(photo.cloudinaryId); } catch (e) {}
           }
         }
         
-        // Delete documents from Cloudinary (if stored there) 
+        // Delete documents from Cloudinary
         for (const doc of shipment.documents) {
           if (doc.cloudinaryId) {
-            try {
-              await cloudinary.uploader.destroy(doc.cloudinaryId, { resource_type: 'raw' });
-              console.log(`Deleted Cloudinary document: ${doc.cloudinaryId}`);
-            } catch (e) {
-              console.error(`Failed to delete Cloudinary document ${doc.cloudinaryId}:`, e.message);
-            }
+            try { await cloudinary.uploader.destroy(doc.cloudinaryId, { resource_type: 'raw' }); } catch (e) {}
           }
-          // Note: NAS documents are referenced by URL but not auto-deleted from NAS
-          // since the backend can't access the local NAS. Consider manual cleanup or
-          // a separate NAS cleanup script if needed.
         }
         
-        // Delete the shipment record (cascade will handle photo/document DB records)
         await shipment.destroy();
-        console.log(`Deleted shipment: ${shipment.id} (${shipment.clientName})`);
       }
-      
-      console.log(`Cleanup complete: Deleted ${oldShipments.length} old shipped items with associated files`);
+      console.log(`[Cleanup] Phase 2 complete: Deleted ${shipmentsToDelete.length} shipment records`);
     }
   } catch (error) {
-    console.error('Cleanup job error:', error);
+    console.error('[Cleanup] Error:', error);
   }
 }
 
 // Database sync and server start
 async function startServer() {
   // Start listening IMMEDIATELY so Heroku doesn't kill us during DB sync
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });
+
+  // Prevent Heroku H13 (Connection closed without response) and H18 (Server Request Interrupted)
+  // Heroku's router timeout is 30s, keep Node's alive longer to avoid premature close
+  server.keepAliveTimeout = 65000; // 65s > Heroku's 55s ALB idle timeout
+  server.headersTimeout = 66000;   // Slightly higher than keepAlive
 
   try {
     await sequelize.authenticate();
@@ -522,8 +565,44 @@ async function startServer() {
           console.error('Backfill warning:', bfErr.message);
         }
       }
+      // Ensure vendorEstimateNumber column exists on work_order_parts
+      if (!wopColNames.includes('vendorEstimateNumber')) {
+        await sequelize.query(`ALTER TABLE work_order_parts ADD COLUMN "vendorEstimateNumber" VARCHAR(255) DEFAULT NULL`);
+        console.log('Added vendorEstimateNumber to work_order_parts');
+      }
+      // Backfill vendorEstimateNumber from linked estimate parts where missing
+      try {
+        const [bfResult] = await sequelize.query(`
+          UPDATE work_order_parts wop
+          SET "vendorEstimateNumber" = ep."vendorEstimateNumber"
+          FROM work_orders wo
+          JOIN estimates e ON e.id = wo."estimateId"
+          JOIN estimate_parts ep ON ep."estimateId" = e.id AND ep."partNumber" = wop."partNumber"
+          WHERE wop."workOrderId" = wo.id
+          AND ep."vendorEstimateNumber" IS NOT NULL AND ep."vendorEstimateNumber" != ''
+          AND (wop."vendorEstimateNumber" IS NULL OR wop."vendorEstimateNumber" = '')
+        `);
+        const bfCount = bfResult?.rowCount || 0;
+        if (bfCount > 0) console.log(`Backfilled vendorEstimateNumber for ${bfCount} work order parts from estimates`);
+      } catch (bfErr) {
+        console.log('vendorEstimateNumber backfill:', bfErr.message);
+      }
     } catch (wopErr) {
       console.error('Work order parts column check warning:', wopErr.message);
+    }
+
+    // Ensure estimate_parts has vendorEstimateNumber column
+    try {
+      const [epCols] = await sequelize.query(
+        `SELECT column_name FROM information_schema.columns WHERE table_name = 'estimate_parts'`
+      );
+      const epColNames = epCols.map(c => c.column_name);
+      if (!epColNames.includes('vendorEstimateNumber')) {
+        await sequelize.query(`ALTER TABLE estimate_parts ADD COLUMN "vendorEstimateNumber" VARCHAR(255) DEFAULT NULL`);
+        console.log('Added vendorEstimateNumber to estimate_parts');
+      }
+    } catch (epErr) {
+      console.error('Estimate parts column check warning:', epErr.message);
     }
 
     // Add noTag column to clients table

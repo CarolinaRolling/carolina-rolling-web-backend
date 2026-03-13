@@ -76,6 +76,70 @@ function mergeFormData(part) {
   return obj;
 }
 
+/**
+ * Rebuild derived text fields from raw database columns.
+ * This ensures consumers (Android, print, PDF) always get correct data
+ * even if the cached _rollingDescription or _materialDescription in formData is stale.
+ * Does NOT modify the database — only enriches the API response.
+ */
+function refreshDerivedFields(part) {
+  // === Rolling Description: rebuild direction from rollType ===
+  if (part._rollingDescription && part.rollType) {
+    let dir = '';
+    if (part.partType === 'tee_bar') {
+      dir = part.rollType === 'easy_way' ? 'SO' : part.rollType === 'on_edge' ? 'SU' : 'SI';
+    } else {
+      dir = part.rollType === 'easy_way' ? 'EW' : part.rollType === 'on_edge' ? 'OE' : 'HW';
+    }
+    const allDirs = ['EW', 'HW', 'OE', 'SO', 'SI', 'SU'];
+    const dirRegex = new RegExp('\\b(' + allDirs.join('|') + ')\\b', 'g');
+    const matches = part._rollingDescription.match(dirRegex);
+    if (matches && matches.length > 0 && !matches.includes(dir)) {
+      part._rollingDescription = part._rollingDescription.replace(dirRegex, dir);
+    }
+  }
+  
+  // === Fallback: build rolling description if missing but raw fields exist ===
+  if (!part._rollingDescription && !part._rollToMethod) {
+    const rollVal = part.diameter || part.radius;
+    if (rollVal) {
+      const mp = part._rollMeasurePoint || 'inside';
+      const isRad = !!part.radius && !part.diameter;
+      const spec = mp === 'inside' ? (isRad ? 'ISR' : 'ID') : mp === 'outside' ? (isRad ? 'OSR' : 'OD') : (isRad ? 'CLR' : 'CLD');
+      let dir = '';
+      if (part.rollType) {
+        if (part.partType === 'tee_bar') {
+          dir = part.rollType === 'easy_way' ? ' SO' : part.rollType === 'on_edge' ? ' SU' : ' SI';
+        } else {
+          dir = part.rollType === 'easy_way' ? ' EW' : part.rollType === 'on_edge' ? ' OE' : ' HW';
+        }
+      }
+      let line = `Roll to ${rollVal}" ${spec}${dir}`;
+      if (part.arcDegrees) line += ` | Arc: ${part.arcDegrees}°`;
+      part._rollingDescription = line;
+    }
+  }
+  
+  // === Material Description: rebuild if missing but raw fields exist ===
+  if (!part._materialDescription && !part.materialDescription) {
+    const specs = [];
+    if (part.thickness) specs.push(part.thickness);
+    if (part.width) specs.push(`x ${part.width}"`);
+    if (part.length) specs.push(`x ${part.length}"`);
+    if (part.sectionSize) specs.push(part.sectionSize);
+    if (part.outerDiameter) specs.push(`${part.outerDiameter}" OD`);
+    if (part.wallThickness && part.wallThickness !== 'SOLID') specs.push(`x ${part.wallThickness} wall`);
+    if (part.material) specs.push(part.material);
+    if (specs.length > 0) {
+      const desc = `${part.quantity || 1}pc: ${specs.join(' ')}`;
+      part._materialDescription = desc;
+      part.materialDescription = desc;
+    }
+  }
+  
+  return part;
+}
+
 // Helper function to generate Purchase Order PDF
 async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
   const PDFDocument = require('pdfkit');
@@ -134,10 +198,21 @@ async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
       
       // ─── PO DETAILS ROW ───
       const detY = boxY + boxH + 12;
+      
+      // Collect vendor estimate numbers from parts
+      const vendorEstNums = [...new Set(parts.map(p => {
+        const obj = p.toJSON ? p.toJSON() : { ...p };
+        if (obj.formData) Object.assign(obj, obj.formData);
+        return obj.vendorEstimateNumber;
+      }).filter(Boolean))];
+      
       const detFields = [
         ['PO DATE', new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' })],
         ['WORK ORDER', workOrder.drNumber ? `DR-${workOrder.drNumber}` : (workOrder.orderNumber || '-')]
       ];
+      if (vendorEstNums.length > 0) {
+        detFields.push(['VENDOR QUOTE #', vendorEstNums.join(', ')]);
+      }
       const colW = W / detFields.length;
       
       detFields.forEach(([label, value], i) => {
@@ -250,7 +325,10 @@ async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
         
         doc.fillColor('#000');
         doc.fontSize(9).font('Helvetica-Bold').text(`${partObj.partNumber || index + 1}`, cols.item + 6, rowY + 6, { width: colWidths.item - 12 });
-        doc.font('Helvetica').text(`${partObj.quantity || 1}`, cols.qty + 6, rowY + 6, { width: colWidths.qty - 12 });
+        
+        // Use stock lengths needed for nesting/complete ring parts, otherwise part quantity
+        const poQty = partObj._stockLengthsNeeded || partObj.quantity || 1;
+        doc.font('Helvetica').text(`${poQty}`, cols.qty + 6, rowY + 6, { width: colWidths.qty - 12 });
         doc.fontSize(8.5).text(desc, cols.desc + 6, rowY + 6, { width: colWidths.desc - 12 });
         
         if (cutFile) {
@@ -426,7 +504,9 @@ router.get('/', async (req, res, next) => {
         { clientName: { [Op.iLike]: searchLower } },
         { orderNumber: { [Op.iLike]: searchLower } },
         { clientPurchaseOrderNumber: { [Op.iLike]: searchLower } },
-        { contactName: { [Op.iLike]: searchLower } }
+        { contactName: { [Op.iLike]: searchLower } },
+        { estimateNumber: { [Op.iLike]: searchLower } },
+        { notes: { [Op.iLike]: searchLower } }
       ];
       // Also try numeric DR search
       const drParsed = parseInt(search.replace(/^dr-?/i, ''));
@@ -456,7 +536,7 @@ router.get('/', async (req, res, next) => {
 
     // For list views, skip file includes to speed up query significantly
     const partInclude = view === 'list' 
-      ? [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'quantity', 'status', 'materialSource', 'materialOrdered', 'supplierName', 'materialDescription', 'formData'] }]
+      ? [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'quantity', 'status', 'materialSource', 'materialOrdered', 'supplierName', 'vendorEstimateNumber', 'materialDescription', 'formData'] }]
       : [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }];
 
     const workOrders = await WorkOrder.findAndCountAll({
@@ -464,7 +544,8 @@ router.get('/', async (req, res, next) => {
       include: partInclude,
       order: [['createdAt', 'DESC']],
       limit: parseInt(limit),
-      offset: parseInt(offset)
+      offset: parseInt(offset),
+      distinct: true
     });
 
     // Batch fetch shipment photos for all work orders in this page
@@ -488,6 +569,16 @@ router.get('/', async (req, res, next) => {
     const rowsWithThumbnails = workOrders.rows.map(wo => {
       const data = wo.toJSON();
       data.thumbnailUrl = null;
+
+      // Enrich parts with refreshed derived fields
+      if (data.parts) {
+        data.parts = data.parts.map(p => {
+          if (p.formData && typeof p.formData === 'object') {
+            Object.assign(p, p.formData);
+          }
+          return refreshDerivedFields(p);
+        });
+      }
 
       // Priority 1: Shipment photos (public Cloudinary URLs — work directly)
       if (shipmentPhotoMap[data.id]) {
@@ -522,6 +613,56 @@ router.get('/recently-completed', async (req, res, next) => {
       limit: 20
     });
     res.json({ data: orders });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/workorders/lookup-dr/:drNumber - Diagnostic: find work order by DR number across all statuses
+router.get('/lookup-dr/:drNumber', async (req, res, next) => {
+  try {
+    const drNum = parseInt(req.params.drNumber);
+    if (isNaN(drNum)) {
+      return res.status(400).json({ error: { message: 'Invalid DR number' } });
+    }
+
+    // Check DR numbers table
+    const drRecord = await DRNumber.findOne({ where: { drNumber: drNum } });
+    
+    // Check work orders table directly
+    const workOrder = await WorkOrder.findOne({
+      where: { drNumber: drNum },
+      include: [{ model: WorkOrderPart, as: 'parts' }]
+    });
+    
+    // Check shipments linked to this WO
+    let shipments = [];
+    if (workOrder) {
+      shipments = await Shipment.findAll({
+        where: { workOrderId: workOrder.id },
+        attributes: ['id', 'clientName', 'location', 'status', 'workOrderId', 'createdAt']
+      });
+    }
+
+    res.json({
+      data: {
+        drNumber: drNum,
+        drRecord: drRecord ? drRecord.toJSON() : null,
+        workOrder: workOrder ? {
+          id: workOrder.id,
+          orderNumber: workOrder.orderNumber,
+          drNumber: workOrder.drNumber,
+          clientName: workOrder.clientName,
+          status: workOrder.status,
+          priority: workOrder.priority,
+          partsCount: workOrder.parts?.length || 0,
+          createdAt: workOrder.createdAt,
+          updatedAt: workOrder.updatedAt
+        } : null,
+        shipments,
+        found: !!workOrder
+      }
+    });
   } catch (error) {
     next(error);
   }
@@ -593,28 +734,40 @@ router.get('/:id', async (req, res, next) => {
     const woJson = workOrder.toJSON();
     const baseUrl = `${req.protocol}://${req.get('host')}`;
 
-    // Attach linked shipment data (location, photos)
+    // Attach linked shipment data (location, photos) — supports multiple shipments
     try {
-      const linkedShipment = await Shipment.findOne({
+      const linkedShipments = await Shipment.findAll({
         where: { workOrderId: woJson.id },
-        include: [{ model: ShipmentPhoto, as: 'photos' }]
+        include: [{ model: ShipmentPhoto, as: 'photos' }],
+        order: [['createdAt', 'DESC']]
       });
-      if (linkedShipment) {
+      // Primary shipment (first one) for backwards compat
+      if (linkedShipments.length > 0) {
+        const primary = linkedShipments[0];
         woJson.shipment = {
-          id: linkedShipment.id,
-          location: linkedShipment.location,
-          status: linkedShipment.status,
-          description: linkedShipment.description,
-          receivedAt: linkedShipment.receivedAt,
-          photos: (linkedShipment.photos || []).map(p => ({
+          id: primary.id,
+          location: primary.location,
+          status: primary.status,
+          description: primary.description,
+          receivedAt: primary.receivedAt,
+          photos: (primary.photos || []).map(p => ({
             id: p.id,
             url: p.url,
             caption: p.caption
           }))
         };
       }
+      // All shipments
+      woJson.shipments = linkedShipments.map(s => ({
+        id: s.id,
+        location: s.location,
+        status: s.status,
+        description: s.description,
+        receivedAt: s.receivedAt,
+        photos: (s.photos || []).map(p => ({ id: p.id, url: p.url, caption: p.caption }))
+      }));
     } catch (e) {
-      console.error('Error fetching shipment for WO detail:', e);
+      console.error('Error fetching shipments for WO detail:', e);
     }
 
     if (woJson.parts) {
@@ -624,6 +777,11 @@ router.get('/:id', async (req, res, next) => {
             file.url = `${baseUrl}/api/workorders/${woJson.id}/parts/${part.id}/files/${file.id}/download`;
           }
         }
+        // Merge formData then refresh derived text fields from raw columns
+        if (part.formData && typeof part.formData === 'object') {
+          Object.assign(part, part.formData);
+        }
+        refreshDerivedFields(part);
       }
     }
     // Rewrite document URLs to use download proxy
@@ -632,6 +790,16 @@ router.get('/:id', async (req, res, next) => {
         doc.url = `${baseUrl}/api/workorders/${woJson.id}/documents/${doc.id}/download`;
       }
     }
+
+    // Lookup client flags
+    try {
+      if (woJson.clientName) {
+        const clientRecord = await Client.findOne({ where: { name: { [Op.iLike]: woJson.clientName.trim() }, isActive: true } });
+        if (clientRecord) {
+          woJson.requiresPartLabels = clientRecord.requiresPartLabels === true;
+        }
+      }
+    } catch (e) { /* ignore client lookup failure */ }
 
     res.json({ data: woJson });
   } catch (error) {
@@ -896,15 +1064,34 @@ router.post('/:id/pickup', async (req, res, next) => {
     const history = workOrder.pickupHistory || [];
     
     if (type === 'full') {
-      // Full pickup: mark all parts as picked up
-      const pickupItems = workOrder.parts.map(p => ({
-        partId: p.id,
-        partNumber: p.partNumber,
-        partType: p.partType,
-        description: p.materialDescription || p.sectionSize || p.partType,
-        quantity: p.quantity || 1
-      }));
+      // Full pickup: pick up all REMAINING parts (accounting for previous pickups)
+      const totalPickedByPart = {};
+      history.forEach(entry => {
+        (entry.items || []).forEach(item => {
+          const key = item.partId || item.partNumber;
+          totalPickedByPart[key] = (totalPickedByPart[key] || 0) + (item.quantity || 0);
+        });
+      });
+
+      const pickupItems = workOrder.parts
+        .map(p => {
+          const totalQty = p.quantity || 1;
+          const alreadyPicked = (totalPickedByPart[p.id] || 0) + (totalPickedByPart[p.partNumber] || 0);
+          const remaining = Math.max(0, totalQty - alreadyPicked);
+          return {
+            partId: p.id,
+            partNumber: p.partNumber,
+            partType: p.partType,
+            description: p.materialDescription || p.sectionSize || p.partType,
+            quantity: remaining
+          };
+        })
+        .filter(p => p.quantity > 0);
       
+      if (pickupItems.length === 0) {
+        return res.status(400).json({ error: { message: 'All items have already been picked up' } });
+      }
+
       history.push({
         date: now,
         pickedUpBy: pickedUpBy || 'unknown',
@@ -1463,6 +1650,8 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
       completedBy,
       // Material source fields
       materialSource,
+      materialOrdered,
+      materialPurchaseOrderNumber,
       vendorId,
       supplierName,
       vendorEstimateNumber,
@@ -1493,6 +1682,13 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     
     // Material source fields - vendorId is primary, supplierName kept in sync
     if (materialSource !== undefined) updates.materialSource = materialSource;
+    if (materialOrdered !== undefined) {
+      updates.materialOrdered = materialOrdered;
+      if (materialOrdered && !part.materialOrderedAt) {
+        updates.materialOrderedAt = new Date();
+      }
+    }
+    if (materialPurchaseOrderNumber !== undefined) updates.materialPurchaseOrderNumber = materialPurchaseOrderNumber;
     if (vendorId !== undefined) {
       updates.vendorId = vendorId || null;
       if (vendorId) {
@@ -1525,7 +1721,12 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
       updates.status = status;
       if (status === 'completed' && !part.completedAt) {
         updates.completedAt = new Date();
-        if (completedBy) updates.completedBy = completedBy;
+        // Use explicitly sent completedBy, or fall back to API key operator/device
+        if (completedBy) {
+          updates.completedBy = completedBy;
+        } else if (req.operatorName) {
+          updates.completedBy = req.operatorName + (req.deviceName ? ` (${req.deviceName})` : '');
+        }
       }
     }
 
@@ -2085,7 +2286,8 @@ router.get('/archived', async (req, res, next) => {
       ],
       order: [['updatedAt', 'DESC']],
       limit: parseInt(limit),
-      offset: parseInt(offset)
+      offset: parseInt(offset),
+      distinct: true
     });
 
     // Batch fetch shipment photos
@@ -2636,6 +2838,81 @@ router.post('/:id/documents/:documentId/regenerate', async (req, res, next) => {
     });
   } catch (error) {
     console.error('[regenerate-po] Error:', error);
+    next(error);
+  }
+});
+
+// POST /api/workorders/:id/create-po-pdf - Create a PO PDF from scratch (for deleted/missing PO documents)
+router.post('/:id/create-po-pdf', async (req, res, next) => {
+  try {
+    const { poNumber } = req.body;
+    if (!poNumber) {
+      return res.status(400).json({ error: { message: 'PO number is required' } });
+    }
+
+    const workOrder = await WorkOrder.findByPk(req.params.id, {
+      include: [{ model: WorkOrderPart, as: 'parts' }]
+    });
+    if (!workOrder) {
+      return res.status(404).json({ error: { message: 'Work order not found' } });
+    }
+
+    // Find parts linked to this PO
+    const poParts = workOrder.parts.filter(p => p.materialPurchaseOrderNumber === poNumber);
+    if (poParts.length === 0) {
+      return res.status(400).json({ error: { message: `No parts found with PO ${poNumber}` } });
+    }
+
+    // Get supplier from parts
+    let supplier = 'Unknown Supplier';
+    if (poParts[0].vendorId) {
+      const vendor = await Vendor.findByPk(poParts[0].vendorId);
+      if (vendor) supplier = vendor.name;
+    } else if (poParts[0].supplierName) {
+      supplier = poParts[0].supplierName;
+    }
+
+    console.log(`[create-po-pdf] Creating ${poNumber} for ${supplier} (${poParts.length} parts)`);
+
+    const pdfBuffer = await generatePurchaseOrderPDF(poNumber, supplier, poParts, workOrder);
+
+    // Upload to Cloudinary
+    const uploadResult = await new Promise((resolve, reject) => {
+      cloudinary.uploader.upload_stream(
+        {
+          folder: 'purchase-orders',
+          resource_type: 'raw',
+          public_id: `${poNumber}-${workOrder.drNumber}`,
+          format: 'pdf',
+          overwrite: true,
+          invalidate: true
+        },
+        (error, result) => {
+          if (error) reject(error);
+          else resolve(result);
+        }
+      ).end(pdfBuffer);
+    });
+
+    // Create new document record
+    await WorkOrderDocument.create({
+      workOrderId: workOrder.id,
+      originalName: `${poNumber} - ${supplier}.pdf`,
+      mimeType: 'application/pdf',
+      size: pdfBuffer.length,
+      url: uploadResult.secure_url,
+      cloudinaryId: uploadResult.public_id,
+      documentType: 'purchase_order'
+    });
+
+    console.log(`[create-po-pdf] Success — ${poNumber} for ${supplier}`);
+
+    res.status(201).json({ 
+      message: `Purchase order PDF created for ${poNumber}`,
+      data: { url: uploadResult.secure_url }
+    });
+  } catch (error) {
+    console.error('[create-po-pdf] Error:', error);
     next(error);
   }
 });

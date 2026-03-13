@@ -68,18 +68,85 @@ const authenticate = async (req, res, next) => {
   const apiKeyValue = apiKeyHeader || req.query.apikey;
   if (apiKeyValue) {
     try {
-      const apiKey = await ApiKey.findOne({ where: { key: apiKeyValue, isActive: true } });
+      const apiKey = await ApiKey.findOne({ where: { key: apiKeyValue } });
       if (!apiKey) {
         return res.status(401).json({ error: { message: 'Invalid API key' } });
       }
+      
+      // Check if revoked
+      if (!apiKey.isActive) {
+        const reason = apiKey.revokedReason || 'Key has been revoked';
+        return res.status(401).json({ error: { message: `API key revoked: ${reason}` } });
+      }
+      
       // Check expiration
       if (apiKey.expiresAt && new Date(apiKey.expiresAt) < new Date()) {
         return res.status(401).json({ error: { message: 'API key expired' } });
       }
+      
+      // === IP ALLOWLIST CHECK ===
+      const clientIP = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || req.connection?.remoteAddress || '';
+      
+      if (apiKey.allowedIPs) {
+        const allowed = apiKey.allowedIPs.split(',').map(ip => ip.trim()).filter(Boolean);
+        if (allowed.length > 0) {
+          const ipMatch = allowed.some(allowedIP => {
+            // Exact match
+            if (clientIP === allowedIP) return true;
+            // CIDR range match (simple /24 support)
+            if (allowedIP.includes('/')) {
+              const [network, bits] = allowedIP.split('/');
+              const mask = ~(Math.pow(2, 32 - parseInt(bits)) - 1) >>> 0;
+              const ipToNum = (ip) => ip.split('.').reduce((acc, oct) => (acc << 8) + parseInt(oct), 0) >>> 0;
+              return (ipToNum(clientIP) & mask) === (ipToNum(network) & mask);
+            }
+            // Wildcard match (e.g. 192.168.1.*)
+            if (allowedIP.includes('*')) {
+              const regex = new RegExp('^' + allowedIP.replace(/\./g, '\\.').replace(/\*/g, '\\d+') + '$');
+              return regex.test(clientIP);
+            }
+            return false;
+          });
+          
+          if (!ipMatch) {
+            // AUTO-REVOKE: unauthorized IP detected
+            console.error(`[SECURITY] API key "${apiKey.name}" (${apiKey.deviceName || 'unknown device'}) used from unauthorized IP: ${clientIP}. Allowed: ${apiKey.allowedIPs}. KEY REVOKED.`);
+            await apiKey.update({
+              isActive: false,
+              revokedReason: `Unauthorized IP: ${clientIP} (allowed: ${apiKey.allowedIPs})`,
+              revokedAt: new Date(),
+              lastIP: clientIP,
+              lastIPDate: new Date()
+            });
+            
+            // Log the security event
+            try {
+              const { DailyActivity } = require('../models');
+              await DailyActivity.create({
+                activityType: 'security',
+                resourceType: 'system',
+                description: `🚨 API key "${apiKey.name}" auto-revoked — unauthorized IP ${clientIP} (operator: ${apiKey.operatorName || 'unknown'}, device: ${apiKey.deviceName || 'unknown'})`
+              });
+            } catch (e) { /* ignore logging failure */ }
+            
+            return res.status(403).json({ 
+              error: { 
+                message: 'ACCESS REVOKED: This device is not authorized. Contact your administrator.',
+                code: 'IP_REVOKED'
+              } 
+            });
+          }
+        }
+      }
+      
       // Attach key info to request so routes can scope data
       req.apiKey = apiKey;
-      // Update last used timestamp (fire and forget)
-      apiKey.update({ lastUsedAt: new Date() }).catch(() => {});
+      // Attach operator info for tracking
+      req.operatorName = apiKey.operatorName || null;
+      req.deviceName = apiKey.deviceName || apiKey.name || null;
+      
+      // Update last used timestamp and IP (fire and forget)
+      apiKey.update({ lastUsedAt: new Date(), lastIP: clientIP, lastIPDate: new Date() }).catch(() => {});
       
       // Enforce read-only permission — block write operations
       if (apiKey.permissions === 'read' && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
@@ -115,7 +182,7 @@ const logActivity = async (userId, username, action, resourceType, resourceId, d
 // POST /api/auth/login
 router.post('/login', async (req, res, next) => {
   try {
-    const { username, password } = req.body;
+    const { username, password, totpCode } = req.body;
 
     if (!username || !password) {
       return res.status(400).json({ error: { message: 'Username and password required' } });
@@ -131,6 +198,37 @@ router.post('/login', async (req, res, next) => {
     if (!user.isActive) {
       await logActivity(user.id, username, 'LOGIN_FAILED', 'user', user.id, { reason: 'Account disabled' }, req.ip);
       return res.status(401).json({ error: { message: 'Account is disabled' } });
+    }
+
+    // Check if 2FA is enabled
+    if (user.totpEnabled && user.totpSecret) {
+      if (!totpCode) {
+        // Password correct but 2FA required — return partial response
+        return res.json({
+          data: {
+            requires2FA: true,
+            userId: user.id,
+            username: user.username
+          }
+        });
+      }
+
+      // Verify TOTP code
+      const { TOTP } = require('otpauth');
+      const totp = new TOTP({
+        issuer: 'Carolina Rolling',
+        label: user.username,
+        algorithm: 'SHA1',
+        digits: 6,
+        period: 30,
+        secret: user.totpSecret
+      });
+
+      const delta = totp.validate({ token: totpCode, window: 1 });
+      if (delta === null) {
+        await logActivity(user.id, username, 'LOGIN_FAILED', 'user', user.id, { reason: 'Invalid 2FA code' }, req.ip);
+        return res.status(401).json({ error: { message: 'Invalid verification code' } });
+      }
     }
 
     const token = jwt.sign(
@@ -154,6 +252,109 @@ router.post('/login', async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+// POST /api/auth/2fa/setup - Generate TOTP secret and QR code
+router.post('/2fa/setup', authenticateToken, async (req, res, next) => {
+  try {
+    const { TOTP, Secret } = require('otpauth');
+    const QRCode = require('qrcode');
+
+    // Generate a new secret
+    const secret = new Secret({ size: 20 });
+
+    const totp = new TOTP({
+      issuer: 'Carolina Rolling',
+      label: req.user.username,
+      algorithm: 'SHA1',
+      digits: 6,
+      period: 30,
+      secret: secret
+    });
+
+    const otpauthUrl = totp.toString();
+    const qrCodeDataUrl = await QRCode.toDataURL(otpauthUrl);
+
+    // Store secret temporarily (not enabled yet until verified)
+    await req.user.update({ totpSecret: secret.base32 });
+
+    res.json({
+      data: {
+        secret: secret.base32,
+        qrCode: qrCodeDataUrl,
+        otpauthUrl
+      },
+      message: 'Scan the QR code with your authenticator app, then verify with a code.'
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/auth/2fa/verify - Verify TOTP code and enable 2FA
+router.post('/2fa/verify', authenticateToken, async (req, res, next) => {
+  try {
+    const { code } = req.body;
+    if (!code) {
+      return res.status(400).json({ error: { message: 'Verification code is required' } });
+    }
+
+    if (!req.user.totpSecret) {
+      return res.status(400).json({ error: { message: 'Run 2FA setup first' } });
+    }
+
+    const { TOTP } = require('otpauth');
+    const totp = new TOTP({
+      issuer: 'Carolina Rolling',
+      label: req.user.username,
+      algorithm: 'SHA1',
+      digits: 6,
+      period: 30,
+      secret: req.user.totpSecret
+    });
+
+    const delta = totp.validate({ token: code, window: 1 });
+    if (delta === null) {
+      return res.status(400).json({ error: { message: 'Invalid code. Make sure you scanned the QR code and the time on your phone is correct.' } });
+    }
+
+    await req.user.update({ totpEnabled: true });
+    await logActivity(req.user.id, req.user.username, '2FA_ENABLED', 'user', req.user.id, null, req.ip);
+
+    res.json({ message: 'Two-factor authentication enabled successfully.' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/auth/2fa/disable - Disable 2FA
+router.post('/2fa/disable', authenticateToken, async (req, res, next) => {
+  try {
+    const { password } = req.body;
+    if (!password) {
+      return res.status(400).json({ error: { message: 'Password is required to disable 2FA' } });
+    }
+
+    if (!(await req.user.validatePassword(password))) {
+      return res.status(401).json({ error: { message: 'Invalid password' } });
+    }
+
+    await req.user.update({ totpEnabled: false, totpSecret: null });
+    await logActivity(req.user.id, req.user.username, '2FA_DISABLED', 'user', req.user.id, null, req.ip);
+
+    res.json({ message: 'Two-factor authentication disabled.' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/auth/2fa/status - Check if 2FA is enabled for current user
+router.get('/2fa/status', authenticateToken, async (req, res) => {
+  res.json({
+    data: {
+      enabled: req.user.totpEnabled || false
+    }
+  });
 });
 
 // POST /api/auth/register (admin only - for creating new users)
@@ -196,7 +397,8 @@ router.get('/me', authenticateToken, async (req, res) => {
     data: {
       id: req.user.id,
       username: req.user.username,
-      role: req.user.role
+      role: req.user.role,
+      totpEnabled: req.user.totpEnabled || false
     }
   });
 });
@@ -341,7 +543,7 @@ module.exports = { router, authenticateToken, requireAdmin, logActivity, initial
 // POST /api/auth/api-keys - Create new API key (admin only)
 router.post('/api-keys', authenticateToken, requireAdmin, async (req, res, next) => {
   try {
-    const { name, clientName, permissions, expiresAt } = req.body;
+    const { name, clientName, permissions, expiresAt, allowedIPs, operatorName, deviceName } = req.body;
     if (!name) {
       return res.status(400).json({ error: { message: 'API key name is required' } });
     }
@@ -356,6 +558,9 @@ router.post('/api-keys', authenticateToken, requireAdmin, async (req, res, next)
       clientName: clientName || null,
       permissions: permissions || 'read',
       expiresAt: expiresAt || null,
+      allowedIPs: allowedIPs || null,
+      operatorName: operatorName || null,
+      deviceName: deviceName || null,
       createdBy: req.user.username
     });
 
@@ -367,6 +572,9 @@ router.post('/api-keys', authenticateToken, requireAdmin, async (req, res, next)
         key: apiKey.key, // Only shown on creation
         clientName: apiKey.clientName,
         permissions: apiKey.permissions,
+        allowedIPs: apiKey.allowedIPs,
+        operatorName: apiKey.operatorName,
+        deviceName: apiKey.deviceName,
         expiresAt: apiKey.expiresAt,
         createdAt: apiKey.createdAt
       },
@@ -381,16 +589,53 @@ router.post('/api-keys', authenticateToken, requireAdmin, async (req, res, next)
 router.get('/api-keys', authenticateToken, requireAdmin, async (req, res, next) => {
   try {
     const apiKeys = await ApiKey.findAll({
-      attributes: ['id', 'name', 'clientName', 'permissions', 'isActive', 'lastUsedAt', 'expiresAt', 'createdBy', 'createdAt'],
+      attributes: ['id', 'name', 'clientName', 'permissions', 'isActive', 'lastUsedAt', 'lastIP', 'lastIPDate',
+        'expiresAt', 'createdBy', 'createdAt', 'allowedIPs', 'operatorName', 'deviceName', 'revokedReason', 'revokedAt'],
       order: [['createdAt', 'DESC']]
     });
-    // Key value is NOT returned in list — only prefix for identification
     const keysWithPrefix = apiKeys.map(k => {
       const data = k.toJSON();
       data.keyPrefix = 'crm_****';
       return data;
     });
     res.json({ data: keysWithPrefix });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// PUT /api/auth/api-keys/:id - Update API key settings (admin only)
+router.put('/api-keys/:id', authenticateToken, requireAdmin, async (req, res, next) => {
+  try {
+    const apiKey = await ApiKey.findByPk(req.params.id);
+    if (!apiKey) {
+      return res.status(404).json({ error: { message: 'API key not found' } });
+    }
+    
+    const { name, clientName, permissions, allowedIPs, operatorName, deviceName, expiresAt, isActive } = req.body;
+    const updates = {};
+    if (name !== undefined) updates.name = name;
+    if (clientName !== undefined) updates.clientName = clientName || null;
+    if (permissions !== undefined) updates.permissions = permissions;
+    if (allowedIPs !== undefined) updates.allowedIPs = allowedIPs || null;
+    if (operatorName !== undefined) updates.operatorName = operatorName || null;
+    if (deviceName !== undefined) updates.deviceName = deviceName || null;
+    if (expiresAt !== undefined) updates.expiresAt = expiresAt || null;
+    
+    // Re-activate a revoked key
+    if (isActive === true && !apiKey.isActive) {
+      updates.isActive = true;
+      updates.revokedReason = null;
+      updates.revokedAt = null;
+    }
+    if (isActive === false) {
+      updates.isActive = false;
+      updates.revokedReason = 'Manually deactivated';
+      updates.revokedAt = new Date();
+    }
+    
+    await apiKey.update(updates);
+    res.json({ data: apiKey, message: 'API key updated' });
   } catch (error) {
     next(error);
   }

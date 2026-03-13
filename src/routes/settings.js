@@ -847,10 +847,11 @@ router.get('/printer-config', async (req, res, next) => {
   try {
     const setting = await AppSettings.findOne({ where: { key: 'printer_config' } });
     const defaults = {
-      printerIp: '',
+      qrPrinterIp: '',
       qrLabelType: 'CONTINUOUS_29',
       qrLabelLengthMm: 25,
-      qrLabelWidthMm: 29
+      partPrinterIp: '',
+      partLabelType: 'DK_11202_62x100'
     };
     res.json({ data: setting?.value || defaults });
   } catch (error) {
@@ -861,8 +862,14 @@ router.get('/printer-config', async (req, res, next) => {
 // PUT /api/settings/printer-config - Update printer config (admin only)
 router.put('/printer-config', async (req, res, next) => {
   try {
-    const { printerIp, qrLabelType, qrLabelLengthMm, qrLabelWidthMm } = req.body;
-    const config = { printerIp: printerIp || '', qrLabelType: qrLabelType || 'CONTINUOUS_29', qrLabelLengthMm: parseInt(qrLabelLengthMm) || 25, qrLabelWidthMm: parseInt(qrLabelWidthMm) || 29 };
+    const { qrPrinterIp, qrLabelType, qrLabelLengthMm, partPrinterIp, partLabelType } = req.body;
+    const config = {
+      qrPrinterIp: qrPrinterIp || '',
+      qrLabelType: qrLabelType || 'CONTINUOUS_29',
+      qrLabelLengthMm: parseInt(qrLabelLengthMm) || 25,
+      partPrinterIp: partPrinterIp || '',
+      partLabelType: partLabelType || 'DK_11202_62x100'
+    };
     await AppSettings.upsert({ key: 'printer_config', value: config });
     res.json({ data: config, message: 'Printer configuration updated' });
   } catch (error) {

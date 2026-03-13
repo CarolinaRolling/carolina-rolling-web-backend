@@ -562,8 +562,8 @@ router.post('/api-keys', authenticateToken, requireAdmin, async (req, res, next)
       return res.status(400).json({ error: { message: 'API key name is required' } });
     }
 
-    // Generate a secure random key: crm_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
-    const rawKey = crypto.randomBytes(32).toString('hex');
+    // Generate a secure random key: crm_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX (32 hex = 128 bits)
+    const rawKey = crypto.randomBytes(16).toString('hex');
     const key = `crm_${rawKey}`;
 
     const apiKey = await ApiKey.create({

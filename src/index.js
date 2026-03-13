@@ -587,6 +587,40 @@ async function startServer() {
       } catch (bfErr) {
         console.log('vendorEstimateNumber backfill:', bfErr.message);
       }
+      // Backfill clientPartNumber from linked estimate parts where missing
+      try {
+        const [cpResult] = await sequelize.query(`
+          UPDATE work_order_parts wop
+          SET "clientPartNumber" = ep."clientPartNumber"
+          FROM work_orders wo
+          JOIN estimates e ON e.id = wo."estimateId"
+          JOIN estimate_parts ep ON ep."estimateId" = e.id AND ep."partNumber" = wop."partNumber"
+          WHERE wop."workOrderId" = wo.id
+          AND ep."clientPartNumber" IS NOT NULL AND ep."clientPartNumber" != ''
+          AND (wop."clientPartNumber" IS NULL OR wop."clientPartNumber" = '')
+        `);
+        const cpCount = cpResult?.rowCount || 0;
+        if (cpCount > 0) console.log(`Backfilled clientPartNumber for ${cpCount} work order parts from estimates`);
+      } catch (bfErr) {
+        console.log('clientPartNumber backfill:', bfErr.message);
+      }
+      // Backfill heatNumber from linked estimate parts where missing
+      try {
+        const [hnResult] = await sequelize.query(`
+          UPDATE work_order_parts wop
+          SET "heatNumber" = ep."heatNumber"
+          FROM work_orders wo
+          JOIN estimates e ON e.id = wo."estimateId"
+          JOIN estimate_parts ep ON ep."estimateId" = e.id AND ep."partNumber" = wop."partNumber"
+          WHERE wop."workOrderId" = wo.id
+          AND ep."heatNumber" IS NOT NULL AND ep."heatNumber" != ''
+          AND (wop."heatNumber" IS NULL OR wop."heatNumber" = '')
+        `);
+        const hnCount = hnResult?.rowCount || 0;
+        if (hnCount > 0) console.log(`Backfilled heatNumber for ${hnCount} work order parts from estimates`);
+      } catch (bfErr) {
+        console.log('heatNumber backfill:', bfErr.message);
+      }
     } catch (wopErr) {
       console.error('Work order parts column check warning:', wopErr.message);
     }

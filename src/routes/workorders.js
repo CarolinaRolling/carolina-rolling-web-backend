@@ -137,6 +137,14 @@ function refreshDerivedFields(part) {
     }
   }
   
+  // === Promote clientPartNumber and heatNumber from formData if top-level is empty ===
+  if (!part.clientPartNumber && part.formData?.clientPartNumber) {
+    part.clientPartNumber = part.formData.clientPartNumber;
+  }
+  if (!part.heatNumber && part.formData?.heatNumber) {
+    part.heatNumber = part.formData.heatNumber;
+  }
+  
   return part;
 }
 
@@ -536,7 +544,7 @@ router.get('/', async (req, res, next) => {
 
     // For list views, skip file includes to speed up query significantly
     const partInclude = view === 'list' 
-      ? [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'quantity', 'status', 'materialSource', 'materialOrdered', 'supplierName', 'vendorEstimateNumber', 'materialDescription', 'formData'] }]
+      ? [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'quantity', 'status', 'materialSource', 'materialOrdered', 'supplierName', 'vendorEstimateNumber', 'clientPartNumber', 'heatNumber', 'materialDescription', 'formData'] }]
       : [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }];
 
     const workOrders = await WorkOrder.findAndCountAll({

@@ -2124,13 +2124,13 @@ router.get('/:id/pdf', async (req, res, next) => {
       }
     } catch (e) {}
     if (hasYellowcake) {
-      doc.fontSize(15).fillColor(darkColor).font('Yellowcake').text('Carolina Rolling Co. Inc.', 130, 40, { lineBreak: false });
+      doc.fontSize(15).fillColor(darkColor).font('Yellowcake').text('Carolina Rolling Co. Inc.', 130, 32, { lineBreak: false });
     } else {
-      doc.fontSize(15).fillColor(darkColor).font('Helvetica-Bold').text('CAROLINA ROLLING CO. INC.', 130, 40, { lineBreak: false });
+      doc.fontSize(15).fillColor(darkColor).font('Helvetica-Bold').text('CAROLINA ROLLING CO. INC.', 130, 32, { lineBreak: false });
     }
     doc.font('Helvetica').fontSize(8.5).fillColor(grayColor);
-    doc.text('9152 Sonrisa St., Bellflower, CA 90706', 130, 60, { lineBreak: false });
-    doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 130, 71, { lineBreak: false });
+    doc.text('9152 Sonrisa St., Bellflower, CA 90706', 130, 52, { lineBreak: false });
+    doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 130, 63, { lineBreak: false });
     
     // ESTIMATE + number + date — top right corner
     doc.fontSize(16).fillColor(primaryColor).font('Helvetica-Bold');

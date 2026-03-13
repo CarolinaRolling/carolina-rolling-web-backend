@@ -842,6 +842,34 @@ router.post('/warehouse-map', upload.single('image'), async (req, res, next) => 
 module.exports = router;
 module.exports.sendScheduleEmail = sendScheduleEmail;
 
+// GET /api/settings/printer-config - Get printer config (accessible by tablets via API key)
+router.get('/printer-config', async (req, res, next) => {
+  try {
+    const setting = await AppSettings.findOne({ where: { key: 'printer_config' } });
+    const defaults = {
+      printerIp: '',
+      qrLabelType: 'CONTINUOUS_29',
+      qrLabelLengthMm: 25,
+      qrLabelWidthMm: 29
+    };
+    res.json({ data: setting?.value || defaults });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// PUT /api/settings/printer-config - Update printer config (admin only)
+router.put('/printer-config', async (req, res, next) => {
+  try {
+    const { printerIp, qrLabelType, qrLabelLengthMm, qrLabelWidthMm } = req.body;
+    const config = { printerIp: printerIp || '', qrLabelType: qrLabelType || 'CONTINUOUS_29', qrLabelLengthMm: parseInt(qrLabelLengthMm) || 25, qrLabelWidthMm: parseInt(qrLabelWidthMm) || 29 };
+    await AppSettings.upsert({ key: 'printer_config', value: config });
+    res.json({ data: config, message: 'Printer configuration updated' });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // GET /api/settings/:key - Get a general setting by key
 router.get('/:key', async (req, res, next) => {
   try {

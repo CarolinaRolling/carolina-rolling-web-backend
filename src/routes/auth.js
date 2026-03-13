@@ -87,10 +87,21 @@ const authenticate = async (req, res, next) => {
       // === IP ALLOWLIST CHECK ===
       const clientIP = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || req.connection?.remoteAddress || '';
       
-      if (apiKey.allowedIPs) {
-        const allowed = apiKey.allowedIPs.split(',').map(ip => ip.trim()).filter(Boolean);
-        if (allowed.length > 0) {
-          const ipMatch = allowed.some(allowedIP => {
+      // Build combined allowlist: per-key IPs + global approved IPs
+      const perKeyIPs = apiKey.allowedIPs ? apiKey.allowedIPs.split(',').map(ip => ip.trim()).filter(Boolean) : [];
+      let globalIPs = [];
+      try {
+        const { AppSettings } = require('../models');
+        const globalSetting = await AppSettings.findOne({ where: { key: 'approved_ips' } });
+        if (globalSetting?.value?.ips) {
+          globalIPs = globalSetting.value.ips.map(ip => ip.trim()).filter(Boolean);
+        }
+      } catch (e) { /* ignore */ }
+      
+      const allAllowed = [...perKeyIPs, ...globalIPs];
+      
+      if (allAllowed.length > 0) {
+          const ipMatch = allAllowed.some(allowedIP => {
             // Exact match
             if (clientIP === allowedIP) return true;
             // CIDR range match (simple /24 support)
@@ -110,10 +121,10 @@ const authenticate = async (req, res, next) => {
           
           if (!ipMatch) {
             // AUTO-REVOKE: unauthorized IP detected
-            console.error(`[SECURITY] API key "${apiKey.name}" (${apiKey.deviceName || 'unknown device'}) used from unauthorized IP: ${clientIP}. Allowed: ${apiKey.allowedIPs}. KEY REVOKED.`);
+            console.error(`[SECURITY] API key "${apiKey.name}" (${apiKey.deviceName || 'unknown device'}) used from unauthorized IP: ${clientIP}. Allowed: ${allAllowed.join(', ')}. KEY REVOKED.`);
             await apiKey.update({
               isActive: false,
-              revokedReason: `Unauthorized IP: ${clientIP} (allowed: ${apiKey.allowedIPs})`,
+              revokedReason: `Unauthorized IP: ${clientIP} (allowed: ${allAllowed.join(', ')})`,
               revokedAt: new Date(),
               lastIP: clientIP,
               lastIPDate: new Date()
@@ -136,7 +147,6 @@ const authenticate = async (req, res, next) => {
               } 
             });
           }
-        }
       }
       
       // Attach key info to request so routes can scope data
@@ -604,6 +614,31 @@ router.get('/api-keys', authenticateToken, requireAdmin, async (req, res, next) 
   }
 });
 
+// GET /api/auth/api-keys/:id/setup-qr - Get QR config data for tablet setup (admin only)
+router.get('/api-keys/:id/setup-qr', authenticateToken, requireAdmin, async (req, res, next) => {
+  try {
+    const apiKey = await ApiKey.findByPk(req.params.id);
+    if (!apiKey) {
+      return res.status(404).json({ error: { message: 'API key not found' } });
+    }
+    
+    const baseUrl = `${req.protocol}://${req.get('host')}/api/`;
+    
+    res.json({
+      data: {
+        qrPayload: `CONFIG-${JSON.stringify({
+          apiKey: apiKey.key,
+          serverUrl: baseUrl,
+          deviceName: apiKey.deviceName || apiKey.name
+        })}`,
+        deviceName: apiKey.deviceName || apiKey.name
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // PUT /api/auth/api-keys/:id - Update API key settings (admin only)
 router.put('/api-keys/:id', authenticateToken, requireAdmin, async (req, res, next) => {
   try {
@@ -650,6 +685,32 @@ router.delete('/api-keys/:id', authenticateToken, requireAdmin, async (req, res,
     }
     await apiKey.update({ isActive: false });
     res.json({ message: `API key "${apiKey.name}" revoked` });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/auth/approved-ips - Get global approved IP list
+router.get('/approved-ips', authenticateToken, requireAdmin, async (req, res, next) => {
+  try {
+    const { AppSettings } = require('../models');
+    const setting = await AppSettings.findOne({ where: { key: 'approved_ips' } });
+    res.json({ data: setting?.value?.ips || [] });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// PUT /api/auth/approved-ips - Update global approved IP list
+router.put('/approved-ips', authenticateToken, requireAdmin, async (req, res, next) => {
+  try {
+    const { ips } = req.body;
+    if (!Array.isArray(ips)) {
+      return res.status(400).json({ error: { message: 'ips must be an array' } });
+    }
+    const { AppSettings } = require('../models');
+    await AppSettings.upsert({ key: 'approved_ips', value: { ips: ips.filter(ip => ip.trim()) } });
+    res.json({ data: ips.filter(ip => ip.trim()), message: 'Approved IPs updated' });
   } catch (error) {
     next(error);
   }

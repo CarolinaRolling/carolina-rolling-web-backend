@@ -2132,17 +2132,19 @@ router.get('/:id/pdf', async (req, res, next) => {
     doc.text('9152 Sonrisa St., Bellflower, CA 90706', 130, 62, { lineBreak: false });
     doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 130, 73, { lineBreak: false });
     
-    // Estimate title and number — left-justified below company info
+    // Estimate title — left side, number + date — right side
     doc.strokeColor(lightGray).lineWidth(1).moveTo(50, 90).lineTo(562, 90).stroke();
     
     const estInfoY = 100;
     doc.fontSize(20).fillColor(primaryColor).font('Helvetica-Bold').text('ESTIMATE', 50, estInfoY, { lineBreak: false });
-    doc.font('Helvetica').fontSize(10).fillColor(darkColor);
-    doc.text(estimate.estimateNumber, 155, estInfoY + 2, { lineBreak: false });
-    doc.fontSize(9).fillColor(grayColor);
-    doc.text(`Date: ${formatDate(estimate.createdAt)}`, 155, estInfoY + 14, { lineBreak: false });
+    
+    // Estimate number and date — right aligned
+    doc.font('Helvetica-Bold').fontSize(11).fillColor(darkColor);
+    doc.text(estimate.estimateNumber, 350, estInfoY + 1, { width: 212, align: 'right', lineBreak: false });
+    doc.font('Helvetica').fontSize(9).fillColor(grayColor);
+    doc.text(`Date: ${formatDate(estimate.createdAt)}`, 350, estInfoY + 15, { width: 212, align: 'right', lineBreak: false });
     if (estimate.validUntil) {
-      doc.text(`Valid Until: ${formatDate(estimate.validUntil)}`, 300, estInfoY + 14, { lineBreak: false });
+      doc.text(`Valid Until: ${formatDate(estimate.validUntil)}`, 350, estInfoY + 27, { width: 212, align: 'right', lineBreak: false });
     }
 
     // Divider line

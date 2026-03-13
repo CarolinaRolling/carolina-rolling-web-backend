@@ -623,6 +623,11 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
     type: DataTypes.STRING,
     allowNull: true
   },
+  heatBreakdown: {
+    type: DataTypes.JSONB,
+    allowNull: true,
+    defaultValue: null
+  },
   cutFileReference: {
     type: DataTypes.STRING,
     allowNull: true

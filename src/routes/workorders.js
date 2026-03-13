@@ -544,7 +544,7 @@ router.get('/', async (req, res, next) => {
 
     // For list views, skip file includes to speed up query significantly
     const partInclude = view === 'list' 
-      ? [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'quantity', 'status', 'materialSource', 'materialOrdered', 'supplierName', 'vendorEstimateNumber', 'clientPartNumber', 'heatNumber', 'materialDescription', 'formData'] }]
+      ? [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'quantity', 'status', 'materialSource', 'materialOrdered', 'supplierName', 'vendorEstimateNumber', 'clientPartNumber', 'heatNumber', 'heatBreakdown', 'materialDescription', 'formData'] }]
       : [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }];
 
     const workOrders = await WorkOrder.findAndCountAll({
@@ -1663,13 +1663,15 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
       vendorId,
       supplierName,
       vendorEstimateNumber,
-      materialDescription
+      materialDescription,
+      heatBreakdown
     } = req.body;
 
     const updates = {};
     if (partType !== undefined) updates.partType = partType;
     if (clientPartNumber !== undefined) updates.clientPartNumber = clientPartNumber;
     if (heatNumber !== undefined) updates.heatNumber = heatNumber;
+    if (heatBreakdown !== undefined) updates.heatBreakdown = heatBreakdown;
     if (quantity !== undefined) updates.quantity = quantity;
     if (material !== undefined) updates.material = material;
     if (thickness !== undefined) updates.thickness = thickness;

@@ -621,6 +621,11 @@ async function startServer() {
       } catch (bfErr) {
         console.log('heatNumber backfill:', bfErr.message);
       }
+      // Ensure heatBreakdown column exists
+      if (!wopColNames.includes('heatBreakdown')) {
+        await sequelize.query(`ALTER TABLE work_order_parts ADD COLUMN "heatBreakdown" JSONB DEFAULT NULL`);
+        console.log('Added heatBreakdown to work_order_parts');
+      }
     } catch (wopErr) {
       console.error('Work order parts column check warning:', wopErr.message);
     }

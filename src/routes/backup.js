@@ -129,30 +129,73 @@ async function buildBackup(includeFiles = false) {
 
     // Try to download — files are uploaded as 'private' so need signed URLs
     const downloadFileEntry = async (entry) => {
+      const errors = [];
+      
       if (entry.cloudinaryId) {
-        // Generate a fresh signed private URL
+        // Method 1: Cloudinary Admin API — gets a fresh working URL for any access type
         try {
-          const signedUrl = cloudinary.utils.private_download_url(entry.cloudinaryId, 'raw', {
-            expires_at: Math.floor(Date.now() / 1000) + 3600 // 1 hour expiry
+          const resource = await cloudinary.api.resource(entry.cloudinaryId, { 
+            resource_type: 'raw',
+            type: 'private'
+          });
+          if (resource?.secure_url) {
+            try {
+              return await downloadFile(resource.secure_url);
+            } catch (e) {
+              errors.push(`Admin API URL failed: ${e.message}`);
+            }
+          }
+        } catch (e) {
+          errors.push(`Admin API lookup failed: ${e.message}`);
+        }
+
+        // Method 2: Try as 'upload' type (some files may not be private)
+        try {
+          const resource = await cloudinary.api.resource(entry.cloudinaryId, { 
+            resource_type: 'raw',
+            type: 'upload'
+          });
+          if (resource?.secure_url) {
+            try {
+              return await downloadFile(resource.secure_url);
+            } catch (e) {
+              errors.push(`Upload type URL failed: ${e.message}`);
+            }
+          }
+        } catch (e) {
+          errors.push(`Upload type lookup: ${e.message}`);
+        }
+
+        // Method 3: Generate signed URL with type: private
+        try {
+          const signedUrl = cloudinary.url(entry.cloudinaryId, {
+            resource_type: 'raw', type: 'private', secure: true, sign_url: true
           });
           return await downloadFile(signedUrl);
         } catch (e) {
-          // Try alternate: direct signed URL generation
-          try {
-            const altUrl = cloudinary.url(entry.cloudinaryId, {
-              resource_type: 'raw',
-              secure: true,
-              sign_url: true,
-              type: 'private'
-            });
-            return await downloadFile(altUrl);
-          } catch (e2) {
-            // Fall through to stored URL
-          }
+          errors.push(`Signed private URL: ${e.message}`);
+        }
+
+        // Method 4: Generate signed URL with type: authenticated
+        try {
+          const authUrl = cloudinary.url(entry.cloudinaryId, {
+            resource_type: 'raw', type: 'authenticated', secure: true, sign_url: true
+          });
+          return await downloadFile(authUrl);
+        } catch (e) {
+          errors.push(`Signed auth URL: ${e.message}`);
         }
       }
-      // Last resort: try the stored URL (might work if recently generated)
-      return await downloadFile(entry.url);
+
+      // Method 5: Try the original stored URL
+      try {
+        return await downloadFile(entry.url);
+      } catch (e) {
+        errors.push(`Stored URL: ${e.message}`);
+      }
+
+      // All methods failed
+      throw new Error(errors[0] || 'All download methods failed');
     };
 
     // Collect all file URLs from document/file tables (these are all PDFs, drawings, specs — not images)
@@ -214,7 +257,12 @@ async function buildBackup(includeFiles = false) {
       console.log(`[backup] Skipping ${skippedCount} non-Cloudinary files (NAS/localhost/other)`);
     }
 
-    console.log(`[backup] Downloading ${downloadableFiles.length} files from Cloudinary...`);
+    const withCloudId = downloadableFiles.filter(f => !!f.cloudinaryId).length;
+    console.log(`[backup] Downloading ${downloadableFiles.length} files (${withCloudId} have cloudinaryId, ${downloadableFiles.length - withCloudId} missing)...`);
+    if (downloadableFiles.length > 0) {
+      const s = downloadableFiles[0];
+      console.log(`[backup] Sample: name=${s.name}, cloudinaryId=${s.cloudinaryId || 'NULL'}, url=${(s.url || '').substring(0, 100)}`);
+    }
     let downloaded = 0;
     let failed = 0;
     const failedFiles = [];
@@ -240,16 +288,22 @@ async function buildBackup(includeFiles = false) {
           downloaded++;
         } else {
           const entry = batch[j];
-          console.warn(`[backup] Failed: ${entry.name} — ${result.reason?.message}`);
-          failedFiles.push({ name: entry.name, error: result.reason?.message });
+          const errMsg = result.reason?.message || 'Unknown error';
+          if (failed < 3) {
+            console.warn(`[backup] DETAILED FAIL #${failed + 1}: ${entry.name}`);
+            console.warn(`[backup]   cloudinaryId: ${entry.cloudinaryId || 'NONE'}`);
+            console.warn(`[backup]   url: ${entry.url}`);
+            console.warn(`[backup]   error: ${errMsg}`);
+          }
+          failedFiles.push({ name: entry.name, error: errMsg, cloudinaryId: entry.cloudinaryId });
           failed++;
         }
       }
       
       if (i + 3 < downloadableFiles.length) {
         console.log(`[backup] Progress: ${downloaded + failed}/${downloadableFiles.length} (${downloaded} ok, ${failed} failed)`);
-        // Delay to respect Cloudinary Admin API rate limits
-        await new Promise(r => setTimeout(r, 300));
+        // Longer delay — Admin API calls per file, respect rate limits
+        await new Promise(r => setTimeout(r, 500));
       }
     }
 

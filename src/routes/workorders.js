@@ -2337,7 +2337,7 @@ router.get('/archived', async (req, res, next) => {
   }
 });
 
-// POST /api/workorders/:id/duplicate-to-estimate - Create estimate from work order (for repeat orders)
+// POST /api/workorders/:id/duplicate-to-estimate - Create estimate from work order's original estimate (for reorders)
 router.post('/:id/duplicate-to-estimate', async (req, res, next) => {
   try {
     const { Estimate, EstimatePart } = require('../models');
@@ -2358,82 +2358,149 @@ router.post('/:id/duplicate-to-estimate', async (req, res, next) => {
     const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
     const estimateNumber = `EST-${year}${month}${day}-${random}`;
 
-    // Create new estimate — copy client info, clear pricing
-    const newEstimate = await Estimate.create({
-      estimateNumber,
-      clientName: workOrder.clientName,
-      contactName: workOrder.contactName,
-      contactEmail: workOrder.contactEmail,
-      contactPhone: workOrder.contactPhone,
-      clientPurchaseOrderNumber: '',
-      projectDescription: workOrder.notes || '',
-      internalNotes: `Reorder from ${workOrder.drNumber ? `DR-${workOrder.drNumber}` : workOrder.orderNumber}`,
-      taxRate: workOrder.taxRate,
-      taxExempt: workOrder.taxExempt,
-      status: 'draft'
-    });
+    const drLabel = workOrder.drNumber ? `DR-${workOrder.drNumber}` : workOrder.orderNumber;
 
-    // Copy parts — keep specs & labor, clear material pricing
-    for (const origPart of (workOrder.parts || [])) {
-      const partJson = origPart.toJSON();
-      
-      // Copy formData but clear material cost fields within it
-      let formData = partJson.formData || {};
-      if (typeof formData === 'string') {
-        try { formData = JSON.parse(formData); } catch(e) { formData = {}; }
-      }
-      // Clear material pricing in formData
-      if (formData.materialTotal) formData.materialTotal = '';
-      if (formData.materialUnitCost) formData.materialUnitCost = '';
-
-      await EstimatePart.create({
-        estimateId: newEstimate.id,
-        partNumber: partJson.partNumber,
-        partType: partJson.partType,
-        clientPartNumber: partJson.clientPartNumber,
-        quantity: partJson.quantity,
-        // Specs — keep these
-        material: partJson.material,
-        thickness: partJson.thickness,
-        width: partJson.width,
-        length: partJson.length,
-        outerDiameter: partJson.outerDiameter,
-        wallThickness: partJson.wallThickness,
-        sectionSize: partJson.sectionSize,
-        rollType: partJson.rollType,
-        radius: partJson.radius,
-        diameter: partJson.diameter,
-        arcDegrees: partJson.arcDegrees,
-        flangeOut: partJson.flangeOut,
-        specialInstructions: partJson.specialInstructions,
-        materialDescription: partJson.materialDescription,
-        materialSource: partJson.materialSource,
-        supplierName: partJson.supplierName,
-        // Labor — keep
-        laborTotal: partJson.laborTotal,
-        rollingCost: partJson.rollingCost,
-        // Material pricing — CLEAR for requoting
-        materialUnitCost: 0,
-        materialTotal: 0,
-        materialMarkupPercent: partJson.materialMarkupPercent || 0,
-        otherServicesCost: partJson.otherServicesCost || 0,
-        otherServicesMarkupPercent: partJson.otherServicesMarkupPercent || 0,
-        // Part total = labor only (material cleared)
-        partTotal: partJson.laborTotal || 0,
-        // formData — keep all part-specific settings (roll specs, etc.)
-        formData
+    // Try to find the original estimate to copy from (preserves all pricing)
+    let sourceEstimate = null;
+    if (workOrder.estimateId) {
+      sourceEstimate = await Estimate.findByPk(workOrder.estimateId, {
+        include: [{ model: EstimatePart, as: 'parts' }]
       });
     }
 
-    // Reload with parts
-    const createdEstimate = await Estimate.findByPk(newEstimate.id, {
-      include: [{ model: EstimatePart, as: 'parts' }]
-    });
+    if (sourceEstimate) {
+      // === DUPLICATE FROM ORIGINAL ESTIMATE (keeps all pricing) ===
+      const newEstimate = await Estimate.create({
+        estimateNumber,
+        clientName: sourceEstimate.clientName,
+        contactName: sourceEstimate.contactName,
+        contactEmail: sourceEstimate.contactEmail,
+        contactPhone: sourceEstimate.contactPhone,
+        clientPurchaseOrderNumber: '',
+        projectDescription: sourceEstimate.projectDescription,
+        notes: sourceEstimate.notes,
+        internalNotes: `Reorder from ${drLabel} (copied from ${sourceEstimate.estimateNumber})`,
+        taxRate: sourceEstimate.taxRate,
+        taxExempt: sourceEstimate.taxExempt,
+        truckingDescription: sourceEstimate.truckingDescription,
+        truckingCost: sourceEstimate.truckingCost,
+        discountPercent: sourceEstimate.discountPercent,
+        discountReason: sourceEstimate.discountReason,
+        status: 'draft'
+      });
 
-    res.status(201).json({
-      data: createdEstimate,
-      message: `Estimate ${estimateNumber} created from ${workOrder.drNumber ? `DR-${workOrder.drNumber}` : workOrder.orderNumber} — material pricing cleared for requoting`
-    });
+      // Copy ALL parts with full pricing
+      for (const origPart of (sourceEstimate.parts || [])) {
+        await EstimatePart.create({
+          estimateId: newEstimate.id,
+          partNumber: origPart.partNumber,
+          partType: origPart.partType,
+          clientPartNumber: origPart.clientPartNumber,
+          quantity: origPart.quantity,
+          materialDescription: origPart.materialDescription,
+          supplierName: origPart.supplierName,
+          vendorEstimateNumber: origPart.vendorEstimateNumber,
+          materialUnitCost: origPart.materialUnitCost,
+          materialMarkupPercent: origPart.materialMarkupPercent,
+          rollingCost: origPart.rollingCost,
+          otherServicesCost: origPart.otherServicesCost,
+          otherServicesMarkupPercent: origPart.otherServicesMarkupPercent,
+          material: origPart.material,
+          thickness: origPart.thickness,
+          width: origPart.width,
+          length: origPart.length,
+          outerDiameter: origPart.outerDiameter,
+          wallThickness: origPart.wallThickness,
+          sectionSize: origPart.sectionSize,
+          rollType: origPart.rollType,
+          radius: origPart.radius,
+          diameter: origPart.diameter,
+          arcDegrees: origPart.arcDegrees,
+          flangeOut: origPart.flangeOut,
+          specialInstructions: origPart.specialInstructions,
+          materialSource: origPart.materialSource,
+          materialTotal: origPart.materialTotal,
+          laborTotal: origPart.laborTotal,
+          partTotal: origPart.partTotal,
+          formData: origPart.formData
+        });
+      }
+
+      // Reload with parts
+      const createdEstimate = await Estimate.findByPk(newEstimate.id, {
+        include: [{ model: EstimatePart, as: 'parts' }]
+      });
+
+      return res.status(201).json({
+        data: createdEstimate,
+        message: `Estimate ${estimateNumber} created from ${drLabel} — all pricing copied from ${sourceEstimate.estimateNumber}`
+      });
+    } else {
+      // === FALLBACK: No linked estimate, create from WO data ===
+      const newEstimate = await Estimate.create({
+        estimateNumber,
+        clientName: workOrder.clientName,
+        contactName: workOrder.contactName,
+        contactEmail: workOrder.contactEmail,
+        contactPhone: workOrder.contactPhone,
+        clientPurchaseOrderNumber: '',
+        projectDescription: workOrder.notes || '',
+        internalNotes: `Reorder from ${drLabel} (no linked estimate found, created from WO)`,
+        taxRate: workOrder.taxRate,
+        taxExempt: workOrder.taxExempt,
+        status: 'draft'
+      });
+
+      for (const origPart of (workOrder.parts || [])) {
+        const partJson = origPart.toJSON();
+        let formData = partJson.formData || {};
+        if (typeof formData === 'string') {
+          try { formData = JSON.parse(formData); } catch(e) { formData = {}; }
+        }
+
+        await EstimatePart.create({
+          estimateId: newEstimate.id,
+          partNumber: partJson.partNumber,
+          partType: partJson.partType,
+          clientPartNumber: partJson.clientPartNumber,
+          quantity: partJson.quantity,
+          material: partJson.material,
+          thickness: partJson.thickness,
+          width: partJson.width,
+          length: partJson.length,
+          outerDiameter: partJson.outerDiameter,
+          wallThickness: partJson.wallThickness,
+          sectionSize: partJson.sectionSize,
+          rollType: partJson.rollType,
+          radius: partJson.radius,
+          diameter: partJson.diameter,
+          arcDegrees: partJson.arcDegrees,
+          flangeOut: partJson.flangeOut,
+          specialInstructions: partJson.specialInstructions,
+          materialDescription: partJson.materialDescription,
+          materialSource: partJson.materialSource,
+          supplierName: partJson.supplierName,
+          laborTotal: partJson.laborTotal,
+          rollingCost: partJson.rollingCost,
+          materialUnitCost: partJson.materialUnitCost || 0,
+          materialTotal: partJson.materialTotal || 0,
+          materialMarkupPercent: partJson.materialMarkupPercent || 0,
+          otherServicesCost: partJson.otherServicesCost || 0,
+          otherServicesMarkupPercent: partJson.otherServicesMarkupPercent || 0,
+          partTotal: partJson.partTotal || 0,
+          formData
+        });
+      }
+
+      const createdEstimate = await Estimate.findByPk(newEstimate.id, {
+        include: [{ model: EstimatePart, as: 'parts' }]
+      });
+
+      return res.status(201).json({
+        data: createdEstimate,
+        message: `Estimate ${estimateNumber} created from ${drLabel} — pricing copied from work order`
+      });
+    }
   } catch (error) {
     next(error);
   }

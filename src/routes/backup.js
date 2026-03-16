@@ -90,47 +90,65 @@ async function buildBackup(includeFiles = false) {
     const https = require('https');
     const http = require('http');
     
-    const downloadFile = (url) => new Promise((resolve, reject) => {
+    const downloadFile = (url, maxRedirects = 5) => new Promise((resolve, reject) => {
+      if (maxRedirects <= 0) return reject(new Error('Too many redirects'));
       const client = url.startsWith('https') ? https : http;
-      const timeout = setTimeout(() => reject(new Error('Download timeout')), 30000);
-      client.get(url, (response) => {
-        if (response.statusCode === 301 || response.statusCode === 302) {
-          clearTimeout(timeout);
-          return downloadFile(response.headers.location).then(resolve).catch(reject);
+      const req = client.get(url, { timeout: 60000 }, (response) => {
+        // Follow redirects
+        if ([301, 302, 303, 307, 308].includes(response.statusCode) && response.headers.location) {
+          let redirectUrl = response.headers.location;
+          if (redirectUrl.startsWith('/')) {
+            const parsed = new URL(url);
+            redirectUrl = `${parsed.protocol}//${parsed.host}${redirectUrl}`;
+          }
+          return downloadFile(redirectUrl, maxRedirects - 1).then(resolve).catch(reject);
         }
         if (response.statusCode !== 200) {
-          clearTimeout(timeout);
+          response.resume(); // drain
           return reject(new Error(`HTTP ${response.statusCode}`));
         }
         const chunks = [];
         response.on('data', chunk => chunks.push(chunk));
-        response.on('end', () => { clearTimeout(timeout); resolve(Buffer.concat(chunks)); });
-        response.on('error', (e) => { clearTimeout(timeout); reject(e); });
-      }).on('error', (e) => { clearTimeout(timeout); reject(e); });
+        response.on('end', () => {
+          const buf = Buffer.concat(chunks);
+          if (buf.length === 0) return reject(new Error('Empty response'));
+          resolve(buf);
+        });
+        response.on('error', reject);
+      });
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('Request timeout (60s)')); });
     });
 
-    // Collect all file URLs (skip images/photos)
-    const fileEntries = [];
-    const isPdfOrStep = (name, mime) => {
-      const n = (name || '').toLowerCase();
-      const m = (mime || '').toLowerCase();
-      return n.endsWith('.pdf') || n.endsWith('.step') || n.endsWith('.stp') || 
-             n.endsWith('.dxf') || n.endsWith('.dwg') || n.endsWith('.igs') || n.endsWith('.iges') ||
-             m.includes('pdf') || m.includes('step') || m.includes('dxf') || m.includes('octet-stream');
+    // Try to download via cloudinaryId first (more reliable), fallback to URL
+    const downloadFileEntry = async (entry) => {
+      // If we have a cloudinaryId, generate a fresh Cloudinary URL
+      if (entry.cloudinaryId) {
+        try {
+          const freshUrl = cloudinary.url(entry.cloudinaryId, { resource_type: 'raw', secure: true });
+          return await downloadFile(freshUrl);
+        } catch (e) {
+          // Fall through to URL-based download
+        }
+      }
+      return await downloadFile(entry.url);
     };
 
-    // WO part files
+    // Collect all file URLs from document/file tables (these are all PDFs, drawings, specs — not images)
+    const fileEntries = [];
+
+    // WO part files (all are prints/drawings)
     for (const wo of backup.data.workOrders) {
       for (const part of (wo.parts || [])) {
         for (const f of (part.files || [])) {
-          if (f.url && isPdfOrStep(f.originalName || f.filename, f.mimeType)) {
-            fileEntries.push({ id: f.id, url: f.url, name: f.originalName || f.filename, source: 'wo_part_file' });
+          if (f.url) {
+            fileEntries.push({ id: f.id, url: f.url, cloudinaryId: f.cloudinaryId, name: f.originalName || f.filename, source: 'wo_part_file' });
           }
         }
       }
       for (const d of (wo.documents || [])) {
-        if (d.url && isPdfOrStep(d.originalName, d.mimeType)) {
-          fileEntries.push({ id: d.id, url: d.url, name: d.originalName, source: 'wo_document' });
+        if (d.url) {
+          fileEntries.push({ id: d.id, url: d.url, cloudinaryId: d.cloudinaryId, name: d.originalName, source: 'wo_document' });
         }
       }
     }
@@ -139,23 +157,23 @@ async function buildBackup(includeFiles = false) {
     for (const est of backup.data.estimates) {
       for (const part of (est.parts || [])) {
         for (const f of (part.files || [])) {
-          if (f.url && isPdfOrStep(f.originalName || f.filename, f.mimeType)) {
-            fileEntries.push({ id: f.id, url: f.url, name: f.originalName || f.filename, source: 'est_part_file' });
+          if (f.url) {
+            fileEntries.push({ id: f.id, url: f.url, cloudinaryId: f.cloudinaryId, name: f.originalName || f.filename, source: 'est_part_file' });
           }
         }
       }
       for (const f of (est.files || [])) {
-        if (f.url && isPdfOrStep(f.originalName || f.filename, f.mimeType)) {
-          fileEntries.push({ id: f.id, url: f.url, name: f.originalName || f.filename, source: 'est_file' });
+        if (f.url) {
+          fileEntries.push({ id: f.id, url: f.url, cloudinaryId: f.cloudinaryId, name: f.originalName || f.filename, source: 'est_file' });
         }
       }
     }
 
-    // Shipment documents (MTRs, etc.)
+    // Shipment documents (MTRs, POs, etc. — skip photos)
     for (const ship of backup.data.shipments) {
       for (const d of (ship.documents || [])) {
-        if (d.url && isPdfOrStep(d.originalName, d.mimeType)) {
-          fileEntries.push({ id: d.id, url: d.url, name: d.originalName, source: 'shipment_document' });
+        if (d.url) {
+          fileEntries.push({ id: d.id, url: d.url, cloudinaryId: d.cloudinaryId, name: d.originalName, source: 'shipment_document' });
         }
       }
     }
@@ -168,27 +186,50 @@ async function buildBackup(includeFiles = false) {
       return true;
     });
 
-    console.log(`[backup] Downloading ${uniqueFiles.length} PDF/STEP/CAD files...`);
+    // Only attempt to download files from Cloudinary (skip NAS, localhost, etc.)
+    const downloadableFiles = uniqueFiles.filter(f => f.cloudinaryId || (f.url && f.url.includes('cloudinary.com')));
+    const skippedCount = uniqueFiles.length - downloadableFiles.length;
+    if (skippedCount > 0) {
+      console.log(`[backup] Skipping ${skippedCount} non-Cloudinary files (NAS/localhost/other)`);
+    }
+
+    console.log(`[backup] Downloading ${downloadableFiles.length} files from Cloudinary...`);
     let downloaded = 0;
     let failed = 0;
+    const failedFiles = [];
 
-    for (const entry of uniqueFiles) {
-      try {
-        const buffer = await downloadFile(entry.url);
-        backup.files[entry.url] = {
-          name: entry.name,
-          source: entry.source,
-          size: buffer.length,
-          data: buffer.toString('base64')
-        };
-        downloaded++;
-      } catch (e) {
-        console.warn(`[backup] Failed to download ${entry.name}: ${e.message}`);
-        failed++;
+    // Download in batches of 5 to avoid overwhelming Cloudinary
+    for (let i = 0; i < downloadableFiles.length; i += 5) {
+      const batch = downloadableFiles.slice(i, i + 5);
+      const results = await Promise.allSettled(batch.map(async (entry) => {
+        const buffer = await downloadFileEntry(entry);
+        return { entry, buffer };
+      }));
+      
+      for (const result of results) {
+        if (result.status === 'fulfilled') {
+          const { entry, buffer } = result.value;
+          backup.files[entry.url] = {
+            name: entry.name,
+            source: entry.source,
+            size: buffer.length,
+            data: buffer.toString('base64')
+          };
+          downloaded++;
+        } else {
+          const entry = batch[results.indexOf(result)];
+          console.warn(`[backup] Failed: ${entry.name} — ${result.reason?.message}`);
+          failedFiles.push({ name: entry.name, error: result.reason?.message });
+          failed++;
+        }
+      }
+      
+      if (i + 5 < downloadableFiles.length) {
+        console.log(`[backup] Progress: ${downloaded + failed}/${downloadableFiles.length} (${downloaded} ok, ${failed} failed)`);
       }
     }
 
-    backup.counts._files = { total: uniqueFiles.length, downloaded, failed };
+    backup.counts._files = { total: uniqueFiles.length, cloudinary: downloadableFiles.length, skipped: skippedCount, downloaded, failed, failedFiles: failedFiles.slice(0, 20) };
     console.log(`[backup] Files: ${downloaded} downloaded, ${failed} failed`);
   }
 
@@ -389,7 +430,7 @@ router.post('/run-background', async (req, res, next) => {
             `  Estimates: ${fileCounts.estimates || 0}`,
             `  Shipments: ${fileCounts.shipments || 0}`,
             `  Inbound: ${fileCounts.inboundOrders || 0}`,
-            fileCounts._files ? `\nFiles: ${fileCounts._files.downloaded || 0} downloaded, ${fileCounts._files.failed || 0} failed` : '',
+            fileCounts._files ? `\nFiles: ${fileCounts._files.downloaded || 0} downloaded, ${fileCounts._files.skipped || 0} skipped (non-Cloudinary), ${fileCounts._files.failed || 0} failed` : '',
             ``,
             `— Carolina Rolling Admin`
           ].join('\n');

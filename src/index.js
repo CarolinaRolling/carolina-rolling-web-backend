@@ -812,12 +812,12 @@ async function startServer() {
     });
     console.log('Annual CDTFA permit verification configured for January 2nd at 3:00 AM Pacific');
 
-    // Auto-backup to Cloudinary every 3 days at midnight Pacific
+    // Auto-backup to Cloudinary every Friday at midnight Pacific (with PDFs & CAD files)
     const { runAutoBackup } = require('./routes/backup');
-    cron.schedule('0 0 */3 * *', async () => {
-      console.log('[CRON] Running scheduled auto-backup...');
+    cron.schedule('0 0 * * 5', async () => {
+      console.log('[CRON] Running scheduled Friday auto-backup (with files)...');
       try {
-        const result = await runAutoBackup();
+        const result = await runAutoBackup(true);
         if (result.success) {
           console.log(`[CRON] Auto-backup successful: ${(result.size / 1024).toFixed(0)}KB`);
         } else {
@@ -829,7 +829,7 @@ async function startServer() {
     }, {
       timezone: 'America/Los_Angeles'
     });
-    console.log('Auto-backup configured for every 3 days at midnight Pacific');
+    console.log('Auto-backup configured for every Friday at midnight Pacific (includes files)');
 
     // Auto-archive old estimates daily at 1:00 AM Pacific
     cron.schedule('0 1 * * *', async () => {

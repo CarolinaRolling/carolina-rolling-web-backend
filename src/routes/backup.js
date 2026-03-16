@@ -19,12 +19,13 @@ const {
 const router = express.Router();
 
 // ============= HELPER: Build full backup object =============
-async function buildBackup() {
+async function buildBackup(includeFiles = false) {
   const backup = {
-    version: '2.0',
+    version: '2.1',
     createdAt: new Date().toISOString(),
     data: {},
-    counts: {}
+    counts: {},
+    files: {}
   };
 
   // Clients & Vendors
@@ -84,6 +85,113 @@ async function buildBackup() {
     backup.counts[key] = val.length;
   }
 
+  // Download PDF/STEP files from Cloudinary if requested
+  if (includeFiles) {
+    const https = require('https');
+    const http = require('http');
+    
+    const downloadFile = (url) => new Promise((resolve, reject) => {
+      const client = url.startsWith('https') ? https : http;
+      const timeout = setTimeout(() => reject(new Error('Download timeout')), 30000);
+      client.get(url, (response) => {
+        if (response.statusCode === 301 || response.statusCode === 302) {
+          clearTimeout(timeout);
+          return downloadFile(response.headers.location).then(resolve).catch(reject);
+        }
+        if (response.statusCode !== 200) {
+          clearTimeout(timeout);
+          return reject(new Error(`HTTP ${response.statusCode}`));
+        }
+        const chunks = [];
+        response.on('data', chunk => chunks.push(chunk));
+        response.on('end', () => { clearTimeout(timeout); resolve(Buffer.concat(chunks)); });
+        response.on('error', (e) => { clearTimeout(timeout); reject(e); });
+      }).on('error', (e) => { clearTimeout(timeout); reject(e); });
+    });
+
+    // Collect all file URLs (skip images/photos)
+    const fileEntries = [];
+    const isPdfOrStep = (name, mime) => {
+      const n = (name || '').toLowerCase();
+      const m = (mime || '').toLowerCase();
+      return n.endsWith('.pdf') || n.endsWith('.step') || n.endsWith('.stp') || 
+             n.endsWith('.dxf') || n.endsWith('.dwg') || n.endsWith('.igs') || n.endsWith('.iges') ||
+             m.includes('pdf') || m.includes('step') || m.includes('dxf') || m.includes('octet-stream');
+    };
+
+    // WO part files
+    for (const wo of backup.data.workOrders) {
+      for (const part of (wo.parts || [])) {
+        for (const f of (part.files || [])) {
+          if (f.url && isPdfOrStep(f.originalName || f.filename, f.mimeType)) {
+            fileEntries.push({ id: f.id, url: f.url, name: f.originalName || f.filename, source: 'wo_part_file' });
+          }
+        }
+      }
+      for (const d of (wo.documents || [])) {
+        if (d.url && isPdfOrStep(d.originalName, d.mimeType)) {
+          fileEntries.push({ id: d.id, url: d.url, name: d.originalName, source: 'wo_document' });
+        }
+      }
+    }
+
+    // Estimate part files + estimate-level files
+    for (const est of backup.data.estimates) {
+      for (const part of (est.parts || [])) {
+        for (const f of (part.files || [])) {
+          if (f.url && isPdfOrStep(f.originalName || f.filename, f.mimeType)) {
+            fileEntries.push({ id: f.id, url: f.url, name: f.originalName || f.filename, source: 'est_part_file' });
+          }
+        }
+      }
+      for (const f of (est.files || [])) {
+        if (f.url && isPdfOrStep(f.originalName || f.filename, f.mimeType)) {
+          fileEntries.push({ id: f.id, url: f.url, name: f.originalName || f.filename, source: 'est_file' });
+        }
+      }
+    }
+
+    // Shipment documents (MTRs, etc.)
+    for (const ship of backup.data.shipments) {
+      for (const d of (ship.documents || [])) {
+        if (d.url && isPdfOrStep(d.originalName, d.mimeType)) {
+          fileEntries.push({ id: d.id, url: d.url, name: d.originalName, source: 'shipment_document' });
+        }
+      }
+    }
+
+    // Deduplicate by URL
+    const seen = new Set();
+    const uniqueFiles = fileEntries.filter(f => {
+      if (seen.has(f.url)) return false;
+      seen.add(f.url);
+      return true;
+    });
+
+    console.log(`[backup] Downloading ${uniqueFiles.length} PDF/STEP/CAD files...`);
+    let downloaded = 0;
+    let failed = 0;
+
+    for (const entry of uniqueFiles) {
+      try {
+        const buffer = await downloadFile(entry.url);
+        backup.files[entry.url] = {
+          name: entry.name,
+          source: entry.source,
+          size: buffer.length,
+          data: buffer.toString('base64')
+        };
+        downloaded++;
+      } catch (e) {
+        console.warn(`[backup] Failed to download ${entry.name}: ${e.message}`);
+        failed++;
+      }
+    }
+
+    backup.counts._files = { total: uniqueFiles.length, downloaded, failed };
+    console.log(`[backup] Files: ${downloaded} downloaded, ${failed} failed`);
+  }
+
   return backup;
 }
 
@@ -111,12 +219,12 @@ async function uploadBackupToCloudinary(backup) {
 }
 
 // ============= AUTO BACKUP (called by cron) =============
-async function runAutoBackup() {
+async function runAutoBackup(includeFiles = false) {
   const startTime = Date.now();
-  console.log('[auto-backup] Starting scheduled backup...');
+  console.log(`[auto-backup] Starting scheduled backup${includeFiles ? ' (with files)' : ''}...`);
   
   try {
-    const backup = await buildBackup();
+    const backup = await buildBackup(includeFiles);
     const uploadResult = await uploadBackupToCloudinary(backup);
     
     const duration = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -164,8 +272,9 @@ async function runAutoBackup() {
 // GET /api/backup - Download full backup as JSON
 router.get('/', async (req, res, next) => {
   try {
-    const backup = await buildBackup();
-    const filename = `backup-${new Date().toISOString().split('T')[0]}.json`;
+    const includeFiles = req.query.includeFiles === 'true';
+    const backup = await buildBackup(includeFiles);
+    const filename = `backup-${new Date().toISOString().split('T')[0]}${includeFiles ? '-with-files' : ''}.json`;
     res.setHeader('Content-Type', 'application/json');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.json(backup);
@@ -223,12 +332,102 @@ router.get('/info', async (req, res, next) => {
 // POST /api/backup/run-now - Trigger immediate cloud backup
 router.post('/run-now', async (req, res, next) => {
   try {
-    const result = await runAutoBackup();
+    const includeFiles = req.body.includeFiles === true;
+    const result = await runAutoBackup(includeFiles);
     if (result.success) {
-      res.json({ message: 'Backup completed successfully', data: result });
+      res.json({ message: `Backup completed successfully${includeFiles ? ' (with files)' : ''}`, data: result });
     } else {
       res.status(500).json({ error: { message: `Backup failed: ${result.error}` } });
     }
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/backup/run-background - Start backup in background, email when done
+router.post('/run-background', async (req, res, next) => {
+  try {
+    const includeFiles = req.body.includeFiles !== false; // default true
+    const email = req.body.email;
+    
+    if (!email) {
+      return res.status(400).json({ error: { message: 'Email address is required' } });
+    }
+
+    // Respond immediately
+    res.json({ message: `Backup started in background${includeFiles ? ' (with files)' : ''}. You'll receive an email at ${email} when it's done.` });
+
+    // Run backup in background (after response is sent)
+    setImmediate(async () => {
+      const startTime = Date.now();
+      let result;
+      try {
+        result = await runAutoBackup(includeFiles);
+      } catch (err) {
+        result = { success: false, error: err.message };
+      }
+
+      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+
+      // Send email notification
+      const nodemailer = require('nodemailer');
+      try {
+        let subject, body;
+        if (result.success) {
+          const sizeKB = ((result.size || 0) / 1024).toFixed(0);
+          const fileCounts = result.counts || {};
+          subject = `✅ Carolina Rolling Backup Complete — ${sizeKB}KB`;
+          body = [
+            `Backup completed successfully in ${duration}s.`,
+            ``,
+            `Size: ${sizeKB}KB compressed`,
+            `URL: ${result.url || 'N/A'}`,
+            ``,
+            `Records:`,
+            `  Clients: ${fileCounts.clients || 0}`,
+            `  Work Orders: ${fileCounts.workOrders || 0}`,
+            `  Estimates: ${fileCounts.estimates || 0}`,
+            `  Shipments: ${fileCounts.shipments || 0}`,
+            `  Inbound: ${fileCounts.inboundOrders || 0}`,
+            fileCounts._files ? `\nFiles: ${fileCounts._files.downloaded || 0} downloaded, ${fileCounts._files.failed || 0} failed` : '',
+            ``,
+            `— Carolina Rolling Admin`
+          ].join('\n');
+        } else {
+          subject = `❌ Carolina Rolling Backup Failed`;
+          body = [
+            `Backup failed after ${duration}s.`,
+            ``,
+            `Error: ${result.error || 'Unknown error'}`,
+            ``,
+            `Please check the Heroku logs for more details.`,
+            ``,
+            `— Carolina Rolling Admin`
+          ].join('\n');
+        }
+
+        if (process.env.SMTP_HOST) {
+          const transporter = nodemailer.createTransport({
+            host: process.env.SMTP_HOST,
+            port: process.env.SMTP_PORT || 587,
+            secure: process.env.SMTP_SECURE === 'true',
+            auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+          });
+          await transporter.sendMail({
+            from: process.env.SMTP_FROM || 'noreply@carolinarolling.com',
+            to: email,
+            subject,
+            text: body
+          });
+          console.log(`[backup] Email notification sent to ${email}`);
+        } else {
+          console.log(`[backup] SMTP not configured — would have emailed ${email}:`);
+          console.log(`[backup] Subject: ${subject}`);
+        }
+      } catch (emailErr) {
+        console.error(`[backup] Failed to send email notification: ${emailErr.message}`);
+      }
+    });
   } catch (error) {
     next(error);
   }
@@ -406,7 +605,71 @@ router.post('/restore', async (req, res, next) => {
     }
 
     await transaction.commit();
-    res.json({ message: 'Backup restored successfully', results });
+
+    // After restore: re-upload any files from backup that are missing on Cloudinary
+    let fileResults = { checked: 0, reuploaded: 0, alreadyExist: 0, failed: 0 };
+    if (backup.files && Object.keys(backup.files).length > 0) {
+      const https = require('https');
+      const http = require('http');
+
+      const checkUrl = (url) => new Promise((resolve) => {
+        const client = url.startsWith('https') ? https : http;
+        const req = client.request(url, { method: 'HEAD', timeout: 5000 }, (res) => {
+          resolve(res.statusCode >= 200 && res.statusCode < 400);
+        });
+        req.on('error', () => resolve(false));
+        req.on('timeout', () => { req.destroy(); resolve(false); });
+        req.end();
+      });
+
+      // Collect all file records from all models that have URLs in the backup
+      const allFileRecords = [];
+      const woPartFiles = await WorkOrderPartFile.findAll();
+      woPartFiles.forEach(f => allFileRecords.push({ model: WorkOrderPartFile, record: f }));
+      const woDocs = await WorkOrderDocument.findAll();
+      woDocs.forEach(f => allFileRecords.push({ model: WorkOrderDocument, record: f }));
+      const estPartFiles = await EstimatePartFile.findAll();
+      estPartFiles.forEach(f => allFileRecords.push({ model: EstimatePartFile, record: f }));
+      const estFiles = await EstimateFile.findAll();
+      estFiles.forEach(f => allFileRecords.push({ model: EstimateFile, record: f }));
+      const shipDocs = await ShipmentDocument.findAll();
+      shipDocs.forEach(f => allFileRecords.push({ model: ShipmentDocument, record: f }));
+
+      for (const { model, record } of allFileRecords) {
+        const url = record.url;
+        const backupFile = backup.files[url];
+        if (!backupFile || !backupFile.data) continue;
+
+        fileResults.checked++;
+        try {
+          const exists = await checkUrl(url);
+          if (exists) {
+            fileResults.alreadyExist++;
+            continue;
+          }
+
+          // File missing from Cloudinary — re-upload
+          const buffer = Buffer.from(backupFile.data, 'base64');
+          const base64Data = buffer.toString('base64');
+          const mimeType = record.mimeType || 'application/octet-stream';
+          const folder = record.cloudinaryId ? record.cloudinaryId.split('/').slice(0, -1).join('/') : 'restored-files';
+          
+          const uploadResult = await cloudinary.uploader.upload(
+            `data:${mimeType};base64,${base64Data}`,
+            { resource_type: 'raw', folder, use_filename: true, unique_filename: true }
+          );
+
+          await record.update({ url: uploadResult.secure_url, cloudinaryId: uploadResult.public_id });
+          fileResults.reuploaded++;
+          console.log(`[restore] Re-uploaded: ${backupFile.name}`);
+        } catch (e) {
+          console.warn(`[restore] Failed to re-upload ${backupFile.name}: ${e.message}`);
+          fileResults.failed++;
+        }
+      }
+    }
+
+    res.json({ message: 'Backup restored successfully', results, fileResults });
   } catch (error) {
     await transaction.rollback();
     next(error);

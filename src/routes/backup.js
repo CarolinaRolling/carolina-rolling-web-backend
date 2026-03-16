@@ -5,6 +5,13 @@ const { promisify } = require('util');
 const gzip = promisify(zlib.gzip);
 const gunzip = promisify(zlib.gunzip);
 
+// Ensure cloudinary is configured
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
+
 const { 
   sequelize, 
   Shipment, ShipmentPhoto, ShipmentDocument,
@@ -120,17 +127,31 @@ async function buildBackup(includeFiles = false) {
       req.on('timeout', () => { req.destroy(); reject(new Error('Request timeout (60s)')); });
     });
 
-    // Try to download via cloudinaryId first (more reliable), fallback to URL
+    // Try to download — files are uploaded as 'private' so need signed URLs
     const downloadFileEntry = async (entry) => {
-      // If we have a cloudinaryId, generate a fresh Cloudinary URL
       if (entry.cloudinaryId) {
+        // Generate a fresh signed private URL
         try {
-          const freshUrl = cloudinary.url(entry.cloudinaryId, { resource_type: 'raw', secure: true });
-          return await downloadFile(freshUrl);
+          const signedUrl = cloudinary.utils.private_download_url(entry.cloudinaryId, 'raw', {
+            expires_at: Math.floor(Date.now() / 1000) + 3600 // 1 hour expiry
+          });
+          return await downloadFile(signedUrl);
         } catch (e) {
-          // Fall through to URL-based download
+          // Try alternate: direct signed URL generation
+          try {
+            const altUrl = cloudinary.url(entry.cloudinaryId, {
+              resource_type: 'raw',
+              secure: true,
+              sign_url: true,
+              type: 'private'
+            });
+            return await downloadFile(altUrl);
+          } catch (e2) {
+            // Fall through to stored URL
+          }
         }
       }
+      // Last resort: try the stored URL (might work if recently generated)
       return await downloadFile(entry.url);
     };
 
@@ -198,15 +219,16 @@ async function buildBackup(includeFiles = false) {
     let failed = 0;
     const failedFiles = [];
 
-    // Download in batches of 5 to avoid overwhelming Cloudinary
-    for (let i = 0; i < downloadableFiles.length; i += 5) {
-      const batch = downloadableFiles.slice(i, i + 5);
+    // Download in batches of 3 with delay (Cloudinary Admin API rate limited to 500/hr)
+    for (let i = 0; i < downloadableFiles.length; i += 3) {
+      const batch = downloadableFiles.slice(i, i + 3);
       const results = await Promise.allSettled(batch.map(async (entry) => {
         const buffer = await downloadFileEntry(entry);
         return { entry, buffer };
       }));
       
-      for (const result of results) {
+      for (let j = 0; j < results.length; j++) {
+        const result = results[j];
         if (result.status === 'fulfilled') {
           const { entry, buffer } = result.value;
           backup.files[entry.url] = {
@@ -217,15 +239,17 @@ async function buildBackup(includeFiles = false) {
           };
           downloaded++;
         } else {
-          const entry = batch[results.indexOf(result)];
+          const entry = batch[j];
           console.warn(`[backup] Failed: ${entry.name} — ${result.reason?.message}`);
           failedFiles.push({ name: entry.name, error: result.reason?.message });
           failed++;
         }
       }
       
-      if (i + 5 < downloadableFiles.length) {
+      if (i + 3 < downloadableFiles.length) {
         console.log(`[backup] Progress: ${downloaded + failed}/${downloadableFiles.length} (${downloaded} ok, ${failed} failed)`);
+        // Delay to respect Cloudinary Admin API rate limits
+        await new Promise(r => setTimeout(r, 300));
       }
     }
 

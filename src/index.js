@@ -644,6 +644,19 @@ async function startServer() {
       console.error('Estimate parts column check warning:', epErr.message);
     }
 
+    // Ensure shop_supplies has imageUrl column
+    try {
+      const [ssCols] = await sequelize.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'shop_supplies'`);
+      const ssColNames = ssCols.map(c => c.column_name);
+      if (!ssColNames.includes('imageUrl')) {
+        await sequelize.query(`ALTER TABLE shop_supplies ADD COLUMN "imageUrl" VARCHAR(255) DEFAULT NULL`);
+        await sequelize.query(`ALTER TABLE shop_supplies ADD COLUMN "imageCloudinaryId" VARCHAR(255) DEFAULT NULL`);
+        console.log('Added imageUrl/imageCloudinaryId to shop_supplies');
+      }
+    } catch (ssErr) {
+      console.error('Shop supplies column check:', ssErr.message);
+    }
+
     // Add noTag column to clients table
     try {
       const [clientCols] = await sequelize.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'clients'`);

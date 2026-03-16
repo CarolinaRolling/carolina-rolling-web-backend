@@ -1923,6 +1923,14 @@ const ShopSupply = sequelize.define('ShopSupply', {
   lowStockAcknowledged: {
     type: DataTypes.BOOLEAN,
     defaultValue: false // reset to false when quantity drops to/below min; set true only by refill
+  },
+  imageUrl: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  imageCloudinaryId: {
+    type: DataTypes.STRING,
+    allowNull: true
   }
 }, {
   tableName: 'shop_supplies',

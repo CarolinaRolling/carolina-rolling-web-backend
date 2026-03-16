@@ -1,9 +1,12 @@
 const express = require('express');
 const crypto = require('crypto');
+const multer = require('multer');
+const cloudinary = require('cloudinary').v2;
 const { ShopSupply, ShopSupplyLog } = require('../models');
 const { Op } = require('sequelize');
 
 const router = express.Router();
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
 // GET /api/shop-supplies - List all supplies
 router.get('/', async (req, res, next) => {
@@ -226,9 +229,62 @@ router.delete('/:id', async (req, res, next) => {
     if (!supply) {
       return res.status(404).json({ error: { message: 'Item not found' } });
     }
+    // Delete image from Cloudinary if exists
+    if (supply.imageCloudinaryId) {
+      try { await cloudinary.uploader.destroy(supply.imageCloudinaryId); } catch (e) { console.error('Cloudinary delete:', e.message); }
+    }
     await ShopSupplyLog.destroy({ where: { shopSupplyId: supply.id } });
     await supply.destroy();
     res.json({ message: `${supply.name} deleted` });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/shop-supplies/:id/image - Upload item image
+router.post('/:id/image', upload.single('image'), async (req, res, next) => {
+  try {
+    const supply = await ShopSupply.findByPk(req.params.id);
+    if (!supply) {
+      return res.status(404).json({ error: { message: 'Item not found' } });
+    }
+    if (!req.file) {
+      return res.status(400).json({ error: { message: 'No image provided' } });
+    }
+    
+    // Delete old image if exists
+    if (supply.imageCloudinaryId) {
+      try { await cloudinary.uploader.destroy(supply.imageCloudinaryId); } catch (e) {}
+    }
+    
+    // Upload to Cloudinary
+    const result = await new Promise((resolve, reject) => {
+      cloudinary.uploader.upload_stream(
+        { folder: 'shop-supplies', public_id: `supply-${supply.id}`, overwrite: true },
+        (error, result) => { if (error) reject(error); else resolve(result); }
+      ).end(req.file.buffer);
+    });
+    
+    await supply.update({ imageUrl: result.secure_url, imageCloudinaryId: result.public_id });
+    
+    res.json({ data: supply, message: 'Image uploaded' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// DELETE /api/shop-supplies/:id/image - Remove item image
+router.delete('/:id/image', async (req, res, next) => {
+  try {
+    const supply = await ShopSupply.findByPk(req.params.id);
+    if (!supply) {
+      return res.status(404).json({ error: { message: 'Item not found' } });
+    }
+    if (supply.imageCloudinaryId) {
+      try { await cloudinary.uploader.destroy(supply.imageCloudinaryId); } catch (e) {}
+    }
+    await supply.update({ imageUrl: null, imageCloudinaryId: null });
+    res.json({ data: supply, message: 'Image removed' });
   } catch (error) {
     next(error);
   }

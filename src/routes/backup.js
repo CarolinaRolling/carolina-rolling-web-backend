@@ -129,73 +129,38 @@ async function buildBackup(includeFiles = false) {
 
     // Try to download — files are uploaded as 'private' so need signed URLs
     const downloadFileEntry = async (entry) => {
-      const errors = [];
-      
       if (entry.cloudinaryId) {
-        // Method 1: Cloudinary Admin API — gets a fresh working URL for any access type
+        // For private files: use Cloudinary API download endpoint with authentication
+        const timestamp = Math.floor(Date.now() / 1000);
+        const publicId = entry.cloudinaryId;
+        
+        // Method 1: Construct authenticated API download URL
         try {
-          const resource = await cloudinary.api.resource(entry.cloudinaryId, { 
-            resource_type: 'raw',
-            type: 'private'
-          });
-          if (resource?.secure_url) {
-            try {
-              return await downloadFile(resource.secure_url);
-            } catch (e) {
-              errors.push(`Admin API URL failed: ${e.message}`);
-            }
+          const apiKey = process.env.CLOUDINARY_API_KEY;
+          const apiSecret = process.env.CLOUDINARY_API_SECRET;
+          const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+          
+          // Generate signature: "public_id={id}&timestamp={ts}{api_secret}"
+          const crypto = require('crypto');
+          const toSign = `public_id=${publicId}&timestamp=${timestamp}`;
+          const signature = crypto.createHash('sha1').update(toSign + apiSecret).digest('hex');
+          
+          const apiUrl = `https://api.cloudinary.com/v1_1/${cloudName}/raw/download?public_id=${encodeURIComponent(publicId)}&timestamp=${timestamp}&api_key=${apiKey}&signature=${signature}`;
+          return await downloadFile(apiUrl);
+        } catch (e) {
+          // Method 2: Try signed delivery URL
+          try {
+            const signedUrl = cloudinary.url(publicId, {
+              resource_type: 'raw', type: 'private', secure: true, sign_url: true
+            });
+            return await downloadFile(signedUrl);
+          } catch (e2) {
+            // Fall through
           }
-        } catch (e) {
-          errors.push(`Admin API lookup failed: ${e.message}`);
-        }
-
-        // Method 2: Try as 'upload' type (some files may not be private)
-        try {
-          const resource = await cloudinary.api.resource(entry.cloudinaryId, { 
-            resource_type: 'raw',
-            type: 'upload'
-          });
-          if (resource?.secure_url) {
-            try {
-              return await downloadFile(resource.secure_url);
-            } catch (e) {
-              errors.push(`Upload type URL failed: ${e.message}`);
-            }
-          }
-        } catch (e) {
-          errors.push(`Upload type lookup: ${e.message}`);
-        }
-
-        // Method 3: Generate signed URL with type: private
-        try {
-          const signedUrl = cloudinary.url(entry.cloudinaryId, {
-            resource_type: 'raw', type: 'private', secure: true, sign_url: true
-          });
-          return await downloadFile(signedUrl);
-        } catch (e) {
-          errors.push(`Signed private URL: ${e.message}`);
-        }
-
-        // Method 4: Generate signed URL with type: authenticated
-        try {
-          const authUrl = cloudinary.url(entry.cloudinaryId, {
-            resource_type: 'raw', type: 'authenticated', secure: true, sign_url: true
-          });
-          return await downloadFile(authUrl);
-        } catch (e) {
-          errors.push(`Signed auth URL: ${e.message}`);
         }
       }
-
-      // Method 5: Try the original stored URL
-      try {
-        return await downloadFile(entry.url);
-      } catch (e) {
-        errors.push(`Stored URL: ${e.message}`);
-      }
-
-      // All methods failed
-      throw new Error(errors[0] || 'All download methods failed');
+      // Last resort: stored URL
+      return await downloadFile(entry.url);
     };
 
     // Collect all file URLs from document/file tables (these are all PDFs, drawings, specs — not images)

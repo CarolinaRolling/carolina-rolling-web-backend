@@ -1187,6 +1187,107 @@ router.delete('/:id/invoice', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// POST /api/workorders/:id/email-invoice - Email invoice to client's AP email
+router.post('/:id/email-invoice', async (req, res, next) => {
+  try {
+    const workOrder = await WorkOrder.findByPk(req.params.id, {
+      include: [{ model: WorkOrderPart, as: 'parts' }]
+    });
+    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+    if (!workOrder.invoiceNumber) return res.status(400).json({ error: { message: 'No invoice recorded for this work order' } });
+
+    // Find client AP email
+    const client = workOrder.clientId ? await Client.findByPk(workOrder.clientId) : null;
+    const recipientEmail = req.body.email || client?.apEmail || client?.contactEmail;
+    if (!recipientEmail) {
+      return res.status(400).json({ error: { message: 'No email address found. Set the client\'s AP Email in Clients & Vendors, or provide an email.' } });
+    }
+
+    const drLabel = workOrder.drNumber ? 'DR-' + workOrder.drNumber : (workOrder.orderNumber || 'N/A');
+    const shopName = 'Carolina Rolling Co. Inc.';
+    const invoiceDate = workOrder.invoiceDate ? new Date(workOrder.invoiceDate).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : 'N/A';
+    
+    // Calculate total
+    const partsTotal = (workOrder.parts || []).reduce((sum, p) => sum + (parseFloat(p.partTotal) || 0), 0);
+    const trucking = parseFloat(workOrder.truckingCost) || 0;
+    const subtotal = partsTotal + trucking;
+    const taxAmt = parseFloat(workOrder.taxAmount) || 0;
+    const total = subtotal + taxAmt;
+
+    const html = `
+      <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
+        <h2 style="color:#1565C0;border-bottom:2px solid #1565C0;padding-bottom:8px">Invoice ${workOrder.invoiceNumber}</h2>
+        <table style="width:100%;border-collapse:collapse;margin:16px 0">
+          <tr><td style="padding:8px;font-weight:bold;color:#555;width:140px">From:</td><td style="padding:8px">${shopName}</td></tr>
+          <tr><td style="padding:8px;font-weight:bold;color:#555">Invoice #:</td><td style="padding:8px;font-weight:bold;font-size:1.1em">${workOrder.invoiceNumber}</td></tr>
+          <tr><td style="padding:8px;font-weight:bold;color:#555">Date:</td><td style="padding:8px">${invoiceDate}</td></tr>
+          <tr><td style="padding:8px;font-weight:bold;color:#555">Work Order:</td><td style="padding:8px">${drLabel}</td></tr>
+          <tr><td style="padding:8px;font-weight:bold;color:#555">Amount:</td><td style="padding:8px;font-weight:bold;font-size:1.1em;color:#1565C0">$${total.toFixed(2)}</td></tr>
+          ${workOrder.paymentTerms ? `<tr><td style="padding:8px;font-weight:bold;color:#555">Terms:</td><td style="padding:8px">${workOrder.paymentTerms}</td></tr>` : ''}
+        </table>
+        ${workOrder.invoicePdfUrl ? '<p style="color:#666">Invoice PDF is attached.</p>' : '<p style="color:#999">No PDF attached. Please contact us if you need a copy.</p>'}
+        <p style="color:#888;font-size:0.85em;margin-top:24px">This invoice was sent from ${shopName}. If you have questions, please reply to this email.</p>
+      </div>
+    `;
+
+    const nodemailer = require('nodemailer');
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: parseInt(process.env.SMTP_PORT) || 587,
+      secure: process.env.SMTP_SECURE === 'true',
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+    });
+
+    const mailOptions = {
+      from: process.env.SMTP_FROM || process.env.SMTP_USER,
+      to: recipientEmail,
+      subject: `Invoice ${workOrder.invoiceNumber} — ${drLabel} — ${shopName}`,
+      html,
+      attachments: []
+    };
+
+    // Attach PDF if available
+    if (workOrder.invoicePdfUrl) {
+      try {
+        const pdfUrl = workOrder.invoicePdfUrl;
+        const isHttps = pdfUrl.startsWith('https');
+        const httpMod = isHttps ? require('https') : require('http');
+        const pdfBuffer = await new Promise((resolve, reject) => {
+          const fetchUrl = (url, redirects = 0) => {
+            if (redirects > 5) { reject(new Error('Too many redirects')); return; }
+            httpMod.get(url, (resp) => {
+              if ([301, 302, 307].includes(resp.statusCode) && resp.headers.location) {
+                resp.resume();
+                fetchUrl(resp.headers.location, redirects + 1);
+                return;
+              }
+              const chunks = [];
+              resp.on('data', c => chunks.push(c));
+              resp.on('end', () => resolve(Buffer.concat(chunks)));
+              resp.on('error', reject);
+            }).on('error', reject);
+          };
+          fetchUrl(pdfUrl);
+        });
+        mailOptions.attachments.push({
+          filename: `Invoice-${workOrder.invoiceNumber}.pdf`,
+          content: pdfBuffer,
+          contentType: 'application/pdf'
+        });
+      } catch (e) {
+        console.warn('[email-invoice] Could not attach PDF:', e.message);
+      }
+    }
+
+    await transporter.sendMail(mailOptions);
+    console.log(`[email-invoice] Invoice ${workOrder.invoiceNumber} sent to ${recipientEmail}`);
+    res.json({ data: { sentTo: recipientEmail }, message: `Invoice emailed to ${recipientEmail}` });
+  } catch (error) {
+    console.error('[email-invoice] Failed:', error.message);
+    next(error);
+  }
+});
+
 // POST /api/workorders/:id/mark-complete - Shop floor marks order complete
 router.post('/:id/mark-complete', async (req, res, next) => {
   try {

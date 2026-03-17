@@ -4,9 +4,11 @@ const { WorkOrder, WorkOrderPart, Client } = require('../models');
 const router = express.Router();
 
 const QB_CONFIG = {
-  arAccount: 'Accounts Receivable',
-  incomeAccount: 'Rolling Services',
-  taxAccount: 'Sales Tax Payable',
+  arAccount: 'ACCOUNTS RECEIVABLE',
+  taxableIncomeAccount: 'SALES - TAXABLE',
+  nontaxableIncomeAccount: 'SALES-NONTAXABLE',
+  freightAccount: 'FREIGHT',
+  taxAccount: 'SALES TAX PAYABLE',
   defaultTerms: 'COD'
 };
 
@@ -154,7 +156,8 @@ function buildInvoiceIIF(wo, parts) {
     lineItems.push({
       description: clean(wo.truckingDescription || 'Trucking / Delivery'),
       amount: trucking,
-      taxable: 'N' // Trucking typically not taxed
+      taxable: 'N',
+      isFreight: true
     });
     subtotal += trucking;
   }
@@ -172,14 +175,17 @@ function buildInvoiceIIF(wo, parts) {
   // TRNS: debit AR
   lines.push([
     'TRNS', '', 'INVOICE', invoiceDate, QB_CONFIG.arAccount, clientName,
-    grandTotal.toFixed(2), drLabel, memo, terms
+    grandTotal.toFixed(2), drLabel, memo, 'N', 'Y'
   ].join('\t'));
   
-  // SPL: credit income per line item
+  // SPL: credit income per line item — route to correct account
   for (const item of lineItems) {
+    const account = item.isFreight ? QB_CONFIG.freightAccount
+      : item.taxable === 'Y' ? QB_CONFIG.taxableIncomeAccount
+      : QB_CONFIG.nontaxableIncomeAccount;
     lines.push([
-      'SPL', '', 'INVOICE', invoiceDate, QB_CONFIG.incomeAccount, clientName,
-      (-item.amount).toFixed(2), drLabel, item.description, '', item.taxable
+      'SPL', '', 'INVOICE', invoiceDate, account, clientName,
+      (-item.amount).toFixed(2), drLabel, item.description, 'N'
     ].join('\t'));
   }
   
@@ -187,7 +193,7 @@ function buildInvoiceIIF(wo, parts) {
   if (taxAmount > 0) {
     lines.push([
       'SPL', '', 'INVOICE', invoiceDate, QB_CONFIG.taxAccount, clientName,
-      (-taxAmount).toFixed(2), drLabel, 'Sales Tax', '', 'N'
+      (-taxAmount).toFixed(2), drLabel, 'Sales Tax', 'N'
     ].join('\t'));
   }
   
@@ -210,8 +216,8 @@ function buildInvoiceIIF(wo, parts) {
 }
 
 const IIF_HEADER = [
-  '!TRNS\tTRNSID\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tDOCNUM\tMEMO\tTERMS',
-  '!SPL\tSPLID\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tDOCNUM\tMEMO\tEXTRA\tTAXABLE',
+  '!TRNS\tTRNSID\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tDOCNUM\tMEMO\tCLEAR\tTOPRINT',
+  '!SPL\tSPLID\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tDOCNUM\tMEMO\tCLEAR',
   '!ENDTRNS'
 ];
 

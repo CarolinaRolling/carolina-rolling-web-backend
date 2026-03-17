@@ -1836,6 +1836,10 @@ const Client = sequelize.define('Client', {
     type: DataTypes.STRING,
     allowNull: true,
     defaultValue: null
+  },
+  apEmail: {
+    type: DataTypes.STRING,
+    allowNull: true
   }
 }, {
   tableName: 'clients',

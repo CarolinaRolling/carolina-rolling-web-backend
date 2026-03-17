@@ -209,6 +209,8 @@ async function startServer() {
   // Start listening IMMEDIATELY so Heroku doesn't kill us during DB sync
   const server = app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+    const { getProvider } = require('./utils/storage');
+    console.log(`File storage: ${getProvider() === 's3' ? 'Amazon S3 (' + process.env.AWS_S3_BUCKET + ')' : 'Cloudinary (legacy)'}`);
   });
 
   // Prevent Heroku H13 (Connection closed without response) and H18 (Server Request Interrupted)
@@ -812,12 +814,13 @@ async function startServer() {
     });
     console.log('Annual CDTFA permit verification configured for January 2nd at 3:00 AM Pacific');
 
-    // Auto-backup to Cloudinary every Friday at midnight Pacific (with PDFs & CAD files)
+    // Auto-backup to Cloudinary every Friday at midnight Pacific
+    // NOTE: Files NOT included — they're already on Cloudinary. Use manual download for full file backup.
     const { runAutoBackup } = require('./routes/backup');
     cron.schedule('0 0 * * 5', async () => {
-      console.log('[CRON] Running scheduled Friday auto-backup (with files)...');
+      console.log('[CRON] Running scheduled Friday auto-backup (database only)...');
       try {
-        const result = await runAutoBackup(true);
+        const result = await runAutoBackup(false);
         if (result.success) {
           console.log(`[CRON] Auto-backup successful: ${(result.size / 1024).toFixed(0)}KB`);
         } else {
@@ -829,7 +832,7 @@ async function startServer() {
     }, {
       timezone: 'America/Los_Angeles'
     });
-    console.log('Auto-backup configured for every Friday at midnight Pacific (includes files)');
+    console.log('Auto-backup configured for every Friday at midnight Pacific (database only — files already on Cloudinary)');
 
     // Auto-archive old estimates daily at 1:00 AM Pacific
     cron.schedule('0 1 * * *', async () => {

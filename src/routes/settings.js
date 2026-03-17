@@ -1,6 +1,7 @@
 const express = require('express');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
+const storage = require('../utils/storage');
 const { AppSettings } = require('../models');
 
 const router = express.Router();
@@ -808,19 +809,15 @@ router.post('/warehouse-map', upload.single('image'), async (req, res, next) => 
       return res.status(400).json({ error: { message: 'Image file is required' } });
     }
 
-    // Upload to Cloudinary
-    const result = await new Promise((resolve, reject) => {
-      const stream = cloudinary.uploader.upload_stream(
-        { folder: 'warehouse-maps', resource_type: 'image', public_id: 'warehouse_map', overwrite: true },
-        (error, result) => {
-          if (error) reject(error);
-          else resolve(result);
-        }
-      );
-      stream.end(req.file.buffer);
+    // Upload image
+    const result = await storage.uploadBuffer(req.file.buffer, {
+      folder: 'warehouse-maps',
+      filename: 'warehouse_map.png',
+      mimeType: req.file.mimetype,
+      resourceType: 'image'
     });
 
-    const imageUrl = result.secure_url;
+    const imageUrl = result.url;
 
     // Save URL to settings
     const [setting, created] = await AppSettings.findOrCreate({

@@ -6,6 +6,7 @@ const https = require('https');
 const http = require('http');
 const { v4: uuidv4 } = require('uuid');
 const cloudinary = require('cloudinary').v2;
+const fileStorage = require('../utils/storage');
 const { Op } = require('sequelize');
 const { PDFDocument: PDFLibDocument } = require('pdf-lib');
 const { WorkOrder, WorkOrderPart, WorkOrderPartFile, WorkOrderDocument, DailyActivity, DRNumber, InboundOrder, PONumber, AppSettings, Estimate, Vendor, Client, Shipment, ShipmentPhoto, sequelize } = require('../models');
@@ -1425,7 +1426,7 @@ router.delete('/:id', async (req, res, next) => {
       for (const file of part.files || []) {
         if (file.cloudinaryId) {
           try {
-            await cloudinary.uploader.destroy(file.cloudinaryId, { resource_type: 'raw' });
+            await fileStorage.deleteFile(file.cloudinaryId);
           } catch (e) {
             console.error('Failed to delete from Cloudinary:', e);
           }
@@ -1437,7 +1438,7 @@ router.delete('/:id', async (req, res, next) => {
     for (const doc of workOrder.documents || []) {
       if (doc.cloudinaryId) {
         try {
-          await cloudinary.uploader.destroy(doc.cloudinaryId, { resource_type: 'raw' });
+          await fileStorage.deleteFile(doc.cloudinaryId);
         } catch (e) {
           console.error('Failed to delete document from Cloudinary:', e);
         }
@@ -1880,7 +1881,7 @@ router.delete('/:id/parts/:partId', async (req, res, next) => {
     for (const file of part.files) {
       if (file.cloudinaryId) {
         try {
-          await cloudinary.uploader.destroy(file.cloudinaryId, { resource_type: 'raw' });
+          await fileStorage.deleteFile(file.cloudinaryId);
         } catch (e) {
           console.error('Failed to delete from Cloudinary:', e);
         }
@@ -1943,13 +1944,11 @@ router.post('/:id/parts/:partId/files', upload.array('files', 10), async (req, r
         else if (['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(ext)) fileType = 'drawing';
         else if (ext === '.doc' || ext === '.docx') fileType = 'specification';
 
-        // Upload to Cloudinary
-        const cloudinaryResult = await cloudinary.uploader.upload(file.path, {
+        // Upload file
+        const uploadResult = await fileStorage.uploadFile(file.path, {
           folder: `work-orders/${req.params.id}/parts/${req.params.partId}`,
-          resource_type: 'raw',
-          type: 'private',
-          use_filename: true,
-          unique_filename: true
+          originalName: file.originalname,
+          mimeType: file.mimetype
         });
 
         // Create database record
@@ -1960,8 +1959,8 @@ router.post('/:id/parts/:partId/files', upload.array('files', 10), async (req, r
           originalName: file.originalname,
           mimeType: file.mimetype,
           size: file.size,
-          url: cloudinaryResult.secure_url,
-          cloudinaryId: cloudinaryResult.public_id
+          url: uploadResult.url,
+          cloudinaryId: uploadResult.storageId
         });
 
         cleanupTempFile(file.path);
@@ -2190,7 +2189,7 @@ router.delete('/:id/parts/:partId/files/:fileId', async (req, res, next) => {
     // Delete from Cloudinary
     if (file.cloudinaryId) {
       try {
-        await cloudinary.uploader.destroy(file.cloudinaryId, { resource_type: 'raw' });
+        await fileStorage.deleteFile(file.cloudinaryId);
       } catch (e) {
         console.error('Failed to delete from Cloudinary:', e);
       }
@@ -2545,10 +2544,10 @@ router.post('/:id/documents', documentUpload.array('documents', 10), async (req,
     for (const file of req.files) {
       try {
         // Upload to Cloudinary (same as part files: raw + private with signed URLs)
-        const result = await cloudinary.uploader.upload(file.path, {
+        const result = await fileStorage.uploadFile(file.path, {
           folder: `work-orders/${workOrder.id}/documents`,
-          resource_type: 'raw',
-          type: 'private'
+          originalName: file.originalname,
+          mimeType: file.mimetype
         });
 
         // Create document record
@@ -2557,8 +2556,8 @@ router.post('/:id/documents', documentUpload.array('documents', 10), async (req,
           originalName: file.originalname,
           mimeType: file.mimetype,
           size: file.size,
-          url: result.secure_url,
-          cloudinaryId: result.public_id,
+          url: result.url,
+          cloudinaryId: result.storageId,
           documentType: req.body.documentType || null
         });
 
@@ -2725,7 +2724,7 @@ router.get('/:id/documents/:documentId/download', async (req, res, next) => {
                   streamDoc(upstream);
                   // Delete old authenticated version in background
                   setImmediate(async () => {
-                    try { await cloudinary.uploader.destroy(pid, { resource_type: resType, type: 'authenticated' }); } catch (e) {}
+                    try { await fileStorage.deleteFile(pid); } catch (e) {}
                   });
                   return;
                 }
@@ -2770,13 +2769,12 @@ router.get('/:id/documents/:documentId/download', async (req, res, next) => {
           // Re-upload to Cloudinary in the background so next time it works from cache
           setImmediate(async () => {
             try {
-              const uploadResult = await new Promise((resolve, reject) => {
-                cloudinary.uploader.upload_stream(
-                  { folder: 'purchase-orders', resource_type: 'raw', public_id: `${poNumber}-${workOrder.drNumber}`, format: 'pdf', overwrite: true },
-                  (error, result) => { if (error) reject(error); else resolve(result); }
-                ).end(pdfBuffer);
+              const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, {
+                folder: 'purchase-orders',
+                filename: `${poNumber}-${workOrder.drNumber}.pdf`,
+                mimeType: 'application/pdf'
               });
-              await document.update({ url: uploadResult.secure_url, cloudinaryId: uploadResult.public_id, size: pdfBuffer.length });
+              await document.update({ url: uploadResult.url, cloudinaryId: uploadResult.storageId, size: pdfBuffer.length });
               console.log(`[doc-proxy] Background re-upload success: ${uploadResult.secure_url}`);
             } catch (uploadErr) {
               console.error(`[doc-proxy] Background re-upload failed:`, uploadErr.message);
@@ -2816,7 +2814,7 @@ router.delete('/:id/documents/:documentId', async (req, res, next) => {
     // Delete from Cloudinary
     if (document.cloudinaryId) {
       try {
-        await cloudinary.uploader.destroy(document.cloudinaryId, { resource_type: 'raw' });
+        await fileStorage.deleteFile(document.cloudinaryId);
       } catch (e) {
         console.error('Failed to delete from Cloudinary:', e);
       }
@@ -2876,42 +2874,31 @@ router.post('/:id/documents/:documentId/regenerate', async (req, res, next) => {
     // Delete old Cloudinary file
     if (doc.cloudinaryId) {
       try {
-        await cloudinary.uploader.destroy(doc.cloudinaryId, { resource_type: 'raw' });
+        await fileStorage.deleteFile(doc.cloudinaryId);
       } catch (e) {
         console.error('[regenerate-po] Failed to delete old file:', e.message);
       }
     }
 
-    // Upload new PDF — use public_id without format to avoid .pdf.pdf
-    const uploadResult = await new Promise((resolve, reject) => {
-      cloudinary.uploader.upload_stream(
-        {
-          folder: 'purchase-orders',
-          resource_type: 'raw',
-          public_id: `${poNumber}-${workOrder.drNumber}`,
-          format: 'pdf',
-          overwrite: true,
-          invalidate: true
-        },
-        (error, result) => {
-          if (error) reject(error);
-          else resolve(result);
-        }
-      ).end(pdfBuffer);
+    // Upload new PDF
+    const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, {
+      folder: 'purchase-orders',
+      filename: `${poNumber}-${workOrder.drNumber}.pdf`,
+      mimeType: 'application/pdf'
     });
 
     // Update document record
     await doc.update({
-      url: uploadResult.secure_url,
-      cloudinaryId: uploadResult.public_id,
+      url: uploadResult.url,
+      cloudinaryId: uploadResult.storageId,
       size: pdfBuffer.length
     });
 
-    console.log(`[regenerate-po] Success — new URL: ${uploadResult.secure_url}`);
+    console.log(`[regenerate-po] Success — new URL: ${uploadResult.url}`);
 
     res.json({ 
       message: 'Purchase order PDF regenerated successfully',
-      data: { url: uploadResult.secure_url, cloudinaryId: uploadResult.public_id }
+      data: { url: uploadResult.url, cloudinaryId: uploadResult.storageId }
     });
   } catch (error) {
     console.error('[regenerate-po] Error:', error);
@@ -2953,22 +2940,11 @@ router.post('/:id/create-po-pdf', async (req, res, next) => {
 
     const pdfBuffer = await generatePurchaseOrderPDF(poNumber, supplier, poParts, workOrder);
 
-    // Upload to Cloudinary
-    const uploadResult = await new Promise((resolve, reject) => {
-      cloudinary.uploader.upload_stream(
-        {
-          folder: 'purchase-orders',
-          resource_type: 'raw',
-          public_id: `${poNumber}-${workOrder.drNumber}`,
-          format: 'pdf',
-          overwrite: true,
-          invalidate: true
-        },
-        (error, result) => {
-          if (error) reject(error);
-          else resolve(result);
-        }
-      ).end(pdfBuffer);
+    // Upload PDF
+    const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, {
+      folder: 'purchase-orders',
+      filename: `${poNumber}-${workOrder.drNumber}.pdf`,
+      mimeType: 'application/pdf'
     });
 
     // Create new document record
@@ -2977,8 +2953,8 @@ router.post('/:id/create-po-pdf', async (req, res, next) => {
       originalName: `${poNumber} - ${supplier}.pdf`,
       mimeType: 'application/pdf',
       size: pdfBuffer.length,
-      url: uploadResult.secure_url,
-      cloudinaryId: uploadResult.public_id,
+      url: uploadResult.url,
+      cloudinaryId: uploadResult.storageId,
       documentType: 'purchase_order'
     });
 
@@ -2986,7 +2962,7 @@ router.post('/:id/create-po-pdf', async (req, res, next) => {
 
     res.status(201).json({ 
       message: `Purchase order PDF created for ${poNumber}`,
-      data: { url: uploadResult.secure_url }
+      data: { url: uploadResult.url }
     });
   } catch (error) {
     console.error('[create-po-pdf] Error:', error);
@@ -3355,20 +3331,11 @@ router.post('/:id/order-material', async (req, res, next) => {
       try {
         const pdfBuffer = await generatePurchaseOrderPDF(poNumberFormatted, supplier, parts, workOrder);
         
-        // Upload to Cloudinary
-        const uploadResult = await new Promise((resolve, reject) => {
-          cloudinary.uploader.upload_stream(
-            {
-              folder: 'purchase-orders',
-              resource_type: 'raw',
-              public_id: `${poNumberFormatted}-${workOrder.drNumber}`,
-              format: 'pdf'
-            },
-            (error, result) => {
-              if (error) reject(error);
-              else resolve(result);
-            }
-          ).end(pdfBuffer);
+        // Upload PDF
+        const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, {
+          folder: 'purchase-orders',
+          filename: `${poNumberFormatted}-${workOrder.drNumber}.pdf`,
+          mimeType: 'application/pdf'
         });
 
         // Save document record linked to work order
@@ -3377,8 +3344,8 @@ router.post('/:id/order-material', async (req, res, next) => {
           originalName: `${poNumberFormatted} - ${supplier}.pdf`,
           mimeType: 'application/pdf',
           size: pdfBuffer.length,
-          url: uploadResult.secure_url,
-          cloudinaryId: uploadResult.public_id,
+          url: uploadResult.url,
+          cloudinaryId: uploadResult.storageId,
           documentType: 'purchase_order'
         }, { transaction });
 

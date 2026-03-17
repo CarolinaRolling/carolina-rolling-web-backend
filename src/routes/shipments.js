@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const cloudinary = require('cloudinary').v2;
+const fileStorage = require('../utils/storage');
 const nodemailer = require('nodemailer');
 const { Shipment, ShipmentPhoto, ShipmentDocument, AppSettings } = require('../models');
 
@@ -83,20 +84,18 @@ function transformShipment(shipment) {
   return data;
 }
 
-// Upload file to Cloudinary
+// Upload file to storage
 async function uploadToCloudinary(filePath, shipmentId) {
   try {
-    const result = await cloudinary.uploader.upload(filePath, {
+    const result = await fileStorage.uploadFile(filePath, {
       folder: `shipment-tracker/${shipmentId}`,
-      resource_type: 'image',
-      transformation: [
-        { quality: 'auto:good' },
-        { fetch_format: 'auto' }
-      ]
+      originalName: path.basename(filePath),
+      mimeType: 'image/jpeg',
+      resourceType: 'image'
     });
-    return result;
+    return { secure_url: result.url, public_id: result.storageId };
   } catch (error) {
-    console.error('Cloudinary upload error:', error);
+    console.error('Upload error:', error);
     throw error;
   }
 }
@@ -104,7 +103,7 @@ async function uploadToCloudinary(filePath, shipmentId) {
 // Delete file from Cloudinary
 async function deleteFromCloudinary(publicId) {
   try {
-    await cloudinary.uploader.destroy(publicId);
+    await fileStorage.deleteFile(publicId);
   } catch (error) {
     console.error('Cloudinary delete error:', error);
     // Don't throw - just log the error
@@ -969,29 +968,21 @@ router.post('/:id/documents', pdfUpload.array('documents', 10), async (req, res,
       req.files.map(async (file) => {
         // Upload to Cloudinary as private file
         // 'private' type allows access via signed URLs generated with private_download_url
-        const cloudinaryResult = await cloudinary.uploader.upload(file.path, {
+        const uploadResult = await fileStorage.uploadFile(file.path, {
           folder: `shipment-tracker/${shipment.id}/documents`,
-          resource_type: 'raw',
-          type: 'private',  // Private - requires signed URL via private_download_url
-          use_filename: true,
-          unique_filename: true
+          originalName: file.originalname,
+          mimeType: file.mimetype
         });
         
-        console.log('Cloudinary private upload result:', {
-          public_id: cloudinaryResult.public_id,
-          secure_url: cloudinaryResult.secure_url,
-          type: cloudinaryResult.type
-        });
-        
-        // Create database record - store the public_id, we'll generate signed URLs on demand
+        // Create database record
         const doc = await ShipmentDocument.create({
           shipmentId: shipment.id,
           filename: file.filename,
           originalName: file.originalname,
           mimeType: file.mimetype,
           size: file.size,
-          url: cloudinaryResult.secure_url,  // Base URL (won't work without signature)
-          cloudinaryId: cloudinaryResult.public_id
+          url: uploadResult.url,
+          cloudinaryId: uploadResult.storageId
         });
         
         cleanupTempFile(file.path);
@@ -1154,7 +1145,7 @@ router.delete('/:id/documents/:documentId', async (req, res, next) => {
     // Delete from Cloudinary if stored there
     if (doc.cloudinaryId) {
       try {
-        await cloudinary.uploader.destroy(doc.cloudinaryId, { resource_type: 'raw' });
+        await fileStorage.deleteFile(doc.cloudinaryId);
       } catch (e) {
         console.error('Failed to delete from Cloudinary:', e);
       }

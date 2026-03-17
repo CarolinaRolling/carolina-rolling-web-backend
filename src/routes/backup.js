@@ -302,25 +302,26 @@ async function uploadBackupToCloudinary(backup) {
   };
 }
 
-// ============= AUTO BACKUP (called by cron) =============
+// ============= AUTO BACKUP (called by cron or run-now) =============
 async function runAutoBackup(includeFiles = false) {
   const startTime = Date.now();
-  console.log(`[auto-backup] Starting scheduled backup${includeFiles ? ' (with files)' : ''}...`);
+  console.log(`[auto-backup] Starting backup${includeFiles ? ' (with files — local only, not uploaded to Cloudinary)' : ''}...`);
   
   try {
-    const backup = await buildBackup(includeFiles);
-    const uploadResult = await uploadBackupToCloudinary(backup);
+    // Always build database-only for Cloudinary upload
+    const dbBackup = await buildBackup(false);
+    const uploadResult = await uploadBackupToCloudinary(dbBackup);
     
     const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`[auto-backup] Complete in ${duration}s - ${(uploadResult.size / 1024).toFixed(0)}KB compressed`);
-    console.log(`[auto-backup] Counts:`, JSON.stringify(backup.counts));
+    console.log(`[auto-backup] Database backup uploaded: ${(uploadResult.size / 1024).toFixed(0)}KB compressed in ${duration}s`);
+    console.log(`[auto-backup] Counts:`, JSON.stringify(dbBackup.counts));
 
     // Save last backup info to settings
     await AppSettings.upsert({
       key: 'last_auto_backup',
       value: JSON.stringify({
         ...uploadResult,
-        counts: backup.counts,
+        counts: dbBackup.counts,
         duration: `${duration}s`
       })
     });
@@ -344,7 +345,7 @@ async function runAutoBackup(includeFiles = false) {
       console.error('[auto-backup] Cleanup error (non-fatal):', cleanErr.message);
     }
 
-    return { success: true, ...uploadResult, counts: backup.counts, duration };
+    return { success: true, ...uploadResult, counts: dbBackup.counts, duration };
   } catch (error) {
     console.error('[auto-backup] FAILED:', error.message);
     return { success: false, error: error.message };
@@ -399,11 +400,14 @@ router.get('/info', async (req, res, next) => {
       }));
     } catch (e) { /* cloudinary may not be configured */ }
 
+    const { getProvider } = require('../utils/storage');
+    
     res.json({
       data: {
         counts: { clients: clientCount, vendors: vendorCount, drNumbers: drCount, poNumbers: poCount,
           shipments: shipmentCount, inboundOrders: inboundCount, workOrders: workOrderCount,
           estimates: estimateCount, settings: settingsCount, users: userCount },
+        storageProvider: getProvider(),
         lastAutoBackup,
         cloudBackups
       }

@@ -11,12 +11,13 @@
     "seed": "node src/seed.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1010.0",
     "@sparticuz/chromium": "^131.0.0",
     "bcryptjs": "^2.4.3",
     "cloudinary": "^1.41.0",
+    "compression": "^1.7.4",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
-    "compression": "^1.7.4",
     "express": "^4.18.2",
     "jsonwebtoken": "^9.0.2",
     "multer": "^1.4.5-lts.1",

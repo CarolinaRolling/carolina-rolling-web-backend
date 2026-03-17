@@ -6,6 +6,7 @@ const https = require('https');
 const http = require('http');
 const { v4: uuidv4 } = require('uuid');
 const cloudinary = require('cloudinary').v2;
+const fileStorage = require('../utils/storage');
 const { Op } = require('sequelize');
 const { Estimate, EstimatePart, EstimatePartFile, EstimateFile, WorkOrder, WorkOrderPart, WorkOrderPartFile, InboundOrder, AppSettings, DRNumber, PONumber, DailyActivity, Client, sequelize } = require('../models');
 
@@ -837,7 +838,7 @@ router.delete('/:id', async (req, res, next) => {
     for (const file of estimate.files || []) {
       if (file.cloudinaryId) {
         try {
-          await cloudinary.uploader.destroy(file.cloudinaryId, { resource_type: 'raw' });
+          await fileStorage.deleteFile(file.cloudinaryId);
         } catch (e) {
           console.error('Failed to delete from Cloudinary:', e);
         }
@@ -1035,13 +1036,11 @@ router.post('/:id/parts/:partId/files', upload.array('files', 10), async (req, r
       else if (ext === '.stp' || ext === '.step') detectedType = 'step_file';
       else if (ext === '.dxf') detectedType = 'drawing';
 
-      // Upload to Cloudinary - use private type like work orders
-      const result = await cloudinary.uploader.upload(file.path, {
+      // Upload file
+      const result = await fileStorage.uploadFile(file.path, {
         folder: `estimates/${req.params.id}/parts/${req.params.partId}`,
-        resource_type: 'raw',
-        type: 'private',
-        use_filename: true,
-        unique_filename: true
+        originalName: file.originalname,
+        mimeType: file.mimetype
       });
 
       // Clean up local file
@@ -1054,8 +1053,8 @@ router.post('/:id/parts/:partId/files', upload.array('files', 10), async (req, r
         originalName: file.originalname,
         mimeType: file.mimetype,
         size: file.size,
-        url: result.secure_url,
-        cloudinaryId: result.public_id,
+        url: result.url,
+        cloudinaryId: result.storageId,
         fileType: detectedType
       });
 
@@ -1258,11 +1257,11 @@ router.delete('/:id/parts/:partId/files/:fileId', async (req, res, next) => {
     // Delete from Cloudinary
     if (file.cloudinaryId) {
       try {
-        await cloudinary.uploader.destroy(file.cloudinaryId, { resource_type: 'raw' });
+        await fileStorage.deleteFile(file.cloudinaryId);
       } catch (err) {
         // Try image type for old files uploaded with resource_type: 'auto'
         try {
-          await cloudinary.uploader.destroy(file.cloudinaryId, { resource_type: 'image' });
+          await fileStorage.deleteFile(file.cloudinaryId);
         } catch (err2) {
           console.error('Failed to delete from Cloudinary:', err2);
         }
@@ -1450,12 +1449,10 @@ router.post('/:id/files', upload.array('files', 10), async (req, res, next) => {
 
     const files = await Promise.all(
       req.files.map(async (file) => {
-        const cloudinaryResult = await cloudinary.uploader.upload(file.path, {
+        const uploadResult = await fileStorage.uploadFile(file.path, {
           folder: `estimates/${estimate.id}`,
-          resource_type: 'raw',
-          type: 'private',
-          use_filename: true,
-          unique_filename: true
+          originalName: file.originalname,
+          mimeType: file.mimetype
         });
 
         const estimateFile = await EstimateFile.create({
@@ -1464,8 +1461,8 @@ router.post('/:id/files', upload.array('files', 10), async (req, res, next) => {
           originalName: file.originalname,
           mimeType: file.mimetype,
           size: file.size,
-          url: cloudinaryResult.secure_url,
-          cloudinaryId: cloudinaryResult.public_id
+          url: uploadResult.url,
+          cloudinaryId: uploadResult.storageId
         });
 
         cleanupTempFile(file.path);
@@ -1607,7 +1604,7 @@ router.delete('/:id/files/:fileId', async (req, res, next) => {
 
     if (file.cloudinaryId) {
       try {
-        await cloudinary.uploader.destroy(file.cloudinaryId, { resource_type: 'raw' });
+        await fileStorage.deleteFile(file.cloudinaryId);
       } catch (e) {
         console.error('Failed to delete from Cloudinary:', e);
       }

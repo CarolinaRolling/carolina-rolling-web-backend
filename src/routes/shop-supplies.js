@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
+const storage = require('../utils/storage');
 const { ShopSupply, ShopSupplyLog } = require('../models');
 const { Op } = require('sequelize');
 
@@ -231,7 +232,7 @@ router.delete('/:id', async (req, res, next) => {
     }
     // Delete image from Cloudinary if exists
     if (supply.imageCloudinaryId) {
-      try { await cloudinary.uploader.destroy(supply.imageCloudinaryId); } catch (e) { console.error('Cloudinary delete:', e.message); }
+      try { await storage.deleteFile(supply.imageCloudinaryId); } catch (e) { console.error('Cloudinary delete:', e.message); }
     }
     await ShopSupplyLog.destroy({ where: { shopSupplyId: supply.id } });
     await supply.destroy();
@@ -254,18 +255,18 @@ router.post('/:id/image', upload.single('image'), async (req, res, next) => {
     
     // Delete old image if exists
     if (supply.imageCloudinaryId) {
-      try { await cloudinary.uploader.destroy(supply.imageCloudinaryId); } catch (e) {}
+      try { await storage.deleteFile(supply.imageCloudinaryId); } catch (e) {}
     }
     
-    // Upload to Cloudinary
-    const result = await new Promise((resolve, reject) => {
-      cloudinary.uploader.upload_stream(
-        { folder: 'shop-supplies', public_id: `supply-${supply.id}`, overwrite: true },
-        (error, result) => { if (error) reject(error); else resolve(result); }
-      ).end(req.file.buffer);
+    // Upload image
+    const result = await storage.uploadBuffer(req.file.buffer, {
+      folder: 'shop-supplies',
+      filename: `supply-${supply.id}.${req.file.originalname.split('.').pop() || 'jpg'}`,
+      mimeType: req.file.mimetype,
+      resourceType: 'image'
     });
     
-    await supply.update({ imageUrl: result.secure_url, imageCloudinaryId: result.public_id });
+    await supply.update({ imageUrl: result.url, imageCloudinaryId: result.storageId });
     
     res.json({ data: supply, message: 'Image uploaded' });
   } catch (error) {
@@ -281,7 +282,7 @@ router.delete('/:id/image', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Item not found' } });
     }
     if (supply.imageCloudinaryId) {
-      try { await cloudinary.uploader.destroy(supply.imageCloudinaryId); } catch (e) {}
+      try { await storage.deleteFile(supply.imageCloudinaryId); } catch (e) {}
     }
     await supply.update({ imageUrl: null, imageCloudinaryId: null });
     res.json({ data: supply, message: 'Image removed' });

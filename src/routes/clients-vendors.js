@@ -138,6 +138,8 @@ router.post('/clients', async (req, res, next) => {
       notes: notes || null,
       noTag: noTag || false,
       paymentTerms: paymentTerms || null,
+      apEmail: req.body.apEmail || null,
+      quickbooksName: req.body.quickbooksName || null,
       contacts: req.body.contacts || []
     });
     
@@ -200,7 +202,8 @@ router.put('/clients/:id', async (req, res, next) => {
       isActive: isActive !== undefined ? isActive : client.isActive,
       noTag: noTag !== undefined ? noTag : client.noTag,
       paymentTerms: paymentTerms !== undefined ? (paymentTerms || null) : client.paymentTerms,
-      contacts: req.body.contacts !== undefined ? req.body.contacts : client.contacts
+      contacts: req.body.contacts !== undefined ? req.body.contacts : client.contacts,
+      quickbooksName: req.body.quickbooksName !== undefined ? (req.body.quickbooksName || null) : client.quickbooksName
     });
     
     // Propagate name change to all work orders and estimates

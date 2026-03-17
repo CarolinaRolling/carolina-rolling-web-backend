@@ -1840,6 +1840,10 @@ const Client = sequelize.define('Client', {
   apEmail: {
     type: DataTypes.STRING,
     allowNull: true
+  },
+  quickbooksName: {
+    type: DataTypes.STRING,
+    allowNull: true
   }
 }, {
   tableName: 'clients',

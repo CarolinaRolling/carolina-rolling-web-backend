@@ -42,7 +42,8 @@ function buildInvoiceIIF(wo, parts, client) {
   const SERVICE_TYPES = ['fab_service', 'shop_rate', 'rush_service'];
   
   const drLabel = wo.drNumber ? `DR-${wo.drNumber}` : (wo.orderNumber || 'UNKNOWN');
-  const clientName = clean(wo.clientName || 'Unknown');
+  // Use QuickBooks reference name if set, otherwise fall back to client name
+  const clientName = clean(client?.quickbooksName || wo.clientName || 'Unknown');
   const invoiceDate = formatQBDate(wo.shippedAt || wo.completedAt || wo.createdAt);
   const terms = (client?.paymentTerms || QB_CONFIG.defaultTerms || 'COD').replace(/[\t\r\n"]/g, ' ').trim();
   

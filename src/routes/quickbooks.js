@@ -43,7 +43,8 @@ function buildInvoiceIIF(wo, parts, client) {
   
   const drLabel = wo.drNumber ? `DR-${wo.drNumber}` : (wo.orderNumber || 'UNKNOWN');
   // Use QuickBooks reference name if set, otherwise fall back to client name
-  const clientName = clean(client?.quickbooksName || wo.clientName || 'Unknown');
+  const clientName = clean(client?.quickbooksName || client?.name || wo.clientName || 'Unknown');
+  console.log(`[IIF] Client lookup: qbName="${client?.quickbooksName || '(none)'}", clientName="${client?.name || '(none)'}", woClientName="${wo.clientName}", using="${clientName}"`);
   const invoiceDate = formatQBDate(wo.shippedAt || wo.completedAt || wo.createdAt);
   const terms = (client?.paymentTerms || QB_CONFIG.defaultTerms || 'COD').replace(/[\t\r\n"]/g, ' ').trim();
   
@@ -236,12 +237,19 @@ router.get('/export/:id', async (req, res, next) => {
     const wo = await WorkOrder.findByPk(req.params.id, {
       include: [
         { model: WorkOrderPart, as: 'parts' },
-        { model: Client, as: 'client', attributes: ['id', 'name', 'taxStatus', 'paymentTerms'] }
+        { model: Client, as: 'client', attributes: ['id', 'name', 'taxStatus', 'paymentTerms', 'quickbooksName'] }
       ]
     });
     if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
     
-    const result = buildInvoiceIIF(wo, wo.parts || [], wo.client);
+    // If no client linked by ID, look up by name
+    let client = wo.client;
+    if (!client && wo.clientName) {
+      const { Op } = require('sequelize');
+      client = await Client.findOne({ where: { name: { [Op.iLike]: wo.clientName } }, attributes: ['id', 'name', 'taxStatus', 'paymentTerms', 'quickbooksName'] });
+    }
+    
+    const result = buildInvoiceIIF(wo, wo.parts || [], client);
     if (!result) return res.status(400).json({ error: { message: 'No billable items found' } });
     
     const iifContent = [...IIF_HEADER, ...result.lines].join('\r\n') + '\r\n';
@@ -267,7 +275,7 @@ router.post('/export-batch', async (req, res, next) => {
       where: { id: { [Op.in]: workOrderIds } },
       include: [
         { model: WorkOrderPart, as: 'parts' },
-        { model: Client, as: 'client', attributes: ['id', 'name', 'taxStatus', 'paymentTerms'] }
+        { model: Client, as: 'client', attributes: ['id', 'name', 'taxStatus', 'paymentTerms', 'quickbooksName'] }
       ],
       order: [['drNumber', 'ASC']]
     });
@@ -275,7 +283,11 @@ router.post('/export-batch', async (req, res, next) => {
     const allLines = [];
     const summaries = [];
     for (const wo of workOrders) {
-      const result = buildInvoiceIIF(wo, wo.parts || [], wo.client);
+      let client = wo.client;
+      if (!client && wo.clientName) {
+        client = await Client.findOne({ where: { name: { [Op.iLike]: wo.clientName } }, attributes: ['id', 'name', 'taxStatus', 'paymentTerms', 'quickbooksName'] });
+      }
+      const result = buildInvoiceIIF(wo, wo.parts || [], client);
       if (result) { allLines.push(...result.lines); summaries.push(result.summary); }
     }
     if (allLines.length === 0) return res.status(400).json({ error: { message: 'No billable items found' } });
@@ -297,12 +309,18 @@ router.get('/preview/:id', async (req, res, next) => {
     const wo = await WorkOrder.findByPk(req.params.id, {
       include: [
         { model: WorkOrderPart, as: 'parts' },
-        { model: Client, as: 'client', attributes: ['id', 'name', 'taxStatus', 'paymentTerms'] }
+        { model: Client, as: 'client', attributes: ['id', 'name', 'taxStatus', 'paymentTerms', 'quickbooksName'] }
       ]
     });
     if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
     
-    const result = buildInvoiceIIF(wo, wo.parts || [], wo.client);
+    let client = wo.client;
+    if (!client && wo.clientName) {
+      const { Op } = require('sequelize');
+      client = await Client.findOne({ where: { name: { [Op.iLike]: wo.clientName } }, attributes: ['id', 'name', 'taxStatus', 'paymentTerms', 'quickbooksName'] });
+    }
+    
+    const result = buildInvoiceIIF(wo, wo.parts || [], client);
     if (!result) return res.json({ data: null, message: 'No billable items found' });
     
     res.json({ data: { summary: result.summary, config: QB_CONFIG, rawIIF: result.lines.join('\n') } });

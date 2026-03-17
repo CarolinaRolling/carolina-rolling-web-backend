@@ -917,3 +917,83 @@ router.put('/:key', async (req, res, next) => {
     next(error);
   }
 });
+
+// ==================== SCRAP PICKUP ====================
+
+// GET /api/settings/scrap-config
+router.get('/scrap-config', async (req, res, next) => {
+  try {
+    const setting = await AppSettings.findOne({ where: { key: 'scrap_config' } });
+    res.json({ data: setting?.value || { scrapEmail: '', shopAddress: '', shopName: 'Carolina Rolling Co. Inc.' } });
+  } catch (error) { next(error); }
+});
+
+// PUT /api/settings/scrap-config
+router.put('/scrap-config', async (req, res, next) => {
+  try {
+    const { scrapEmail, shopAddress, shopName } = req.body;
+    const config = { scrapEmail: scrapEmail || '', shopAddress: shopAddress || '', shopName: shopName || 'Carolina Rolling Co. Inc.' };
+    await AppSettings.upsert({ key: 'scrap_config', value: config });
+    res.json({ data: config, message: 'Scrap config saved' });
+  } catch (error) { next(error); }
+});
+
+// GET /api/settings/scrap-log
+router.get('/scrap-log', async (req, res, next) => {
+  try {
+    const setting = await AppSettings.findOne({ where: { key: 'scrap_log' } });
+    res.json({ data: setting?.value || [] });
+  } catch (error) { next(error); }
+});
+
+// POST /api/settings/scrap-request — Request scrap pickup (tablets + web)
+router.post('/scrap-request', async (req, res, next) => {
+  try {
+    const { scrapType } = req.body;
+    if (!scrapType || !['steel', 'stainless'].includes(scrapType)) {
+      return res.status(400).json({ error: { message: 'scrapType must be "steel" or "stainless"' } });
+    }
+
+    const configSetting = await AppSettings.findOne({ where: { key: 'scrap_config' } });
+    const config = configSetting?.value || {};
+    if (!config.scrapEmail) {
+      return res.status(400).json({ error: { message: 'Scrap company email not configured. Go to Admin > Shop Config > Scrap.' } });
+    }
+
+    const scrapLabel = scrapType === 'steel' ? 'Steel Scrap' : 'Stainless & Aluminum Mix';
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    const timeStr = now.toLocaleTimeString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', minute: '2-digit' });
+    const requestedBy = req.user?.username || req.apiKey?.deviceName || 'Shop Floor';
+
+    const nodemailer = require('nodemailer');
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: parseInt(process.env.SMTP_PORT) || 587,
+      secure: process.env.SMTP_SECURE === 'true',
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+    });
+
+    const shopAddress = (config.shopAddress || 'Address not configured').replace(/\n/g, '<br/>');
+    const shopName = config.shopName || 'Carolina Rolling Co. Inc.';
+
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || process.env.SMTP_USER,
+      to: config.scrapEmail,
+      subject: '♻️ Scrap Pickup Request — ' + scrapLabel + ' — ' + shopName,
+      html: '<div style="font-family:Arial,sans-serif;max-width:600px"><h2 style="color:#1565C0">♻️ Scrap Pickup Request</h2><table style="border-collapse:collapse;width:100%;margin:16px 0"><tr><td style="padding:8px;font-weight:bold;color:#555;width:140px">Scrap Type:</td><td style="padding:8px;font-size:1.1em;font-weight:bold;color:' + (scrapType === 'steel' ? '#1565C0' : '#E65100') + '">' + scrapLabel + '</td></tr><tr><td style="padding:8px;font-weight:bold;color:#555">Company:</td><td style="padding:8px">' + shopName + '</td></tr><tr><td style="padding:8px;font-weight:bold;color:#555">Pickup Address:</td><td style="padding:8px">' + shopAddress + '</td></tr><tr><td style="padding:8px;font-weight:bold;color:#555">Requested:</td><td style="padding:8px">' + dateStr + ' at ' + timeStr + '</td></tr><tr><td style="padding:8px;font-weight:bold;color:#555">Requested By:</td><td style="padding:8px">' + requestedBy + '</td></tr></table><p style="color:#666;font-size:0.9em">Automated request from ' + shopName + '.</p></div>'
+    });
+
+    const logSetting = await AppSettings.findOne({ where: { key: 'scrap_log' } });
+    const log = logSetting?.value || [];
+    log.unshift({ id: Date.now(), scrapType, scrapLabel, requestedBy, requestedAt: now.toISOString(), emailSentTo: config.scrapEmail });
+    if (log.length > 100) log.length = 100;
+    await AppSettings.upsert({ key: 'scrap_log', value: log });
+
+    console.log('[Scrap] Pickup requested: ' + scrapLabel + ' -> ' + config.scrapEmail + ' by ' + requestedBy);
+    res.json({ data: { scrapType, scrapLabel, emailSentTo: config.scrapEmail }, message: 'Scrap pickup request sent to ' + config.scrapEmail });
+  } catch (error) {
+    console.error('[Scrap] Request failed:', error.message);
+    next(error);
+  }
+});

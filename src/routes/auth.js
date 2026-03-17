@@ -259,7 +259,8 @@ router.post('/login', async (req, res, next) => {
         user: {
           id: user.id,
           username: user.username,
-          role: user.role
+          role: user.role,
+          isHeadEstimator: user.isHeadEstimator || false
         }
       }
     });
@@ -412,7 +413,8 @@ router.get('/me', authenticateToken, async (req, res) => {
       id: req.user.id,
       username: req.user.username,
       role: req.user.role,
-      totpEnabled: req.user.totpEnabled || false
+      totpEnabled: req.user.totpEnabled || false,
+      isHeadEstimator: req.user.isHeadEstimator || false
     }
   });
 });

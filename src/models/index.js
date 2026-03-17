@@ -50,6 +50,10 @@ const User = sequelize.define('User', {
   totpEnabled: {
     type: DataTypes.BOOLEAN,
     defaultValue: false
+  },
+  isHeadEstimator: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
   }
 }, {
   tableName: 'users',

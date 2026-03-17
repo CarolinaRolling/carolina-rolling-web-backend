@@ -19,7 +19,11 @@ function formatQBDate(dateStr) {
 }
 
 function clean(s) {
-  return (s || '').replace(/[\t\r\n]/g, ' ').trim();
+  return (s || '')
+    .replace(/[\t\r\n]/g, ' ')
+    .replace(/(\d)"(\s|$|x|X|\))/g, '$1in.$2')  // 2" → 2in., 1/2" → 1/2in.
+    .replace(/"/g, "'")  // any remaining quotes → single quotes
+    .trim();
 }
 
 // Calculate part total from stored pricing fields (matches frontend logic)
@@ -123,7 +127,7 @@ function buildInvoiceIIF(wo, parts) {
       desc += ` | ${breakdownLines.join(' | ')}`;
     }
     
-    desc = clean(desc).substring(0, 4000);
+    desc = clean(desc).substring(0, 250);
     
     lineItems.push({
       description: desc,
@@ -143,7 +147,7 @@ function buildInvoiceIIF(wo, parts) {
     if (svc.specialInstructions) desc += ` - ${clean(svc.specialInstructions)}`;
     
     lineItems.push({
-      description: clean(desc).substring(0, 4000),
+      description: clean(desc).substring(0, 250),
       amount: cost,
       taxable: taxExempt ? 'N' : 'Y'
     });

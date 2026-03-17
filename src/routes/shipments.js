@@ -1052,6 +1052,17 @@ router.get('/:shipmentId/documents/:documentId/signed-url', async (req, res, nex
     
     // If it's a Cloudinary document, generate signed URL
     if (doc.cloudinaryId) {
+      // S3 files: return direct URL — permanent, no signing needed
+      if (doc.cloudinaryId.startsWith('s3:') || (doc.url && doc.url.includes('.s3.') && doc.url.includes('amazonaws.com'))) {
+        return res.json({
+          data: {
+            url: doc.url,
+            expiresIn: null,
+            originalName: doc.originalName || doc.filename
+          }
+        });
+      }
+
       // Use private_download_url for private/authenticated resources
       // This generates a time-limited signed URL for downloading
       // Works with both 'private' and 'authenticated' upload types

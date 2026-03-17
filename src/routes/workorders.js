@@ -2086,6 +2086,14 @@ router.get('/:id/parts/:partId/files/:fileId/download', async (req, res, next) =
       return res.status(404).json({ error: { message: 'File not found' } });
     }
 
+    // S3 files: redirect directly — URLs are permanent and public
+    if (file.cloudinaryId && file.cloudinaryId.startsWith('s3:')) {
+      return res.redirect(file.url);
+    }
+    if (file.url && file.url.includes('.s3.') && file.url.includes('amazonaws.com')) {
+      return res.redirect(file.url);
+    }
+
     // Build list of candidate URLs to try
     const urlsToTry = [];
     const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
@@ -2630,6 +2638,14 @@ router.get('/:id/documents/:documentId/download', async (req, res, next) => {
       if (!wo || !wo.clientName || !wo.clientName.toLowerCase().includes(req.apiKey.clientName.toLowerCase())) {
         return res.status(403).json({ error: { message: 'Access denied' } });
       }
+    }
+
+    // S3 files: redirect directly — URLs are permanent and public
+    if (document.cloudinaryId && document.cloudinaryId.startsWith('s3:')) {
+      return res.redirect(document.url);
+    }
+    if (document.url && document.url.includes('.s3.') && document.url.includes('amazonaws.com')) {
+      return res.redirect(document.url);
     }
 
     const cloudName = process.env.CLOUDINARY_CLOUD_NAME;

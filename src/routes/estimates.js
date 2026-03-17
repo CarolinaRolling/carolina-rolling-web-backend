@@ -1146,7 +1146,7 @@ router.get('/:id/parts/:partId/files/:fileId/debug', async (req, res, next) => {
   }
 });
 
-// GET /api/estimates/:id/parts/:partId/files/:fileId/download - Stream file from Cloudinary
+// GET /api/estimates/:id/parts/:partId/files/:fileId/download - Stream file from storage
 router.get('/:id/parts/:partId/files/:fileId/download', async (req, res, next) => {
   try {
     const file = await EstimatePartFile.findOne({
@@ -1155,6 +1155,14 @@ router.get('/:id/parts/:partId/files/:fileId/download', async (req, res, next) =
 
     if (!file) {
       return res.status(404).json({ error: { message: 'File not found' } });
+    }
+
+    // S3 files: redirect directly — URLs are permanent and public
+    if (file.cloudinaryId && file.cloudinaryId.startsWith('s3:')) {
+      return res.redirect(file.url);
+    }
+    if (file.url && file.url.includes('.s3.') && file.url.includes('amazonaws.com')) {
+      return res.redirect(file.url);
     }
 
     // Build list of candidate URLs to try
@@ -1528,6 +1536,14 @@ router.get('/:id/files/:fileId/download', async (req, res, next) => {
       if (!estimate || !estimate.clientName || !estimate.clientName.toLowerCase().includes(req.apiKey.clientName.toLowerCase())) {
         return res.status(403).json({ error: { message: 'Access denied' } });
       }
+    }
+
+    // S3 files: redirect directly — URLs are permanent and public
+    if (file.cloudinaryId && file.cloudinaryId.startsWith('s3:')) {
+      return res.redirect(file.url);
+    }
+    if (file.url && file.url.includes('.s3.') && file.url.includes('amazonaws.com')) {
+      return res.redirect(file.url);
     }
 
     const urlsToTry = [];

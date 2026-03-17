@@ -266,7 +266,7 @@ router.get('/verify-permits/report-pdf', async (req, res, next) => {
     clients.forEach(c => {
       if (c.permitStatus && ['Closed', 'closed', 'not_found'].includes(c.permitStatus)) warnings.push(c);
       else if (c.permitOwnerName || c.permitDbaName) {
-        const clean = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const clean = (s) => (s || '').toLowerCase().replace(/\b(incorporated|inc|corporation|corp|company|co|limited|ltd|llc|llp|lp|plc|dba|the)\b/g, '').replace(/[^a-z0-9]/g, '');
         const cName = clean(c.name);
         const oName = clean(c.permitOwnerName);
         const dName = clean(c.permitDbaName);
@@ -376,7 +376,7 @@ router.get('/verify-permits/report-pdf', async (req, res, next) => {
 
       // Name mismatch check
       if (client.permitOwnerName || client.permitDbaName) {
-        const clean = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const clean = (s) => (s || '').toLowerCase().replace(/\b(incorporated|inc|corporation|corp|company|co|limited|ltd|llc|llp|lp|plc|dba|the)\b/g, '').replace(/[^a-z0-9]/g, '');
         const cName = clean(client.name);
         const oName = clean(client.permitOwnerName);
         const dName = clean(client.permitDbaName);

@@ -195,12 +195,15 @@ function buildInvoiceIIF(wo, parts, client, invoiceNum) {
   const taxAmount = Math.round(taxableAmount * taxRate / 100 * 100) / 100;
   const grandTotal = Math.round((subtotal + taxAmount) * 100) / 100;
   
-  const memo = clean(`${drLabel} - ${clientName}`).substring(0, 200);
+  // Build memo with DR# and PO#
+  const memoParts = [drLabel, clientName];
+  if (clientPO) memoParts.push(`PO#${clientPO}`);
+  const memo = clean(memoParts.join(' - ')).substring(0, 200);
   
-  // TRNS: debit AR — includes TERMS, OTHER (DR#), PONUMBER
+  // TRNS: debit AR
   lines.push([
     'TRNS', '', 'INVOICE', invoiceDate, QB_CONFIG.arAccount, clientName,
-    grandTotal.toFixed(2), docNum, memo, 'N', 'Y', terms, drLabel, clientPO
+    grandTotal.toFixed(2), docNum, memo, 'N', 'Y', terms
   ].join('\t'));
   
   // SPL: one line per part — includes QNTY, PRICE, INVITEM, TAXABLE
@@ -247,7 +250,7 @@ function buildInvoiceIIF(wo, parts, client, invoiceNum) {
 }
 
 const IIF_HEADER = [
-  '!TRNS\tTRNSID\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tDOCNUM\tMEMO\tCLEAR\tTOPRINT\tTERMS\tOTHER\tPONUMBER',
+  '!TRNS\tTRNSID\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tDOCNUM\tMEMO\tCLEAR\tTOPRINT\tTERMS',
   '!SPL\tSPLID\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tDOCNUM\tMEMO\tCLEAR\tQNTY\tPRICE\tINVITEM\tTAXABLE',
   '!ENDTRNS'
 ];

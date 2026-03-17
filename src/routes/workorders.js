@@ -783,7 +783,10 @@ router.get('/:id', async (req, res, next) => {
       for (const part of woJson.parts) {
         if (part.files) {
           for (const file of part.files) {
-            file.url = `${baseUrl}/api/workorders/${woJson.id}/parts/${part.id}/files/${file.id}/download`;
+            const isS3 = (file.cloudinaryId && file.cloudinaryId.startsWith('s3:')) || (file.url && file.url.includes('amazonaws.com'));
+            if (!isS3) {
+              file.url = `${baseUrl}/api/workorders/${woJson.id}/parts/${part.id}/files/${file.id}/download`;
+            }
           }
         }
         // Merge formData then refresh derived text fields from raw columns
@@ -793,10 +796,13 @@ router.get('/:id', async (req, res, next) => {
         refreshDerivedFields(part);
       }
     }
-    // Rewrite document URLs to use download proxy
+    // Rewrite document URLs to use download proxy (skip S3)
     if (woJson.documents) {
       for (const doc of woJson.documents) {
-        doc.url = `${baseUrl}/api/workorders/${woJson.id}/documents/${doc.id}/download`;
+        const isS3 = (doc.cloudinaryId && doc.cloudinaryId.startsWith('s3:')) || (doc.url && doc.url.includes('amazonaws.com'));
+        if (!isS3) {
+          doc.url = `${baseUrl}/api/workorders/${woJson.id}/documents/${doc.id}/download`;
+        }
       }
     }
 
@@ -1990,6 +1996,12 @@ router.get('/:id/parts/:partId/files/:fileId/signed-url', async (req, res, next)
       return res.status(404).json({ error: { message: 'File not found' } });
     }
 
+    // S3 files: return direct URL
+    const isS3 = (file.cloudinaryId && file.cloudinaryId.startsWith('s3:')) || (file.url && file.url.includes('amazonaws.com'));
+    if (isS3) {
+      return res.json({ data: { url: file.url, expiresIn: null, originalName: file.originalName || file.filename } });
+    }
+
     // Return the download proxy URL - it handles resource_type resolution
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     const url = `${baseUrl}/api/workorders/${req.params.id}/parts/${req.params.partId}/files/${req.params.fileId}/download`;
@@ -2606,6 +2618,12 @@ router.get('/:id/documents/:documentId/signed-url', async (req, res, next) => {
 
     if (!document) {
       return res.status(404).json({ error: { message: 'Document not found' } });
+    }
+
+    // S3 files: return direct URL
+    const isS3 = (document.cloudinaryId && document.cloudinaryId.startsWith('s3:')) || (document.url && document.url.includes('amazonaws.com'));
+    if (isS3) {
+      return res.json({ data: { url: document.url, originalName: document.originalName || document.filename } });
     }
 
     // Return the download proxy URL (same pattern as part files)

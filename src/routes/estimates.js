@@ -629,12 +629,15 @@ router.get('/:id', async (req, res, next) => {
     // Merge formData fields back into parts for frontend
     const estimateData = estimate.toJSON();
     if (estimateData.parts) {
-      // Rewrite file URLs to use download proxy (handles resource_type mismatches transparently)
+      // Rewrite file URLs to use download proxy (only for Cloudinary — S3 URLs are permanent)
       const baseUrl = `${req.protocol}://${req.get('host')}`;
       for (const p of estimateData.parts) {
         if (p.files) {
           for (const f of p.files) {
-            f.url = `${baseUrl}/api/estimates/${estimateData.id}/parts/${p.id}/files/${f.id}/download`;
+            const isS3 = (f.cloudinaryId && f.cloudinaryId.startsWith('s3:')) || (f.url && f.url.includes('amazonaws.com'));
+            if (!isS3) {
+              f.url = `${baseUrl}/api/estimates/${estimateData.id}/parts/${p.id}/files/${f.id}/download`;
+            }
           }
         }
       }
@@ -1082,10 +1085,15 @@ router.get('/:id/parts/:partId/files/:fileId/view', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'File not found' } });
     }
 
-    // Return the download proxy URL which handles resource_type resolution
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
-    const url = `${baseUrl}/api/estimates/${req.params.id}/parts/${req.params.partId}/files/${req.params.fileId}/download`;
-    res.json({ data: { url, originalName: file.originalName } });
+    // Return direct S3 URL or proxy URL for Cloudinary
+    const isS3 = (file.cloudinaryId && file.cloudinaryId.startsWith('s3:')) || (file.url && file.url.includes('amazonaws.com'));
+    if (isS3) {
+      res.json({ data: { url: file.url, originalName: file.originalName } });
+    } else {
+      const baseUrl = `${req.protocol}://${req.get('host')}`;
+      const url = `${baseUrl}/api/estimates/${req.params.id}/parts/${req.params.partId}/files/${req.params.fileId}/download`;
+      res.json({ data: { url, originalName: file.originalName } });
+    }
   } catch (error) {
     next(error);
   }

@@ -92,6 +92,8 @@ app.use('/api', authenticate, clientsVendorsRoutes);
 app.use('/api', authenticate, permitVerificationRoutes);
 app.use('/api/quickbooks', authenticate, quickbooksRoutes);
 app.use('/api/shop-supplies', authenticate, shopSuppliesRoutes);
+const todoRoutes = require('./routes/todos');
+app.use('/api/todos', authenticate, todoRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {

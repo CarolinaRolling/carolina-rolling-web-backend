@@ -2059,6 +2059,66 @@ const ApiKey = sequelize.define('ApiKey', {
   timestamps: true
 });
 
+// Shared Todo Items — persistent to-do list visible to all web users
+const TodoItem = sequelize.define('TodoItem', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  title: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  description: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  type: {
+    type: DataTypes.STRING,
+    defaultValue: 'general' // 'general', 'estimate_review', 'material_order', 'urgent'
+  },
+  priority: {
+    type: DataTypes.STRING,
+    defaultValue: 'normal' // 'low', 'normal', 'high', 'urgent'
+  },
+  status: {
+    type: DataTypes.STRING,
+    defaultValue: 'open' // 'open', 'accepted', 'denied', 'completed'
+  },
+  estimateId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
+  estimateNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  createdBy: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  assignedTo: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  completedBy: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  completedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  deniedReason: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  }
+}, {
+  tableName: 'todo_items',
+  timestamps: true
+});
+
 module.exports = {
   sequelize,
   User,
@@ -2084,5 +2144,6 @@ module.exports = {
   Vendor,
   ApiKey,
   ShopSupply,
-  ShopSupplyLog
+  ShopSupplyLog,
+  TodoItem
 };

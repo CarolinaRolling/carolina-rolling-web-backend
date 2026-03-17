@@ -1665,6 +1665,52 @@ const PONumber = sequelize.define('PONumber', {
   timestamps: true
 });
 
+// Invoice Number Model - auto-incrementing invoice numbers
+const InvoiceNumber = sequelize.define('InvoiceNumber', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  invoiceNumber: {
+    type: DataTypes.INTEGER,
+    unique: true,
+    allowNull: false
+  },
+  status: {
+    type: DataTypes.ENUM('active', 'void'),
+    defaultValue: 'active'
+  },
+  workOrderId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'work_orders', key: 'id' }
+  },
+  clientId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
+  clientName: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  voidedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  voidedBy: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  voidReason: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  }
+}, {
+  tableName: 'invoice_numbers',
+  timestamps: true
+});
+
 // Email Log Model
 const EmailLog = sequelize.define('EmailLog', {
   id: {
@@ -2045,6 +2091,10 @@ ShopSupplyLog.belongsTo(ShopSupply, { foreignKey: 'shopSupplyId', as: 'supply' }
 Client.hasMany(DRNumber, { foreignKey: 'clientId', as: 'drNumbers' });
 DRNumber.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
 
+// InvoiceNumber associations
+InvoiceNumber.belongsTo(WorkOrder, { foreignKey: 'workOrderId', as: 'workOrder' });
+InvoiceNumber.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
+
 // ApiKey Model - for portal/external API access
 const ApiKey = sequelize.define('ApiKey', {
   id: {
@@ -2206,5 +2256,6 @@ module.exports = {
   ApiKey,
   ShopSupply,
   ShopSupplyLog,
-  TodoItem
+  TodoItem,
+  InvoiceNumber
 };

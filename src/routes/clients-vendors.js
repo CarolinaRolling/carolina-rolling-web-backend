@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { Client, Vendor } = require('../models');
+const { Client, Vendor, WorkOrder, Estimate } = require('../models');
 const { Op } = require('sequelize');
 
 // ============= CLIENTS =============
@@ -185,6 +185,8 @@ router.put('/clients/:id', async (req, res, next) => {
       }
     }
     
+    const oldName = client.name;
+    
     await client.update({
       name: name !== undefined ? name : client.name,
       contactName: contactName !== undefined ? contactName : client.contactName,
@@ -201,7 +203,35 @@ router.put('/clients/:id', async (req, res, next) => {
       contacts: req.body.contacts !== undefined ? req.body.contacts : client.contacts
     });
     
-    res.json({ data: client, message: 'Client updated successfully' });
+    // Propagate name change to all work orders and estimates
+    if (name && name !== oldName) {
+      try {
+        const [woCount] = await WorkOrder.update(
+          { clientName: name },
+          { where: { clientId: client.id } }
+        );
+        // Also update WOs matched by old name (in case clientId wasn't set)
+        const [woNameCount] = await WorkOrder.update(
+          { clientName: name },
+          { where: { clientName: oldName, clientId: null } }
+        );
+        const [estCount] = await Estimate.update(
+          { clientName: name },
+          { where: { clientId: client.id } }
+        );
+        const [estNameCount] = await Estimate.update(
+          { clientName: name },
+          { where: { clientName: oldName, clientId: null } }
+        );
+        const total = woCount + woNameCount + estCount + estNameCount;
+        console.log(`[Client] Name changed: "${oldName}" → "${name}" — updated ${woCount + woNameCount} WOs, ${estCount + estNameCount} estimates`);
+      } catch (propErr) {
+        console.error('[Client] Name propagation error:', propErr.message);
+        // Don't fail the request — client was already updated
+      }
+    }
+    
+    res.json({ data: client, message: name && name !== oldName ? `Client updated — name changed across all work orders and estimates` : 'Client updated successfully' });
   } catch (error) {
     console.error('Client update error:', error.message, error.errors?.map(e => e.message));
     next(error);

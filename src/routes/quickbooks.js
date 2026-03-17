@@ -37,15 +37,19 @@ function calcPartTotal(part) {
   return Math.round(unitPrice * qty * 100) / 100;
 }
 
-function buildInvoiceIIF(wo, parts) {
+function buildInvoiceIIF(wo, parts, client) {
   const lines = [];
   const SERVICE_TYPES = ['fab_service', 'shop_rate', 'rush_service'];
   
   const drLabel = wo.drNumber ? `DR-${wo.drNumber}` : (wo.orderNumber || 'UNKNOWN');
   const clientName = clean(wo.clientName || 'Unknown');
   const invoiceDate = formatQBDate(wo.shippedAt || wo.completedAt || wo.createdAt);
-  const terms = QB_CONFIG.defaultTerms;
-  const taxExempt = wo.taxExempt === true || wo.taxExempt === 'true';
+  const terms = (client?.paymentTerms || QB_CONFIG.defaultTerms || 'COD').replace(/[\t\r\n"]/g, ' ').trim();
+  
+  // Tax exempt check: WO taxExempt flag OR client taxStatus is 'resale' or 'exempt'
+  const clientTaxStatus = (client?.taxStatus || '').toLowerCase();
+  const taxExempt = wo.taxExempt === true || wo.taxExempt === 'true' 
+    || clientTaxStatus === 'resale' || clientTaxStatus === 'exempt';
   
   // Sort by part number
   const sorted = [...parts].sort((a, b) => (a.partNumber || 0) - (b.partNumber || 0));
@@ -229,11 +233,14 @@ const IIF_HEADER = [
 router.get('/export/:id', async (req, res, next) => {
   try {
     const wo = await WorkOrder.findByPk(req.params.id, {
-      include: [{ model: WorkOrderPart, as: 'parts' }]
+      include: [
+        { model: WorkOrderPart, as: 'parts' },
+        { model: Client, as: 'client', attributes: ['id', 'name', 'taxStatus', 'paymentTerms'] }
+      ]
     });
     if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
     
-    const result = buildInvoiceIIF(wo, wo.parts || []);
+    const result = buildInvoiceIIF(wo, wo.parts || [], wo.client);
     if (!result) return res.status(400).json({ error: { message: 'No billable items found' } });
     
     const iifContent = [...IIF_HEADER, ...result.lines].join('\r\n') + '\r\n';
@@ -257,14 +264,17 @@ router.post('/export-batch', async (req, res, next) => {
     const { Op } = require('sequelize');
     const workOrders = await WorkOrder.findAll({
       where: { id: { [Op.in]: workOrderIds } },
-      include: [{ model: WorkOrderPart, as: 'parts' }],
+      include: [
+        { model: WorkOrderPart, as: 'parts' },
+        { model: Client, as: 'client', attributes: ['id', 'name', 'taxStatus', 'paymentTerms'] }
+      ],
       order: [['drNumber', 'ASC']]
     });
     
     const allLines = [];
     const summaries = [];
     for (const wo of workOrders) {
-      const result = buildInvoiceIIF(wo, wo.parts || []);
+      const result = buildInvoiceIIF(wo, wo.parts || [], wo.client);
       if (result) { allLines.push(...result.lines); summaries.push(result.summary); }
     }
     if (allLines.length === 0) return res.status(400).json({ error: { message: 'No billable items found' } });
@@ -284,11 +294,14 @@ router.post('/export-batch', async (req, res, next) => {
 router.get('/preview/:id', async (req, res, next) => {
   try {
     const wo = await WorkOrder.findByPk(req.params.id, {
-      include: [{ model: WorkOrderPart, as: 'parts' }]
+      include: [
+        { model: WorkOrderPart, as: 'parts' },
+        { model: Client, as: 'client', attributes: ['id', 'name', 'taxStatus', 'paymentTerms'] }
+      ]
     });
     if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
     
-    const result = buildInvoiceIIF(wo, wo.parts || []);
+    const result = buildInvoiceIIF(wo, wo.parts || [], wo.client);
     if (!result) return res.json({ data: null, message: 'No billable items found' });
     
     res.json({ data: { summary: result.summary, config: QB_CONFIG, rawIIF: result.lines.join('\n') } });

@@ -677,6 +677,38 @@ router.get('/lookup-dr/:drNumber', async (req, res, next) => {
   }
 });
 
+// GET /api/workorders/invoicing/queue - WOs ready for invoicing (MUST be before /:id)
+router.get('/invoicing/queue', async (req, res, next) => {
+  try {
+    const { Op } = require('sequelize');
+    const workOrders = await WorkOrder.findAll({
+      where: {
+        status: { [Op.in]: ['stored', 'shipped', 'completed'] },
+        invoiceNumber: { [Op.or]: [null, ''] }
+      },
+      include: [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'partTotal', 'quantity'] }],
+      order: [['completedAt', 'ASC'], ['createdAt', 'ASC']]
+    });
+    res.json({ data: workOrders });
+  } catch (error) { next(error); }
+});
+
+// GET /api/workorders/invoicing/history - Invoiced WOs (MUST be before /:id)
+router.get('/invoicing/history', async (req, res, next) => {
+  try {
+    const { Op } = require('sequelize');
+    const workOrders = await WorkOrder.findAll({
+      where: {
+        invoiceNumber: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] }
+      },
+      include: [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'partTotal', 'quantity'] }],
+      order: [['invoiceDate', 'DESC']],
+      limit: 100
+    });
+    res.json({ data: workOrders });
+  } catch (error) { next(error); }
+});
+
 // GET /api/workorders/:id - Get work order by ID
 router.get('/:id', async (req, res, next) => {
   try {
@@ -1024,6 +1056,132 @@ router.put('/:id/status', async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+// POST /api/workorders/:id/record-payment - Record COD payment
+router.post('/:id/record-payment', async (req, res, next) => {
+  try {
+    const workOrder = await WorkOrder.findByPk(req.params.id);
+    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+    
+    const { paymentDate, paymentMethod, paymentReference } = req.body;
+    if (!paymentMethod) return res.status(400).json({ error: { message: 'Payment method is required' } });
+    
+    await workOrder.update({
+      codPaid: true,
+      paymentDate: paymentDate || new Date(),
+      paymentMethod,
+      paymentReference: paymentReference || null,
+      paymentRecordedBy: req.user?.username || 'Unknown'
+    });
+    
+    res.json({ data: workOrder, message: 'Payment recorded' });
+  } catch (error) { next(error); }
+});
+
+// POST /api/workorders/:id/clear-payment - Clear payment record (admin)
+router.post('/:id/clear-payment', async (req, res, next) => {
+  try {
+    const workOrder = await WorkOrder.findByPk(req.params.id);
+    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+    
+    await workOrder.update({
+      codPaid: false,
+      paymentDate: null,
+      paymentMethod: null,
+      paymentReference: null,
+      paymentRecordedBy: null
+    });
+    
+    res.json({ data: workOrder, message: 'Payment record cleared' });
+  } catch (error) { next(error); }
+});
+
+// POST /api/workorders/:id/invoice - Record invoice for a work order
+router.post('/:id/invoice', upload.single('invoicePdf'), async (req, res, next) => {
+  try {
+    const workOrder = await WorkOrder.findByPk(req.params.id);
+    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+    
+    const { invoiceNumber, invoiceDate } = req.body;
+    if (!invoiceNumber) return res.status(400).json({ error: { message: 'Invoice number is required' } });
+    
+    const updates = {
+      invoiceNumber,
+      invoiceDate: invoiceDate || new Date(),
+      invoicedBy: req.user?.username || 'Unknown'
+    };
+
+    // Upload PDF if provided
+    if (req.file) {
+      const fileStorage = require('../utils/storage');
+      const result = await fileStorage.uploadFile(req.file.path, {
+        filename: `invoice-${invoiceNumber}-${workOrder.drNumber || workOrder.id}.pdf`,
+        folder: 'invoices',
+        contentType: 'application/pdf'
+      });
+      updates.invoicePdfUrl = result.url;
+      updates.invoicePdfCloudinaryId = result.publicId;
+      try { require('fs').unlinkSync(req.file.path); } catch(e) {}
+    }
+
+    await workOrder.update(updates);
+    
+    const updated = await WorkOrder.findByPk(req.params.id, {
+      include: [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'partTotal', 'quantity'] }]
+    });
+    res.json({ data: updated, message: 'Invoice recorded' });
+  } catch (error) { next(error); }
+});
+
+// POST /api/workorders/:id/invoice-pdf - Upload/replace invoice PDF only
+router.post('/:id/invoice-pdf', upload.single('invoicePdf'), async (req, res, next) => {
+  try {
+    const workOrder = await WorkOrder.findByPk(req.params.id);
+    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+    if (!req.file) return res.status(400).json({ error: { message: 'No PDF file provided' } });
+
+    // Delete old PDF if exists
+    if (workOrder.invoicePdfCloudinaryId) {
+      try {
+        const fileStorage = require('../utils/storage');
+        await fileStorage.destroy(workOrder.invoicePdfCloudinaryId);
+      } catch (e) { console.warn('Could not delete old invoice PDF:', e.message); }
+    }
+
+    const fileStorage = require('../utils/storage');
+    const result = await fileStorage.uploadFile(req.file.path, {
+      filename: `invoice-${workOrder.invoiceNumber || 'draft'}-${workOrder.drNumber || workOrder.id}.pdf`,
+      folder: 'invoices',
+      contentType: 'application/pdf'
+    });
+    try { require('fs').unlinkSync(req.file.path); } catch(e) {}
+
+    await workOrder.update({ invoicePdfUrl: result.url, invoicePdfCloudinaryId: result.publicId });
+    res.json({ data: workOrder, message: 'Invoice PDF uploaded' });
+  } catch (error) { next(error); }
+});
+
+// DELETE /api/workorders/:id/invoice - Clear invoice from a work order
+router.delete('/:id/invoice', async (req, res, next) => {
+  try {
+    const workOrder = await WorkOrder.findByPk(req.params.id);
+    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+    
+    // Delete PDF if exists
+    if (workOrder.invoicePdfCloudinaryId) {
+      try {
+        const fileStorage = require('../utils/storage');
+        await fileStorage.destroy(workOrder.invoicePdfCloudinaryId);
+      } catch (e) { console.warn('Could not delete invoice PDF:', e.message); }
+    }
+
+    await workOrder.update({
+      invoiceNumber: null, invoiceDate: null, invoicedBy: null,
+      invoicePdfUrl: null, invoicePdfCloudinaryId: null
+    });
+    res.json({ data: workOrder, message: 'Invoice cleared' });
+  } catch (error) { next(error); }
 });
 
 // POST /api/workorders/:id/mark-complete - Shop floor marks order complete
@@ -3113,8 +3271,8 @@ router.post('/:id/print-package', async (req, res, next) => {
       }
     }
 
-    // Full mode: add order documents and purchase orders
-    if (mode === 'full' && workOrder.documents) {
+    // Order documents (both modes — drawings, specs, etc.)
+    if (workOrder.documents) {
       for (const doc of workOrder.documents.filter(d => d.documentType !== 'purchase_order' && d.documentType !== 'mtr')) {
         if (doc.mimeType === 'application/pdf' || (doc.originalName || '').toLowerCase().endsWith('.pdf')) {
           pdfSources.push({
@@ -3123,49 +3281,73 @@ router.post('/:id/print-package', async (req, res, next) => {
           });
         }
       }
-      for (const doc of workOrder.documents.filter(d => d.documentType === 'purchase_order')) {
-        pdfSources.push({
-          label: `PO: ${doc.originalName}`,
-          proxyUrl: `${baseUrl}/documents/${doc.id}/download`
-        });
+      // Full mode: also include POs
+      if (mode === 'full') {
+        for (const doc of workOrder.documents.filter(d => d.documentType === 'purchase_order')) {
+          pdfSources.push({
+            label: `PO: ${doc.originalName}`,
+            proxyUrl: `${baseUrl}/documents/${doc.id}/download`
+          });
+        }
       }
     }
 
     console.log(`[print-package] Fetching ${pdfSources.length} attached PDFs...`);
 
-    // ─── Step 3: Fetch attached PDFs via internal proxy ───
+    // ─── Step 3: Fetch attached PDFs — follows redirects for S3 ───
     const fetchPdfBuffer = (source) => {
       return new Promise((resolve) => {
-        const url = source.proxyUrl;
-        const options = { headers: {} };
-        if (req.headers.cookie) options.headers.cookie = req.headers.cookie;
-        if (req.headers.authorization) options.headers.authorization = req.headers.authorization;
-        
-        const request = http.get(url, options, (resp) => {
-          if (resp.statusCode !== 200) {
-            resp.resume();
-            console.warn(`[print-package] Proxy returned ${resp.statusCode} for ${source.label}`);
-            resolve(null);
-            return;
+        const fetchUrl = (urlStr, redirectCount = 0) => {
+          if (redirectCount > 5) { resolve(null); return; }
+          
+          const isHttps = urlStr.startsWith('https');
+          const httpModule = isHttps ? https : http;
+          const options = {};
+          
+          // Only add auth headers for local proxy URLs, not external S3
+          if (urlStr.startsWith('http://localhost')) {
+            options.headers = {};
+            if (req.headers.cookie) options.headers.cookie = req.headers.cookie;
+            if (req.headers.authorization) options.headers.authorization = req.headers.authorization;
           }
-          const chunks = [];
-          resp.on('data', c => chunks.push(c));
-          resp.on('end', () => {
-            const buf = Buffer.concat(chunks);
-            if (buf.length > 4 && buf.slice(0, 5).toString() === '%PDF-') {
-              resolve(buf);
-            } else {
-              console.warn(`[print-package] Not a valid PDF for ${source.label} (${buf.length} bytes)`);
-              resolve(null);
+          
+          const request = httpModule.get(urlStr, options, (resp) => {
+            // Follow redirects (302, 301, 307, 308) — S3 files redirect
+            if ([301, 302, 307, 308].includes(resp.statusCode) && resp.headers.location) {
+              resp.resume();
+              console.log(`[print-package] Following redirect for ${source.label} → ${resp.headers.location.substring(0, 80)}...`);
+              fetchUrl(resp.headers.location, redirectCount + 1);
+              return;
             }
+            
+            if (resp.statusCode !== 200) {
+              resp.resume();
+              console.warn(`[print-package] HTTP ${resp.statusCode} for ${source.label}`);
+              resolve(null);
+              return;
+            }
+            const chunks = [];
+            resp.on('data', c => chunks.push(c));
+            resp.on('end', () => {
+              const buf = Buffer.concat(chunks);
+              if (buf.length > 4 && buf.slice(0, 5).toString() === '%PDF-') {
+                console.log(`[print-package] Fetched ${source.label} (${buf.length} bytes)`);
+                resolve(buf);
+              } else {
+                console.warn(`[print-package] Not a valid PDF for ${source.label} (${buf.length} bytes, starts: ${buf.slice(0, 20).toString()})`);
+                resolve(null);
+              }
+            });
+            resp.on('error', () => resolve(null));
           });
-          resp.on('error', () => resolve(null));
-        });
-        request.on('error', (err) => {
-          console.error(`[print-package] Fetch error for ${source.label}: ${err.message}`);
-          resolve(null);
-        });
-        request.setTimeout(15000, () => { request.destroy(); resolve(null); });
+          request.on('error', (err) => {
+            console.error(`[print-package] Fetch error for ${source.label}: ${err.message}`);
+            resolve(null);
+          });
+          request.setTimeout(15000, () => { request.destroy(); resolve(null); });
+        };
+        
+        fetchUrl(source.proxyUrl);
       });
     };
 

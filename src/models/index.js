@@ -590,6 +590,49 @@ const WorkOrder = sequelize.define('WorkOrder', {
   taxExemptCertNumber: {
     type: DataTypes.STRING,
     allowNull: true
+  },
+  // COD Payment Tracking
+  codPaid: {
+    type: DataTypes.BOOLEAN,
+    allowNull: true,
+    defaultValue: false
+  },
+  paymentDate: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  paymentMethod: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  paymentReference: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  paymentRecordedBy: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  // Invoice Tracking
+  invoiceNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  invoiceDate: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  invoicedBy: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  invoicePdfUrl: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  invoicePdfCloudinaryId: {
+    type: DataTypes.STRING,
+    allowNull: true
   }
 }, {
   tableName: 'work_orders',

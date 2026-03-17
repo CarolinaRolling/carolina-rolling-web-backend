@@ -1758,22 +1758,23 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
         const allParts = await WorkOrderPart.findAll({ where: { workOrderId: req.params.id } });
         
         // 1. Auto-complete fab_service/shop_rate parts linked to this part
-        // Primary: match by _linkedPartId, Fallback: match by part number adjacency
         const serviceParts = allParts.filter(p => ['fab_service', 'shop_rate'].includes(p.partType));
         const regularPartIds = new Set(allParts.filter(p => !['fab_service', 'shop_rate', 'rush_service'].includes(p.partType)).map(p => p.id));
         
         const linkedServices = serviceParts.filter(p => {
+          if (p.status === 'completed') return false; // already done
           const fd = p.formData && typeof p.formData === 'object' ? p.formData : {};
-          // Direct match
-          if (String(fd._linkedPartId) === String(part.id)) return true;
-          // Fallback: if _linkedPartId doesn't match any WO part, use part number adjacency
-          if (fd._linkedPartId && !regularPartIds.has(fd._linkedPartId)) {
-            // Find the closest regular part before this service by part number
-            const regularBefore = allParts
-              .filter(rp => !['fab_service', 'shop_rate', 'rush_service'].includes(rp.partType) && rp.partNumber < p.partNumber)
-              .sort((a, b) => b.partNumber - a.partNumber);
-            if (regularBefore.length > 0 && regularBefore[0].id === part.id) return true;
-          }
+          
+          // Match 1: Direct _linkedPartId match
+          if (fd._linkedPartId && String(fd._linkedPartId) === String(part.id)) return true;
+          
+          // Match 2: Part number adjacency — find the closest regular part before this service
+          // This handles: no _linkedPartId, stale _linkedPartId from estimate, etc.
+          const regularBefore = allParts
+            .filter(rp => !['fab_service', 'shop_rate', 'rush_service'].includes(rp.partType) && rp.partNumber < p.partNumber)
+            .sort((a, b) => b.partNumber - a.partNumber);
+          if (regularBefore.length > 0 && regularBefore[0].id === part.id) return true;
+          
           return false;
         });
         

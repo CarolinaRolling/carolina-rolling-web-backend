@@ -684,7 +684,10 @@ router.get('/invoicing/queue', async (req, res, next) => {
     const workOrders = await WorkOrder.findAll({
       where: {
         status: { [Op.in]: ['stored', 'shipped', 'completed'] },
-        invoiceNumber: { [Op.or]: [null, ''] }
+        [Op.or]: [
+          { invoiceNumber: null },
+          { invoiceNumber: '' }
+        ]
       },
       include: [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'partTotal', 'quantity'] }],
       order: [['completedAt', 'ASC'], ['createdAt', 'ASC']]

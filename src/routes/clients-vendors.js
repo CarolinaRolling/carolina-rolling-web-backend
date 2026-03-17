@@ -137,7 +137,8 @@ router.post('/clients', async (req, res, next) => {
       customTaxRate: (customTaxRate && customTaxRate !== '' && !isNaN(parseFloat(customTaxRate))) ? parseFloat(customTaxRate) : null,
       notes: notes || null,
       noTag: noTag || false,
-      paymentTerms: paymentTerms || null
+      paymentTerms: paymentTerms || null,
+      contacts: req.body.contacts || []
     });
     
     res.status(201).json({ data: client, message: 'Client created successfully' });
@@ -196,7 +197,8 @@ router.put('/clients/:id', async (req, res, next) => {
       notes: notes !== undefined ? (notes || null) : client.notes,
       isActive: isActive !== undefined ? isActive : client.isActive,
       noTag: noTag !== undefined ? noTag : client.noTag,
-      paymentTerms: paymentTerms !== undefined ? (paymentTerms || null) : client.paymentTerms
+      paymentTerms: paymentTerms !== undefined ? (paymentTerms || null) : client.paymentTerms,
+      contacts: req.body.contacts !== undefined ? req.body.contacts : client.contacts
     });
     
     res.json({ data: client, message: 'Client updated successfully' });

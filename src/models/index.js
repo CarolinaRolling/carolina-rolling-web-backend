@@ -1759,6 +1759,12 @@ const Client = sequelize.define('Client', {
     type: DataTypes.BOOLEAN,
     defaultValue: false
   },
+  contacts: {
+    type: DataTypes.JSONB,
+    defaultValue: [],
+    allowNull: true
+    // Array of { name, phone, email, isPrimary }
+  },
   requiresPartLabels: {
     type: DataTypes.BOOLEAN,
     defaultValue: false

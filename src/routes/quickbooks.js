@@ -188,7 +188,7 @@ function buildInvoiceIIF(wo, parts, client, invoiceNum) {
       lineItems.push(filler(`Rolling/Labor: $${partCost.toFixed(2)}`));
     }
     for (const s of svcDetails) {
-      lineItems.push(filler(`${s.label}: $${s.cost.toFixed(2)}`));
+      if (s.cost > 0) lineItems.push(filler(`${s.label}: $${s.cost.toFixed(2)}`));
     }
     
     // Blank line between parts (not after the last one)
@@ -275,12 +275,12 @@ function buildInvoiceIIF(wo, parts, client, invoiceNum) {
         (-qty).toString(), (-parseFloat(each)).toFixed(2), item.invItem || '', taxable
       ].join('\t'));
     } else {
-      // Filler line — description only, no pricing
+      // Filler line — description only, empty amounts so QB shows no zeros
       const account = isResale ? QB_CONFIG.nontaxableIncomeAccount : QB_CONFIG.taxableIncomeAccount;
       lines.push([
         'SPL', '', 'INVOICE', invoiceDate, account, clientName,
-        '0.00', docNum, item.description, 'N',
-        '', '', '', 'N'
+        '', docNum, item.description, 'N',
+        '', '', '', ''
       ].join('\t'));
     }
   }

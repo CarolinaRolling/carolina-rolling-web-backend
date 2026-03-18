@@ -275,22 +275,21 @@ function buildInvoiceIIF(wo, parts, client, invoiceNum) {
         (-qty).toString(), (-parseFloat(each)).toFixed(2), item.invItem || '', taxable
       ].join('\t'));
     } else {
-      // Filler line — description only, empty amounts so QB shows no zeros
-      const account = isResale ? QB_CONFIG.nontaxableIncomeAccount : QB_CONFIG.taxableIncomeAccount;
+      // Filler line — description only, no account, no amounts, no tax
+      // Trim to exactly 10 columns (matching SPL header up to CLEAR) so QB doesn't fill TAXABLE
       lines.push([
-        'SPL', '', 'INVOICE', invoiceDate, account, clientName,
-        '', docNum, item.description, 'N',
-        '', '', '', ''
+        'SPL', '', 'INVOICE', invoiceDate, '', '',
+        '', docNum, item.description, ''
       ].join('\t'));
     }
   }
   
-  // SPL: tax line
+  // SPL: tax line — INVITEM must reference the sales tax item so QB knows the vendor
   if (taxAmount > 0) {
     lines.push([
-      'SPL', '', 'INVOICE', invoiceDate, QB_CONFIG.taxAccount, clientName,
-      (-taxAmount).toFixed(2), docNum, 'Sales Tax', 'N',
-      '', '', '', 'N'
+      'SPL', '', 'INVOICE', invoiceDate, QB_CONFIG.taxAccount, '',
+      (-taxAmount).toFixed(2), docNum, '', 'N',
+      '', '', 'SALES TAX', 'N'
     ].join('\t'));
   }
   

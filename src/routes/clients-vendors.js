@@ -173,7 +173,8 @@ router.put('/clients/:id', async (req, res, next) => {
       notes,
       isActive,
       noTag,
-      paymentTerms
+      paymentTerms,
+      requiresPartLabels
     } = req.body;
     
     // Check for duplicate name (excluding current)

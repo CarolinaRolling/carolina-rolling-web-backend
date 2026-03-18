@@ -118,11 +118,25 @@ function buildInvoiceIIF(wo, parts, client, invoiceNum) {
     }
   }
   
-  // Build line items — one per regular part with services rolled in
+  // Build line items — multi-line per part:
+  // Line 1: material description with INVITEM (priced row)
+  // Filler lines: rolling instructions, each service on own line
+  // Blank line between parts
   const lineItems = [];
   let subtotal = 0;
   
-  for (const part of regularParts) {
+  // Item type: 1 = resale (nontaxable), 2 = taxable
+  const itemType = isResale ? '1' : '2';
+  
+  // Helper to make a filler line (no pricing)
+  const filler = (desc) => ({ description: clean(desc).substring(0, 200), amount: 0, qty: 0, invItem: '', isPriced: false });
+  const blank = () => ({ description: '', amount: 0, qty: 0, invItem: '', isPriced: false });
+  
+  // Track material sources for summary at end
+  const materialSources = new Set();
+  
+  for (let pi = 0; pi < regularParts.length; pi++) {
+    const part = regularParts[pi];
     const partCost = getPartAmount(part);
     const linked = servicesByParent.get(part.id) || [];
     
@@ -141,26 +155,46 @@ function buildInvoiceIIF(wo, parts, client, invoiceNum) {
     
     const combinedTotal = Math.round((partCost + svcTotal) * 100) / 100;
     
-    // Build description
+    // Build descriptions
     const fd = part.formData && typeof part.formData === 'object' ? part.formData : {};
-    const matDesc = clean(fd._materialDescription || part.materialDescription || '');
+    let matDesc = clean(fd._materialDescription || part.materialDescription || '');
+    // Strip leading quantity like "(2) " or "1pc: " or "2pc: "
+    matDesc = matDesc.replace(/^\(\d+\)\s*/, '').replace(/^\d+pc:?\s*/i, '');
+    
     const rollDesc = fd._rollingDescription || '';
     const firstRoll = rollDesc ? clean(rollDesc.split(/\n|\\n/)[0]) : '';
     
-    let desc = `Part #${part.partNumber}: ${matDesc}`;
-    if (firstRoll) desc += ` - ${firstRoll}`;
-    if (svcDetails.length > 0) {
-      desc += ` - Rolling: $${partCost.toFixed(2)}`;
-      for (const s of svcDetails) desc += ` - ${s.label}: $${s.cost.toFixed(2)}`;
-    }
-    desc = clean(desc).substring(0, 200);
+    // Track material source
+    if (part.materialSource) materialSources.add(part.materialSource);
     
+    // Line 1: material description — priced row with INVITEM
+    const qty = parseInt(part.quantity) || 1;
     lineItems.push({
-      description: desc,
+      description: clean(matDesc).substring(0, 200),
       amount: combinedTotal,
-      qty: parseInt(part.quantity) || 1
+      qty: qty,
+      invItem: itemType,
+      isPriced: true
     });
     subtotal += combinedTotal;
+    
+    // Filler: rolling instructions
+    if (firstRoll) {
+      lineItems.push(filler(firstRoll));
+    }
+    
+    // Filler: each service on its own line
+    if (partCost > 0) {
+      lineItems.push(filler(`Rolling/Labor: $${partCost.toFixed(2)}`));
+    }
+    for (const s of svcDetails) {
+      lineItems.push(filler(`${s.label}: $${s.cost.toFixed(2)}`));
+    }
+    
+    // Blank line between parts (not after the last one)
+    if (pi < regularParts.length - 1) {
+      lineItems.push(blank());
+    }
   }
   
   // Unlinked services
@@ -169,9 +203,9 @@ function buildInvoiceIIF(wo, parts, client, invoiceNum) {
     if (cost <= 0) continue;
     const fd = svc.formData && typeof svc.formData === 'object' ? svc.formData : {};
     let label = fd._fabServiceType || fd._serviceType || svc.partType;
-    let desc = `Service #${svc.partNumber}: ${label}`;
+    let desc = label;
     if (svc.specialInstructions) desc += ` - ${clean(svc.specialInstructions).substring(0, 60)}`;
-    lineItems.push({ description: clean(desc).substring(0, 200), amount: cost, qty: 1 });
+    lineItems.push({ description: clean(desc).substring(0, 200), amount: cost, qty: 1, invItem: itemType, isPriced: true });
     subtotal += cost;
   }
   
@@ -182,40 +216,73 @@ function buildInvoiceIIF(wo, parts, client, invoiceNum) {
       description: clean(wo.truckingDescription || 'Trucking / Delivery'),
       amount: trucking,
       qty: 1,
-      isFreight: true
+      isFreight: true,
+      isPriced: true,
+      invItem: ''
     });
     subtotal += trucking;
+  }
+  
+  // Add blank lines then material supplier info
+  lineItems.push(blank());
+  lineItems.push(blank());
+  
+  // Determine material supplier
+  const sourceLabels = {
+    'customer_supplied': 'Customer',
+    'we_order': 'Carolina Rolling Co., Inc.',
+    'in_stock': 'Carolina Rolling Co., Inc. (In Stock)'
+  };
+  if (materialSources.size > 0) {
+    const sources = [...materialSources].map(s => sourceLabels[s] || s);
+    const uniqueSources = [...new Set(sources)];
+    lineItems.push(filler(`Material supplied by: ${uniqueSources.join(' / ')}`));
   }
   
   if (lineItems.length === 0) return null;
   
   // Tax calculation
   const taxRate = isResale ? 0 : (parseFloat(wo.taxRate) || 0);
-  const taxableAmount = isResale ? 0 : lineItems.filter(i => !i.isFreight).reduce((s, i) => s + i.amount, 0);
+  const taxableAmount = isResale ? 0 : lineItems.filter(i => i.isPriced && !i.isFreight).reduce((s, i) => s + i.amount, 0);
   const taxAmount = Math.round(taxableAmount * taxRate / 100 * 100) / 100;
   const grandTotal = Math.round((subtotal + taxAmount) * 100) / 100;
   
+  // DR number for Delivery Receipt field — just the number, no prefix
+  const drNum = wo.drNumber ? String(wo.drNumber) : '';
+  
   const memo = clean(`${drLabel} - ${clientName}`).substring(0, 200);
   
-  // TRNS: debit AR — PONUM=client PO, OTHER1=DR# (Delivery Receipt)
+  // TRNS: debit AR — PONUM=client PO, OTHER1=DR number (Delivery Receipt)
   lines.push([
     'TRNS', '', 'INVOICE', invoiceDate, QB_CONFIG.arAccount, clientName,
-    grandTotal.toFixed(2), docNum, memo, 'N', 'Y', terms, clientPO, drLabel
+    grandTotal.toFixed(2), docNum, memo, 'N', 'Y', terms, clientPO, drNum
   ].join('\t'));
   
-  // SPL: one line per part — QNTY, PRICE (each), INVITEM, TAXABLE
+  // SPL: two types of lines per part
+  // Priced line: has INVITEM (1 or 2), QTY, PRICE — creates a billable row
+  // Filler line: no INVITEM, no amounts — just description text
   for (const item of lineItems) {
-    const account = item.isFreight ? QB_CONFIG.freightAccount
-      : isResale ? QB_CONFIG.nontaxableIncomeAccount
-      : QB_CONFIG.taxableIncomeAccount;
-    const taxable = (item.isFreight || isResale) ? 'N' : 'Y';
-    const qty = item.qty || 1;
-    const each = (item.amount / qty).toFixed(2);
-    lines.push([
-      'SPL', '', 'INVOICE', invoiceDate, account, clientName,
-      (-item.amount).toFixed(2), docNum, item.description, 'N',
-      (-qty).toString(), (-parseFloat(each)).toFixed(2), '', taxable
-    ].join('\t'));
+    if (item.isPriced) {
+      const account = item.isFreight ? QB_CONFIG.freightAccount
+        : isResale ? QB_CONFIG.nontaxableIncomeAccount
+        : QB_CONFIG.taxableIncomeAccount;
+      const taxable = (item.isFreight || isResale) ? 'N' : 'Y';
+      const qty = item.qty || 1;
+      const each = (item.amount / qty).toFixed(2);
+      lines.push([
+        'SPL', '', 'INVOICE', invoiceDate, account, clientName,
+        (-item.amount).toFixed(2), docNum, item.description, 'N',
+        (-qty).toString(), (-parseFloat(each)).toFixed(2), item.invItem || '', taxable
+      ].join('\t'));
+    } else {
+      // Filler line — description only, no pricing
+      const account = isResale ? QB_CONFIG.nontaxableIncomeAccount : QB_CONFIG.taxableIncomeAccount;
+      lines.push([
+        'SPL', '', 'INVOICE', invoiceDate, account, clientName,
+        '0.00', docNum, item.description, 'N',
+        '', '', '', 'N'
+      ].join('\t'));
+    }
   }
   
   // SPL: tax line

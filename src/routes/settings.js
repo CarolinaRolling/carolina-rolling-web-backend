@@ -933,9 +933,19 @@ router.put('/scrap-config', async (req, res, next) => {
   try {
     const { scrapEmail, shopAddress, shopName } = req.body;
     const config = { scrapEmail: scrapEmail || '', shopAddress: shopAddress || '', shopName: shopName || 'Carolina Rolling Co. Inc.' };
-    await AppSettings.upsert({ key: 'scrap_config', value: config });
+    
+    const existing = await AppSettings.findOne({ where: { key: 'scrap_config' } });
+    if (existing) {
+      await existing.update({ value: config });
+    } else {
+      await AppSettings.create({ key: 'scrap_config', value: config });
+    }
+    
     res.json({ data: config, message: 'Scrap config saved' });
-  } catch (error) { next(error); }
+  } catch (error) {
+    console.error('[scrap-config] Save error:', error.message);
+    next(error);
+  }
 });
 
 // GET /api/settings/scrap-log

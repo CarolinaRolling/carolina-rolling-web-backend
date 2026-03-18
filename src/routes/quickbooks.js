@@ -46,13 +46,22 @@ function mapTerms(terms) {
   return TERMS_MAP[terms] || TERMS_MAP[terms.toUpperCase()] || terms.toUpperCase();
 }
 
-// Get part amount — use stored partTotal first, fall back to calculation
+// Round up material cost after markup (matches frontend logic)
+function roundUpMaterial(value, rounding) {
+  if (!rounding || rounding === 'none' || value <= 0) return value;
+  if (rounding === 'dollar') return Math.ceil(value);
+  if (rounding === 'five') return Math.ceil(value / 5) * 5;
+  return value;
+}
+
+// Get part amount — use stored partTotal first, fall back to calculation with rounding
 function getPartAmount(part) {
   const stored = parseFloat(part.partTotal);
   if (stored && stored > 0) return stored;
   const matCost = parseFloat(part.materialTotal) || 0;
   const matMarkup = parseFloat(part.materialMarkupPercent) || 0;
-  const matEach = matCost * (1 + matMarkup / 100);
+  const fd = part.formData && typeof part.formData === 'object' ? part.formData : {};
+  const matEach = roundUpMaterial(matCost * (1 + matMarkup / 100), fd._materialRounding);
   const labEach = parseFloat(part.laborTotal) || 0;
   const qty = parseInt(part.quantity) || 1;
   return Math.round((matEach + labEach) * qty * 100) / 100;

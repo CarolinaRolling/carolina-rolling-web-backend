@@ -687,6 +687,9 @@ router.get('/invoicing/queue', async (req, res, next) => {
         [Op.or]: [
           { invoiceNumber: null },
           { invoiceNumber: '' }
+        ],
+        [Op.and]: [
+          { [Op.or]: [{ invoiceSkipped: null }, { invoiceSkipped: false }] }
         ]
       },
       include: [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'partTotal', 'quantity'] }],
@@ -707,6 +710,18 @@ router.get('/invoicing/history', async (req, res, next) => {
       include: [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'partTotal', 'quantity'] }],
       order: [['invoiceDate', 'DESC']],
       limit: 100
+    });
+    res.json({ data: workOrders });
+  } catch (error) { next(error); }
+});
+
+// GET /api/workorders/invoicing/skipped - WOs marked as not invoiced (MUST be before /:id)
+router.get('/invoicing/skipped', async (req, res, next) => {
+  try {
+    const workOrders = await WorkOrder.findAll({
+      where: { invoiceSkipped: true },
+      include: [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'partTotal', 'quantity'] }],
+      order: [['invoiceSkippedAt', 'DESC']]
     });
     res.json({ data: workOrders });
   } catch (error) { next(error); }
@@ -1184,6 +1199,66 @@ router.delete('/:id/invoice', async (req, res, next) => {
       invoicePdfUrl: null, invoicePdfCloudinaryId: null
     });
     res.json({ data: workOrder, message: 'Invoice cleared' });
+  } catch (error) { next(error); }
+});
+
+// POST /api/workorders/:id/skip-invoice - Mark WO as not needing an invoice
+router.post('/:id/skip-invoice', async (req, res, next) => {
+  try {
+    const workOrder = await WorkOrder.findByPk(req.params.id);
+    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+    
+    await workOrder.update({
+      invoiceSkipped: true,
+      invoiceSkipReason: req.body.reason || null,
+      invoiceSkippedBy: req.user?.username || 'Unknown',
+      invoiceSkippedAt: new Date()
+    });
+    res.json({ data: workOrder, message: 'Marked as not invoiced' });
+  } catch (error) { next(error); }
+});
+
+// POST /api/workorders/:id/restore-invoice - Move back to invoice queue
+router.post('/:id/restore-invoice', async (req, res, next) => {
+  try {
+    const workOrder = await WorkOrder.findByPk(req.params.id);
+    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+    
+    await workOrder.update({
+      invoiceSkipped: false,
+      invoiceSkipReason: null,
+      invoiceSkippedBy: null,
+      invoiceSkippedAt: null
+    });
+    res.json({ data: workOrder, message: 'Restored to invoice queue' });
+  } catch (error) { next(error); }
+});
+
+// POST /api/workorders/:id/mark-invoice-sent - Record that invoice was sent (date + PDF)
+router.post('/:id/mark-invoice-sent', upload.single('invoicePdf'), async (req, res, next) => {
+  try {
+    const workOrder = await WorkOrder.findByPk(req.params.id);
+    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+    
+    const updates = {
+      invoiceDate: new Date(),
+      invoicedBy: req.user?.username || 'Unknown'
+    };
+    
+    if (req.file) {
+      const fileStorage = require('../utils/storage');
+      const result = await fileStorage.uploadFile(req.file.path, {
+        filename: `invoice-${workOrder.invoiceNumber || 'draft'}-${workOrder.drNumber || workOrder.id}.pdf`,
+        folder: 'invoices',
+        contentType: 'application/pdf'
+      });
+      updates.invoicePdfUrl = result.url;
+      updates.invoicePdfCloudinaryId = result.publicId;
+      try { require('fs').unlinkSync(req.file.path); } catch(e) {}
+    }
+    
+    await workOrder.update(updates);
+    res.json({ data: workOrder, message: 'Invoice marked as sent' });
   } catch (error) { next(error); }
 });
 

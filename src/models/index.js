@@ -633,6 +633,23 @@ const WorkOrder = sequelize.define('WorkOrder', {
   invoicePdfCloudinaryId: {
     type: DataTypes.STRING,
     allowNull: true
+  },
+  invoiceSkipped: {
+    type: DataTypes.BOOLEAN,
+    allowNull: true,
+    defaultValue: false
+  },
+  invoiceSkipReason: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  invoiceSkippedBy: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  invoiceSkippedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
   }
 }, {
   tableName: 'work_orders',

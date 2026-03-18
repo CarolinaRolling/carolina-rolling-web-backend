@@ -498,6 +498,45 @@ router.get('/invoice-numbers', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// POST /api/quickbooks/invoice-numbers/manual - Manually create an invoice number entry
+router.post('/invoice-numbers/manual', async (req, res, next) => {
+  try {
+    const { invoiceNumber, clientName, workOrderId } = req.body;
+    if (!invoiceNumber) return res.status(400).json({ error: { message: 'Invoice number is required' } });
+    
+    const num = parseInt(invoiceNumber);
+    if (isNaN(num) || num < 1) return res.status(400).json({ error: { message: 'Invoice number must be a positive number' } });
+    
+    // Check if already exists
+    const existing = await InvoiceNumber.findOne({ where: { invoiceNumber: num } });
+    if (existing) return res.status(400).json({ error: { message: `Invoice #${num} already exists` } });
+    
+    const entry = { invoiceNumber: num, clientName: clientName || null };
+    
+    // If linking to a work order
+    if (workOrderId) {
+      const wo = await WorkOrder.findByPk(workOrderId);
+      if (wo) {
+        entry.workOrderId = wo.id;
+        entry.clientId = wo.clientId;
+        entry.clientName = wo.clientName;
+        await wo.update({ invoiceNumber: String(num) });
+      }
+    }
+    
+    const inv = await InvoiceNumber.create(entry);
+    
+    // Update next number if this one is >= current next
+    const setting = await AppSettings.findOne({ where: { key: 'next_invoice_number' } });
+    const currentNext = setting?.value || 1001;
+    if (num >= currentNext) {
+      await AppSettings.upsert({ key: 'next_invoice_number', value: num + 1 });
+    }
+    
+    res.json({ data: inv, message: `Invoice #${num} created` });
+  } catch (error) { next(error); }
+});
+
 // POST /api/quickbooks/invoice-numbers/:id/void - Void an invoice number
 router.post('/invoice-numbers/:id/void', async (req, res, next) => {
   try {

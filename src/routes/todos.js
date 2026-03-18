@@ -126,15 +126,29 @@ router.post('/:id/accept', async (req, res, next) => {
     });
 
     // Create notification for all users that review is complete
-    if (item.type === 'estimate_review') {
-      const estLabel = item.estimateNumber || 'estimate';
+    if (item.type === 'estimate_review' && item.estimateId) {
+      // Look up estimate for number and client name
+      const { Estimate } = require('../models');
+      let estLabel = item.estimateNumber || 'Estimate';
+      let clientName = '';
+      try {
+        const est = await Estimate.findByPk(item.estimateId);
+        if (est) {
+          estLabel = est.estimateNumber || estLabel;
+          clientName = est.clientName || '';
+        }
+      } catch (e) { /* ignore lookup failure */ }
+
+      const titleParts = [estLabel];
+      if (clientName) titleParts.push(clientName);
+
       await TodoItem.create({
-        title: `✅ ${estLabel} review complete — ready to send`,
+        title: `✅ ${titleParts.join(' — ')} review complete — ready to send`,
         description: `Reviewed and approved by ${reviewerName}. Estimate is ready to be sent to the client.`,
         type: 'general',
         priority: 'normal',
         estimateId: item.estimateId,
-        estimateNumber: item.estimateNumber,
+        estimateNumber: estLabel,
         createdBy: reviewerName
       });
     }

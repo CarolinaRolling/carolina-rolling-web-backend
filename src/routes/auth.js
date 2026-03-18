@@ -503,6 +503,11 @@ router.delete('/users/:id', authenticateToken, requireAdmin, async (req, res, ne
     }
 
     const deletedUsername = user.username;
+    
+    // Nullify foreign key references to preserve logs
+    const { ActivityLog } = require('../models');
+    await ActivityLog.update({ userId: null }, { where: { userId: user.id } });
+    
     await user.destroy();
 
     await logActivity(req.user.id, req.user.username, 'USER_DELETED', 'user', req.params.id, { deletedUsername }, req.ip);

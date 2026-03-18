@@ -195,27 +195,26 @@ function buildInvoiceIIF(wo, parts, client, invoiceNum) {
   const taxAmount = Math.round(taxableAmount * taxRate / 100 * 100) / 100;
   const grandTotal = Math.round((subtotal + taxAmount) * 100) / 100;
   
-  // Build memo with DR# and PO#
-  const memoParts = [drLabel, clientName];
-  if (clientPO) memoParts.push(`PO#${clientPO}`);
-  const memo = clean(memoParts.join(' - ')).substring(0, 200);
+  const memo = clean(`${drLabel} - ${clientName}`).substring(0, 200);
   
-  // TRNS: debit AR
+  // TRNS: debit AR — PONUM=client PO, OTHER1=DR# (Delivery Receipt)
   lines.push([
     'TRNS', '', 'INVOICE', invoiceDate, QB_CONFIG.arAccount, clientName,
-    grandTotal.toFixed(2), docNum, memo, 'N', 'Y', terms
+    grandTotal.toFixed(2), docNum, memo, 'N', 'Y', terms, clientPO, drLabel
   ].join('\t'));
   
-  // SPL: one line per part — includes QNTY, PRICE, INVITEM, TAXABLE
+  // SPL: one line per part — QNTY, PRICE (each), INVITEM, TAXABLE
   for (const item of lineItems) {
     const account = item.isFreight ? QB_CONFIG.freightAccount
       : isResale ? QB_CONFIG.nontaxableIncomeAccount
       : QB_CONFIG.taxableIncomeAccount;
     const taxable = (item.isFreight || isResale) ? 'N' : 'Y';
+    const qty = item.qty || 1;
+    const each = (item.amount / qty).toFixed(2);
     lines.push([
       'SPL', '', 'INVOICE', invoiceDate, account, clientName,
       (-item.amount).toFixed(2), docNum, item.description, 'N',
-      '', '', '', taxable
+      (-qty).toString(), (-parseFloat(each)).toFixed(2), '', taxable
     ].join('\t'));
   }
   
@@ -250,7 +249,7 @@ function buildInvoiceIIF(wo, parts, client, invoiceNum) {
 }
 
 const IIF_HEADER = [
-  '!TRNS\tTRNSID\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tDOCNUM\tMEMO\tCLEAR\tTOPRINT\tTERMS',
+  '!TRNS\tTRNSID\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tDOCNUM\tMEMO\tCLEAR\tTOPRINT\tTERMS\tPONUM\tOTHER1',
   '!SPL\tSPLID\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tDOCNUM\tMEMO\tCLEAR\tQNTY\tPRICE\tINVITEM\tTAXABLE',
   '!ENDTRNS'
 ];

@@ -1241,7 +1241,7 @@ router.post('/:id/mark-invoice-sent', upload.single('invoicePdf'), async (req, r
     if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
     
     const updates = {
-      invoiceDate: new Date(),
+      invoiceDate: req.body.invoiceDate ? new Date(req.body.invoiceDate + 'T12:00:00') : new Date(),
       invoicedBy: req.user?.username || 'Unknown'
     };
     

@@ -447,7 +447,7 @@ router.put('/change-password', authenticateToken, async (req, res, next) => {
 router.get('/users', authenticateToken, requireAdmin, async (req, res, next) => {
   try {
     const users = await User.findAll({
-      attributes: ['id', 'username', 'role', 'isActive', 'createdAt'],
+      attributes: ['id', 'username', 'role', 'isActive', 'isHeadEstimator', 'createdAt'],
       order: [['createdAt', 'DESC']]
     });
 
@@ -466,10 +466,11 @@ router.put('/users/:id', authenticateToken, requireAdmin, async (req, res, next)
       return res.status(404).json({ error: { message: 'User not found' } });
     }
 
-    const { role, isActive, password } = req.body;
+    const { role, isActive, password, isHeadEstimator } = req.body;
 
     if (role) user.role = role;
     if (typeof isActive === 'boolean') user.isActive = isActive;
+    if (typeof isHeadEstimator === 'boolean') user.isHeadEstimator = isHeadEstimator;
     if (password) user.password = password;
 
     await user.save();
@@ -481,7 +482,8 @@ router.put('/users/:id', authenticateToken, requireAdmin, async (req, res, next)
         id: user.id,
         username: user.username,
         role: user.role,
-        isActive: user.isActive
+        isActive: user.isActive,
+        isHeadEstimator: user.isHeadEstimator
       }
     });
   } catch (error) {

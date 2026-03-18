@@ -1,5 +1,5 @@
 const express = require('express');
-const { TodoItem, User } = require('../models');
+const { TodoItem, User, Estimate } = require('../models');
 const { Op } = require('sequelize');
 
 const router = express.Router();
@@ -45,6 +45,23 @@ router.post('/', async (req, res, next) => {
       return res.status(400).json({ error: { message: 'Title is required' } });
     }
 
+    let finalTitle = title;
+    let finalEstimateNumber = estimateNumber || null;
+
+    // For estimate reviews, look up the actual estimate to get correct number + client
+    if (type === 'estimate_review' && estimateId) {
+      try {
+        const est = await Estimate.findByPk(estimateId);
+        if (est) {
+          finalEstimateNumber = est.estimateNumber || estimateNumber;
+          const clientName = est.clientName || '';
+          const titleParts = [finalEstimateNumber];
+          if (clientName) titleParts.push(clientName);
+          finalTitle = `Review pricing: ${titleParts.join(' — ')}`;
+        }
+      } catch (e) { /* use frontend-provided title */ }
+    }
+
     let finalAssignedTo = assignedTo || null;
 
     // Auto-assign estimate reviews to head estimator
@@ -56,13 +73,13 @@ router.post('/', async (req, res, next) => {
     }
 
     const item = await TodoItem.create({
-      title,
+      title: finalTitle,
       description: description || null,
       type: type || 'general',
       priority: priority || 'normal',
       assignedTo: finalAssignedTo,
       estimateId: estimateId || null,
-      estimateNumber: estimateNumber || null,
+      estimateNumber: finalEstimateNumber,
       createdBy: req.user?.username || 'system'
     });
 
@@ -128,7 +145,6 @@ router.post('/:id/accept', async (req, res, next) => {
     // Create notification for all users that review is complete
     if (item.type === 'estimate_review' && item.estimateId) {
       // Look up estimate for number and client name
-      const { Estimate } = require('../models');
       let estLabel = item.estimateNumber || 'Estimate';
       let clientName = '';
       try {

@@ -241,11 +241,12 @@ function buildInvoiceIIF(wo, parts, client, invoiceNum) {
   
   if (lineItems.length === 0) return null;
   
-  // Tax calculation
+  // Tax calculation — for summary only. QB auto-calculates tax from TAXABLE=Y lines
   const taxRate = isResale ? 0 : (parseFloat(wo.taxRate) || 0);
   const taxableAmount = isResale ? 0 : lineItems.filter(i => i.isPriced && !i.isFreight).reduce((s, i) => s + i.amount, 0);
   const taxAmount = Math.round(taxableAmount * taxRate / 100 * 100) / 100;
-  const grandTotal = Math.round((subtotal + taxAmount) * 100) / 100;
+  // TRNS amount = subtotal only. QB adds tax automatically for taxable lines.
+  const grandTotal = Math.round(subtotal * 100) / 100;
   
   // DR number for Delivery Receipt field — just the number, no prefix
   const drNum = wo.drNumber ? String(wo.drNumber) : '';
@@ -276,7 +277,6 @@ function buildInvoiceIIF(wo, parts, client, invoiceNum) {
       ].join('\t'));
     } else {
       // Filler line — description only, no account, no amounts, no tax
-      // Trim to exactly 10 columns (matching SPL header up to CLEAR) so QB doesn't fill TAXABLE
       lines.push([
         'SPL', '', 'INVOICE', invoiceDate, '', '',
         '', docNum, item.description, ''
@@ -284,14 +284,7 @@ function buildInvoiceIIF(wo, parts, client, invoiceNum) {
     }
   }
   
-  // SPL: tax line — INVITEM must reference the sales tax item so QB knows the vendor
-  if (taxAmount > 0) {
-    lines.push([
-      'SPL', '', 'INVOICE', invoiceDate, QB_CONFIG.taxAccount, '',
-      (-taxAmount).toFixed(2), docNum, '', 'N',
-      '', '', 'SALES TAX', 'N'
-    ].join('\t'));
-  }
+  // No explicit tax SPL line — QB auto-calculates tax from TAXABLE=Y lines
   
   lines.push('ENDTRNS');
   

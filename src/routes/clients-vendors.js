@@ -96,7 +96,7 @@ router.post('/clients', async (req, res, next) => {
       customTaxRate,
       notes,
       noTag,
-      paymentTerms
+      paymentTerms, requiresPartLabels
     } = req.body;
     
     if (!name) {
@@ -119,6 +119,7 @@ router.post('/clients', async (req, res, next) => {
           customTaxRate: (customTaxRate && customTaxRate !== '' && !isNaN(parseFloat(customTaxRate))) ? parseFloat(customTaxRate) : existing.customTaxRate,
           notes: notes || existing.notes,
           noTag: noTag !== undefined ? noTag : existing.noTag,
+          requiresPartLabels: requiresPartLabels !== undefined ? requiresPartLabels : existing.requiresPartLabels,
           paymentTerms: paymentTerms || existing.paymentTerms
         });
         return res.status(201).json({ data: existing, message: `Client "${existing.name}" reactivated` });
@@ -137,6 +138,7 @@ router.post('/clients', async (req, res, next) => {
       customTaxRate: (customTaxRate && customTaxRate !== '' && !isNaN(parseFloat(customTaxRate))) ? parseFloat(customTaxRate) : null,
       notes: notes || null,
       noTag: noTag || false,
+      requiresPartLabels: requiresPartLabels || false,
       paymentTerms: paymentTerms || null,
       apEmail: req.body.apEmail || null,
       quickbooksName: req.body.quickbooksName || null,
@@ -201,6 +203,7 @@ router.put('/clients/:id', async (req, res, next) => {
       notes: notes !== undefined ? (notes || null) : client.notes,
       isActive: isActive !== undefined ? isActive : client.isActive,
       noTag: noTag !== undefined ? noTag : client.noTag,
+      requiresPartLabels: requiresPartLabels !== undefined ? requiresPartLabels : client.requiresPartLabels,
       paymentTerms: paymentTerms !== undefined ? (paymentTerms || null) : client.paymentTerms,
       contacts: req.body.contacts !== undefined ? req.body.contacts : client.contacts,
       quickbooksName: req.body.quickbooksName !== undefined ? (req.body.quickbooksName || null) : client.quickbooksName

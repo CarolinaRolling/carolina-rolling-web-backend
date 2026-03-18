@@ -45,12 +45,22 @@ router.post('/', async (req, res, next) => {
       return res.status(400).json({ error: { message: 'Title is required' } });
     }
 
+    let finalAssignedTo = assignedTo || null;
+
+    // Auto-assign estimate reviews to head estimator
+    if (type === 'estimate_review' && !finalAssignedTo) {
+      const headEstimator = await User.findOne({ where: { isHeadEstimator: true, isActive: true } });
+      if (headEstimator) {
+        finalAssignedTo = headEstimator.username;
+      }
+    }
+
     const item = await TodoItem.create({
       title,
       description: description || null,
       type: type || 'general',
       priority: priority || 'normal',
-      assignedTo: assignedTo || null,
+      assignedTo: finalAssignedTo,
       estimateId: estimateId || null,
       estimateNumber: estimateNumber || null,
       createdBy: req.user?.username || 'system'
@@ -107,11 +117,27 @@ router.post('/:id/accept', async (req, res, next) => {
     const item = await TodoItem.findByPk(req.params.id);
     if (!item) return res.status(404).json({ error: { message: 'Task not found' } });
 
+    const reviewerName = req.user?.username || 'unknown';
+
     await item.update({
       status: 'accepted',
-      completedBy: req.user?.username || 'unknown',
+      completedBy: reviewerName,
       completedAt: new Date()
     });
+
+    // Create notification for all users that review is complete
+    if (item.type === 'estimate_review') {
+      const estLabel = item.estimateNumber || 'estimate';
+      await TodoItem.create({
+        title: `✅ ${estLabel} review complete — ready to send`,
+        description: `Reviewed and approved by ${reviewerName}. Estimate is ready to be sent to the client.`,
+        type: 'general',
+        priority: 'normal',
+        estimateId: item.estimateId,
+        estimateNumber: item.estimateNumber,
+        createdBy: reviewerName
+      });
+    }
 
     res.json({ data: item, message: 'Estimate accepted' });
   } catch (error) {

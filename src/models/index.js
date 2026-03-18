@@ -2019,6 +2019,11 @@ const ShopSupply = sequelize.define('ShopSupply', {
     type: DataTypes.INTEGER,
     defaultValue: 1 // warn when at or below this level
   },
+  maxQuantity: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    defaultValue: null // max stock level for progress bar
+  },
   qrCode: {
     type: DataTypes.STRING,
     unique: true,

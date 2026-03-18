@@ -3,11 +3,32 @@ const crypto = require('crypto');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const storage = require('../utils/storage');
-const { ShopSupply, ShopSupplyLog } = require('../models');
+const { ShopSupply, ShopSupplyLog, AppSettings } = require('../models');
 const { Op } = require('sequelize');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+
+// GET /api/shop-supplies/categories - Get all categories
+router.get('/categories', async (req, res, next) => {
+  try {
+    const setting = await AppSettings.findOne({ where: { key: 'shop_supply_categories' } });
+    const categories = setting?.value || ['Gas', 'Safety', 'Consumables', 'Paint', 'Tools', 'Other'];
+    res.json({ data: categories });
+  } catch (error) { next(error); }
+});
+
+// PUT /api/shop-supplies/categories - Update categories list
+router.put('/categories', async (req, res, next) => {
+  try {
+    const { categories } = req.body;
+    if (!Array.isArray(categories)) return res.status(400).json({ error: { message: 'Categories must be an array' } });
+    const existing = await AppSettings.findOne({ where: { key: 'shop_supply_categories' } });
+    if (existing) { await existing.update({ value: categories }); }
+    else { await AppSettings.create({ key: 'shop_supply_categories', value: categories }); }
+    res.json({ data: categories, message: 'Categories updated' });
+  } catch (error) { next(error); }
+});
 
 // GET /api/shop-supplies - List all supplies
 router.get('/', async (req, res, next) => {
@@ -60,7 +81,7 @@ router.get('/qr/:qrCode', async (req, res, next) => {
 // POST /api/shop-supplies - Create new supply item
 router.post('/', async (req, res, next) => {
   try {
-    const { name, description, category, quantity, unit, minQuantity } = req.body;
+    const { name, description, category, quantity, unit, minQuantity, maxQuantity } = req.body;
     if (!name) {
       return res.status(400).json({ error: { message: 'Name is required' } });
     }
@@ -75,6 +96,7 @@ router.post('/', async (req, res, next) => {
       quantity: parseInt(quantity) || 0,
       unit: unit || 'each',
       minQuantity: parseInt(minQuantity) || 1,
+      maxQuantity: maxQuantity ? parseInt(maxQuantity) : null,
       qrCode,
       lowStockAcknowledged: (parseInt(quantity) || 0) > (parseInt(minQuantity) || 1)
     });
@@ -105,14 +127,38 @@ router.put('/:id', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Item not found' } });
     }
 
-    const { name, description, category, unit, minQuantity, isActive } = req.body;
+    const { name, description, category, unit, minQuantity, maxQuantity, isActive, quantity } = req.body;
     const updates = {};
     if (name !== undefined) updates.name = name;
     if (description !== undefined) updates.description = description;
     if (category !== undefined) updates.category = category;
     if (unit !== undefined) updates.unit = unit;
     if (minQuantity !== undefined) updates.minQuantity = parseInt(minQuantity) || 1;
+    if (maxQuantity !== undefined) updates.maxQuantity = maxQuantity ? parseInt(maxQuantity) : null;
     if (isActive !== undefined) updates.isActive = isActive;
+    
+    // Allow direct stock adjustment from web panel
+    if (quantity !== undefined) {
+      const newQty = parseInt(quantity) || 0;
+      const oldQty = supply.quantity;
+      if (newQty !== oldQty) {
+        updates.quantity = newQty;
+        updates.lowStockAcknowledged = newQty > (supply.minQuantity || 1);
+        // Log the adjustment
+        await ShopSupplyLog.create({
+          shopSupplyId: supply.id,
+          action: newQty > oldQty ? 'refill' : 'consume',
+          quantityChange: newQty - oldQty,
+          quantityAfter: newQty,
+          performedBy: req.user?.username || 'admin',
+          notes: `Stock adjusted: ${oldQty} → ${newQty}`
+        });
+        if (newQty > oldQty) {
+          updates.lastRefilledAt = new Date();
+          updates.lastRefilledBy = req.user?.username || 'admin';
+        }
+      }
+    }
 
     await supply.update(updates);
     res.json({ data: supply, message: 'Item updated' });

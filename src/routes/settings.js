@@ -904,6 +904,18 @@ router.put('/scrap-config', async (req, res, next) => {
   }
 });
 
+// GET /api/settings/scrap-pending — Check if any scrap pickups are pending
+router.get('/scrap-pending', async (req, res, next) => {
+  try {
+    const setting = await AppSettings.findOne({ where: { key: 'scrap_config' } });
+    const config = setting?.value || {};
+    const pending = [];
+    if (config.steelPending) pending.push({ type: 'steel', label: 'Steel Scrap', ...config.steelPending });
+    if (config.stainlessPending) pending.push({ type: 'stainless', label: 'Stainless & Aluminum', ...config.stainlessPending });
+    res.json({ data: pending });
+  } catch (error) { next(error); }
+});
+
 // GET /api/settings/scrap-log
 router.get('/scrap-log', async (req, res, next) => {
   try {
@@ -926,6 +938,14 @@ router.post('/scrap-request', async (req, res, next) => {
       return res.status(400).json({ error: { message: 'Scrap company email not configured. Go to Admin > Shop Config > Scrap.' } });
     }
 
+    // Check if this type already has a pending request
+    const pendingKey = scrapType === 'steel' ? 'steelPending' : 'stainlessPending';
+    if (config[pendingKey]) {
+      const pendingDate = new Date(config[pendingKey].requestedAt).toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' });
+      const pendingBy = config[pendingKey].requestedBy || 'someone';
+      return res.status(400).json({ error: { message: `A ${scrapType} scrap pickup was already requested on ${pendingDate} by ${pendingBy}. An admin must confirm pickup before requesting again.` } });
+    }
+
     const scrapLabel = scrapType === 'steel' ? 'Steel Scrap' : 'Stainless & Aluminum Mix';
     const now = new Date();
     const dateStr = now.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
@@ -943,12 +963,34 @@ router.post('/scrap-request', async (req, res, next) => {
     const shopAddress = (config.shopAddress || 'Address not configured').replace(/\n/g, '<br/>');
     const shopName = config.shopName || 'Carolina Rolling Co. Inc.';
 
+    // Email to scrap company — NO "Requested By"
     await transporter.sendMail({
       from: process.env.SMTP_FROM || process.env.SMTP_USER,
       to: config.scrapEmail,
       subject: 'Scrap Pickup Request — ' + scrapLabel + ' — ' + shopName,
-      html: '<div style="font-family:Arial,sans-serif;max-width:600px"><h2 style="color:#1565C0">Scrap Pickup Request</h2><table style="border-collapse:collapse;width:100%;margin:16px 0"><tr><td style="padding:8px;font-weight:bold;color:#555;width:140px">Scrap Type:</td><td style="padding:8px;font-size:1.1em;font-weight:bold;color:' + (scrapType === 'steel' ? '#1565C0' : '#E65100') + '">' + scrapLabel + '</td></tr><tr><td style="padding:8px;font-weight:bold;color:#555">Company:</td><td style="padding:8px">' + shopName + '</td></tr><tr><td style="padding:8px;font-weight:bold;color:#555">Pickup Address:</td><td style="padding:8px">' + shopAddress + '</td></tr><tr><td style="padding:8px;font-weight:bold;color:#555">Requested:</td><td style="padding:8px">' + dateStr + ' at ' + timeStr + '</td></tr><tr><td style="padding:8px;font-weight:bold;color:#555">Requested By:</td><td style="padding:8px">' + requestedBy + '</td></tr></table><p style="color:#666;font-size:0.9em">Automated request from ' + shopName + '.</p></div>'
+      html: '<div style="font-family:Arial,sans-serif;max-width:600px"><h2 style="color:#1565C0">Scrap Pickup Request</h2><table style="border-collapse:collapse;width:100%;margin:16px 0"><tr><td style="padding:8px;font-weight:bold;color:#555;width:140px">Scrap Type:</td><td style="padding:8px;font-size:1.1em;font-weight:bold;color:' + (scrapType === 'steel' ? '#1565C0' : '#E65100') + '">' + scrapLabel + '</td></tr><tr><td style="padding:8px;font-weight:bold;color:#555">Company:</td><td style="padding:8px">' + shopName + '</td></tr><tr><td style="padding:8px;font-weight:bold;color:#555">Pickup Address:</td><td style="padding:8px">' + shopAddress + '</td></tr><tr><td style="padding:8px;font-weight:bold;color:#555">Requested:</td><td style="padding:8px">' + dateStr + ' at ' + timeStr + '</td></tr></table><p style="color:#666;font-size:0.9em">Automated request from ' + shopName + '.</p></div>'
     });
+
+    // Email to office — includes who requested it
+    try {
+      const notifSetting = await AppSettings.findOne({ where: { key: 'notification_email' } });
+      const officeEmail = notifSetting?.value?.email || notifSetting?.value;
+      if (officeEmail && typeof officeEmail === 'string' && officeEmail.includes('@')) {
+        await transporter.sendMail({
+          from: process.env.SMTP_FROM || process.env.SMTP_USER,
+          to: officeEmail,
+          subject: '♻️ Scrap Pickup Requested — ' + scrapLabel,
+          html: '<div style="font-family:Arial,sans-serif;max-width:600px"><h2 style="color:#E65100">♻️ Scrap Pickup Requested</h2><p>A scrap pickup request has been sent to <strong>' + config.scrapEmail + '</strong>.</p><table style="border-collapse:collapse;width:100%;margin:16px 0"><tr><td style="padding:8px;font-weight:bold;color:#555;width:140px">Scrap Type:</td><td style="padding:8px;font-weight:bold;color:' + (scrapType === 'steel' ? '#1565C0' : '#E65100') + '">' + scrapLabel + '</td></tr><tr><td style="padding:8px;font-weight:bold;color:#555">Requested By:</td><td style="padding:8px">' + requestedBy + '</td></tr><tr><td style="padding:8px;font-weight:bold;color:#555">Date:</td><td style="padding:8px">' + dateStr + ' at ' + timeStr + '</td></tr></table><p style="color:#888;font-size:0.85em">Log into the system and go to Admin → Shop Config → Scrap to confirm pickup when complete.</p></div>'
+        });
+      }
+    } catch (emailErr) {
+      console.warn('[Scrap] Office notification email failed:', emailErr.message);
+    }
+
+    // Mark this type as pending
+    config[pendingKey] = { requestedAt: now.toISOString(), requestedBy };
+    if (configSetting) { await configSetting.update({ value: config }); }
+    else { await AppSettings.create({ key: 'scrap_config', value: config }); }
 
     const logSetting = await AppSettings.findOne({ where: { key: 'scrap_log' } });
     const log = logSetting?.value || [];
@@ -965,6 +1007,47 @@ router.post('/scrap-request', async (req, res, next) => {
     console.error('[Scrap] Request failed:', error.message);
     next(error);
   }
+});
+
+// POST /api/settings/scrap-confirm-pickup — Confirm scrap has been picked up (resets lock)
+router.post('/scrap-confirm-pickup', async (req, res, next) => {
+  try {
+    const { scrapType } = req.body;
+    if (!scrapType || !['steel', 'stainless'].includes(scrapType)) {
+      return res.status(400).json({ error: { message: 'scrapType must be "steel" or "stainless"' } });
+    }
+
+    const configSetting = await AppSettings.findOne({ where: { key: 'scrap_config' } });
+    if (!configSetting) return res.status(404).json({ error: { message: 'Scrap config not found' } });
+
+    const config = configSetting.value || {};
+    const pendingKey = scrapType === 'steel' ? 'steelPending' : 'stainlessPending';
+    
+    // Log the pickup confirmation
+    const logSetting = await AppSettings.findOne({ where: { key: 'scrap_log' } });
+    const log = logSetting?.value || [];
+    if (config[pendingKey]) {
+      log.unshift({
+        id: Date.now(),
+        scrapType,
+        scrapLabel: scrapType === 'steel' ? 'Steel Scrap' : 'Stainless & Aluminum Mix',
+        requestedBy: req.user?.username || 'Admin',
+        requestedAt: new Date().toISOString(),
+        action: 'picked_up',
+        originalRequest: config[pendingKey]
+      });
+      if (log.length > 100) log.length = 100;
+      if (logSetting) { await logSetting.update({ value: log }); }
+      else { await AppSettings.create({ key: 'scrap_log', value: log }); }
+    }
+
+    // Clear pending status
+    delete config[pendingKey];
+    await configSetting.update({ value: config });
+
+    const label = scrapType === 'steel' ? 'Steel' : 'Stainless & Aluminum';
+    res.json({ data: config, message: `${label} scrap pickup confirmed. New requests can now be sent.` });
+  } catch (error) { next(error); }
 });
 
 // ==================== GENERIC SETTINGS (catch-all — MUST BE LAST) ====================

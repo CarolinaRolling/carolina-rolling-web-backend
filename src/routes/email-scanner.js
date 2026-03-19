@@ -158,7 +158,7 @@ router.get('/status', async (req, res, next) => {
 // POST /api/email-scanner/scan-now - Trigger manual scan
 router.post('/scan-now', async (req, res, next) => {
   try {
-    const results = await runScan(true); // Force scan even outside business hours
+    const results = await runScan();
     res.json({ data: results, message: `Scan complete: ${results.processed || 0} emails processed` });
   } catch (error) {
     console.error('[EmailScanner] Manual scan error:', error.message);

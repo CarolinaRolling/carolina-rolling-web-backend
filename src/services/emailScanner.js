@@ -758,10 +758,7 @@ async function createPendingOrderFromParsed(parsed, clientInfo, scannedEmail) {
 }
 
 // Main scan function — scans all connected accounts
-async function runScan(forceOutsideHours = false) {
-  if (!forceOutsideHours && !isBusinessHours()) {
-    return { skipped: true, reason: 'Outside business hours' };
-  }
+async function runScan() {
 
   if (!process.env.ANTHROPIC_API_KEY) {
     return { error: 'ANTHROPIC_API_KEY not configured' };

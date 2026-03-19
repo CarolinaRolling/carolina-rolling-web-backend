@@ -95,6 +95,11 @@ app.use('/api/shop-supplies', authenticate, shopSuppliesRoutes);
 const todoRoutes = require('./routes/todos');
 app.use('/api/todos', authenticate, todoRoutes);
 
+// Email Scanner - OAuth callback must be unauthenticated (Google redirects here)
+const emailScannerRoutes = require('./routes/email-scanner');
+app.use('/api/email-scanner/oauth/callback', emailScannerRoutes);
+app.use('/api/email-scanner', authenticate, emailScannerRoutes);
+
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Error:', err.message || err);
@@ -852,6 +857,20 @@ async function startServer() {
       }
     }, { timezone: 'America/Los_Angeles' });
     console.log('Auto-archive configured for daily at 1:00 AM Pacific');
+
+    // Email Scanner — every 5 minutes during business hours
+    cron.schedule('*/5 * * * *', async () => {
+      try {
+        const { runScan } = require('./services/emailScanner');
+        const result = await runScan();
+        if (result.processed > 0) {
+          console.log(`[EmailScanner] Processed ${result.processed} emails, ${result.estimates} estimates, ${result.pendingOrders} pending orders`);
+        }
+      } catch (err) {
+        console.error('[EmailScanner] Cron error:', err.message);
+      }
+    });
+    console.log('Email scanner cron configured for every 5 minutes');
 
   } catch (error) {
     console.error('Startup error (server still running):', error.message);

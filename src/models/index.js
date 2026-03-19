@@ -1174,6 +1174,14 @@ const Estimate = sequelize.define('Estimate', {
   allCustomerSupplied: {
     type: DataTypes.BOOLEAN,
     defaultValue: false
+  },
+  emailLink: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  scannedEmailId: {
+    type: DataTypes.UUID,
+    allowNull: true
   }
 }, {
   tableName: 'estimates',
@@ -1907,11 +1915,240 @@ const Client = sequelize.define('Client', {
   quickbooksName: {
     type: DataTypes.STRING,
     allowNull: true
+  },
+  // Email scanning
+  emailScanEnabled: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  emailScanAddresses: {
+    type: DataTypes.JSONB,
+    defaultValue: [],
+    allowNull: true
+    // Array of email addresses to scan for this client
+  },
+  emailScanParsingNotes: {
+    type: DataTypes.TEXT,
+    allowNull: true
+    // Free text hints for AI parsing e.g. "OR numbers are their reference numbers"
   }
 }, {
   tableName: 'clients',
   timestamps: true
 });
+
+// GmailAccount - connected Gmail/Workspace accounts for email scanning
+const GmailAccount = sequelize.define('GmailAccount', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  email: {
+    type: DataTypes.STRING,
+    allowNull: false,
+    unique: true
+  },
+  accessToken: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  refreshToken: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  tokenExpiry: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  isActive: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: true
+  },
+  lastScannedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  lastError: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  connectedBy: {
+    type: DataTypes.STRING,
+    allowNull: true
+  }
+}, {
+  tableName: 'gmail_accounts',
+  timestamps: true
+});
+
+// ScannedEmail - track processed emails to avoid duplicates
+const ScannedEmail = sequelize.define('ScannedEmail', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  gmailMessageId: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  gmailAccountId: {
+    type: DataTypes.UUID,
+    allowNull: false,
+    references: { model: 'gmail_accounts', key: 'id' }
+  },
+  fromEmail: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  fromName: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  subject: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  receivedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  clientId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'clients', key: 'id' }
+  },
+  emailType: {
+    type: DataTypes.STRING,
+    allowNull: true // 'rfq', 'po', 'unknown'
+  },
+  status: {
+    type: DataTypes.STRING,
+    defaultValue: 'processed' // 'processed', 'estimate_created', 'pending_order', 'error', 'ignored'
+  },
+  estimateId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
+  pendingOrderId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
+  parsedData: {
+    type: DataTypes.JSONB,
+    allowNull: true
+  },
+  parseConfidence: {
+    type: DataTypes.STRING,
+    allowNull: true // 'high', 'medium', 'low'
+  },
+  errorMessage: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  gmailLink: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  rawBody: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  }
+}, {
+  tableName: 'scanned_emails',
+  timestamps: true
+});
+
+// PendingOrder - POs awaiting approval before becoming work orders
+const PendingOrder = sequelize.define('PendingOrder', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  clientId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'clients', key: 'id' }
+  },
+  clientName: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  poNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  referenceNumber: {
+    type: DataTypes.STRING,
+    allowNull: true // OR number, quote reference, etc.
+  },
+  matchedEstimateId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
+  matchedEstimateNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  scannedEmailId: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'scanned_emails', key: 'id' }
+  },
+  emailLink: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  subject: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  parsedData: {
+    type: DataTypes.JSONB,
+    allowNull: true
+    // { parts: [...], specialInstructions, attachments, etc. }
+  },
+  status: {
+    type: DataTypes.STRING,
+    defaultValue: 'pending' // 'pending', 'approved', 'rejected'
+  },
+  approvedBy: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  approvedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  rejectedBy: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  rejectedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  rejectionReason: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  workOrderId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
+  notes: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  }
+}, {
+  tableName: 'pending_orders',
+  timestamps: true
+});
+
+GmailAccount.hasMany(ScannedEmail, { foreignKey: 'gmailAccountId', as: 'scannedEmails' });
+ScannedEmail.belongsTo(GmailAccount, { foreignKey: 'gmailAccountId', as: 'gmailAccount' });
 
 // Vendor Model - for supplier autofill
 const Vendor = sequelize.define('Vendor', {
@@ -2279,5 +2516,8 @@ module.exports = {
   ShopSupply,
   ShopSupplyLog,
   TodoItem,
-  InvoiceNumber
+  InvoiceNumber,
+  GmailAccount,
+  ScannedEmail,
+  PendingOrder
 };

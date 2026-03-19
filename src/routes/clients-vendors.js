@@ -207,7 +207,10 @@ router.put('/clients/:id', async (req, res, next) => {
       requiresPartLabels: requiresPartLabels !== undefined ? requiresPartLabels : client.requiresPartLabels,
       paymentTerms: paymentTerms !== undefined ? (paymentTerms || null) : client.paymentTerms,
       contacts: req.body.contacts !== undefined ? req.body.contacts : client.contacts,
-      quickbooksName: req.body.quickbooksName !== undefined ? (req.body.quickbooksName || null) : client.quickbooksName
+      quickbooksName: req.body.quickbooksName !== undefined ? (req.body.quickbooksName || null) : client.quickbooksName,
+      emailScanEnabled: req.body.emailScanEnabled !== undefined ? req.body.emailScanEnabled : client.emailScanEnabled,
+      emailScanAddresses: req.body.emailScanAddresses !== undefined ? req.body.emailScanAddresses : client.emailScanAddresses,
+      emailScanParsingNotes: req.body.emailScanParsingNotes !== undefined ? (req.body.emailScanParsingNotes || null) : client.emailScanParsingNotes
     });
     
     // Propagate name change to all work orders and estimates

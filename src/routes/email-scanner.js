@@ -451,4 +451,98 @@ router.delete('/history/:id', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// POST /api/email-scanner/reply-with-pdf/:estimateId - Create Gmail draft reply with PDF attached
+router.post('/reply-with-pdf/:estimateId', async (req, res, next) => {
+  try {
+    const estimate = await Estimate.findByPk(req.params.estimateId);
+    if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
+    if (!estimate.scannedEmailId) return res.status(400).json({ error: { message: 'This estimate was not created from a scanned email' } });
+
+    const scannedEmail = await ScannedEmail.findByPk(estimate.scannedEmailId);
+    if (!scannedEmail) return res.status(400).json({ error: { message: 'Scanned email record not found' } });
+
+    const gmailAccount = await GmailAccount.findByPk(scannedEmail.gmailAccountId);
+    if (!gmailAccount || !gmailAccount.isActive) return res.status(400).json({ error: { message: 'Gmail account not connected' } });
+
+    // Fetch PDF from our own API
+    const http = require('http');
+    const port = process.env.PORT || 5001;
+    const authHeader = req.headers.authorization;
+    const pdfBuffer = await new Promise((resolve, reject) => {
+      const pdfReq = http.request({
+        hostname: 'localhost',
+        port,
+        path: `/api/estimates/${req.params.estimateId}/pdf`,
+        method: 'GET',
+        headers: { 'Authorization': authHeader }
+      }, (pdfRes) => {
+        if (pdfRes.statusCode !== 200) {
+          reject(new Error(`PDF generation failed: ${pdfRes.statusCode}`));
+          return;
+        }
+        const chunks = [];
+        pdfRes.on('data', chunk => chunks.push(chunk));
+        pdfRes.on('end', () => resolve(Buffer.concat(chunks)));
+      });
+      pdfReq.on('error', reject);
+      pdfReq.end();
+    });
+
+    // Build MIME email with PDF attachment as a reply
+    const { getGmailClient } = require('../services/emailScanner');
+    const gmail = await getGmailClient(gmailAccount);
+    
+    const boundary = 'boundary_' + Date.now();
+    const fileName = `Estimate-${estimate.estimateNumber}.pdf`;
+    const toEmail = scannedEmail.fromEmail;
+    const subject = `Re: ${scannedEmail.subject || 'Quote'}`;
+    const bodyText = req.body.message || `Hi,\n\nPlease find the attached quote for your review.\n\nThank you,\nCarolina Rolling Co.`;
+
+    const messageParts = [
+      `Content-Type: multipart/mixed; boundary="${boundary}"`,
+      `MIME-Version: 1.0`,
+      `To: ${toEmail}`,
+      `Subject: ${subject}`,
+      `In-Reply-To: ${scannedEmail.gmailMessageId}`,
+      `References: ${scannedEmail.gmailMessageId}`,
+      '',
+      `--${boundary}`,
+      'Content-Type: text/plain; charset="UTF-8"',
+      '',
+      bodyText,
+      '',
+      `--${boundary}`,
+      `Content-Type: application/pdf; name="${fileName}"`,
+      `Content-Disposition: attachment; filename="${fileName}"`,
+      'Content-Transfer-Encoding: base64',
+      '',
+      pdfBuffer.toString('base64'),
+      '',
+      `--${boundary}--`
+    ];
+
+    const rawMessage = messageParts.join('\r\n');
+    const encodedMessage = Buffer.from(rawMessage).toString('base64url');
+
+    // Create draft in the same thread
+    const draft = await gmail.users.drafts.create({
+      userId: 'me',
+      requestBody: {
+        message: {
+          raw: encodedMessage,
+          threadId: scannedEmail.gmailThreadId || undefined
+        }
+      }
+    });
+
+    // Build URL to open the draft in Gmail
+    const draftUrl = `https://mail.google.com/mail/?authuser=${encodeURIComponent(gmailAccount.email)}#drafts?compose=${draft.data.id}`;
+
+    res.json({ data: { draftUrl, draftId: draft.data.id }, message: 'Draft created with PDF attached' });
+  } catch (error) {
+    console.error('[EmailScanner] Reply with PDF error:', error.message);
+    next(error);
+  }
+});
+
 module.exports = router;

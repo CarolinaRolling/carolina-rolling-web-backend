@@ -402,16 +402,21 @@ function buildFormData(p) {
 
   else if (type === 'angle_roll') {
     // Angle uses separate legSize and thickness
-    const legs = p.legSize || p.sectionSize || '';
-    // Strip "L" prefix and thickness if AI included it (e.g. "L3x3x3/8" → "3x3")
-    const cleanLegs = legs.replace(/^L/i, '').replace(/x[\d/.]+$/, '').trim();
-    // Check if legSize matches known sizes (e.g. "3x3")
+    let legs = (p.legSize || p.sectionSize || '').replace(/^L/i, '').trim();
+    // If AI included thickness as third segment (e.g. "3x3x3/8"), strip it
+    // Only strip if there are 3+ segments separated by 'x'
+    const segments = legs.split(/x/i);
+    if (segments.length >= 3) {
+      // First two are legs, rest is thickness
+      legs = segments[0] + 'x' + segments[1];
+    }
+    // Check if legSize matches known sizes
     const KNOWN_ANGLES = ['0.5x0.5','0.75x0.75','1x1','1.25x1.25','1.5x1.5','2x2','2.5x2.5','3x3','4x4','5x5','6x6','1x2','2x3','3x4','4x5','4x6'];
-    if (cleanLegs && KNOWN_ANGLES.includes(cleanLegs)) {
-      fd._angleSize = cleanLegs;
-    } else if (cleanLegs) {
+    if (legs && KNOWN_ANGLES.includes(legs)) {
+      fd._angleSize = legs;
+    } else if (legs) {
       fd._angleSize = 'Custom';
-      fd._customAngleSize = cleanLegs;
+      fd._customAngleSize = legs;
     }
     fd.sectionSize = legs;
     if (p.thickness) fd.thickness = p.thickness;

@@ -177,16 +177,46 @@ press_brake — Press brake forming:
   Fields: material, thickness, width, length, specialInstructions
 
 fab_service — Fabrication service (welding, fitting, etc.):
-  Fields: specialInstructions, description
+  Fields: specialInstructions, description, fabType, parentPartIndex
+  fabType values: "weld_100" (100% weld/full pen weld), "tack_weld", "bevel", "bracing", "fit" (fit only), "cut_to_fit", "finishing", "other"
+  IMPORTANT: fab_service parts MUST have a "parentPartIndex" field set to the 0-based index of the rolling/forming part they belong to.
+  Example: If part index 0 is a plate_roll and they want it tack welded, create a fab_service with parentPartIndex=0.
+  Only create a SEPARATE fab_service if the email explicitly requests welding/beveling/fitting AS A SERVICE.
+  Do NOT create fab_service for "R/T" or "rolled and tacked" — that goes in the plate_roll's specialInstructions instead.
+  DO create fab_service for: "100% weld", "full penetration weld", "bevel prep", "fit and weld", "grind smooth"
+
+shop_rate — Hourly labor charges:
+  Fields: specialInstructions, description, parentPartIndex (optional)
 
 IMPORTANT RULES:
 - All dimensions should be in INCHES (convert if given in feet, mm, etc.)
-- "thickness" is plate thickness (e.g. "0.500", "3/8", "0.375")
 - For plate rolls: "width" = height of the shell, "length" = flat developed length
-- If they say "rolled and tack welded" or "R/T", put that in specialInstructions
-- If they mention "no bevel", "square and resquare", "stress relieve", etc. put in specialInstructions
+- If they say "rolled and tack welded" or "R/T", put that in the ROLLING PART's specialInstructions — do NOT create a separate fab_service for tack welding
+- Only create a separate fab_service part for explicit services like "100% weld", "full pen weld", "bevel", "fit and weld", "grind smooth"
+- Every fab_service MUST include "parentPartIndex" pointing to which rolling part it belongs to (0-based index in the parts array)
 - materialSource: set to "customer_supplied" unless they ask you to supply material
-- Convert fractions to decimals (3/8 = 0.375, 1/2 = 0.500, 5/8 = 0.625, 3/4 = 0.750)
+- If information is MISSING from the email (thickness, diameter, material, etc.), leave the field as null and add it to missingFields
+
+AVAILABLE DROPDOWN OPTIONS — You MUST pick from these lists when possible. Only use "Custom" if the value doesn't match any option:
+
+Thickness options (for plate_roll, press_brake, flat_stock, angle_roll):
+  "24 ga", "20 ga", "16 ga", "14 ga", "12 ga", "11 ga", "10 ga", '1/8"', '3/16"', '1/4"', '5/16"', '3/8"', '1/2"', '5/8"', '3/4"', '7/8"', '1"', '1-1/4"', '1-1/2"', '2"'
+  IMPORTANT: Use the FRACTION format with quotes, e.g. '3/8"' not "0.375". Only use decimals if the value doesn't match a fraction.
+
+Angle sizes (legSize field — legs only, NO thickness):
+  "0.5x0.5", "0.75x0.75", "1x1", "1.25x1.25", "1.5x1.5", "2x2", "2.5x2.5", "3x3", "4x4", "5x5", "6x6", "1x2", "2x3", "3x4", "4x5", "4x6"
+
+Channel sizes (sectionSize field — full designation):
+  "C3x4.1", "C3x5", "C3x6", "C4x5.4", "C4x7.25", "C5x6.7", "C5x9", "C6x8.2", "C6x10.5", "C6x13", "C7x9.8", "C7x12.25", "C7x14.75", "C8x11.5", "C8x13.75", "C8x18.75", "C9x13.4", "C9x15", "C9x20", "C10x15.3", "C10x20", "C10x25", "C10x30", "C12x20.7", "C12x25", "C12x30", "C15x33.9", "C15x40", "C15x50"
+
+Beam sizes (sectionSize field — full designation):
+  W-shapes: "W4x13", "W5x16", "W5x19", "W6x9", "W6x12", "W6x15", "W6x16", "W6x20", "W6x25", "W8x10", "W8x13", "W8x15", "W8x18", "W8x21", "W8x24", "W8x28", "W8x31", "W8x35", "W8x40", "W8x48", "W8x58", "W8x67", "W10x12" thru "W10x112", "W12x14" thru "W12x120", "W14x22" thru "W14x132", "W16x26" thru "W16x100", "W18x35" thru "W18x119", "W21x44" thru "W21x122"
+  S-shapes: "S3x5.7", "S3x7.5", "S4x7.7", "S4x9.5", "S5x10", "S6x12.5", "S6x17.25", "S8x18.4", "S8x23", "S10x25.4", "S10x35", "S12x31.8", "S12x35", "S12x40.8", "S12x50"
+
+Tee sizes (sectionSize field): "WT2x6.5", "WT2.5x8", "WT3x4.5" thru "WT3x10", "WT4x5" thru "WT4x29", "WT5x6" thru "WT5x38.5", "WT6x7" thru "WT6x60", "WT7x11" thru "WT7x66"
+
+Flat bar sizes (_barSize field — width x thickness in fractions):
+  "1/2x1/4", "3/4x1/4", "3/4x3/8", "1x1/4", "1x3/8", "1x1/2", "1-1/2x1/4", "1-1/2x3/8", "1-1/2x1/2", "2x1/4", "2x3/8", "2x1/2", "2x3/4", "3x1/4", "3x3/8", "3x1/2", "3x3/4", "3x1", "4x3/8", "4x1/2", "4x3/4", "4x1", "5x3/8", "5x1/2", "5x3/4", "5x1", "6x3/8", "6x1/2", "6x3/4", "6x1", "8x1/2", "8x3/4", "8x1", "10x1/2", "10x3/4", "10x1", "12x1/2", "12x3/4", "12x1"
 
 ${generalNotes ? `\nGENERAL SHOP NOTES:\n${generalNotes}\n` : ''}
 ${parsingNotes ? `\nCLIENT-SPECIFIC NOTES:\n${parsingNotes}\n` : ''}
@@ -194,7 +224,7 @@ ${parsingNotes ? `\nCLIENT-SPECIFIC NOTES:\n${parsingNotes}\n` : ''}
 Respond ONLY with valid JSON (no markdown, no backticks). Format:
 {
   "emailType": "rfq" or "po",
-  "referenceNumber": "OR number, PO number, or null",
+  "referenceNumber": "OR number, quote reference, or null",
   "poNumber": "PO number if this is a purchase order, or null",
   "referencesQuote": "reference to previous quote/OR if PO, or null",
   "confidence": "high", "medium", or "low",
@@ -203,26 +233,34 @@ Respond ONLY with valid JSON (no markdown, no backticks). Format:
       "partType": "plate_roll",
       "quantity": 1,
       "material": "SA-516-70",
-      "thickness": "0.500",
+      "thickness": "1/2\\"",
       "width": "120",
       "length": "452.16",
       "outerDiameter": "144",
       "diameter": "144",
       "radius": null,
       "arcDegrees": "360",
-      "rollType": "easy_way or hard_way or on_edge or null",
-      "legSize": "for angle_roll only: leg dimensions like 3x3 (NO thickness)",
-      "sectionSize": "for channel/beam/tee: full designation like C8x11.5, W8x31, WT5x22.5",
-      "wallThickness": "for pipe_roll or square_tube_roll",
-      "flangeOut": "for channel_roll: true or false",
-      "specialInstructions": "Rolled and tack welded, no bevel, square and resquare",
+      "rollType": "easy_way",
+      "legSize": "for angle_roll only: e.g. 3x3",
+      "sectionSize": "for channel/beam/tee: e.g. C8x11.5",
+      "barSize": "for flat_bar: e.g. 4x1/2",
+      "wallThickness": "for pipe_roll",
+      "flangeOut": false,
+      "fabType": "for fab_service: weld_100, tack_weld, bevel, bracing, fit, cut_to_fit, finishing, other",
+      "parentPartIndex": "for fab_service: 0-based index of the parent part in this array (e.g. 0 for first part)",
+      "specialInstructions": "Rolled and tack welded, no bevel",
       "clientPartNumber": "127250-535S1",
-      "description": "Shell - 120\\" x 452.16\\" x 0.500 SA-516-70, R/T to 144\\" OD"
+      "description": "auto-generated material description",
+      "missingFields": ["thickness", "material"],
+      "missingFieldNotes": "No thickness specified. No material grade given."
     }
   ],
-  "notes": "any delivery or special notes",
-  "attachmentMentions": ["list of mentioned file names"]
+  "notes": "delivery or special notes",
+  "attachmentMentions": ["file names mentioned"],
+  "aiNotes": "Overall notes about what info was missing or unclear in this email"
 }
+
+CRITICAL: For missingFields, list any field the client did NOT provide that is needed to complete the estimate. Common missing fields: thickness, material, diameter/radius, arcDegrees, length, rollType. Add a human-readable note in missingFieldNotes explaining what's missing.
 
 If this is a PO (purchase order) rather than an RFQ, set emailType to "po" and extract the PO number and any reference to a previous quote.`,
       messages: [
@@ -454,7 +492,34 @@ function buildFormData(p) {
     if (p.length) fd.length = p.length;
   }
 
-  // fab_service and shop_rate just use specialInstructions/description
+  // fab_service — needs fabType and will get _linkedPartId after parts are created
+  if (type === 'fab_service') {
+    if (p.fabType) fd._fabType = p.fabType;
+    if (p.description) fd._serviceDescription = p.description;
+    // _linkedPartId gets set in createEstimateFromParsed after all parts exist
+  }
+
+  // shop_rate
+  if (type === 'shop_rate') {
+    if (p.description) fd._serviceDescription = p.description;
+  }
+  // Store missing fields info for highlighting
+  if (p.missingFields && p.missingFields.length > 0) {
+    fd._missingFields = p.missingFields;
+    fd._missingFieldNotes = p.missingFieldNotes || '';
+  }
+
+  // Store barSize for flat_bar matching
+  if (type === 'flat_bar' && p.barSize) {
+    const KNOWN_BARS = ['1/2x1/4','3/4x1/4','3/4x3/8','1x1/4','1x3/8','1x1/2','1-1/2x1/4','1-1/2x3/8','1-1/2x1/2','2x1/4','2x3/8','2x1/2','2x3/4','3x1/4','3x3/8','3x1/2','3x3/4','3x1','4x3/8','4x1/2','4x3/4','4x1','5x3/8','5x1/2','5x3/4','5x1','6x3/8','6x1/2','6x3/4','6x1','8x1/2','8x3/4','8x1','10x1/2','10x3/4','10x1','12x1/2','12x3/4','12x1'];
+    if (KNOWN_BARS.includes(p.barSize)) {
+      fd._barSize = p.barSize;
+    } else {
+      fd._barSize = 'Custom';
+      fd._customBarSize = p.barSize;
+    }
+  }
+
   return fd;
 }
 
@@ -471,21 +536,30 @@ async function createEstimateFromParsed(parsed, clientInfo, scannedEmail) {
       return { duplicate: true, estimateId: existing.id };
     }
 
+    // Build internal notes from AI analysis
+    const missingInfo = (parsed.parts || [])
+      .filter(p => p.missingFieldNotes)
+      .map((p, i) => `Part #${i + 1}: ${p.missingFieldNotes}`)
+      .join('\n');
+    const internalNotes = [parsed.aiNotes, missingInfo].filter(Boolean).join('\n\n') || null;
+
     const estimate = await Estimate.create({
       estimateNumber: estNumber,
       clientName: clientInfo.clientName,
       clientId: clientInfo.clientId,
       status: 'draft',
       notes: parsed.notes || null,
+      internalNotes: internalNotes,
       emailLink: scannedEmail.gmailLink,
       scannedEmailId: scannedEmail.id
     });
 
-    // Create parts with proper formData
+    // Create parts with proper formData — track IDs for fab service linking
+    const createdPartIds = []; // index → part ID
     for (let i = 0; i < (parsed.parts || []).length; i++) {
       const p = parsed.parts[i];
       const formData = buildFormData(p);
-      await EstimatePart.create({
+      const part = await EstimatePart.create({
         estimateId: estimate.id,
         partNumber: i + 1,
         partType: p.partType || 'plate_roll',
@@ -497,7 +571,7 @@ async function createEstimateFromParsed(parsed, clientInfo, scannedEmail) {
         outerDiameter: p.outerDiameter || p.diameter || null,
         diameter: p.diameter || p.outerDiameter || null,
         wallThickness: p.wallThickness || null,
-        sectionSize: p.sectionSize || null,
+        sectionSize: p.sectionSize || p.legSize || null,
         radius: p.radius || null,
         arcDegrees: p.arcDegrees || null,
         rollType: p.rollType || null,
@@ -508,6 +582,23 @@ async function createEstimateFromParsed(parsed, clientInfo, scannedEmail) {
         materialSource: p.materialSource || 'customer_supplied',
         formData: formData
       });
+      createdPartIds.push(part.id);
+    }
+
+    // Link fab_service/shop_rate parts to their parent parts
+    for (let i = 0; i < (parsed.parts || []).length; i++) {
+      const p = parsed.parts[i];
+      if ((p.partType === 'fab_service' || p.partType === 'shop_rate') && p.parentPartIndex !== undefined && p.parentPartIndex !== null) {
+        const parentId = createdPartIds[p.parentPartIndex];
+        if (parentId) {
+          const fabPartId = createdPartIds[i];
+          await EstimatePart.update(
+            { formData: { ...buildFormData(p), _linkedPartId: parentId } },
+            { where: { id: fabPartId } }
+          );
+          console.log(`[EmailScanner] Linked fab_service part #${i + 1} to parent part #${p.parentPartIndex + 1}`);
+        }
+      }
     }
 
     // Auto-send for review

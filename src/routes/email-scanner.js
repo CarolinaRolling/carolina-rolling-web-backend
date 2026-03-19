@@ -346,20 +346,35 @@ router.post('/retry/:id', async (req, res, next) => {
         estimateNumber: estNumber, clientName, clientId: email.clientId,
         status: 'draft', notes: parsed.notes || null, emailLink: email.gmailLink, scannedEmailId: email.id
       });
+      const createdPartIds = [];
       for (let i = 0; i < (parsed.parts || []).length; i++) {
         const p = parsed.parts[i];
         const formData = buildFormData(p);
-        await EstimatePart.create({
+        const part = await EstimatePart.create({
           estimateId: estimate.id, partNumber: i + 1, partType: p.partType || 'plate_roll',
           quantity: parseInt(p.quantity) || 1, material: p.material || null, thickness: p.thickness || null,
           width: p.width || null, length: p.length || null, outerDiameter: p.outerDiameter || p.diameter || null,
           diameter: p.diameter || p.outerDiameter || null, wallThickness: p.wallThickness || null,
-          sectionSize: p.sectionSize || null, radius: p.radius || null, arcDegrees: p.arcDegrees || null,
+          sectionSize: p.sectionSize || p.legSize || null, radius: p.radius || null, arcDegrees: p.arcDegrees || null,
           rollType: p.rollType || null, flangeOut: p.flangeOut || false,
           specialInstructions: p.specialInstructions || null, clientPartNumber: p.clientPartNumber || null,
           materialDescription: p.description || null, materialSource: p.materialSource || 'customer_supplied',
           formData: formData
         });
+        createdPartIds.push(part.id);
+      }
+      // Link fab services to parent parts
+      for (let i = 0; i < (parsed.parts || []).length; i++) {
+        const p = parsed.parts[i];
+        if ((p.partType === 'fab_service' || p.partType === 'shop_rate') && p.parentPartIndex !== undefined && p.parentPartIndex !== null) {
+          const parentId = createdPartIds[p.parentPartIndex];
+          if (parentId) {
+            await EstimatePart.update(
+              { formData: { ...buildFormData(p), _linkedPartId: parentId } },
+              { where: { id: createdPartIds[i] } }
+            );
+          }
+        }
       }
       const headEst = await User.findOne({ where: { isHeadEstimator: true, isActive: true } });
       await TodoItem.create({

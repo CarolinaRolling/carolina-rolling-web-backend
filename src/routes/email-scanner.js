@@ -16,7 +16,7 @@ router.get('/oauth/start', async (req, res, next) => {
     const oauth2 = getOAuth2Client();
     const authUrl = oauth2.generateAuthUrl({
       access_type: 'offline',
-      prompt: 'consent',
+      prompt: 'consent select_account',
       scope: [
         'https://www.googleapis.com/auth/gmail.readonly',
         'https://www.googleapis.com/auth/gmail.labels',
@@ -237,6 +237,16 @@ router.post('/pending-orders/:id/reject', async (req, res, next) => {
     });
 
     res.json({ data: order, message: 'Order rejected' });
+  } catch (error) { next(error); }
+});
+
+// DELETE /api/email-scanner/pending-orders/:id - Delete a pending order permanently
+router.delete('/pending-orders/:id', async (req, res, next) => {
+  try {
+    const order = await PendingOrder.findByPk(req.params.id);
+    if (!order) return res.status(404).json({ error: { message: 'Pending order not found' } });
+    await order.destroy();
+    res.json({ message: 'Pending order deleted' });
   } catch (error) { next(error); }
 });
 

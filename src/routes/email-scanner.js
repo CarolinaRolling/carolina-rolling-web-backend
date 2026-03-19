@@ -1,5 +1,5 @@
 const express = require('express');
-const { GmailAccount, ScannedEmail, PendingOrder, Client, Estimate, WorkOrder, WorkOrderPart, sequelize } = require('../models');
+const { GmailAccount, ScannedEmail, PendingOrder, Client, Estimate, WorkOrder, WorkOrderPart, AppSettings, sequelize } = require('../models');
 const { getOAuth2Client, runScan, getScanConfig } = require('../services/emailScanner');
 const { Op } = require('sequelize');
 
@@ -105,6 +105,30 @@ router.put('/accounts/:id/toggle', async (req, res, next) => {
     if (!account) return res.status(404).json({ error: { message: 'Account not found' } });
     await account.update({ isActive: !account.isActive });
     res.json({ data: account, message: `${account.email} ${account.isActive ? 'enabled' : 'paused'}` });
+  } catch (error) { next(error); }
+});
+
+// ==================== GENERAL NOTES ====================
+
+// GET /api/email-scanner/general-notes - Get general AI parsing notes
+router.get('/general-notes', async (req, res, next) => {
+  try {
+    const setting = await AppSettings.findOne({ where: { key: 'email_scanner_general_notes' } });
+    res.json({ data: setting?.value || '' });
+  } catch (error) { next(error); }
+});
+
+// PUT /api/email-scanner/general-notes - Update general AI parsing notes
+router.put('/general-notes', async (req, res, next) => {
+  try {
+    const { notes } = req.body;
+    const existing = await AppSettings.findOne({ where: { key: 'email_scanner_general_notes' } });
+    if (existing) {
+      await existing.update({ value: notes || '' });
+    } else {
+      await AppSettings.create({ key: 'email_scanner_general_notes', value: notes || '' });
+    }
+    res.json({ data: notes, message: 'General notes saved' });
   } catch (error) { next(error); }
 });
 
@@ -216,6 +240,29 @@ router.post('/pending-orders/:id/reject', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// ==================== GENERAL NOTES ====================
+
+// GET /api/email-scanner/general-notes - Get general AI parsing notes
+router.get('/general-notes', async (req, res, next) => {
+  try {
+    const { AppSettings } = require('../models');
+    const setting = await AppSettings.findOne({ where: { key: 'email_scanner_general_notes' } });
+    res.json({ data: setting?.value || '' });
+  } catch (error) { next(error); }
+});
+
+// PUT /api/email-scanner/general-notes - Save general AI parsing notes
+router.put('/general-notes', async (req, res, next) => {
+  try {
+    const { notes } = req.body;
+    const { AppSettings } = require('../models');
+    const existing = await AppSettings.findOne({ where: { key: 'email_scanner_general_notes' } });
+    if (existing) { await existing.update({ value: notes || '' }); }
+    else { await AppSettings.create({ key: 'email_scanner_general_notes', value: notes || '' }); }
+    res.json({ data: notes, message: 'General notes saved' });
+  } catch (error) { next(error); }
+});
+
 // ==================== CLIENT CONFIG ====================
 
 // GET /api/email-scanner/monitored-clients - Get clients with email scanning enabled
@@ -226,6 +273,113 @@ router.get('/monitored-clients', async (req, res, next) => {
       attributes: ['id', 'name', 'emailScanAddresses', 'emailScanParsingNotes']
     });
     res.json({ data: clients });
+  } catch (error) { next(error); }
+});
+
+// POST /api/email-scanner/retry/:id - Retry a failed scanned email
+router.post('/retry/:id', async (req, res, next) => {
+  try {
+    const email = await ScannedEmail.findByPk(req.params.id);
+    if (!email) return res.status(404).json({ error: { message: 'Scanned email not found' } });
+
+    if (!email.rawBody) {
+      return res.status(400).json({ error: { message: 'No email body stored — cannot retry' } });
+    }
+
+    // Find client info
+    const client = email.clientId ? await Client.findByPk(email.clientId) : null;
+    const clientName = client?.name || 'Unknown';
+    const parsingNotes = client?.emailScanParsingNotes || '';
+
+    // Re-parse with AI
+    const { parseEmailWithAI, getScanConfig } = require('../services/emailScanner');
+    const generalNotesSetting = await require('../models').AppSettings.findOne({ where: { key: 'email_scanner_general_notes' } });
+    const generalNotes = generalNotesSetting?.value || '';
+    const parsed = await parseEmailWithAI(email.rawBody, email.subject || '', clientName, parsingNotes, generalNotes);
+
+    if (!parsed) {
+      await email.update({ status: 'error', errorMessage: 'AI parsing returned no result (retry)' });
+      return res.status(400).json({ error: { message: 'AI parsing failed again. Check Anthropic API key and credits.' } });
+    }
+
+    await email.update({
+      emailType: parsed.emailType || 'rfq',
+      parsedData: parsed,
+      parseConfidence: parsed.confidence || 'medium',
+      errorMessage: null
+    });
+
+    const { Op } = require('sequelize');
+    const { TodoItem, User, EstimatePart } = require('../models');
+
+    if (parsed.emailType === 'po') {
+      // Check duplicate
+      let skip = false;
+      if (parsed.poNumber) {
+        const existing = await PendingOrder.findOne({ where: { poNumber: parsed.poNumber, clientId: email.clientId, status: 'pending' } });
+        if (existing) skip = true;
+      }
+      if (!skip) {
+        let matchedEstimate = null;
+        if (parsed.referencesQuote) {
+          matchedEstimate = await Estimate.findOne({ where: { [Op.or]: [{ estimateNumber: parsed.referencesQuote }, { estimateNumber: { [Op.iLike]: `%${parsed.referencesQuote}%` } }] } });
+        }
+        const pending = await PendingOrder.create({
+          clientId: email.clientId, clientName, poNumber: parsed.poNumber || null,
+          referenceNumber: parsed.referencesQuote || parsed.referenceNumber || null,
+          matchedEstimateId: matchedEstimate?.id || null, matchedEstimateNumber: matchedEstimate?.estimateNumber || parsed.referencesQuote || null,
+          scannedEmailId: email.id, emailLink: email.gmailLink, subject: email.subject, parsedData: parsed, status: 'pending'
+        });
+        await email.update({ status: 'pending_order', pendingOrderId: pending.id });
+      }
+      res.json({ data: email, message: 'Retry successful — pending order created' });
+    } else {
+      // RFQ — create estimate
+      const estNumber = parsed.referenceNumber || `EST-${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`;
+      const existingEst = await Estimate.findOne({ where: { estimateNumber: estNumber } });
+      if (existingEst) {
+        await email.update({ status: 'ignored', errorMessage: 'Duplicate estimate number' });
+        return res.json({ data: email, message: `Estimate ${estNumber} already exists` });
+      }
+
+      const estimate = await Estimate.create({
+        estimateNumber: estNumber, clientName, clientId: email.clientId,
+        status: 'draft', notes: parsed.notes || null, emailLink: email.gmailLink, scannedEmailId: email.id
+      });
+      for (let i = 0; i < (parsed.parts || []).length; i++) {
+        const p = parsed.parts[i];
+        await EstimatePart.create({
+          estimateId: estimate.id, partNumber: i + 1, partType: p.partType || 'plate_roll',
+          quantity: parseInt(p.quantity) || 1, material: p.material || null, thickness: p.thickness || null,
+          width: p.width || null, length: p.length || null, outerDiameter: p.outerDiameter || p.diameter || null,
+          diameter: p.diameter || p.outerDiameter || null, wallThickness: p.wallThickness || null,
+          specialInstructions: p.specialInstructions || null, clientPartNumber: p.clientPartNumber || null,
+          materialDescription: p.description || null
+        });
+      }
+      const headEst = await User.findOne({ where: { isHeadEstimator: true, isActive: true } });
+      await TodoItem.create({
+        title: `Review pricing: ${estNumber} — ${clientName}`,
+        description: `Auto-created from email (retry). ${(parsed.parts || []).length} part(s). Confidence: ${parsed.confidence || 'unknown'}.`,
+        type: 'estimate_review', priority: 'high', assignedTo: headEst?.username || null,
+        estimateId: estimate.id, estimateNumber: estNumber, createdBy: 'Email Scanner'
+      });
+      await email.update({ status: 'estimate_created', estimateId: estimate.id });
+      res.json({ data: email, message: `Retry successful — estimate ${estNumber} created` });
+    }
+  } catch (error) {
+    console.error('[EmailScanner] Retry error:', error.message);
+    next(error);
+  }
+});
+
+// DELETE /api/email-scanner/history/:id - Delete a scanned email record
+router.delete('/history/:id', async (req, res, next) => {
+  try {
+    const email = await ScannedEmail.findByPk(req.params.id);
+    if (!email) return res.status(404).json({ error: { message: 'Not found' } });
+    await email.destroy();
+    res.json({ message: 'Deleted' });
   } catch (error) { next(error); }
 });
 

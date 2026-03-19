@@ -110,7 +110,7 @@ function extractName(fromStr) {
 }
 
 // Use Claude API to parse email content
-async function parseEmailWithAI(emailBody, subject, clientName, parsingNotes) {
+async function parseEmailWithAI(emailBody, subject, clientName, parsingNotes, generalNotes) {
   try {
     console.log(`[EmailScanner] Calling Anthropic API for: "${subject}" from ${clientName}`);
     console.log(`[EmailScanner] API key present: ${!!process.env.ANTHROPIC_API_KEY} (${(process.env.ANTHROPIC_API_KEY || '').substring(0, 10)}...)`);
@@ -123,25 +123,64 @@ You work for Carolina Rolling Company, a metal rolling shop.
 
 Your job is to extract structured data from client emails. These emails request quotes for rolling steel plates, cones, pipes, angles, channels, beams, etc.
 
-Common abbreviations:
+COMMON ABBREVIATIONS:
 - OD = outer diameter, ID = inner diameter
-- R/T = rolled and tacked (welded)
+- R/T or R&T = rolled and tacked (tack welded along the seam)
 - V/H = vertical height (for cones)
 - pc = piece(s)
-- SA-516-70, A36, 304/304L, 316L = material grades
+- SA-516-70, A36, 304/304L, 316L, SA-240 = material grades
 - Shell = cylindrical plate roll
+- EW = easy way (rolling along the length, width becomes circumference)
+- HW = hard way (rolling along the width, length becomes circumference)
+- ISOF = inside out flange
 
-Part types to identify:
-- plate_roll: flat plate rolled into a cylinder
-- cone_roll: conical shape
-- pipe_roll: pipe or tube bending
-- angle_roll: angle iron rolling
-- channel_roll: channel rolling  
-- beam_roll: beam rolling
-- flat_bar: flat bar rolling
-- press_brake: press brake forming
+PART TYPES AND THEIR FORM FIELDS:
 
-${parsingNotes ? `\nClient-specific notes: ${parsingNotes}` : ''}
+plate_roll — Flat plate rolled into a cylinder (shell, ring, segment):
+  Fields: material, thickness, width (= shell height), length (flat arc length), outerDiameter OR diameter, arcDegrees (360 for full cylinder), rollType (easy_way or hard_way)
+  Note: "Shell Height" = the width of the plate. "Shell Length" = the flat arc length. If they say "R/T to 144 OD" that means outerDiameter=144.
+  If they give both width and OD you can calculate length: length = π × OD × (arcDegrees/360). But if they provide length, use it.
+
+cone_roll — Conical shape (frustum, reducer):
+  Fields: material, thickness, outerDiameter (large end OD), diameter (small end OD), width (slant height or V/H), arcDegrees
+  Note: V/H means vertical height of the cone. Two different diameters = cone.
+
+pipe_roll — Pipe or tube bending:
+  Fields: material, outerDiameter, wallThickness, radius (centerline bend radius), arcDegrees
+  Note: Pipe is specified by OD and wall thickness, NOT width/length.
+
+angle_roll — Angle iron rolling:
+  Fields: material, sectionSize (e.g. "3x3x3/8"), radius OR diameter, arcDegrees, rollType (easy_way, hard_way, on_edge)
+
+channel_roll — Channel rolling:
+  Fields: material, sectionSize (e.g. "C8x11.5"), radius OR diameter, arcDegrees, flangeOut (boolean)
+
+beam_roll — Beam/wide flange rolling:
+  Fields: material, sectionSize (e.g. "W8x31"), radius OR diameter, arcDegrees, rollType (easy_way or hard_way)
+
+flat_bar — Flat bar rolling:
+  Fields: material, thickness, width, radius OR diameter, arcDegrees, rollType (easy_way, hard_way, on_edge)
+
+flat_stock — Flat stock (plate without rolling):
+  Fields: material, thickness, width, length
+
+press_brake — Press brake forming:
+  Fields: material, thickness, width, length, specialInstructions
+
+fab_service — Fabrication service (welding, fitting, etc.):
+  Fields: specialInstructions, description
+
+IMPORTANT RULES:
+- All dimensions should be in INCHES (convert if given in feet, mm, etc.)
+- "thickness" is plate thickness (e.g. "0.500", "3/8", "0.375")
+- For plate rolls: "width" = height of the shell, "length" = flat developed length
+- If they say "rolled and tack welded" or "R/T", put that in specialInstructions
+- If they mention "no bevel", "square and resquare", "stress relieve", etc. put in specialInstructions
+- materialSource: set to "customer_supplied" unless they ask you to supply material
+- Convert fractions to decimals (3/8 = 0.375, 1/2 = 0.500, 5/8 = 0.625, 3/4 = 0.750)
+
+${generalNotes ? `\nGENERAL SHOP NOTES:\n${generalNotes}\n` : ''}
+${parsingNotes ? `\nCLIENT-SPECIFIC NOTES:\n${parsingNotes}\n` : ''}
 
 Respond ONLY with valid JSON (no markdown, no backticks). Format:
 {
@@ -365,6 +404,10 @@ async function runScan(forceOutsideHours = false) {
     return { skipped: true, reason: 'No client email scanning configured' };
   }
 
+  // Load general AI parsing notes
+  const generalNotesSetting = await AppSettings.findOne({ where: { key: 'email_scanner_general_notes' } });
+  const generalNotes = generalNotesSetting?.value || '';
+
   const results = { processed: 0, estimates: 0, pendingOrders: 0, errors: 0, accounts: [] };
 
   for (const account of accounts) {
@@ -441,7 +484,7 @@ async function runScan(forceOutsideHours = false) {
           });
 
           // Parse with AI
-          const parsed = await parseEmailWithAI(bodyText, subject, clientInfo.clientName, clientInfo.parsingNotes);
+          const parsed = await parseEmailWithAI(bodyText, subject, clientInfo.clientName, clientInfo.parsingNotes, generalNotes);
 
           if (!parsed) {
             await scannedEmail.update({ status: 'error', errorMessage: 'AI parsing returned no result' });

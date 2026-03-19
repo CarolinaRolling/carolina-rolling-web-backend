@@ -1720,88 +1720,38 @@ router.post('/:id/convert', async (req, res, next) => {
     // Generate work order number using DR number if available
     const orderNumber = drNumber ? `DR-${drNumber}` : `WO-${Date.now()}`;
 
-    // Create work order
-    const workOrder = await WorkOrder.create({
+    // Create work order using shared utility
+    const { buildWorkOrderFromEstimate, buildWorkOrderPartFromEstimate } = require('../services/pricing');
+    
+    const woData = buildWorkOrderFromEstimate(estimate, {
       orderNumber,
       drNumber,
-      clientName: estimate.clientName,
       clientPurchaseOrderNumber,
-      contactName: estimate.contactName,
-      contactPhone: estimate.contactPhone,
-      contactEmail: estimate.contactEmail,
       notes: estimate.projectDescription,
       promisedDate: promisedDate || null,
       storageLocation,
       status: 'received',
       receivedAt: new Date(),
-      estimateId: estimate.id,
-      estimateNumber: estimate.estimateNumber,
-      estimateTotal: estimate.grandTotal,
       allMaterialReceived: allMaterialOnHand,
-      pendingInboundCount: allMaterialOnHand ? 0 : estimate.parts.filter(p => p.materialSource === 'we_order' && !p.materialReceived).length,
-      // Copy order-level pricing
-      truckingDescription: estimate.truckingDescription,
-      truckingCost: estimate.truckingCost,
-      taxRate: estimate.taxRate,
-      taxExempt: estimate.taxExempt || false,
-      taxExemptReason: estimate.taxExemptReason || null,
-      taxExemptCertNumber: estimate.taxExemptCertNumber || null,
-      taxAmount: estimate.taxAmount,
-      subtotal: estimate.partsSubtotal,
-      grandTotal: estimate.grandTotal,
-      // Copy minimum charge settings
-      minimumOverride: estimate.minimumOverride || false,
-      minimumOverrideReason: estimate.minimumOverrideReason || null
-    }, { transaction });
+      pendingInboundCount: allMaterialOnHand ? 0 : estimate.parts.filter(p => p.materialSource === 'we_order' && !p.materialReceived).length
+    });
 
-    // Create work order parts from estimate parts
+    const workOrder = await WorkOrder.create(woData, { transaction });
+
+    // Create work order parts from estimate parts using shared utility
     for (const estPart of estimate.parts) {
       try {
-        await WorkOrderPart.create({
-          workOrderId: workOrder.id,
-          partNumber: estPart.partNumber || 1,
-          partType: estPart.partType || 'other',
-          clientPartNumber: estPart.clientPartNumber,
-          heatNumber: estPart.heatNumber,
-          cutFileReference: estPart.cutFileReference,
-          quantity: estPart.quantity || 1,
-          material: estPart.material,
-          thickness: estPart.thickness,
-          width: estPart.width,
-          length: estPart.length,
-          outerDiameter: estPart.outerDiameter,
-          wallThickness: estPart.wallThickness,
-          sectionSize: estPart.sectionSize,
-          rollType: estPart.rollType,
-          radius: estPart.radius,
-          diameter: estPart.diameter,
-          arcDegrees: estPart.arcDegrees,
-          flangeOut: estPart.flangeOut,
-          specialInstructions: estPart.specialInstructions,
-          status: 'pending',
-          materialSource: estPart.materialSource || 
-            (['fab_service', 'shop_rate'].includes(estPart.partType) ? 'customer_supplied' :
-            (estPart.weSupplyMaterial ? 'we_order' : 'customer_supplied')),
-          materialReceived: ['customer_supplied', 'in_stock'].includes(estPart.materialSource) || estPart.materialReceived,
-          materialReceivedAt: ['customer_supplied', 'in_stock'].includes(estPart.materialSource) ? new Date() : estPart.materialReceivedAt,
-          awaitingInboundId: estPart.inboundOrderId,
-          awaitingPONumber: estPart.materialPurchaseOrderNumber,
-          supplierName: estPart.supplierName,
-          vendorId: estPart.vendorId || null,
-          vendorEstimateNumber: estPart.vendorEstimateNumber || null,
-          materialDescription: estPart.materialDescription,
-          formData: estPart.formData || null,
-          // Copy pricing fields
-          laborRate: estPart.laborRate,
-          laborHours: estPart.laborHours,
-          laborTotal: estPart.laborTotal,
-          materialUnitCost: estPart.materialUnitCost,
-          materialMarkupPercent: estPart.materialMarkupPercent,
-          materialTotal: estPart.materialTotal,
-          setupCharge: estPart.setupCharge,
-          otherCharges: estPart.otherCharges,
-          partTotal: estPart.partTotal
-        }, { transaction });
+        const partData = buildWorkOrderPartFromEstimate(estPart);
+        partData.workOrderId = workOrder.id;
+        // Override material received status for customer-supplied/in-stock parts
+        if (['customer_supplied', 'in_stock'].includes(partData.materialSource)) {
+          partData.materialReceived = true;
+          partData.materialReceivedAt = new Date();
+        }
+        if (estPart.inboundOrderId) partData.awaitingInboundId = estPart.inboundOrderId;
+        if (estPart.materialPurchaseOrderNumber) partData.awaitingPONumber = estPart.materialPurchaseOrderNumber;
+
+        await WorkOrderPart.create(partData, { transaction });
       } catch (partErr) {
         console.error(`Failed to create WO part #${estPart.partNumber} (type: ${estPart.partType}):`, partErr.message);
         if (partErr.errors) partErr.errors.forEach(e => console.error(`  Validation: ${e.path} - ${e.message}`));
@@ -2633,104 +2583,36 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
     const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
     const orderNumber = `WO-${year}${month}${day}-${random}`;
 
-    // Create work order from estimate
-    const workOrder = await WorkOrder.create({
+    // Create work order from estimate using shared utility
+    const { buildWorkOrderFromEstimate, buildWorkOrderPartFromEstimate } = require('../services/pricing');
+    
+    const woData = buildWorkOrderFromEstimate(estimate, {
       orderNumber,
-      drNumber: drNumber,
-      clientName: estimate.clientName,
-      clientId: estimate.clientId || null,
-      contactName: estimate.contactName,
-      contactPhone: estimate.contactPhone,
-      contactEmail: estimate.contactEmail,
+      drNumber,
       clientPurchaseOrderNumber: clientPurchaseOrderNumber || null,
       notes: notes || estimate.notes,
       status: materialReceived ? 'received' : 'waiting_for_materials',
       receivedAt: materialReceived ? new Date() : null,
       allMaterialReceived: materialReceived ? true : false,
-      estimateId: estimate.id,
-      estimateNumber: estimate.estimateNumber,
-      estimateTotal: estimate.grandTotal,
       requestedDueDate: requestedDueDate || null,
-      promisedDate: promisedDate || null,
-      // Copy order-level pricing
-      truckingDescription: estimate.truckingDescription,
-      truckingCost: estimate.truckingCost,
-      taxRate: estimate.taxRate,
-      taxExempt: estimate.taxExempt || false,
-      taxExemptReason: estimate.taxExemptReason || null,
-      taxExemptCertNumber: estimate.taxExemptCertNumber || null,
-      taxAmount: estimate.taxAmount,
-      subtotal: estimate.partsSubtotal,
-      grandTotal: estimate.grandTotal,
-      // Copy minimum charge settings
-      minimumOverride: estimate.minimumOverride || false,
-      minimumOverrideReason: estimate.minimumOverrideReason || null
-    }, { transaction });
+      promisedDate: promisedDate || null
+    });
+
+    const workOrder = await WorkOrder.create(woData, { transaction });
 
     // Update DR record with work order ID
     await drRecord.update({ workOrderId: workOrder.id }, { transaction });
 
-    // Create work order parts from estimate parts
-    // First pass: create all parts and build ID mapping (estimate part ID → WO part ID)
+    // Create work order parts from estimate parts using shared utility
     const estimateToWoPartIdMap = {};
     for (const estimatePart of estimate.parts) {
       try {
-        // Get pricing from top-level columns, fall back to formData if stored there
-        const fd = estimatePart.formData && typeof estimatePart.formData === 'object' ? estimatePart.formData : {};
-        const getPricing = (field) => {
-          const val = estimatePart[field];
-          if (val !== null && val !== undefined && val !== '' && val !== 0) return val;
-          if (fd[field] !== undefined && fd[field] !== null && fd[field] !== '') return fd[field];
-          return val;
-        };
+        const partData = buildWorkOrderPartFromEstimate(estimatePart);
+        partData.workOrderId = workOrder.id;
+        
+        console.log(`[convert] Part #${partData.partNumber} (${partData.partType}): labor=${partData.laborTotal}, material=${partData.materialTotal}, total=${partData.partTotal}`);
 
-        console.log(`[convert] Part #${estimatePart.partNumber} (${estimatePart.partType}): labor=${estimatePart.laborTotal}, material=${estimatePart.materialTotal}, markup=${estimatePart.materialMarkupPercent}, total=${estimatePart.partTotal}`);
-
-        const workOrderPart = await WorkOrderPart.create({
-          workOrderId: workOrder.id,
-          partNumber: estimatePart.partNumber || 1,
-          partType: estimatePart.partType || 'other',
-          clientPartNumber: estimatePart.clientPartNumber,
-          heatNumber: estimatePart.heatNumber,
-          cutFileReference: estimatePart.cutFileReference,
-          quantity: estimatePart.quantity || 1,
-          materialDescription: estimatePart.materialDescription,
-          material: estimatePart.material,
-          thickness: estimatePart.thickness,
-          width: estimatePart.width,
-          length: estimatePart.length,
-          outerDiameter: estimatePart.outerDiameter,
-          wallThickness: estimatePart.wallThickness,
-          sectionSize: estimatePart.sectionSize,
-          rollType: estimatePart.rollType,
-          radius: estimatePart.radius,
-          diameter: estimatePart.diameter,
-          arcDegrees: estimatePart.arcDegrees,
-          flangeOut: estimatePart.flangeOut,
-          specialInstructions: estimatePart.specialInstructions,
-          status: 'pending',
-          // Copy supplier info for material ordering
-          supplierName: estimatePart.supplierName,
-          vendorId: estimatePart.vendorId || null,
-          vendorEstimateNumber: estimatePart.vendorEstimateNumber || null,
-          // Set materialSource - prefer estimate's materialSource, fall back to weSupplyMaterial flag
-          // For service types (fab_service, shop_rate), default to customer_supplied since no material is involved
-          materialSource: estimatePart.materialSource || 
-            (['fab_service', 'shop_rate'].includes(estimatePart.partType) ? 'customer_supplied' :
-            (estimatePart.weSupplyMaterial ? 'we_order' : 'customer_supplied')),
-          // Copy pricing fields (with formData fallback)
-          laborRate: getPricing('laborRate'),
-          laborHours: getPricing('laborHours'),
-          laborTotal: getPricing('laborTotal'),
-          materialUnitCost: getPricing('materialUnitCost'),
-          materialMarkupPercent: getPricing('materialMarkupPercent'),
-          materialTotal: getPricing('materialTotal'),
-          setupCharge: getPricing('setupCharge'),
-          otherCharges: getPricing('otherCharges'),
-          partTotal: getPricing('partTotal'),
-          // Copy form display data (rolling descriptions, specs, etc.)
-          formData: estimatePart.formData || null
-        }, { transaction });
+        const workOrderPart = await WorkOrderPart.create(partData, { transaction });
 
         // Track estimate part ID → work order part ID mapping
         estimateToWoPartIdMap[estimatePart.id] = workOrderPart.id;

@@ -578,6 +578,19 @@ const WorkOrder = sequelize.define('WorkOrder', {
     type: DataTypes.STRING,
     allowNull: true
   },
+  // Discount
+  discountPercent: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: true
+  },
+  discountAmount: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: true
+  },
+  discountReason: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
   // Tax exempt
   taxExempt: {
     type: DataTypes.BOOLEAN,

@@ -464,6 +464,25 @@ router.post('/reply-with-pdf/:estimateId', async (req, res, next) => {
     const gmailAccount = await GmailAccount.findByPk(scannedEmail.gmailAccountId);
     if (!gmailAccount || !gmailAccount.isActive) return res.status(400).json({ error: { message: 'Gmail account not connected' } });
 
+    const { getGmailClient } = require('../services/emailScanner');
+    const gmail = await getGmailClient(gmailAccount);
+
+    // Fetch the original message to get the RFC822 Message-ID header (needed for proper threading)
+    let rfc822MessageId = '';
+    try {
+      const origMsg = await gmail.users.messages.get({
+        userId: 'me',
+        id: scannedEmail.gmailMessageId,
+        format: 'metadata',
+        metadataHeaders: ['Message-ID', 'Message-Id']
+      });
+      const headers = origMsg.data.payload?.headers || [];
+      const msgIdHeader = headers.find(h => h.name.toLowerCase() === 'message-id');
+      rfc822MessageId = msgIdHeader?.value || '';
+    } catch (e) {
+      console.warn('[Reply] Could not fetch original Message-ID:', e.message);
+    }
+
     // Fetch PDF from our own API
     const http = require('http');
     const port = process.env.PORT || 5001;
@@ -488,23 +507,26 @@ router.post('/reply-with-pdf/:estimateId', async (req, res, next) => {
       pdfReq.end();
     });
 
-    // Build MIME email with PDF attachment as a reply
-    const { getGmailClient } = require('../services/emailScanner');
-    const gmail = await getGmailClient(gmailAccount);
-    
     const boundary = 'boundary_' + Date.now();
     const fileName = `Estimate-${estimate.estimateNumber}.pdf`;
     const toEmail = scannedEmail.fromEmail;
-    const subject = `Re: ${scannedEmail.subject || 'Quote'}`;
+    const subject = `Re: ${(scannedEmail.subject || 'Quote').replace(/^Re:\s*/i, '')}`;
     const bodyText = req.body.message || `Hi,\n\nPlease find the attached quote for your review.\n\nThank you,\nCarolina Rolling Co.`;
 
-    const messageParts = [
-      `Content-Type: multipart/mixed; boundary="${boundary}"`,
+    // Build proper MIME with In-Reply-To using RFC822 Message-ID
+    const headerLines = [
       `MIME-Version: 1.0`,
       `To: ${toEmail}`,
       `Subject: ${subject}`,
-      `In-Reply-To: ${scannedEmail.gmailMessageId}`,
-      `References: ${scannedEmail.gmailMessageId}`,
+      `Content-Type: multipart/mixed; boundary="${boundary}"`
+    ];
+    if (rfc822MessageId) {
+      headerLines.push(`In-Reply-To: ${rfc822MessageId}`);
+      headerLines.push(`References: ${rfc822MessageId}`);
+    }
+
+    const messageParts = [
+      ...headerLines,
       '',
       `--${boundary}`,
       'Content-Type: text/plain; charset="UTF-8"',
@@ -535,8 +557,13 @@ router.post('/reply-with-pdf/:estimateId', async (req, res, next) => {
       }
     });
 
-    // Build URL to open the draft in Gmail
-    const draftUrl = `https://mail.google.com/mail/?authuser=${encodeURIComponent(gmailAccount.email)}#drafts?compose=${draft.data.id}`;
+    // The draft response has draft.data.message.id (the message ID inside the draft)
+    const draftMsgId = draft.data.message?.id || draft.data.id;
+
+    // Gmail compose URL — open the draft for editing
+    const draftUrl = `https://mail.google.com/mail/?authuser=${encodeURIComponent(gmailAccount.email)}#inbox/${draftMsgId}`;
+
+    console.log(`[Reply] Draft created: id=${draft.data.id}, msgId=${draftMsgId}, thread=${scannedEmail.gmailThreadId}, to=${toEmail}`);
 
     res.json({ data: { draftUrl, draftId: draft.data.id }, message: 'Draft created with PDF attached' });
   } catch (error) {

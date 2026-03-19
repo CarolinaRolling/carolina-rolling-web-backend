@@ -9,7 +9,7 @@ const cloudinary = require('cloudinary').v2;
 const fileStorage = require('../utils/storage');
 const { Op } = require('sequelize');
 const { PDFDocument: PDFLibDocument } = require('pdf-lib');
-const { WorkOrder, WorkOrderPart, WorkOrderPartFile, WorkOrderDocument, DailyActivity, DRNumber, InboundOrder, PONumber, AppSettings, Estimate, Vendor, Client, Shipment, ShipmentPhoto, sequelize } = require('../models');
+const { WorkOrder, WorkOrderPart, WorkOrderPartFile, WorkOrderDocument, DailyActivity, DRNumber, InboundOrder, PONumber, AppSettings, Estimate, EstimatePart, Vendor, Client, Shipment, ShipmentPhoto, sequelize } = require('../models');
 
 const router = express.Router();
 
@@ -3858,6 +3858,122 @@ router.post('/:id/unlink-estimate', async (req, res, next) => {
     if (error.message.includes('No estimate linked')) {
       return res.status(400).json({ error: { message: error.message } });
     }
+    next(error);
+  }
+});
+
+// POST /api/workorders/repair-pricing - Scan WOs for missing pricing and backfill from linked estimates
+router.post('/repair-pricing', async (req, res, next) => {
+  try {
+    const { Op } = require('sequelize');
+    const { ORDER_FIELD_MAP, PART_SHARED_FIELDS } = require('../services/pricing');
+    
+    // Find all WOs linked to estimates
+    const workOrders = await WorkOrder.findAll({
+      where: { estimateId: { [Op.ne]: null } },
+      include: [{ model: WorkOrderPart, as: 'parts' }]
+    });
+
+    let orderFieldsRepaired = 0;
+    let partsRepaired = 0;
+    const details = [];
+
+    for (const wo of workOrders) {
+      const estimate = await Estimate.findByPk(wo.estimateId, {
+        include: [{ model: EstimatePart, as: 'parts' }]
+      });
+      if (!estimate) continue;
+
+      // Repair order-level fields — copy anything present on estimate but missing on WO
+      const orderUpdates = {};
+      for (const [estField, woField] of Object.entries(ORDER_FIELD_MAP)) {
+        const estVal = estimate[estField];
+        const woVal = wo[woField];
+        // Only repair if estimate has a value and WO is missing it
+        if (estVal !== null && estVal !== undefined && estVal !== '' && estVal !== false) {
+          if (woVal === null || woVal === undefined || woVal === '') {
+            orderUpdates[woField] = estVal;
+          }
+        }
+      }
+      // Also check totals
+      if ((!wo.subtotal || parseFloat(wo.subtotal) === 0) && estimate.partsSubtotal) {
+        orderUpdates.subtotal = estimate.partsSubtotal;
+      }
+      if ((!wo.grandTotal || parseFloat(wo.grandTotal) === 0) && estimate.grandTotal) {
+        orderUpdates.grandTotal = estimate.grandTotal;
+        orderUpdates.estimateTotal = estimate.grandTotal;
+      }
+      if ((!wo.taxAmount || parseFloat(wo.taxAmount) === 0) && estimate.taxAmount) {
+        orderUpdates.taxAmount = estimate.taxAmount;
+      }
+
+      if (Object.keys(orderUpdates).length > 0) {
+        await wo.update(orderUpdates);
+        orderFieldsRepaired++;
+        details.push(`DR-${wo.drNumber}: order-level fields repaired: ${Object.keys(orderUpdates).join(', ')}`);
+      }
+
+      // Repair parts by matching partNumber
+      for (const woPart of wo.parts) {
+        const estPart = estimate.parts.find(ep => ep.partNumber === woPart.partNumber);
+        if (!estPart) continue;
+
+        const estFd = estPart.formData && typeof estPart.formData === 'object' ? estPart.formData : {};
+        const woLabor = parseFloat(woPart.laborTotal) || 0;
+        const woMaterial = parseFloat(woPart.materialTotal) || 0;
+        const woTotal = parseFloat(woPart.partTotal) || 0;
+        const estLabor = parseFloat(estPart.laborTotal) || parseFloat(estFd.laborTotal) || 0;
+        const estMaterial = parseFloat(estPart.materialTotal) || parseFloat(estFd.materialTotal) || 0;
+        const estTotal = parseFloat(estPart.partTotal) || parseFloat(estFd.partTotal) || 0;
+
+        if ((woLabor === 0 && estLabor > 0) || (woTotal === 0 && estTotal > 0) || (woMaterial === 0 && estMaterial > 0)) {
+          const updates = {};
+          
+          // Copy all pricing fields from estimate using shared field list
+          const pricingColumns = ['laborRate', 'laborHours', 'laborTotal', 'materialUnitCost', 'materialMarkupPercent', 'materialTotal', 'setupCharge', 'otherCharges', 'partTotal'];
+          for (const field of pricingColumns) {
+            const estVal = estPart[field] || estFd[field];
+            const woVal = woPart[field];
+            if (estVal && (!woVal || parseFloat(woVal) === 0)) {
+              updates[field] = estVal;
+            }
+          }
+
+          // Merge formData pricing fields
+          const woFd = woPart.formData && typeof woPart.formData === 'object' ? { ...woPart.formData } : {};
+          const pricingFdFields = ['laborRate', 'laborHours', 'laborTotal', 'materialTotal', 'materialMarkupPercent', 'materialUnitCost', 'partTotal', 'setupCharge', 'otherCharges', '_materialRounding', '_rollingDescription', '_materialDescription'];
+          let fdChanged = false;
+          for (const f of pricingFdFields) {
+            if (estFd[f] !== undefined && (woFd[f] === undefined || woFd[f] === null || woFd[f] === '' || woFd[f] === 0)) {
+              woFd[f] = estFd[f];
+              fdChanged = true;
+            }
+          }
+          if (fdChanged) updates.formData = woFd;
+
+          if (Object.keys(updates).length > 0) {
+            await woPart.update(updates);
+            partsRepaired++;
+            details.push(`DR-${wo.drNumber} Part #${woPart.partNumber} (${woPart.partType}): labor $${woLabor}→$${estLabor}, material $${woMaterial}→$${estMaterial}, total $${woTotal}→$${estTotal}`);
+          }
+        }
+      }
+    }
+
+    console.log(`[repair-pricing] Scanned ${workOrders.length} WOs: ${orderFieldsRepaired} order-level, ${partsRepaired} parts`);
+
+    res.json({
+      data: {
+        scanned: workOrders.length,
+        orderFieldsRepaired,
+        partsRepaired,
+        details
+      },
+      message: `Scanned ${workOrders.length} work orders: ${partsRepaired} parts repaired, ${orderFieldsRepaired} orders repaired`
+    });
+  } catch (error) {
+    console.error('[repair-pricing] Error:', error.message);
     next(error);
   }
 });

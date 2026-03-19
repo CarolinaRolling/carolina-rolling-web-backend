@@ -46,25 +46,11 @@ function mapTerms(terms) {
   return TERMS_MAP[terms] || TERMS_MAP[terms.toUpperCase()] || terms.toUpperCase();
 }
 
-// Round up material cost after markup (matches frontend logic)
-function roundUpMaterial(value, rounding) {
-  if (!rounding || rounding === 'none' || value <= 0) return value;
-  if (rounding === 'dollar') return Math.ceil(value);
-  if (rounding === 'five') return Math.ceil(value / 5) * 5;
-  return value;
-}
+// Pricing utilities from shared module
+const { calculatePartTotal, roundUpMaterial, loadLaborMinimums, calculateMinimumAdjustment } = require('../services/pricing');
 
-// Get part amount — use stored partTotal first, fall back to calculation with rounding
 function getPartAmount(part) {
-  const stored = parseFloat(part.partTotal);
-  if (stored && stored > 0) return stored;
-  const matCost = parseFloat(part.materialTotal) || 0;
-  const matMarkup = parseFloat(part.materialMarkupPercent) || 0;
-  const fd = part.formData && typeof part.formData === 'object' ? part.formData : {};
-  const matEach = roundUpMaterial(matCost * (1 + matMarkup / 100), fd._materialRounding);
-  const labEach = parseFloat(part.laborTotal) || 0;
-  const qty = parseInt(part.quantity) || 1;
-  return Math.round((matEach + labEach) * qty * 100) / 100;
+  return calculatePartTotal(part);
 }
 
 // Look up client by ID association or name fallback
@@ -80,7 +66,7 @@ async function resolveClient(wo) {
   return null;
 }
 
-function buildInvoiceIIF(wo, parts, client, invoiceNum) {
+async function buildInvoiceIIF(wo, parts, client, invoiceNum) {
   const lines = [];
   const SERVICE_TYPES = ['fab_service', 'shop_rate', 'rush_service'];
   
@@ -250,6 +236,52 @@ function buildInvoiceIIF(wo, parts, client, invoiceNum) {
   
   if (lineItems.length === 0) return null;
   
+  // Check minimum labor charge using shared utility
+  let minimumAdjustment = 0;
+  if (!wo.minimumOverride) {
+    try {
+      const minimums = await loadLaborMinimums();
+      const minInfo = calculateMinimumAdjustment(sorted, wo.minimumOverride, minimums);
+      if (minInfo.applies) {
+        minimumAdjustment = minInfo.adjustment;
+        console.log(`[IIF] Minimum labor applies: totalLabor=$${minInfo.totalLabor}, minimum=$${minInfo.minimum}, adjustment=$${minimumAdjustment}`);
+        lineItems.push({
+          description: `Minimum labor charge adjustment`,
+          amount: minimumAdjustment,
+          qty: 1,
+          invItem: itemType,
+          isPriced: true
+        });
+        subtotal += minimumAdjustment;
+      }
+    } catch (e) {
+      console.error('[IIF] Minimum labor check error:', e.message);
+    }
+  }
+  
+  // Apply discount
+  const discountPct = parseFloat(wo.discountPercent) || 0;
+  const discountAmt = parseFloat(wo.discountAmount) || 0;
+  let discountTotal = 0;
+  if (discountPct > 0) {
+    discountTotal = Math.round(subtotal * discountPct / 100 * 100) / 100;
+  } else if (discountAmt > 0) {
+    discountTotal = discountAmt;
+  }
+  if (discountTotal > 0) {
+    const reason = wo.discountReason ? ` (${clean(wo.discountReason)})` : '';
+    const label = discountPct > 0 ? `Discount ${discountPct}%${reason}` : `Discount${reason}`;
+    lineItems.push({
+      description: clean(label).substring(0, 200),
+      amount: -discountTotal,
+      qty: 1,
+      invItem: itemType,
+      isPriced: true
+    });
+    subtotal -= discountTotal;
+    console.log(`[IIF] Discount: $${discountTotal} (${discountPct > 0 ? discountPct + '%' : 'flat'})`);
+  }
+  
   // Tax calculation — for summary only. QB auto-calculates tax from TAXABLE=Y lines
   const taxRate = isResale ? 0 : (parseFloat(wo.taxRate) || 0);
   const taxableAmount = isResale ? 0 : lineItems.filter(i => i.isPriced && !i.isFreight).reduce((s, i) => s + i.amount, 0);
@@ -406,7 +438,7 @@ router.get('/export/:id', async (req, res, next) => {
     if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
     
     const client = await resolveClient(wo);
-    const result = buildInvoiceIIF(wo, wo.parts || [], client, wo.invoiceNumber);
+    const result = await buildInvoiceIIF(wo, wo.parts || [], client, wo.invoiceNumber);
     if (!result) return res.status(400).json({ error: { message: 'No billable items found' } });
     
     const iifContent = [...IIF_HEADER, ...result.lines].join('\r\n') + '\r\n';
@@ -441,7 +473,7 @@ router.post('/export-batch', async (req, res, next) => {
     const summaries = [];
     for (const wo of workOrders) {
       const client = await resolveClient(wo);
-      const result = buildInvoiceIIF(wo, wo.parts || [], client, wo.invoiceNumber);
+      const result = await buildInvoiceIIF(wo, wo.parts || [], client, wo.invoiceNumber);
       if (result) { allLines.push(...result.lines); summaries.push(result.summary); }
     }
     if (allLines.length === 0) return res.status(400).json({ error: { message: 'No billable items found' } });
@@ -469,7 +501,7 @@ router.get('/preview/:id', async (req, res, next) => {
     if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
     
     const client = await resolveClient(wo);
-    const result = buildInvoiceIIF(wo, wo.parts || [], client, wo.invoiceNumber);
+    const result = await buildInvoiceIIF(wo, wo.parts || [], client, wo.invoiceNumber);
     if (!result) return res.json({ data: null, message: 'No billable items found' });
     
     res.json({ data: { summary: result.summary, config: QB_CONFIG, rawIIF: result.lines.join('\n') } });

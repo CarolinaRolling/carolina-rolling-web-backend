@@ -194,6 +194,7 @@ IMPORTANT RULES:
 - If they say "rolled and tack welded" or "R/T", put that in the ROLLING PART's specialInstructions — do NOT create a separate fab_service for tack welding
 - Only create a separate fab_service part for explicit services like "100% weld", "full pen weld", "bevel", "fit and weld", "grind smooth"
 - Every fab_service MUST include "parentPartIndex" pointing to which rolling part it belongs to (0-based index in the parts array)
+- If the email mentions a requested delivery date, need-by date, due date, or ship date, extract it as "requestedDate" in YYYY-MM-DD format. Convert relative dates like "next Friday" or "2 weeks" to actual dates based on today's date.
 - materialSource: set to "customer_supplied" unless they ask you to supply material
 - If information is MISSING from the email (thickness, diameter, material, etc.), leave the field as null and add it to missingFields
 
@@ -256,6 +257,7 @@ Respond ONLY with valid JSON (no markdown, no backticks). Format:
     }
   ],
   "notes": "delivery or special notes",
+  "requestedDate": "requested delivery/completion date if mentioned (YYYY-MM-DD format), or null",
   "attachmentMentions": ["file names mentioned"],
   "aiNotes": "Overall notes about what info was missing or unclear in this email"
 }
@@ -660,7 +662,8 @@ async function createPendingOrderFromParsed(parsed, clientInfo, scannedEmail) {
       emailLink: scannedEmail.gmailLink,
       subject: scannedEmail.subject,
       parsedData: parsed,
-      status: 'pending'
+      status: 'pending',
+      requestedDate: parsed.requestedDate || null
     });
 
     console.log(`[EmailScanner] Created pending order PO#${parsed.poNumber} for ${clientInfo.clientName}`);

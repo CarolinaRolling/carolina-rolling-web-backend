@@ -2141,6 +2141,10 @@ const PendingOrder = sequelize.define('PendingOrder', {
   notes: {
     type: DataTypes.TEXT,
     allowNull: true
+  },
+  requestedDate: {
+    type: DataTypes.STRING,
+    allowNull: true
   }
 }, {
   tableName: 'pending_orders',

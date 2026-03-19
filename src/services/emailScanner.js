@@ -820,17 +820,20 @@ async function runScan() {
     try {
       const gmail = await getGmailClient(account);
 
-      // Build search query: from any of the configured client OR vendor emails
+      // Build search query: from monitored addresses OR replies to our RFQs
       const allAddresses = [...Object.keys(emailToClient), ...Object.keys(emailToVendor)];
-      if (allAddresses.length === 0) continue;
-      const fromQuery = allAddresses.map(e => `from:${e}`).join(' OR ');
+      const queryParts = [];
+      if (allAddresses.length > 0) {
+        queryParts.push(`(${allAddresses.map(e => `from:${e}`).join(' OR ')})`);
+      }
+      // Also search for any replies to our RFQ emails (catches vendor responses)
+      queryParts.push('subject:RFQ-');
       
-      // Search for unread messages or messages after last scan
       const afterDate = account.lastScannedAt 
         ? Math.floor(new Date(account.lastScannedAt).getTime() / 1000)
-        : Math.floor((Date.now() - 24 * 60 * 60 * 1000) / 1000); // Default: last 24h
+        : Math.floor((Date.now() - 24 * 60 * 60 * 1000) / 1000);
 
-      const query = `(${fromQuery}) after:${afterDate} -label:cr-processed`;
+      const query = `(${queryParts.join(' OR ')}) after:${afterDate} -label:cr-processed`;
 
       const listRes = await gmail.users.messages.list({
         userId: 'me',
@@ -863,45 +866,46 @@ async function runScan() {
           const fromEmail = extractEmail(from);
           const fromName = extractName(from);
 
-          // Match to client or vendor
-          const clientInfo = emailToClient[fromEmail];
-          const vendorInfo = emailToVendor[fromEmail];
-          if (!clientInfo && !vendorInfo) continue; // Not from a monitored address
+          // Skip our own sent emails
+          if (fromEmail === account.email.toLowerCase()) continue;
 
-          // Extract body text
+          // Extract body text and build Gmail link early — needed for all paths
           const bodyText = extractTextFromParts(fullMsg.data.payload);
-          
-          // Build Gmail link
           const gmailLink = `https://mail.google.com/mail/?authuser=${encodeURIComponent(account.email)}#inbox/${msg.id}`;
 
-          if (vendorInfo) {
-            // ===== VENDOR EMAIL — check if it's a response to our RFQ =====
-            const threadId = fullMsg.data.threadId;
-            
-            // Find estimate that has this thread as RFQ thread
-            let matchedEstimate = null;
-            if (threadId) {
-              matchedEstimate = await Estimate.findOne({
-                where: { rfqThreadId: threadId, rfqVendorId: vendorInfo.vendorId }
+          // FIRST: Check if this email is in a thread that matches an RFQ we sent
+          // This catches vendor responses even if the vendor isn't in the scan list
+          const threadId = fullMsg.data.threadId;
+          let rfqEstimate = null;
+          if (threadId) {
+            rfqEstimate = await Estimate.findOne({
+              where: { rfqThreadId: threadId }
+            });
+          }
+          // Also check subject for RFQ-EST pattern
+          if (!rfqEstimate && subject) {
+            const rfqMatch = subject.match(/RFQ-([A-Z0-9-]+)/i);
+            if (rfqMatch) {
+              rfqEstimate = await Estimate.findOne({
+                where: { [Op.or]: [
+                  { estimateNumber: rfqMatch[1] },
+                  { estimateNumber: { [Op.iLike]: `%${rfqMatch[1]}%` } }
+                ]}
               });
             }
-            // Also try matching by subject line (RFQ-EST-XXXXXX)
-            if (!matchedEstimate && subject) {
-              const rfqMatch = subject.match(/RFQ-([A-Z0-9-]+)/i);
-              if (rfqMatch) {
-                matchedEstimate = await Estimate.findOne({
-                  where: { estimateNumber: rfqMatch[1], rfqVendorId: vendorInfo.vendorId }
-                });
-              }
-            }
+          }
 
-            if (!matchedEstimate) {
-              // Not a response to any of our RFQs — skip
-              console.log(`[EmailScanner] Vendor email from ${fromEmail} but no matching RFQ, skipping`);
-              continue;
-            }
+          if (rfqEstimate) {
+            // ===== VENDOR RESPONSE to our RFQ =====
+            const vendorInfo = emailToVendor[fromEmail];
+            const vendorName = vendorInfo?.vendorName || fromName || fromEmail;
+            
+            // Check if already processed
+            const alreadyScanned = await ScannedEmail.findOne({
+              where: { gmailMessageId: msg.id, gmailAccountId: account.id }
+            });
+            if (alreadyScanned) continue;
 
-            // Create scanned email record for vendor response
             const scannedEmail = await ScannedEmail.create({
               gmailMessageId: msg.id,
               gmailThreadId: threadId || null,
@@ -912,10 +916,10 @@ async function runScan() {
               status: 'processed',
               gmailLink,
               rawBody: bodyText.substring(0, 10000),
-              estimateId: matchedEstimate.id
+              estimateId: rfqEstimate.id
             });
 
-            console.log(`[EmailScanner] Vendor response from ${vendorInfo.vendorName} for ${matchedEstimate.estimateNumber}`);
+            console.log(`[EmailScanner] Vendor response from ${vendorName} for ${rfqEstimate.estimateNumber}`);
 
             // Check for PDF attachments
             let attachedPdf = false;
@@ -927,20 +931,19 @@ async function runScan() {
                       userId: 'me', messageId: msg.id, id: part.body.attachmentId
                     });
                     const pdfData = Buffer.from(attachment.data.data, 'base64');
-                    const fileName = part.filename || `vendor-quote-${vendorInfo.vendorName}.pdf`;
+                    const fileName = part.filename || `vendor-quote-${vendorName}.pdf`;
 
-                    // Upload to S3 or save locally
                     const cloudinary = require('cloudinary').v2;
                     const uploadResult = await new Promise((resolve, reject) => {
                       const stream = cloudinary.uploader.upload_stream(
-                        { resource_type: 'raw', folder: 'estimate-files', public_id: `vendor-quote-${matchedEstimate.estimateNumber}-${Date.now()}` },
+                        { resource_type: 'raw', folder: 'estimate-files', public_id: `vendor-quote-${rfqEstimate.estimateNumber}-${Date.now()}` },
                         (error, result) => { if (error) reject(error); else resolve(result); }
                       );
                       stream.end(pdfData);
                     });
 
                     await EstimateFile.create({
-                      estimateId: matchedEstimate.id,
+                      estimateId: rfqEstimate.id,
                       filename: uploadResult.public_id,
                       originalName: fileName,
                       mimeType: 'application/pdf',
@@ -951,7 +954,7 @@ async function runScan() {
                     });
 
                     attachedPdf = true;
-                    console.log(`[EmailScanner] Saved vendor PDF: ${fileName} → ${matchedEstimate.estimateNumber}`);
+                    console.log(`[EmailScanner] Saved vendor PDF: ${fileName} → ${rfqEstimate.estimateNumber}`);
                   } catch (pdfErr) {
                     console.error(`[EmailScanner] Failed to save vendor PDF:`, pdfErr.message);
                   }
@@ -959,29 +962,62 @@ async function runScan() {
               }
             }
 
-            // Append text to internal notes
-            if (bodyText.trim()) {
-              const timestamp = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' });
-              const noteBlock = `\n\n***Supplier quote: ${vendorInfo.vendorName} (${timestamp})***\n${bodyText.substring(0, 3000).trim()}\n***Supplier quote: end***`;
-              const currentNotes = matchedEstimate.internalNotes || '';
-              await matchedEstimate.update({ internalNotes: currentNotes + noteBlock });
-              console.log(`[EmailScanner] Appended vendor quote text to ${matchedEstimate.estimateNumber} internal notes`);
+            // Build short pricing summary for internal notes using AI
+            const timestamp = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' });
+            let pricingSummary = bodyText.substring(0, 2000).trim();
+            
+            // Try to use AI for a concise summary
+            if (process.env.ANTHROPIC_API_KEY && bodyText.trim()) {
+              try {
+                const https = require('https');
+                const summaryBody = JSON.stringify({
+                  model: 'claude-sonnet-4-20250514',
+                  max_tokens: 500,
+                  system: 'Extract material pricing from this vendor quote email. Format as a SHORT list:\nMaterial pricing:\nPart #1: $XX ea (brief description)\nPart #2: $XX ea (brief description)\n\nIf lead time or availability is mentioned, add one line for that. Keep it very concise. No other text.',
+                  messages: [{ role: 'user', content: bodyText.substring(0, 3000) }]
+                });
+                const summaryText = await new Promise((resolve, reject) => {
+                  const req = https.request({
+                    hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(summaryBody) }
+                  }, (res) => {
+                    let data = '';
+                    res.on('data', chunk => data += chunk);
+                    res.on('end', () => {
+                      if (res.statusCode === 200) {
+                        try { resolve(JSON.parse(data).content?.[0]?.text || ''); } catch { resolve(''); }
+                      } else { resolve(''); }
+                    });
+                  });
+                  req.on('error', () => resolve(''));
+                  req.write(summaryBody);
+                  req.end();
+                });
+                if (summaryText.trim()) pricingSummary = summaryText.trim();
+              } catch (e) {
+                console.warn('[EmailScanner] AI summary failed, using raw text');
+              }
             }
+            
+            const noteBlock = `\n\n***Supplier quote: ${vendorName} (${timestamp})***\n📧 ${gmailLink}\n${pricingSummary}\n***Supplier quote: end***`;
+            const currentNotes = rfqEstimate.internalNotes || '';
+            await rfqEstimate.update({ internalNotes: currentNotes + noteBlock });
+            console.log(`[EmailScanner] Appended vendor quote to ${rfqEstimate.estimateNumber} internal notes`);
 
             await scannedEmail.update({
               status: attachedPdf ? 'vendor_pdf_saved' : 'vendor_text_saved',
-              parsedData: { vendorName: vendorInfo.vendorName, estimateNumber: matchedEstimate.estimateNumber, attachedPdf }
+              parsedData: { vendorName, estimateNumber: rfqEstimate.estimateNumber, attachedPdf }
             });
 
             // Create todo for estimator
             const headEstimator = await User.findOne({ where: { isHeadEstimator: true, isActive: true } });
             await TodoItem.create({
-              title: `📨 Vendor quote received: ${matchedEstimate.estimateNumber} — ${vendorInfo.vendorName}`,
-              description: `${vendorInfo.vendorName} replied to RFQ-${matchedEstimate.estimateNumber}.${attachedPdf ? ' PDF attached.' : ' Text captured in internal notes.'}`,
+              title: `📨 Vendor quote received: ${rfqEstimate.estimateNumber} — ${vendorName}`,
+              description: `${vendorName} replied to RFQ-${rfqEstimate.estimateNumber}.${attachedPdf ? ' PDF attached.' : ' Text captured in internal notes.'}`,
               type: 'estimate_review', priority: 'high',
               assignedTo: headEstimator?.username || null,
-              estimateId: matchedEstimate.id,
-              estimateNumber: matchedEstimate.estimateNumber,
+              estimateId: rfqEstimate.id,
+              estimateNumber: rfqEstimate.estimateNumber,
               createdBy: 'Email Scanner'
             });
 
@@ -1000,8 +1036,20 @@ async function runScan() {
 
             accountResult.processed++;
             results.processed++;
-            continue; // Done with this vendor email
+            continue;
           }
+
+          // Match to client or vendor
+          const clientInfo = emailToClient[fromEmail];
+          const vendorInfo = emailToVendor[fromEmail];
+          if (!clientInfo && !vendorInfo) continue;
+
+          if (vendorInfo && !clientInfo) {
+            // Vendor email that didn't match any RFQ thread — skip silently
+            continue;
+          }
+
+          if (!clientInfo) continue; // Not from a monitored client
 
           // ===== CLIENT EMAIL — existing flow =====
           // Create scanned email record

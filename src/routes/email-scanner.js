@@ -580,14 +580,14 @@ router.post('/vendor-rfq/:estimateId', async (req, res, next) => {
     const { vendorId, contactEmail, partIds, gmailAccountId } = req.body;
     
     const estimate = await Estimate.findByPk(req.params.estimateId, {
-      include: [{ model: EstimatePart, as: 'parts' }]
+      include: [{ model: EstimatePart, as: 'parts', include: [{ model: require('../models').EstimatePartFile, as: 'files' }] }]
     });
     if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
 
     const vendor = await Vendor.findByPk(vendorId);
     if (!vendor) return res.status(404).json({ error: { message: 'Vendor not found' } });
 
-    // Pick Gmail account — use specified or first active
+    // Pick Gmail account
     let gmailAccount;
     if (gmailAccountId) {
       gmailAccount = await GmailAccount.findByPk(gmailAccountId);
@@ -600,38 +600,87 @@ router.post('/vendor-rfq/:estimateId', async (req, res, next) => {
     const toEmail = contactEmail || vendor.contactEmail;
     if (!toEmail) return res.status(400).json({ error: { message: 'No vendor email address' } });
 
-    // Filter parts if specific IDs provided, otherwise use all non-service parts
+    // Filter parts
     let partsToQuote = estimate.parts.filter(p => !['fab_service', 'shop_rate'].includes(p.partType));
     if (partIds && partIds.length > 0) {
       partsToQuote = estimate.parts.filter(p => partIds.includes(p.id));
     }
 
-    // Build materials list
+    // Build materials list with cut file references
     const materialLines = partsToQuote.map((p, i) => {
       const fd = p.formData && typeof p.formData === 'object' ? p.formData : {};
       const desc = fd._materialDescription || p.materialDescription || '';
       const qty = p.quantity || 1;
+      const cutFile = p.cutFileReference ? `\n   Cut File: ${p.cutFileReference} (attached)` : '';
       const specialInstr = p.specialInstructions ? `\n   Notes: ${p.specialInstructions}` : '';
-      return `${i + 1}. (${qty}) ${desc}${specialInstr}`;
+      return `${i + 1}. (${qty}) ${desc}${cutFile}${specialInstr}`;
     }).join('\n\n');
 
     const subject = `RFQ-${estimate.estimateNumber}`;
     const bodyText = `Hi ${vendor.contactName || ''},\n\nCould you please provide pricing and availability for the following materials:\n\n${materialLines}\n\nPlease reference RFQ-${estimate.estimateNumber} in your response.\n\nThank you,\nCarolina Rolling Co.`;
 
+    // Collect DXF/STEP files from parts
+    const attachments = [];
+    for (const p of partsToQuote) {
+      if (p.files) {
+        for (const f of p.files) {
+          if (f.fileType === 'cut_file' || (f.originalName || '').match(/\.(dxf|step|stp)$/i)) {
+            try {
+              const https = require('https');
+              const fileUrl = f.url;
+              if (fileUrl) {
+                const fileData = await new Promise((resolve, reject) => {
+                  https.get(fileUrl, (res) => {
+                    const chunks = [];
+                    res.on('data', chunk => chunks.push(chunk));
+                    res.on('end', () => resolve(Buffer.concat(chunks)));
+                    res.on('error', reject);
+                  }).on('error', reject);
+                });
+                attachments.push({ name: f.originalName || `part${p.partNumber}.dxf`, data: fileData, mimeType: f.mimeType || 'application/octet-stream' });
+              }
+            } catch (e) {
+              console.warn(`[VendorRFQ] Failed to fetch DXF file: ${f.originalName}`, e.message);
+            }
+          }
+        }
+      }
+    }
+
     const { getGmailClient } = require('../services/emailScanner');
     const gmail = await getGmailClient(gmailAccount);
 
-    const boundary = 'boundary_' + Date.now();
-    const messageParts = [
-      `MIME-Version: 1.0`,
-      `To: ${toEmail}`,
-      `Subject: ${subject}`,
-      `Content-Type: text/plain; charset="UTF-8"`,
-      '',
-      bodyText
-    ];
+    let rawMessage;
+    if (attachments.length > 0) {
+      const boundary = 'boundary_' + Date.now();
+      const parts = [
+        `MIME-Version: 1.0`,
+        `To: ${toEmail}`,
+        `Subject: ${subject}`,
+        `Content-Type: multipart/mixed; boundary="${boundary}"`,
+        '',
+        `--${boundary}`,
+        'Content-Type: text/plain; charset="UTF-8"',
+        '',
+        bodyText
+      ];
+      for (const att of attachments) {
+        parts.push('', `--${boundary}`);
+        parts.push(`Content-Type: ${att.mimeType}; name="${att.name}"`);
+        parts.push(`Content-Disposition: attachment; filename="${att.name}"`);
+        parts.push('Content-Transfer-Encoding: base64');
+        parts.push('');
+        parts.push(att.data.toString('base64'));
+      }
+      parts.push('', `--${boundary}--`);
+      rawMessage = parts.join('\r\n');
+    } else {
+      rawMessage = [
+        `MIME-Version: 1.0`, `To: ${toEmail}`, `Subject: ${subject}`,
+        `Content-Type: text/plain; charset="UTF-8"`, '', bodyText
+      ].join('\r\n');
+    }
 
-    const rawMessage = messageParts.join('\r\n');
     const encodedMessage = Buffer.from(rawMessage).toString('base64url');
 
     const draft = await gmail.users.drafts.create({
@@ -697,7 +746,9 @@ router.post('/vendor-po/:workOrderId', async (req, res, next) => {
     if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
     if (!wo.estimateId) return res.status(400).json({ error: { message: 'Work order has no linked estimate' } });
 
-    const estimate = await Estimate.findByPk(wo.estimateId);
+    const estimate = await Estimate.findByPk(wo.estimateId, {
+      include: [{ model: EstimatePart, as: 'parts', include: [{ model: require('../models').EstimatePartFile, as: 'files' }] }]
+    });
     if (!estimate) return res.status(400).json({ error: { message: 'Linked estimate not found' } });
     if (!estimate.rfqVendorId) return res.status(400).json({ error: { message: 'No vendor RFQ was sent for this estimate' } });
 
@@ -748,8 +799,36 @@ router.post('/vendor-po/:workOrderId', async (req, res, next) => {
     const subject = `PO for RFQ-${estimate.estimateNumber}`;
     const bodyText = req.body.message || `Hi ${vendor.contactName || ''},\n\nPlease find the attached purchase order referencing RFQ-${estimate.estimateNumber}.\n\nThank you,\nCarolina Rolling Co.`;
 
+    // Collect DXF/STEP files from estimate parts
+    const dxfAttachments = [];
+    if (estimate.parts) {
+      for (const p of estimate.parts) {
+        if (p.files) {
+          for (const f of p.files) {
+            if (f.fileType === 'cut_file' || (f.originalName || '').match(/\.(dxf|step|stp)$/i)) {
+              try {
+                const httpsLib = require('https');
+                if (f.url) {
+                  const fileData = await new Promise((resolve, reject) => {
+                    httpsLib.get(f.url, (res) => {
+                      const chunks = [];
+                      res.on('data', chunk => chunks.push(chunk));
+                      res.on('end', () => resolve(Buffer.concat(chunks)));
+                      res.on('error', reject);
+                    }).on('error', reject);
+                  });
+                  dxfAttachments.push({ name: f.originalName || `part${p.partNumber}.dxf`, data: fileData, mimeType: f.mimeType || 'application/octet-stream' });
+                }
+              } catch (e) { console.warn(`[VendorPO] Failed to fetch DXF: ${f.originalName}`, e.message); }
+            }
+          }
+        }
+      }
+    }
+
     let rawMessage;
-    if (pdfBuffer) {
+    const hasAttachments = pdfBuffer || dxfAttachments.length > 0;
+    if (hasAttachments) {
       const boundary = 'boundary_' + Date.now();
       const fileName = `PO-${poNumber}.pdf`;
       
@@ -779,12 +858,20 @@ router.post('/vendor-po/:workOrderId', async (req, res, next) => {
 
       rawMessage = [
         ...headerLines, '',
-        `--${boundary}`, 'Content-Type: text/plain; charset="UTF-8"', '', bodyText, '',
-        `--${boundary}`, `Content-Type: application/pdf; name="${fileName}"`,
-        `Content-Disposition: attachment; filename="${fileName}"`,
-        'Content-Transfer-Encoding: base64', '', pdfBuffer.toString('base64'), '',
-        `--${boundary}--`
-      ].join('\r\n');
+        `--${boundary}`, 'Content-Type: text/plain; charset="UTF-8"', '', bodyText, ''
+      ];
+      if (pdfBuffer) {
+        rawMessage.push(`--${boundary}`, `Content-Type: application/pdf; name="${fileName}"`,
+          `Content-Disposition: attachment; filename="${fileName}"`,
+          'Content-Transfer-Encoding: base64', '', pdfBuffer.toString('base64'), '');
+      }
+      for (const att of dxfAttachments) {
+        rawMessage.push(`--${boundary}`, `Content-Type: ${att.mimeType}; name="${att.name}"`,
+          `Content-Disposition: attachment; filename="${att.name}"`,
+          'Content-Transfer-Encoding: base64', '', att.data.toString('base64'), '');
+      }
+      rawMessage.push(`--${boundary}--`);
+      rawMessage = rawMessage.join('\r\n');
     } else {
       rawMessage = [
         `MIME-Version: 1.0`, `To: ${toEmail}`, `Subject: ${subject}`,

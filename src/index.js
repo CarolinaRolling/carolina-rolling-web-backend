@@ -97,7 +97,50 @@ app.use('/api/todos', authenticate, todoRoutes);
 
 // Email Scanner - OAuth callback must be unauthenticated (Google redirects here)
 const emailScannerRoutes = require('./routes/email-scanner');
-app.use('/api/email-scanner/oauth/callback', emailScannerRoutes);
+const { getOAuth2Client } = require('./services/emailScanner');
+app.get('/api/email-scanner/oauth/callback', async (req, res) => {
+  try {
+    const { code } = req.query;
+    if (!code) return res.status(400).send('No authorization code received');
+
+    const oauth2 = getOAuth2Client();
+    const { tokens } = await oauth2.getToken(code);
+    oauth2.setCredentials(tokens);
+
+    const { google } = require('googleapis');
+    const oauth2Api = google.oauth2({ version: 'v2', auth: oauth2 });
+    const userInfo = await oauth2Api.userinfo.get();
+    const email = userInfo.data.email;
+
+    const { GmailAccount } = require('./models');
+    const [account, created] = await GmailAccount.findOrCreate({
+      where: { email },
+      defaults: {
+        accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token,
+        tokenExpiry: tokens.expiry_date ? new Date(tokens.expiry_date) : null,
+        isActive: true,
+        connectedBy: 'admin'
+      }
+    });
+    if (!created) {
+      await account.update({
+        accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token || account.refreshToken,
+        tokenExpiry: tokens.expiry_date ? new Date(tokens.expiry_date) : null,
+        isActive: true,
+        lastError: null
+      });
+    }
+
+    const baseUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    res.redirect(`${baseUrl}/admin/shop-config?tab=emailScanner&connected=${encodeURIComponent(email)}`);
+  } catch (error) {
+    console.error('[EmailScanner] OAuth callback error:', error.message);
+    const baseUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    res.redirect(`${baseUrl}/admin/shop-config?tab=emailScanner&error=${encodeURIComponent(error.message)}`);
+  }
+});
 app.use('/api/email-scanner', authenticate, emailScannerRoutes);
 
 // Error handling middleware

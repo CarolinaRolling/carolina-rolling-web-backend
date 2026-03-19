@@ -150,16 +150,25 @@ pipe_roll — Pipe or tube bending:
   Note: Pipe is specified by OD and wall thickness, NOT width/length.
 
 angle_roll — Angle iron rolling:
-  Fields: material, sectionSize (e.g. "3x3x3/8"), radius OR diameter, arcDegrees, rollType (easy_way, hard_way, on_edge)
+  Fields: material, legSize (e.g. "3x3" — just the leg dimensions, NO thickness), thickness (e.g. "0.375"), radius OR diameter, arcDegrees, rollType (easy_way, hard_way, on_edge), length
+  Note: "L3x3x3/8" → legSize="3x3", thickness="0.375". The legSize is JUST leg1 x leg2. Thickness is always separate.
 
 channel_roll — Channel rolling:
-  Fields: material, sectionSize (e.g. "C8x11.5"), radius OR diameter, arcDegrees, flangeOut (boolean)
+  Fields: material, sectionSize (e.g. "C8x11.5" — full designation with weight), radius OR diameter, arcDegrees, flangeOut (boolean), rollType, length
+  Note: Channel sizes include the weight: "C8x11.5", "MC8x22.8". Do NOT separate thickness — use the full designation.
 
 beam_roll — Beam/wide flange rolling:
-  Fields: material, sectionSize (e.g. "W8x31"), radius OR diameter, arcDegrees, rollType (easy_way or hard_way)
+  Fields: material, sectionSize (e.g. "W8x31" or "S8x23" — full designation), radius OR diameter, arcDegrees, rollType (easy_way or hard_way), length
+
+tee_bar — Tee bar rolling:
+  Fields: material, sectionSize (e.g. "WT5x22.5" — full designation), radius OR diameter, arcDegrees, rollType, length
 
 flat_bar — Flat bar rolling:
-  Fields: material, thickness, width, radius OR diameter, arcDegrees, rollType (easy_way, hard_way, on_edge)
+  Fields: material, thickness, width, radius OR diameter, arcDegrees, rollType (easy_way, hard_way, on_edge), length
+  Note: Width and thickness are separate fields. "1/2 x 4 flat" → width="4", thickness="0.500"
+
+square_tube_roll — Square or rectangular tube rolling:
+  Fields: material, sectionSize (e.g. "2x2" or "4x2"), wallThickness, radius OR diameter, arcDegrees, rollType, length
 
 flat_stock — Flat stock (plate without rolling):
   Fields: material, thickness, width, length
@@ -199,6 +208,13 @@ Respond ONLY with valid JSON (no markdown, no backticks). Format:
       "length": "452.16",
       "outerDiameter": "144",
       "diameter": "144",
+      "radius": null,
+      "arcDegrees": "360",
+      "rollType": "easy_way or hard_way or on_edge or null",
+      "legSize": "for angle_roll only: leg dimensions like 3x3 (NO thickness)",
+      "sectionSize": "for channel/beam/tee: full designation like C8x11.5, W8x31, WT5x22.5",
+      "wallThickness": "for pipe_roll or square_tube_roll",
+      "flangeOut": "for channel_roll: true or false",
       "specialInstructions": "Rolled and tack welded, no bevel, square and resquare",
       "clientPartNumber": "127250-535S1",
       "description": "Shell - 120\\" x 452.16\\" x 0.500 SA-516-70, R/T to 144\\" OD"
@@ -269,6 +285,179 @@ function generateEstimateNumber() {
   return `EST-${y}${m}${d}-${rand}`;
 }
 
+// Build formData object that matches what the frontend form components expect
+function buildFormData(p) {
+  const fd = {};
+  const type = p.partType || 'plate_roll';
+
+  // Common fields
+  if (p.material) fd.material = p.material;
+  if (p.quantity) fd.quantity = String(p.quantity);
+  if (p.specialInstructions) fd.specialInstructions = p.specialInstructions;
+  if (p.clientPartNumber) fd.clientPartNumber = p.clientPartNumber;
+  if (p.description) fd._materialDescription = p.description;
+  fd.materialSource = p.materialSource || 'customer_supplied';
+
+  if (type === 'plate_roll') {
+    if (p.thickness) fd.thickness = p.thickness;
+    if (p.width) fd.width = p.width;
+    if (p.length) fd.length = p.length;
+    // Roll value — prefer diameter
+    if (p.outerDiameter || p.diameter) {
+      fd._rollValue = String(p.outerDiameter || p.diameter);
+      fd._rollMeasureType = 'diameter';
+      fd._rollMeasurePoint = 'outside';
+    } else if (p.radius) {
+      fd._rollValue = String(p.radius);
+      fd._rollMeasureType = 'radius';
+    }
+    if (p.arcDegrees) fd.arcDegrees = String(p.arcDegrees);
+    if (p.rollType) fd.rollType = p.rollType;
+    fd._rollToMethod = '';
+  }
+
+  else if (type === 'cone_roll') {
+    if (p.thickness) fd.thickness = p.thickness;
+    // Large end = outerDiameter, small end = diameter
+    if (p.outerDiameter) {
+      fd._coneLargeDia = String(p.outerDiameter);
+      fd._coneLargeDiaType = 'outside';
+      fd._coneLargeDiaMeasure = 'diameter';
+    }
+    if (p.diameter) {
+      fd._coneSmallDia = String(p.diameter);
+      fd._coneSmallDiaType = 'outside';
+      fd._coneSmallDiaMeasure = 'diameter';
+    }
+    if (p.width) fd._coneHeight = String(p.width); // V/H = cone height
+    fd._coneType = 'concentric';
+    fd._coneRadialSegments = '1';
+  }
+
+  else if (type === 'pipe_roll') {
+    if (p.outerDiameter) fd.outerDiameter = String(p.outerDiameter);
+    if (p.wallThickness) fd.wallThickness = String(p.wallThickness);
+    // Look up common pipe size or set as custom
+    fd._pipeSize = 'Custom';
+    if (p.outerDiameter || p.diameter) {
+      fd._rollValue = String(p.radius || p.diameter || '');
+      fd._rollMeasureType = p.radius ? 'radius' : 'diameter';
+      fd._rollMeasurePoint = 'centerline';
+    }
+    if (p.arcDegrees) fd.arcDegrees = String(p.arcDegrees);
+    if (p.length) { fd._lengthOption = 'custom'; fd._customLength = String(p.length); fd.length = String(p.length); }
+  }
+
+  else if (type === 'angle_roll') {
+    // Angle uses separate legSize and thickness
+    const legs = p.legSize || p.sectionSize || '';
+    // Strip "L" prefix and thickness if AI included it (e.g. "L3x3x3/8" → "3x3")
+    const cleanLegs = legs.replace(/^L/i, '').replace(/x[\d/.]+$/, '').trim();
+    // Check if legSize matches known sizes (e.g. "3x3")
+    const KNOWN_ANGLES = ['0.5x0.5','0.75x0.75','1x1','1.25x1.25','1.5x1.5','2x2','2.5x2.5','3x3','4x4','5x5','6x6','1x2','2x3','3x4','4x5','4x6'];
+    if (cleanLegs && KNOWN_ANGLES.includes(cleanLegs)) {
+      fd._angleSize = cleanLegs;
+    } else if (cleanLegs) {
+      fd._angleSize = 'Custom';
+      fd._customAngleSize = cleanLegs;
+    }
+    fd.sectionSize = legs;
+    if (p.thickness) fd.thickness = p.thickness;
+    if (p.outerDiameter || p.diameter || p.radius) {
+      fd._rollValue = String(p.radius || p.diameter || p.outerDiameter || '');
+      fd._rollMeasureType = p.radius ? 'radius' : 'diameter';
+      fd._rollMeasurePoint = 'inside';
+    }
+    if (p.arcDegrees) fd.arcDegrees = String(p.arcDegrees);
+    if (p.rollType) fd.rollType = p.rollType;
+    if (p.length) { fd._lengthOption = 'custom'; fd._customLength = String(p.length); fd.length = String(p.length); }
+  }
+
+  else if (type === 'channel_roll') {
+    const size = p.sectionSize || '';
+    // Channel sizes are full designations like "C8x11.5"
+    fd._channelSize = size || 'Custom';
+    if (size) fd._customChannelSize = size;
+    fd.sectionSize = size;
+    if (p.outerDiameter || p.diameter || p.radius) {
+      fd._rollValue = String(p.radius || p.diameter || p.outerDiameter || '');
+      fd._rollMeasureType = p.radius ? 'radius' : 'diameter';
+      fd._rollMeasurePoint = 'outside';
+    }
+    if (p.arcDegrees) fd.arcDegrees = String(p.arcDegrees);
+    if (p.rollType) fd.rollType = p.rollType;
+    if (p.flangeOut !== undefined) fd.flangeOut = p.flangeOut;
+    if (p.length) { fd._lengthOption = 'custom'; fd._customLength = String(p.length); fd.length = String(p.length); }
+  }
+
+  else if (type === 'beam_roll') {
+    const size = p.sectionSize || '';
+    fd._beamSize = size || 'Custom';
+    if (size) fd._customBeamSize = size;
+    fd.sectionSize = size;
+    if (p.outerDiameter || p.diameter || p.radius) {
+      fd._rollValue = String(p.radius || p.diameter || p.outerDiameter || '');
+      fd._rollMeasureType = p.radius ? 'radius' : 'diameter';
+      fd._rollMeasurePoint = 'outside';
+    }
+    if (p.arcDegrees) fd.arcDegrees = String(p.arcDegrees);
+    if (p.rollType) fd.rollType = p.rollType;
+    if (p.length) { fd._lengthOption = 'custom'; fd._customLength = String(p.length); fd.length = String(p.length); }
+  }
+
+  else if (type === 'flat_bar') {
+    if (p.thickness) fd.thickness = p.thickness;
+    if (p.width) fd.width = p.width;
+    if (p.sectionSize) {
+      fd._barSize = 'Custom';
+      fd._customBarSize = p.sectionSize;
+      fd._barShape = 'flat';
+    } else if (p.width && p.thickness) {
+      fd._barSize = 'Custom';
+      fd._customBarSize = `${p.width}x${p.thickness}`;
+      fd._barShape = p.width === p.thickness ? 'square' : 'flat';
+    }
+    if (p.outerDiameter || p.diameter || p.radius) {
+      fd._rollValue = String(p.radius || p.diameter || p.outerDiameter || '');
+      fd._rollMeasureType = p.radius ? 'radius' : 'diameter';
+      fd._rollMeasurePoint = 'centerline';
+    }
+    if (p.arcDegrees) fd.arcDegrees = String(p.arcDegrees);
+    if (p.rollType) fd.rollType = p.rollType;
+    if (p.length) { fd._lengthOption = 'custom'; fd._customLength = String(p.length); fd.length = String(p.length); }
+  }
+
+  else if (type === 'tee_bar') {
+    const size = p.sectionSize || '';
+    fd._teeSize = size || 'Custom';
+    if (size) fd._customTeeSize = size;
+    fd.sectionSize = size;
+    if (p.outerDiameter || p.diameter || p.radius) {
+      fd._rollValue = String(p.radius || p.diameter || p.outerDiameter || '');
+      fd._rollMeasureType = p.radius ? 'radius' : 'diameter';
+      fd._rollMeasurePoint = 'outside';
+    }
+    if (p.arcDegrees) fd.arcDegrees = String(p.arcDegrees);
+    if (p.rollType) fd.rollType = p.rollType;
+    if (p.length) { fd._lengthOption = 'custom'; fd._customLength = String(p.length); fd.length = String(p.length); }
+  }
+
+  else if (type === 'press_brake') {
+    if (p.thickness) fd.thickness = p.thickness;
+    if (p.width) fd.width = p.width;
+    if (p.length) fd.length = p.length;
+  }
+
+  else if (type === 'flat_stock') {
+    if (p.thickness) fd.thickness = p.thickness;
+    if (p.width) fd.width = p.width;
+    if (p.length) fd.length = p.length;
+  }
+
+  // fab_service and shop_rate just use specialInstructions/description
+  return fd;
+}
+
 // Create an estimate from parsed email data
 async function createEstimateFromParsed(parsed, clientInfo, scannedEmail) {
   try {
@@ -292,9 +481,10 @@ async function createEstimateFromParsed(parsed, clientInfo, scannedEmail) {
       scannedEmailId: scannedEmail.id
     });
 
-    // Create parts
+    // Create parts with proper formData
     for (let i = 0; i < (parsed.parts || []).length; i++) {
       const p = parsed.parts[i];
+      const formData = buildFormData(p);
       await EstimatePart.create({
         estimateId: estimate.id,
         partNumber: i + 1,
@@ -308,9 +498,15 @@ async function createEstimateFromParsed(parsed, clientInfo, scannedEmail) {
         diameter: p.diameter || p.outerDiameter || null,
         wallThickness: p.wallThickness || null,
         sectionSize: p.sectionSize || null,
+        radius: p.radius || null,
+        arcDegrees: p.arcDegrees || null,
+        rollType: p.rollType || null,
+        flangeOut: p.flangeOut || false,
         specialInstructions: p.specialInstructions || null,
         clientPartNumber: p.clientPartNumber || null,
-        materialDescription: p.description || null
+        materialDescription: p.description || null,
+        materialSource: p.materialSource || 'customer_supplied',
+        formData: formData
       });
     }
 
@@ -576,5 +772,6 @@ module.exports = {
   runScan,
   isBusinessHours,
   parseEmailWithAI,
-  getScanConfig
+  getScanConfig,
+  buildFormData
 };

@@ -250,6 +250,45 @@ router.delete('/pending-orders/:id', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// PUT /api/email-scanner/pending-orders/:id/link-estimate - Link an estimate to a pending order
+router.put('/pending-orders/:id/link-estimate', async (req, res, next) => {
+  try {
+    const order = await PendingOrder.findByPk(req.params.id);
+    if (!order) return res.status(404).json({ error: { message: 'Pending order not found' } });
+    const { estimateId } = req.body;
+    if (!estimateId) {
+      // Unlink
+      await order.update({ matchedEstimateId: null, matchedEstimateNumber: null });
+      return res.json({ data: order, message: 'Estimate unlinked' });
+    }
+    const estimate = await Estimate.findByPk(estimateId);
+    if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
+    await order.update({ matchedEstimateId: estimate.id, matchedEstimateNumber: estimate.estimateNumber });
+    res.json({ data: order, message: `Linked to ${estimate.estimateNumber}` });
+  } catch (error) { next(error); }
+});
+
+// GET /api/email-scanner/search-estimates - Search estimates for linking
+router.get('/search-estimates', async (req, res, next) => {
+  try {
+    const { q } = req.query;
+    if (!q || q.length < 2) return res.json({ data: [] });
+    const estimates = await Estimate.findAll({
+      where: {
+        [Op.or]: [
+          { estimateNumber: { [Op.iLike]: `%${q}%` } },
+          { clientName: { [Op.iLike]: `%${q}%` } }
+        ],
+        status: { [Op.notIn]: ['archived'] }
+      },
+      attributes: ['id', 'estimateNumber', 'clientName', 'status', 'createdAt'],
+      order: [['createdAt', 'DESC']],
+      limit: 10
+    });
+    res.json({ data: estimates });
+  } catch (error) { next(error); }
+});
+
 // ==================== GENERAL NOTES ====================
 
 // GET /api/email-scanner/general-notes - Get general AI parsing notes

@@ -1993,6 +1993,10 @@ const ScannedEmail = sequelize.define('ScannedEmail', {
     type: DataTypes.STRING,
     allowNull: false
   },
+  gmailThreadId: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
   gmailAccountId: {
     type: DataTypes.UUID,
     allowNull: false,

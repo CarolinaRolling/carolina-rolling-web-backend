@@ -264,7 +264,15 @@ Respond ONLY with valid JSON (no markdown, no backticks). Format:
 
 CRITICAL: For missingFields, list any field the client did NOT provide that is needed to complete the estimate. Common missing fields: thickness, material, diameter/radius, arcDegrees, length, rollType. Add a human-readable note in missingFieldNotes explaining what's missing.
 
-If this is a PO (purchase order) rather than an RFQ, set emailType to "po" and extract the PO number and any reference to a previous quote.`,
+If this is a PO (purchase order) rather than an RFQ:
+- Set emailType to "po"
+- Extract the client's PO number into "poNumber"
+- Look CAREFULLY for any reference to a previous quote, estimate, or OR number. Check:
+  * Subject line for patterns like "RE: Quote...", "OR#12345", "EST-240319-001", "Ref: ..."
+  * Body for phrases like "per your quote", "reference estimate", "per OR#...", "as quoted"
+  * Any number that looks like our estimate format (EST-XXXXXX or OR followed by digits)
+- Put the found reference in "referencesQuote" — this is critical for linking POs to estimates
+- If the email is a reply to a quote/RFQ conversation, check the quoted/forwarded text for our estimate numbers too`,
       messages: [
         { role: 'user', content: `Email from: ${clientName}\nSubject: ${subject}\n\n${emailBody}` }
       ]
@@ -638,9 +646,11 @@ async function createPendingOrderFromParsed(parsed, clientInfo, scannedEmail) {
       }
     }
 
-    // Try to match to existing estimate
+    // Try to match to existing estimate — multiple strategies
     let matchedEstimate = null;
-    if (parsed.referencesQuote) {
+
+    // Strategy 1: AI extracted a reference to our quote/estimate number
+    if (!matchedEstimate && parsed.referencesQuote) {
       matchedEstimate = await Estimate.findOne({
         where: {
           [Op.or]: [
@@ -649,6 +659,75 @@ async function createPendingOrderFromParsed(parsed, clientInfo, scannedEmail) {
           ]
         }
       });
+      if (matchedEstimate) console.log(`[EmailScanner] Matched by reference number: ${parsed.referencesQuote} → ${matchedEstimate.estimateNumber}`);
+    }
+
+    // Strategy 2: AI extracted a generic reference number — check against estimate numbers for this client
+    if (!matchedEstimate && parsed.referenceNumber) {
+      matchedEstimate = await Estimate.findOne({
+        where: {
+          clientId: clientInfo.clientId,
+          [Op.or]: [
+            { estimateNumber: parsed.referenceNumber },
+            { estimateNumber: { [Op.iLike]: `%${parsed.referenceNumber}%` } }
+          ]
+        }
+      });
+      if (matchedEstimate) console.log(`[EmailScanner] Matched by client reference: ${parsed.referenceNumber} → ${matchedEstimate.estimateNumber}`);
+    }
+
+    // Strategy 3: Same Gmail thread — if an earlier email in this thread created an estimate
+    if (!matchedEstimate && scannedEmail.gmailThreadId) {
+      const threadSibling = await ScannedEmail.findOne({
+        where: {
+          gmailThreadId: scannedEmail.gmailThreadId,
+          id: { [Op.ne]: scannedEmail.id },
+          estimateId: { [Op.ne]: null }
+        },
+        order: [['createdAt', 'DESC']]
+      });
+      if (threadSibling?.estimateId) {
+        matchedEstimate = await Estimate.findByPk(threadSibling.estimateId);
+        if (matchedEstimate) console.log(`[EmailScanner] Matched by Gmail thread: threadId=${scannedEmail.gmailThreadId} → ${matchedEstimate.estimateNumber}`);
+      }
+    }
+
+    // Strategy 4: Scan email body for our estimate number pattern (EST-XXXXXX)
+    if (!matchedEstimate && scannedEmail.rawBody) {
+      const estMatch = scannedEmail.rawBody.match(/EST-[\d-]+/i);
+      if (estMatch) {
+        matchedEstimate = await Estimate.findOne({ where: { estimateNumber: estMatch[0] } });
+        if (matchedEstimate) console.log(`[EmailScanner] Matched by EST pattern in body: ${estMatch[0]} → ${matchedEstimate.estimateNumber}`);
+      }
+    }
+
+    // Strategy 5: Check subject line for estimate/OR number patterns
+    if (!matchedEstimate && scannedEmail.subject) {
+      // Look for OR numbers, estimate numbers, quote references
+      const subjectPatterns = [
+        /EST-[\d-]+/i,
+        /OR[\s#-]*(\d+)/i,
+        /(?:quote|estimate|ref|reference)[\s#:]*([A-Z0-9-]+)/i
+      ];
+      for (const pattern of subjectPatterns) {
+        const m = scannedEmail.subject.match(pattern);
+        if (m) {
+          const searchTerm = m[1] || m[0];
+          matchedEstimate = await Estimate.findOne({
+            where: {
+              clientId: clientInfo.clientId,
+              [Op.or]: [
+                { estimateNumber: searchTerm },
+                { estimateNumber: { [Op.iLike]: `%${searchTerm}%` } }
+              ]
+            }
+          });
+          if (matchedEstimate) {
+            console.log(`[EmailScanner] Matched by subject pattern: "${searchTerm}" → ${matchedEstimate.estimateNumber}`);
+            break;
+          }
+        }
+      }
     }
 
     const pending = await PendingOrder.create({
@@ -761,6 +840,7 @@ async function runScan(forceOutsideHours = false) {
           // Create scanned email record
           const scannedEmail = await ScannedEmail.create({
             gmailMessageId: msg.id,
+            gmailThreadId: fullMsg.data.threadId || null,
             gmailAccountId: account.id,
             fromEmail,
             fromName,

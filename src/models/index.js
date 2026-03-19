@@ -1195,6 +1195,23 @@ const Estimate = sequelize.define('Estimate', {
   scannedEmailId: {
     type: DataTypes.UUID,
     allowNull: true
+  },
+  // Vendor RFQ tracking
+  rfqVendorId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
+  rfqThreadId: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  rfqGmailAccountId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
+  rfqSentAt: {
+    type: DataTypes.DATE,
+    allowNull: true
   }
 }, {
   tableName: 'estimates',
@@ -2210,6 +2227,21 @@ const Vendor = sequelize.define('Vendor', {
   isActive: {
     type: DataTypes.BOOLEAN,
     defaultValue: true
+  },
+  contacts: {
+    type: DataTypes.JSONB,
+    defaultValue: [],
+    allowNull: true
+    // Array of { name, phone, email, isPrimary }
+  },
+  emailScanEnabled: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  emailScanAddresses: {
+    type: DataTypes.JSONB,
+    defaultValue: [],
+    allowNull: true
   }
 }, {
   tableName: 'vendors',

@@ -1,5 +1,5 @@
 const { google } = require('googleapis');
-const { GmailAccount, ScannedEmail, PendingOrder, Client, Estimate, EstimatePart, TodoItem, User, AppSettings } = require('../models');
+const { GmailAccount, ScannedEmail, PendingOrder, Client, Vendor, Estimate, EstimatePart, EstimateFile, TodoItem, User, AppSettings } = require('../models');
 const { Op } = require('sequelize');
 
 // Google OAuth2 client
@@ -49,12 +49,41 @@ async function getScanConfig() {
       emailToClient[addr.toLowerCase().trim()] = {
         clientId: client.id,
         clientName: client.name,
-        parsingNotes: client.emailScanParsingNotes || ''
+        parsingNotes: client.emailScanParsingNotes || '',
+        type: 'client'
       };
     });
   });
 
-  return { clients, emailToClient };
+  // Also monitor vendors
+  const vendors = await Vendor.findAll({
+    where: { emailScanEnabled: true, isActive: true },
+    attributes: ['id', 'name', 'emailScanAddresses', 'contactEmail']
+  });
+
+  const emailToVendor = {};
+  vendors.forEach(vendor => {
+    const addresses = vendor.emailScanAddresses || [];
+    // Also include the primary contactEmail
+    addresses.forEach(addr => {
+      emailToVendor[addr.toLowerCase().trim()] = {
+        vendorId: vendor.id,
+        vendorName: vendor.name,
+        type: 'vendor'
+      };
+    });
+  });
+  // Also add vendor primary emails
+  for (const vendor of vendors) {
+    if (vendor.contactEmail) {
+      const addr = vendor.contactEmail.toLowerCase().trim();
+      if (!emailToVendor[addr]) {
+        emailToVendor[addr] = { vendorId: vendor.id, vendorName: vendor.name, type: 'vendor' };
+      }
+    }
+  }
+
+  return { clients, emailToClient, vendors, emailToVendor };
 }
 
 // Check if within business hours (6 AM - 5 PM Pacific)
@@ -774,9 +803,9 @@ async function runScan() {
     return { skipped: true, reason: 'No Gmail accounts connected' };
   }
 
-  const { emailToClient } = await getScanConfig();
-  if (Object.keys(emailToClient).length === 0) {
-    return { skipped: true, reason: 'No client email scanning configured' };
+  const { emailToClient, emailToVendor } = await getScanConfig();
+  if (Object.keys(emailToClient).length === 0 && Object.keys(emailToVendor).length === 0) {
+    return { skipped: true, reason: 'No email scanning configured' };
   }
 
   // Load general AI parsing notes
@@ -791,9 +820,10 @@ async function runScan() {
     try {
       const gmail = await getGmailClient(account);
 
-      // Build search query: from any of the configured client emails, newer than last scan
-      const fromAddresses = Object.keys(emailToClient);
-      const fromQuery = fromAddresses.map(e => `from:${e}`).join(' OR ');
+      // Build search query: from any of the configured client OR vendor emails
+      const allAddresses = [...Object.keys(emailToClient), ...Object.keys(emailToVendor)];
+      if (allAddresses.length === 0) continue;
+      const fromQuery = allAddresses.map(e => `from:${e}`).join(' OR ');
       
       // Search for unread messages or messages after last scan
       const afterDate = account.lastScannedAt 
@@ -833,16 +863,147 @@ async function runScan() {
           const fromEmail = extractEmail(from);
           const fromName = extractName(from);
 
-          // Match to client
+          // Match to client or vendor
           const clientInfo = emailToClient[fromEmail];
-          if (!clientInfo) continue; // Not from a monitored address
+          const vendorInfo = emailToVendor[fromEmail];
+          if (!clientInfo && !vendorInfo) continue; // Not from a monitored address
 
           // Extract body text
           const bodyText = extractTextFromParts(fullMsg.data.payload);
           
-          // Build Gmail link — use authuser= so it opens the correct account in Chrome
+          // Build Gmail link
           const gmailLink = `https://mail.google.com/mail/?authuser=${encodeURIComponent(account.email)}#inbox/${msg.id}`;
 
+          if (vendorInfo) {
+            // ===== VENDOR EMAIL — check if it's a response to our RFQ =====
+            const threadId = fullMsg.data.threadId;
+            
+            // Find estimate that has this thread as RFQ thread
+            let matchedEstimate = null;
+            if (threadId) {
+              matchedEstimate = await Estimate.findOne({
+                where: { rfqThreadId: threadId, rfqVendorId: vendorInfo.vendorId }
+              });
+            }
+            // Also try matching by subject line (RFQ-EST-XXXXXX)
+            if (!matchedEstimate && subject) {
+              const rfqMatch = subject.match(/RFQ-([A-Z0-9-]+)/i);
+              if (rfqMatch) {
+                matchedEstimate = await Estimate.findOne({
+                  where: { estimateNumber: rfqMatch[1], rfqVendorId: vendorInfo.vendorId }
+                });
+              }
+            }
+
+            if (!matchedEstimate) {
+              // Not a response to any of our RFQs — skip
+              console.log(`[EmailScanner] Vendor email from ${fromEmail} but no matching RFQ, skipping`);
+              continue;
+            }
+
+            // Create scanned email record for vendor response
+            const scannedEmail = await ScannedEmail.create({
+              gmailMessageId: msg.id,
+              gmailThreadId: threadId || null,
+              gmailAccountId: account.id,
+              fromEmail, fromName, subject,
+              receivedAt: date ? new Date(date) : new Date(),
+              emailType: 'vendor_response',
+              status: 'processed',
+              gmailLink,
+              rawBody: bodyText.substring(0, 10000),
+              estimateId: matchedEstimate.id
+            });
+
+            console.log(`[EmailScanner] Vendor response from ${vendorInfo.vendorName} for ${matchedEstimate.estimateNumber}`);
+
+            // Check for PDF attachments
+            let attachedPdf = false;
+            if (fullMsg.data.payload?.parts) {
+              for (const part of fullMsg.data.payload.parts) {
+                if (part.mimeType === 'application/pdf' && part.body?.attachmentId) {
+                  try {
+                    const attachment = await gmail.users.messages.attachments.get({
+                      userId: 'me', messageId: msg.id, id: part.body.attachmentId
+                    });
+                    const pdfData = Buffer.from(attachment.data.data, 'base64');
+                    const fileName = part.filename || `vendor-quote-${vendorInfo.vendorName}.pdf`;
+
+                    // Upload to S3 or save locally
+                    const cloudinary = require('cloudinary').v2;
+                    const uploadResult = await new Promise((resolve, reject) => {
+                      const stream = cloudinary.uploader.upload_stream(
+                        { resource_type: 'raw', folder: 'estimate-files', public_id: `vendor-quote-${matchedEstimate.estimateNumber}-${Date.now()}` },
+                        (error, result) => { if (error) reject(error); else resolve(result); }
+                      );
+                      stream.end(pdfData);
+                    });
+
+                    await EstimateFile.create({
+                      estimateId: matchedEstimate.id,
+                      filename: uploadResult.public_id,
+                      originalName: fileName,
+                      mimeType: 'application/pdf',
+                      size: pdfData.length,
+                      url: uploadResult.secure_url,
+                      cloudinaryId: uploadResult.public_id,
+                      fileType: 'vendor_quote'
+                    });
+
+                    attachedPdf = true;
+                    console.log(`[EmailScanner] Saved vendor PDF: ${fileName} → ${matchedEstimate.estimateNumber}`);
+                  } catch (pdfErr) {
+                    console.error(`[EmailScanner] Failed to save vendor PDF:`, pdfErr.message);
+                  }
+                }
+              }
+            }
+
+            // Append text to internal notes
+            if (bodyText.trim()) {
+              const timestamp = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' });
+              const noteBlock = `\n\n***Supplier quote: ${vendorInfo.vendorName} (${timestamp})***\n${bodyText.substring(0, 3000).trim()}\n***Supplier quote: end***`;
+              const currentNotes = matchedEstimate.internalNotes || '';
+              await matchedEstimate.update({ internalNotes: currentNotes + noteBlock });
+              console.log(`[EmailScanner] Appended vendor quote text to ${matchedEstimate.estimateNumber} internal notes`);
+            }
+
+            await scannedEmail.update({
+              status: attachedPdf ? 'vendor_pdf_saved' : 'vendor_text_saved',
+              parsedData: { vendorName: vendorInfo.vendorName, estimateNumber: matchedEstimate.estimateNumber, attachedPdf }
+            });
+
+            // Create todo for estimator
+            const headEstimator = await User.findOne({ where: { isHeadEstimator: true, isActive: true } });
+            await TodoItem.create({
+              title: `📨 Vendor quote received: ${matchedEstimate.estimateNumber} — ${vendorInfo.vendorName}`,
+              description: `${vendorInfo.vendorName} replied to RFQ-${matchedEstimate.estimateNumber}.${attachedPdf ? ' PDF attached.' : ' Text captured in internal notes.'}`,
+              type: 'estimate_review', priority: 'high',
+              assignedTo: headEstimator?.username || null,
+              estimateId: matchedEstimate.id,
+              estimateNumber: matchedEstimate.estimateNumber,
+              createdBy: 'Email Scanner'
+            });
+
+            // Label as processed
+            try {
+              let labelId;
+              const labelsRes = await gmail.users.labels.list({ userId: 'me' });
+              const existingLabel = labelsRes.data.labels.find(l => l.name === 'cr-processed');
+              if (existingLabel) { labelId = existingLabel.id; }
+              else {
+                const created = await gmail.users.labels.create({ userId: 'me', requestBody: { name: 'cr-processed', labelListVisibility: 'labelShow', messageListVisibility: 'show' } });
+                labelId = created.data.id;
+              }
+              await gmail.users.messages.modify({ userId: 'me', id: msg.id, requestBody: { addLabelIds: [labelId] } });
+            } catch (labelErr) { console.warn('[EmailScanner] Label error:', labelErr.message); }
+
+            accountResult.processed++;
+            results.processed++;
+            continue; // Done with this vendor email
+          }
+
+          // ===== CLIENT EMAIL — existing flow =====
           // Create scanned email record
           const scannedEmail = await ScannedEmail.create({
             gmailMessageId: msg.id,

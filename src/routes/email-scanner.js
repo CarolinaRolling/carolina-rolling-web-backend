@@ -1,5 +1,5 @@
 const express = require('express');
-const { GmailAccount, ScannedEmail, PendingOrder, Client, Estimate, WorkOrder, WorkOrderPart, AppSettings, sequelize } = require('../models');
+const { GmailAccount, ScannedEmail, PendingOrder, Client, Vendor, Estimate, EstimatePart, EstimateFile, WorkOrder, WorkOrderPart, AppSettings, sequelize } = require('../models');
 const { getOAuth2Client, runScan, getScanConfig } = require('../services/emailScanner');
 const { Op } = require('sequelize');
 
@@ -568,6 +568,248 @@ router.post('/reply-with-pdf/:estimateId', async (req, res, next) => {
     res.json({ data: { draftUrl, draftId: draft.data.id }, message: 'Draft created with PDF attached' });
   } catch (error) {
     console.error('[EmailScanner] Reply with PDF error:', error.message);
+    next(error);
+  }
+});
+
+// ==================== VENDOR RFQ EMAIL ====================
+
+// POST /api/email-scanner/vendor-rfq/:estimateId - Create Gmail draft RFQ to vendor
+router.post('/vendor-rfq/:estimateId', async (req, res, next) => {
+  try {
+    const { vendorId, contactEmail, partIds, gmailAccountId } = req.body;
+    
+    const estimate = await Estimate.findByPk(req.params.estimateId, {
+      include: [{ model: EstimatePart, as: 'parts' }]
+    });
+    if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
+
+    const vendor = await Vendor.findByPk(vendorId);
+    if (!vendor) return res.status(404).json({ error: { message: 'Vendor not found' } });
+
+    // Pick Gmail account — use specified or first active
+    let gmailAccount;
+    if (gmailAccountId) {
+      gmailAccount = await GmailAccount.findByPk(gmailAccountId);
+    }
+    if (!gmailAccount) {
+      gmailAccount = await GmailAccount.findOne({ where: { isActive: true }, order: [['createdAt', 'ASC']] });
+    }
+    if (!gmailAccount) return res.status(400).json({ error: { message: 'No Gmail account connected' } });
+
+    const toEmail = contactEmail || vendor.contactEmail;
+    if (!toEmail) return res.status(400).json({ error: { message: 'No vendor email address' } });
+
+    // Filter parts if specific IDs provided, otherwise use all non-service parts
+    let partsToQuote = estimate.parts.filter(p => !['fab_service', 'shop_rate'].includes(p.partType));
+    if (partIds && partIds.length > 0) {
+      partsToQuote = estimate.parts.filter(p => partIds.includes(p.id));
+    }
+
+    // Build materials list
+    const materialLines = partsToQuote.map((p, i) => {
+      const fd = p.formData && typeof p.formData === 'object' ? p.formData : {};
+      const desc = fd._materialDescription || p.materialDescription || '';
+      const qty = p.quantity || 1;
+      const specialInstr = p.specialInstructions ? `\n   Notes: ${p.specialInstructions}` : '';
+      return `${i + 1}. (${qty}) ${desc}${specialInstr}`;
+    }).join('\n\n');
+
+    const subject = `RFQ-${estimate.estimateNumber}`;
+    const bodyText = `Hi ${vendor.contactName || ''},\n\nCould you please provide pricing and availability for the following materials:\n\n${materialLines}\n\nPlease reference RFQ-${estimate.estimateNumber} in your response.\n\nThank you,\nCarolina Rolling Co.`;
+
+    const { getGmailClient } = require('../services/emailScanner');
+    const gmail = await getGmailClient(gmailAccount);
+
+    const boundary = 'boundary_' + Date.now();
+    const messageParts = [
+      `MIME-Version: 1.0`,
+      `To: ${toEmail}`,
+      `Subject: ${subject}`,
+      `Content-Type: text/plain; charset="UTF-8"`,
+      '',
+      bodyText
+    ];
+
+    const rawMessage = messageParts.join('\r\n');
+    const encodedMessage = Buffer.from(rawMessage).toString('base64url');
+
+    const draft = await gmail.users.drafts.create({
+      userId: 'me',
+      requestBody: { message: { raw: encodedMessage } }
+    });
+
+    // Save RFQ tracking on the estimate
+    // We'll get the threadId after the email is sent — for now save what we can
+    const draftMsgId = draft.data.message?.id;
+    let threadId = draft.data.message?.threadId;
+
+    await estimate.update({
+      rfqVendorId: vendorId,
+      rfqGmailAccountId: gmailAccount.id,
+      rfqThreadId: threadId || null,
+      rfqSentAt: new Date()
+    });
+
+    const draftUrl = `https://mail.google.com/mail/?authuser=${encodeURIComponent(gmailAccount.email)}#inbox/${draftMsgId}`;
+
+    console.log(`[VendorRFQ] Draft created for ${estimate.estimateNumber} → ${toEmail}, thread=${threadId}`);
+
+    res.json({
+      data: { draftUrl, draftId: draft.data.id, threadId },
+      message: `RFQ draft created for ${vendor.name}`
+    });
+  } catch (error) {
+    console.error('[VendorRFQ] Error:', error.message);
+    next(error);
+  }
+});
+
+// GET /api/email-scanner/vendor-contacts/:vendorId - Get vendor contacts for selection
+router.get('/vendor-contacts/:vendorId', async (req, res, next) => {
+  try {
+    const vendor = await Vendor.findByPk(req.params.vendorId);
+    if (!vendor) return res.status(404).json({ error: { message: 'Vendor not found' } });
+    
+    const contacts = [];
+    // Add primary contact
+    if (vendor.contactEmail) {
+      contacts.push({ name: vendor.contactName || vendor.name, email: vendor.contactEmail, isPrimary: true });
+    }
+    // Add additional contacts from contacts array
+    if (vendor.contacts && Array.isArray(vendor.contacts)) {
+      for (const c of vendor.contacts) {
+        if (c.email && !contacts.find(x => x.email === c.email)) {
+          contacts.push({ name: c.name || '', email: c.email, isPrimary: c.isPrimary || false });
+        }
+      }
+    }
+    res.json({ data: contacts });
+  } catch (error) { next(error); }
+});
+
+// ==================== VENDOR PO EMAIL ====================
+
+// POST /api/email-scanner/vendor-po/:workOrderId - Create Gmail draft PO to vendor in same RFQ thread
+router.post('/vendor-po/:workOrderId', async (req, res, next) => {
+  try {
+    const wo = await WorkOrder.findByPk(req.params.workOrderId);
+    if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
+    if (!wo.estimateId) return res.status(400).json({ error: { message: 'Work order has no linked estimate' } });
+
+    const estimate = await Estimate.findByPk(wo.estimateId);
+    if (!estimate) return res.status(400).json({ error: { message: 'Linked estimate not found' } });
+    if (!estimate.rfqVendorId) return res.status(400).json({ error: { message: 'No vendor RFQ was sent for this estimate' } });
+
+    const vendor = await Vendor.findByPk(estimate.rfqVendorId);
+    if (!vendor) return res.status(400).json({ error: { message: 'Vendor not found' } });
+
+    const gmailAccount = estimate.rfqGmailAccountId 
+      ? await GmailAccount.findByPk(estimate.rfqGmailAccountId)
+      : await GmailAccount.findOne({ where: { isActive: true } });
+    if (!gmailAccount) return res.status(400).json({ error: { message: 'No Gmail account' } });
+
+    const toEmail = req.body.contactEmail || vendor.contactEmail;
+    if (!toEmail) return res.status(400).json({ error: { message: 'No vendor email' } });
+
+    // Fetch PO PDF
+    const http = require('http');
+    const port = process.env.PORT || 5001;
+    const authHeader = req.headers.authorization;
+    
+    // Build PO number for filename
+    const poNumber = wo.poNumber || wo.materialPurchaseOrderNumber || `DR-${wo.drNumber}`;
+    
+    let pdfBuffer;
+    try {
+      pdfBuffer = await new Promise((resolve, reject) => {
+        const pdfReq = http.request({
+          hostname: 'localhost', port,
+          path: `/api/po-numbers/${wo.id}/pdf`,
+          method: 'GET',
+          headers: { 'Authorization': authHeader }
+        }, (pdfRes) => {
+          if (pdfRes.statusCode !== 200) { reject(new Error(`PO PDF failed: ${pdfRes.statusCode}`)); return; }
+          const chunks = [];
+          pdfRes.on('data', chunk => chunks.push(chunk));
+          pdfRes.on('end', () => resolve(Buffer.concat(chunks)));
+        });
+        pdfReq.on('error', reject);
+        pdfReq.end();
+      });
+    } catch (e) {
+      console.warn('[VendorPO] PO PDF not available, sending without attachment:', e.message);
+      pdfBuffer = null;
+    }
+
+    const { getGmailClient } = require('../services/emailScanner');
+    const gmail = await getGmailClient(gmailAccount);
+
+    const subject = `PO for RFQ-${estimate.estimateNumber}`;
+    const bodyText = req.body.message || `Hi ${vendor.contactName || ''},\n\nPlease find the attached purchase order referencing RFQ-${estimate.estimateNumber}.\n\nThank you,\nCarolina Rolling Co.`;
+
+    let rawMessage;
+    if (pdfBuffer) {
+      const boundary = 'boundary_' + Date.now();
+      const fileName = `PO-${poNumber}.pdf`;
+      
+      // Get RFC822 Message-ID for threading
+      let rfc822MessageId = '';
+      if (estimate.rfqThreadId) {
+        try {
+          const msgs = await gmail.users.messages.list({ userId: 'me', q: `in:sent subject:"RFQ-${estimate.estimateNumber}"`, maxResults: 1 });
+          if (msgs.data.messages?.[0]) {
+            const orig = await gmail.users.messages.get({ userId: 'me', id: msgs.data.messages[0].id, format: 'metadata', metadataHeaders: ['Message-ID'] });
+            const h = orig.data.payload?.headers?.find(h => h.name.toLowerCase() === 'message-id');
+            if (h) rfc822MessageId = h.value;
+          }
+        } catch (e) { /* ignore */ }
+      }
+
+      const headerLines = [
+        `MIME-Version: 1.0`,
+        `To: ${toEmail}`,
+        `Subject: ${subject}`,
+        `Content-Type: multipart/mixed; boundary="${boundary}"`
+      ];
+      if (rfc822MessageId) {
+        headerLines.push(`In-Reply-To: ${rfc822MessageId}`);
+        headerLines.push(`References: ${rfc822MessageId}`);
+      }
+
+      rawMessage = [
+        ...headerLines, '',
+        `--${boundary}`, 'Content-Type: text/plain; charset="UTF-8"', '', bodyText, '',
+        `--${boundary}`, `Content-Type: application/pdf; name="${fileName}"`,
+        `Content-Disposition: attachment; filename="${fileName}"`,
+        'Content-Transfer-Encoding: base64', '', pdfBuffer.toString('base64'), '',
+        `--${boundary}--`
+      ].join('\r\n');
+    } else {
+      rawMessage = [
+        `MIME-Version: 1.0`, `To: ${toEmail}`, `Subject: ${subject}`,
+        `Content-Type: text/plain; charset="UTF-8"`, '', bodyText
+      ].join('\r\n');
+    }
+
+    const encodedMessage = Buffer.from(rawMessage).toString('base64url');
+    const draft = await gmail.users.drafts.create({
+      userId: 'me',
+      requestBody: {
+        message: {
+          raw: encodedMessage,
+          threadId: estimate.rfqThreadId || undefined
+        }
+      }
+    });
+
+    const draftMsgId = draft.data.message?.id || draft.data.id;
+    const draftUrl = `https://mail.google.com/mail/?authuser=${encodeURIComponent(gmailAccount.email)}#inbox/${draftMsgId}`;
+
+    console.log(`[VendorPO] Draft created for DR-${wo.drNumber} → ${toEmail}`);
+    res.json({ data: { draftUrl, draftId: draft.data.id }, message: 'PO draft created' });
+  } catch (error) {
+    console.error('[VendorPO] Error:', error.message);
     next(error);
   }
 });

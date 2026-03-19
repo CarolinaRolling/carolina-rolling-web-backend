@@ -408,7 +408,10 @@ router.put('/vendors/:id', async (req, res, next) => {
       address: address !== undefined ? address : vendor.address,
       accountNumber: accountNumber !== undefined ? accountNumber : vendor.accountNumber,
       notes: notes !== undefined ? notes : vendor.notes,
-      isActive: isActive !== undefined ? isActive : vendor.isActive
+      isActive: isActive !== undefined ? isActive : vendor.isActive,
+      contacts: req.body.contacts !== undefined ? req.body.contacts : vendor.contacts,
+      emailScanEnabled: req.body.emailScanEnabled !== undefined ? req.body.emailScanEnabled : vendor.emailScanEnabled,
+      emailScanAddresses: req.body.emailScanAddresses !== undefined ? req.body.emailScanAddresses : vendor.emailScanAddresses
     });
     
     res.json({ data: vendor, message: 'Vendor updated successfully' });

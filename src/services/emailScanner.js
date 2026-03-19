@@ -752,8 +752,8 @@ async function runScan(forceOutsideHours = false) {
           // Extract body text
           const bodyText = extractTextFromParts(fullMsg.data.payload);
           
-          // Build Gmail link
-          const gmailLink = `https://mail.google.com/mail/u/0/#inbox/${msg.id}`;
+          // Build Gmail link — use authuser= so it opens the correct account in Chrome
+          const gmailLink = `https://mail.google.com/mail/?authuser=${encodeURIComponent(account.email)}#inbox/${msg.id}`;
 
           // Create scanned email record
           const scannedEmail = await ScannedEmail.create({

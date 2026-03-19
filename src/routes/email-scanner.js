@@ -158,6 +158,16 @@ router.get('/status', async (req, res, next) => {
 // POST /api/email-scanner/scan-now - Trigger manual scan
 router.post('/scan-now', async (req, res, next) => {
   try {
+    const { hoursBack } = req.body || {};
+    // If hoursBack specified, temporarily reset lastScannedAt on all accounts
+    if (hoursBack && parseInt(hoursBack) > 0) {
+      const cutoff = new Date(Date.now() - parseInt(hoursBack) * 60 * 60 * 1000);
+      console.log(`[EmailScanner] Force rescan: going back ${hoursBack} hours to ${cutoff.toISOString()}`);
+      await GmailAccount.update(
+        { lastScannedAt: cutoff },
+        { where: { isActive: true } }
+      );
+    }
     const results = await runScan();
     res.json({ data: results, message: `Scan complete: ${results.processed || 0} emails processed` });
   } catch (error) {
@@ -570,6 +580,30 @@ router.post('/reply-with-pdf/:estimateId', async (req, res, next) => {
     console.error('[EmailScanner] Reply with PDF error:', error.message);
     next(error);
   }
+});
+
+// ==================== EMAIL NOTIFICATIONS ====================
+
+// GET /api/email-scanner/notifications - Get unread email notifications
+router.get('/notifications', async (req, res, next) => {
+  try {
+    const notifications = await ScannedEmail.findAll({
+      where: { status: 'notification' },
+      order: [['receivedAt', 'DESC']],
+      limit: 50
+    });
+    res.json({ data: notifications });
+  } catch (error) { next(error); }
+});
+
+// POST /api/email-scanner/notifications/:id/dismiss - Dismiss a notification
+router.post('/notifications/:id/dismiss', async (req, res, next) => {
+  try {
+    const email = await ScannedEmail.findByPk(req.params.id);
+    if (!email) return res.status(404).json({ error: { message: 'Not found' } });
+    await email.update({ status: 'dismissed' });
+    res.json({ data: email, message: 'Notification dismissed' });
+  } catch (error) { next(error); }
 });
 
 // ==================== VENDOR RFQ EMAIL ====================

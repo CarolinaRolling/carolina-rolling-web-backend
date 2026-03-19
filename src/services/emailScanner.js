@@ -257,7 +257,7 @@ ${parsingNotes ? `\nCLIENT-SPECIFIC NOTES:\n${parsingNotes}\n` : ''}
 
 Respond ONLY with valid JSON (no markdown, no backticks). Format:
 {
-  "emailType": "rfq" or "po",
+  "emailType": "rfq" or "po" or "general",
   "referenceNumber": "OR number, quote reference, or null",
   "poNumber": "PO number if this is a purchase order, or null",
   "referencesQuote": "reference to previous quote/OR if PO, or null",
@@ -305,7 +305,13 @@ If this is a PO (purchase order) rather than an RFQ:
   * Body for phrases like "per your quote", "reference estimate", "per OR#...", "as quoted"
   * Any number that looks like our estimate format (EST-XXXXXX or OR followed by digits)
 - Put the found reference in "referencesQuote" — this is critical for linking POs to estimates
-- If the email is a reply to a quote/RFQ conversation, check the quoted/forwarded text for our estimate numbers too`,
+- If the email is a reply to a quote/RFQ conversation, check the quoted/forwarded text for our estimate numbers too
+
+If the email does NOT contain any parts, material requests, or RFQ/PO content:
+- Set emailType to "general"
+- Set parts to an empty array []
+- Still extract any reference numbers, dates, and notes
+- This includes emails like: general inquiries, scheduling questions, status updates, thank you notes, delivery coordination, etc.`,
       messages: [
         { role: 'user', content: `Email from: ${clientName}\nSubject: ${subject}\n\n${emailBody}` }
       ]
@@ -829,11 +835,15 @@ async function runScan() {
       // Also search for any replies to our RFQ emails (catches vendor responses)
       queryParts.push('subject:RFQ-');
       
+      // Use a wider window — go back 2 hours before lastScannedAt to catch edge cases
       const afterDate = account.lastScannedAt 
-        ? Math.floor(new Date(account.lastScannedAt).getTime() / 1000)
+        ? Math.floor((new Date(account.lastScannedAt).getTime() - 2 * 60 * 60 * 1000) / 1000)
         : Math.floor((Date.now() - 24 * 60 * 60 * 1000) / 1000);
 
       const query = `(${queryParts.join(' OR ')}) after:${afterDate} -label:cr-processed`;
+      
+      console.log(`[EmailScanner] ${account.email}: Query: ${query}`);
+      console.log(`[EmailScanner] ${account.email}: Monitoring ${Object.keys(emailToClient).length} client emails, ${Object.keys(emailToVendor).length} vendor emails`);
 
       const listRes = await gmail.users.messages.list({
         userId: 'me',
@@ -867,11 +877,16 @@ async function runScan() {
           const fromName = extractName(from);
 
           // Skip our own sent emails
-          if (fromEmail === account.email.toLowerCase()) continue;
+          if (fromEmail === account.email.toLowerCase()) {
+            console.log(`[EmailScanner] Skipping own sent email: ${subject}`);
+            continue;
+          }
 
           // Extract body text and build Gmail link early — needed for all paths
           const bodyText = extractTextFromParts(fullMsg.data.payload);
           const gmailLink = `https://mail.google.com/mail/?authuser=${encodeURIComponent(account.email)}#inbox/${msg.id}`;
+
+          console.log(`[EmailScanner] Processing: from=${fromEmail}, subject="${subject}", thread=${fullMsg.data.threadId}`);
 
           // FIRST: Check if this email is in a thread that matches an RFQ we sent
           // This catches vendor responses even if the vendor isn't in the scan list
@@ -1042,14 +1057,21 @@ async function runScan() {
           // Match to client or vendor
           const clientInfo = emailToClient[fromEmail];
           const vendorInfo = emailToVendor[fromEmail];
-          if (!clientInfo && !vendorInfo) continue;
-
-          if (vendorInfo && !clientInfo) {
-            // Vendor email that didn't match any RFQ thread — skip silently
+          if (!clientInfo && !vendorInfo) {
+            console.log(`[EmailScanner] Skipping — from=${fromEmail} not in any monitored list. Subject: "${subject}"`);
             continue;
           }
 
-          if (!clientInfo) continue; // Not from a monitored client
+          if (vendorInfo && !clientInfo) {
+            // Vendor email that didn't match any RFQ thread — skip
+            console.log(`[EmailScanner] Skipping — vendor email from ${fromEmail} (${vendorInfo.vendorName}) but no matching RFQ thread`);
+            continue;
+          }
+
+          if (!clientInfo) {
+            console.log(`[EmailScanner] Skipping — no client match for ${fromEmail}`);
+            continue;
+          }
 
           // ===== CLIENT EMAIL — existing flow =====
           // Create scanned email record
@@ -1084,7 +1106,20 @@ async function runScan() {
             parseConfidence: parsed.confidence || 'medium'
           });
 
-          if (parsed.emailType === 'po') {
+          // Check if email has no parts (general inquiry, status update, etc.)
+          const hasParts = (parsed.parts || []).length > 0;
+          
+          if (parsed.emailType === 'general' || !hasParts) {
+            // No parts — create notification instead of estimate
+            await scannedEmail.update({ 
+              status: 'notification', 
+              emailType: 'general',
+              errorMessage: null 
+            });
+            console.log(`[EmailScanner] General email from ${clientInfo.clientName} — "${subject}" — notification created`);
+            accountResult.processed++;
+            results.processed++;
+          } else if (parsed.emailType === 'po') {
             // PO → create pending order
             const poResult = await createPendingOrderFromParsed(parsed, clientInfo, scannedEmail);
             if (poResult.pendingOrderId) {

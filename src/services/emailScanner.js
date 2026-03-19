@@ -151,7 +151,9 @@ pipe_roll — Pipe or tube bending:
 
 angle_roll — Angle iron rolling:
   Fields: material, legSize (e.g. "3x3" — just the leg dimensions, NO thickness), thickness (e.g. "0.375"), radius OR diameter, arcDegrees, rollType (easy_way, hard_way, on_edge), length
-  Note: "L3x3x3/8" → legSize="3x3", thickness="0.375". The legSize is JUST leg1 x leg2. Thickness is always separate.
+  CRITICAL: "2x2 angle" means an angle with 2" x 2" legs — it is ONE part with legSize="2x2", NOT 2 pieces! Same for "3x3 angle", "4x4 angle", etc. The NxN is the leg dimensions.
+  "L3x3x3/8" → legSize="3x3", thickness="0.375". The legSize is JUST leg1 x leg2. Thickness is always separate.
+  If they want multiple pieces, they'll say "2 pc 2x2 angle" or "qty 2 — 2x2 angle".
 
 channel_roll — Channel rolling:
   Fields: material, sectionSize (e.g. "C8x11.5" — full designation with weight), radius OR diameter, arcDegrees, flangeOut (boolean), rollType, length
@@ -190,6 +192,8 @@ shop_rate — Hourly labor charges:
 
 IMPORTANT RULES:
 - All dimensions should be in INCHES (convert if given in feet, mm, etc.)
+- NEVER confuse section dimensions with quantity! "2x2 angle" = 1 angle with 2"x2" legs. "3x3x1/4 angle" = 1 angle with 3"x3" legs and 1/4" thickness. "4x2 flat" = 1 flat bar 4" wide x 2" thick. Quantity is only specified with words like "qty", "pc", "pcs", "pieces", or a number BEFORE the part description (e.g. "3 pc 2x2 angle" = qty 3). If no quantity is mentioned, default to 1.
+- Each unique part line in the email = ONE entry in the parts array. Do NOT split a single part into multiple entries.
 - For plate rolls: "width" = height of the shell, "length" = flat developed length
 - If they say "rolled and tack welded" or "R/T", put that in the ROLLING PART's specialInstructions — do NOT create a separate fab_service for tack welding
 - Only create a separate fab_service part for explicit services like "100% weld", "full pen weld", "bevel", "fit and weld", "grind smooth"

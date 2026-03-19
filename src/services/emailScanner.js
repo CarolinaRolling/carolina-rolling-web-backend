@@ -112,17 +112,13 @@ function extractName(fromStr) {
 // Use Claude API to parse email content
 async function parseEmailWithAI(emailBody, subject, clientName, parsingNotes) {
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 2000,
-        system: `You are an expert at parsing emails from clients requesting quotes for metal rolling, forming, and fabrication services. 
+    console.log(`[EmailScanner] Calling Anthropic API for: "${subject}" from ${clientName}`);
+    console.log(`[EmailScanner] API key present: ${!!process.env.ANTHROPIC_API_KEY} (${(process.env.ANTHROPIC_API_KEY || '').substring(0, 10)}...)`);
+    
+    const requestBody = JSON.stringify({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 2000,
+      system: `You are an expert at parsing emails from clients requesting quotes for metal rolling, forming, and fabrication services. 
 You work for Carolina Rolling Company, a metal rolling shop.
 
 Your job is to extract structured data from client emails. These emails request quotes for rolling steel plates, cones, pipes, angles, channels, beams, etc.
@@ -166,7 +162,7 @@ Respond ONLY with valid JSON (no markdown, no backticks). Format:
       "diameter": "144",
       "specialInstructions": "Rolled and tack welded, no bevel, square and resquare",
       "clientPartNumber": "127250-535S1",
-      "description": "Shell - 120\" x 452.16\" x 0.500 SA-516-70, R/T to 144\" OD"
+      "description": "Shell - 120\\" x 452.16\\" x 0.500 SA-516-70, R/T to 144\\" OD"
     }
   ],
   "notes": "any delivery or special notes",
@@ -174,25 +170,52 @@ Respond ONLY with valid JSON (no markdown, no backticks). Format:
 }
 
 If this is a PO (purchase order) rather than an RFQ, set emailType to "po" and extract the PO number and any reference to a previous quote.`,
-        messages: [
-          { role: 'user', content: `Email from: ${clientName}\nSubject: ${subject}\n\n${emailBody}` }
-        ]
-      })
+      messages: [
+        { role: 'user', content: `Email from: ${clientName}\nSubject: ${subject}\n\n${emailBody}` }
+      ]
     });
 
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`AI API error ${response.status}: ${errText}`);
-    }
+    const https = require('https');
+    const responseText = await new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: 'api.anthropic.com',
+        path: '/v1/messages',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': process.env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'Content-Length': Buffer.byteLength(requestBody)
+        }
+      }, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          console.log(`[EmailScanner] API response status: ${res.statusCode}`);
+          if (res.statusCode !== 200) {
+            console.error(`[EmailScanner] AI API error ${res.statusCode}: ${data.substring(0, 500)}`);
+            reject(new Error(`API ${res.statusCode}: ${data.substring(0, 200)}`));
+          } else {
+            resolve(data);
+          }
+        });
+      });
+      req.on('error', reject);
+      req.write(requestBody);
+      req.end();
+    });
 
-    const data = await response.json();
+    const data = JSON.parse(responseText);
     const text = data.content?.[0]?.text || '';
+    console.log(`[EmailScanner] AI response (first 200): ${text.substring(0, 200)}`);
     
     // Clean and parse JSON
     const clean = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-    return JSON.parse(clean);
+    const parsed = JSON.parse(clean);
+    console.log(`[EmailScanner] Parsed: type=${parsed.emailType}, parts=${(parsed.parts || []).length}, confidence=${parsed.confidence}`);
+    return parsed;
   } catch (err) {
-    console.error('[EmailScanner] AI parse error:', err.message);
+    console.error('[EmailScanner] AI parse error:', err.message, err.stack);
     return null;
   }
 }

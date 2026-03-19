@@ -77,26 +77,7 @@ app.get('/health', (req, res) => {
 // API Routes
 app.use('/api/auth', authRoutes);
 
-// All other routes require authentication (JWT token or API key)
-const { authenticate } = require('./routes/auth');
-app.use('/api/shipments', authenticate, shipmentRoutes);
-app.use('/api/settings', authenticate, settingsRoutes);
-app.use('/api/inbound', authenticate, inboundRoutes);
-app.use('/api/workorders', authenticate, workordersRoutes);
-app.use('/api/estimates', authenticate, estimatesRoutes);
-app.use('/api/backup', authenticate, backupRoutes);
-app.use('/api/dr-numbers', authenticate, drNumbersRoutes);
-app.use('/api/po-numbers', authenticate, poNumbersRoutes);
-app.use('/api/email', authenticate, emailRoutes);
-app.use('/api', authenticate, clientsVendorsRoutes);
-app.use('/api', authenticate, permitVerificationRoutes);
-app.use('/api/quickbooks', authenticate, quickbooksRoutes);
-app.use('/api/shop-supplies', authenticate, shopSuppliesRoutes);
-const todoRoutes = require('./routes/todos');
-app.use('/api/todos', authenticate, todoRoutes);
-
-// Email Scanner - OAuth callback must be unauthenticated (Google redirects here)
-const emailScannerRoutes = require('./routes/email-scanner');
+// Email Scanner - OAuth callback MUST be before authenticate middleware (Google redirects browser here)
 const { getOAuth2Client } = require('./services/emailScanner');
 app.get('/api/email-scanner/oauth/callback', async (req, res) => {
   try {
@@ -141,6 +122,27 @@ app.get('/api/email-scanner/oauth/callback', async (req, res) => {
     res.redirect(`${baseUrl}/admin/shop-config?tab=emailScanner&error=${encodeURIComponent(error.message)}`);
   }
 });
+
+// All other routes require authentication (JWT token or API key)
+const { authenticate } = require('./routes/auth');
+app.use('/api/shipments', authenticate, shipmentRoutes);
+app.use('/api/settings', authenticate, settingsRoutes);
+app.use('/api/inbound', authenticate, inboundRoutes);
+app.use('/api/workorders', authenticate, workordersRoutes);
+app.use('/api/estimates', authenticate, estimatesRoutes);
+app.use('/api/backup', authenticate, backupRoutes);
+app.use('/api/dr-numbers', authenticate, drNumbersRoutes);
+app.use('/api/po-numbers', authenticate, poNumbersRoutes);
+app.use('/api/email', authenticate, emailRoutes);
+app.use('/api', authenticate, clientsVendorsRoutes);
+app.use('/api', authenticate, permitVerificationRoutes);
+app.use('/api/quickbooks', authenticate, quickbooksRoutes);
+app.use('/api/shop-supplies', authenticate, shopSuppliesRoutes);
+const todoRoutes = require('./routes/todos');
+app.use('/api/todos', authenticate, todoRoutes);
+
+// Email Scanner (authenticated routes only - callback handled above)
+const emailScannerRoutes = require('./routes/email-scanner');
 app.use('/api/email-scanner', authenticate, emailScannerRoutes);
 
 // Error handling middleware

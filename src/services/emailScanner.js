@@ -170,6 +170,12 @@ plate_roll — Flat plate rolled into a cylinder (shell, ring, segment):
   Note: "Shell Height" = the width of the plate. "Shell Length" = the flat arc length. If they say "R/T to 144 OD" that means outerDiameter=144.
   If they give both width and OD you can calculate length: length = π × OD × (arcDegrees/360). But if they provide length, use it.
 
+shaped_plate — Round plates, donuts (rings), and custom-shaped plates (NOT rolled — flat or formed):
+  Fields: material, thickness, outerDiameter (OD), innerDiameter (ID — donuts only), width/length (custom shapes only), donutPurpose
+  Use this type when: "round plate", "circle", "disc", "donut", "ring plate", "blank", "flange plate", custom shape cut from plate
+  Do NOT use plate_roll for these — plate_roll is for bending/rolling. shaped_plate is for flat cut shapes.
+  donutPurpose: "cylinder" if forming to fit a cylinder, "head" if forming to fit an elliptical head, omit if flat
+
 cone_roll — Conical shape (frustum, reducer):
   Fields: material, thickness, outerDiameter (large end OD), diameter (small end OD), width (slant height or V/H), arcDegrees
   Note: V/H means vertical height of the cone. Two different diameters = cone.
@@ -401,6 +407,26 @@ function buildFormData(p) {
     if (p.arcDegrees) fd.arcDegrees = String(p.arcDegrees);
     if (p.rollType) fd.rollType = p.rollType;
     fd._rollToMethod = '';
+  }
+
+  else if (type === 'shaped_plate') {
+    if (p.thickness) fd.thickness = p.thickness;
+    if (p.outerDiameter) fd.outerDiameter = String(p.outerDiameter);
+    if (p.innerDiameter) fd._innerDiameter = String(p.innerDiameter);
+    if (p.width) fd.width = p.width;
+    if (p.length) fd.length = p.length;
+    // Determine shape type
+    if (p.innerDiameter || (p.description && p.description.toLowerCase().includes('donut'))) {
+      fd._shapeType = 'donut';
+    } else if (p.outerDiameter && !p.width && !p.length) {
+      fd._shapeType = 'round';
+    } else if (p.description && (p.description.toLowerCase().includes('custom') || p.description.toLowerCase().includes('dxf'))) {
+      fd._shapeType = 'custom';
+      fd._customDescription = p.description;
+    } else {
+      fd._shapeType = 'round';
+    }
+    if (p.donutPurpose) fd._donutPurpose = p.donutPurpose;
   }
 
   else if (type === 'cone_roll') {
@@ -1227,6 +1253,188 @@ module.exports = {
   runScan,
   isBusinessHours,
   parseEmailWithAI,
+  parseDocumentWithAI,
   getScanConfig,
   buildFormData
 };
+
+// Parse an uploaded image or PDF with Claude Vision API
+async function parseDocumentWithAI(fileBuffer, mimeType, clientName, parsingNotes) {
+  try {
+    if (!process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY not configured');
+
+    const generalNotesSetting = await AppSettings.findOne({ where: { key: 'email_scanner_general_notes' } });
+    const generalNotes = generalNotesSetting?.value || '';
+
+    const base64Data = fileBuffer.toString('base64');
+    const isPdf = mimeType === 'application/pdf';
+
+    // Build content array with the document
+    const userContent = [];
+    if (isPdf) {
+      userContent.push({
+        type: 'document',
+        source: { type: 'base64', media_type: 'application/pdf', data: base64Data }
+      });
+    } else {
+      userContent.push({
+        type: 'image',
+        source: { type: 'base64', media_type: mimeType, data: base64Data }
+      });
+    }
+    userContent.push({
+      type: 'text',
+      text: `This is a document from client "${clientName || 'Unknown'}". Extract all parts/materials from this document and return structured JSON. Look for: material specs, dimensions, quantities, rolling/forming requirements, part numbers, and any special instructions. If it's a drawing, extract the dimensions and material callouts from the title block and notes.`
+    });
+
+    // Reuse the same system prompt as email parsing
+    const systemPrompt = buildParsingSystemPrompt(generalNotes, parsingNotes || '');
+
+    const requestBody = JSON.stringify({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 4000,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userContent }]
+    });
+
+    const https = require('https');
+    const responseText = await new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: 'api.anthropic.com',
+        path: '/v1/messages',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': process.env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'Content-Length': Buffer.byteLength(requestBody)
+        }
+      }, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          if (res.statusCode !== 200) {
+            console.error(`[DocParser] AI API error ${res.statusCode}: ${data.substring(0, 500)}`);
+            reject(new Error(`API ${res.statusCode}: ${data.substring(0, 200)}`));
+          } else {
+            resolve(data);
+          }
+        });
+      });
+      req.on('error', reject);
+      req.write(requestBody);
+      req.end();
+    });
+
+    const data = JSON.parse(responseText);
+    const text = data.content?.[0]?.text || '';
+    console.log(`[DocParser] AI response (first 300): ${text.substring(0, 300)}`);
+
+    const clean = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+    const parsed = JSON.parse(clean);
+    console.log(`[DocParser] Parsed: parts=${(parsed.parts || []).length}, confidence=${parsed.confidence}`);
+    return parsed;
+  } catch (err) {
+    console.error('[DocParser] Error:', err.message);
+    throw err;
+  }
+}
+
+// Extract the system prompt into a reusable function
+function buildParsingSystemPrompt(generalNotes, parsingNotes) {
+  return `You are an expert at parsing documents from clients requesting quotes for metal rolling, forming, and fabrication services. 
+You work for Carolina Rolling Company, a metal rolling shop.
+
+Your job is to extract structured data from client documents (emails, drawings, faxes, PDFs, handwritten notes). These request quotes for rolling steel plates, cones, pipes, angles, channels, beams, etc.
+
+COMMON ABBREVIATIONS:
+- OD = outer diameter, ID = inner diameter
+- R/T or R&T = rolled and tacked (tack welded along the seam)
+- V/H = vertical height (for cones)
+- pc = piece(s)
+- SA-516-70, A36, 304/304L, 316L, SA-240 = material grades
+- Shell = cylindrical plate roll
+- EW = easy way (rolling along the length, width becomes circumference)
+- HW = hard way (rolling along the width, length becomes circumference)
+- ISOF = inside out flange
+
+PART TYPES AND THEIR FORM FIELDS:
+
+plate_roll — Flat plate rolled into a cylinder (shell, ring, segment):
+  Fields: material, thickness, width (= shell height), length (flat arc length), outerDiameter OR diameter, arcDegrees (360 for full cylinder), rollType (easy_way or hard_way)
+
+shaped_plate — Round plates, donuts (rings), and custom-shaped plates (NOT rolled — flat or formed):
+  Fields: material, thickness, outerDiameter (OD), innerDiameter (ID — donuts only), width/length (custom shapes only), donutPurpose
+
+cone_roll — Conical shape (frustum, reducer):
+  Fields: material, thickness, outerDiameter (large end OD), diameter (small end OD), width (slant height or V/H), arcDegrees
+
+pipe_roll — Pipe or tube bending:
+  Fields: material, outerDiameter, wallThickness, radius (centerline bend radius), arcDegrees
+
+angle_roll — Angle iron rolling:
+  Fields: material, legSize (e.g. "3x3"), thickness, radius OR diameter, arcDegrees, rollType, length
+
+flat_bar — Flat bar and square bar bending:
+  Fields: material, barSize (e.g. "4x1/2"), radius OR diameter, arcDegrees, rollType, length
+
+tube_roll — Square/rectangular tube rolling:
+  Fields: material, sectionSize (e.g. "4x4x1/4"), radius OR diameter, arcDegrees, rollType
+
+channel_roll — C-channel rolling:
+  Fields: material, sectionSize (e.g. "C8x11.5"), radius OR diameter, arcDegrees, rollType (easy_way, hard_way, flanges_out)
+
+beam_roll — I-beam/H-beam rolling:
+  Fields: material, sectionSize (e.g. "W8x31"), radius OR diameter, arcDegrees, rollType (easy_way, hard_way)
+
+press_brake — Press brake forming from print:
+  Fields: material, thickness, width, length, description
+
+flat_stock — Ship flat, no rolling:
+  Fields: material, thickness, width, length, description
+
+fab_service — Welding, fitting, cut-to-fit:
+  Fields: fabType (weld_100, tack_weld, bevel, bracing, fit, cut_to_fit, finishing, other), parentPartIndex, description
+
+${generalNotes ? `\nGENERAL SHOP NOTES:\n${generalNotes}\n` : ''}
+${parsingNotes ? `\nCLIENT-SPECIFIC NOTES:\n${parsingNotes}\n` : ''}
+
+Respond ONLY with valid JSON (no markdown, no backticks). Format:
+{
+  "emailType": "rfq",
+  "confidence": "high", "medium", or "low",
+  "parts": [
+    {
+      "partType": "plate_roll",
+      "quantity": 1,
+      "material": "SA-516-70",
+      "thickness": "1/2\\"",
+      "width": "120",
+      "length": "452.16",
+      "outerDiameter": "144",
+      "diameter": "144",
+      "radius": null,
+      "arcDegrees": "360",
+      "rollType": "easy_way",
+      "legSize": null,
+      "sectionSize": null,
+      "barSize": null,
+      "wallThickness": null,
+      "innerDiameter": null,
+      "flangeOut": false,
+      "fabType": null,
+      "parentPartIndex": null,
+      "specialInstructions": "notes about this part",
+      "clientPartNumber": "if visible on drawing",
+      "description": "auto-generated material description",
+      "missingFields": ["thickness"],
+      "missingFieldNotes": "No thickness specified on drawing"
+    }
+  ],
+  "notes": "general notes about the document",
+  "aiNotes": "What info was missing or unclear"
+}
+
+CRITICAL: For missingFields, list any field the client did NOT provide. Common missing fields: thickness, material, diameter/radius, arcDegrees, length, rollType.
+If reading a drawing, extract info from the title block, bill of materials, dimension callouts, and notes. If handwritten, do your best to interpret the writing.`;
+}

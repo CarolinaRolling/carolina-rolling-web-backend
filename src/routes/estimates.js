@@ -2751,4 +2751,198 @@ router.post('/:id/reset-conversion', async (req, res, next) => {
   }
 });
 
+// POST /api/estimates/:id/ai-parse-document - Upload image/PDF and parse with AI
+router.post('/:id/ai-parse-document', upload.single('file'), async (req, res, next) => {
+  try {
+    if (!process.env.ANTHROPIC_API_KEY) {
+      return res.status(400).json({ error: { message: 'ANTHROPIC_API_KEY not configured' } });
+    }
+
+    const estimate = await Estimate.findByPk(req.params.id, {
+      include: [{ model: EstimatePart, as: 'parts' }]
+    });
+    if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
+
+    if (!req.file) return res.status(400).json({ error: { message: 'No file uploaded' } });
+
+    const filePath = req.file.path;
+    const fileBuffer = fs.readFileSync(filePath);
+    const base64Data = fileBuffer.toString('base64');
+    const ext = path.extname(req.file.originalname).toLowerCase();
+    const clientName = estimate.clientName || 'Unknown Client';
+
+    // Load general AI notes
+    const generalNotesSetting = await AppSettings.findOne({ where: { key: 'email_scanner_general_notes' } });
+    const generalNotes = generalNotesSetting?.value || '';
+
+    // Load client-specific notes
+    let clientNotes = '';
+    if (estimate.clientId) {
+      const client = await Client.findByPk(estimate.clientId);
+      clientNotes = client?.emailScanParsingNotes || '';
+    }
+
+    // Build the content array for Claude
+    const contentItems = [];
+
+    if (ext === '.pdf') {
+      contentItems.push({
+        type: 'document',
+        source: { type: 'base64', media_type: 'application/pdf', data: base64Data }
+      });
+    } else {
+      const mimeMap = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
+      const mediaType = mimeMap[ext] || 'image/jpeg';
+      contentItems.push({
+        type: 'image',
+        source: { type: 'base64', media_type: mediaType, data: base64Data }
+      });
+    }
+
+    contentItems.push({
+      type: 'text',
+      text: `This is a document from client: ${clientName}. Parse it as a request for quote (RFQ) for metal rolling, forming, or fabrication services. Extract all parts, dimensions, materials, and quantities. ${req.body.additionalNotes || ''}`
+    });
+
+    // System prompt — reuse from email scanner with modifications for document parsing
+    const systemPrompt = `You are an expert at reading drawings, RFQs, purchase orders, and specification documents for metal rolling, forming, and fabrication.
+You work for Carolina Rolling Company, a metal rolling shop.
+
+Read the uploaded document carefully and extract ALL parts that need to be quoted. This could be a drawing, a table of parts, a letter requesting services, or a spec sheet.
+
+COMMON ABBREVIATIONS:
+- OD = outer diameter, ID = inner diameter
+- R/T or R&T = rolled and tacked (tack welded along seam)
+- V/H = vertical height (for cones), EW = easy way, HW = hard way
+- ISOF = inside out flange
+
+PART TYPES:
+- plate_roll: Flat plate rolled into cylinder/shell. Fields: material, thickness, width (shell height), length, outerDiameter, arcDegrees (360=full cylinder), rollType (easy_way/hard_way)
+- shaped_plate: Round plates, donuts, custom shapes (NOT rolled). Fields: material, thickness, outerDiameter, innerDiameter (donuts), donutPurpose
+- cone_roll: Conical/frustum. Fields: material, thickness, outerDiameter (large end), diameter (small end), width (slant height)
+- pipe_roll: Pipe/tube bending. Fields: material, outerDiameter, wallThickness, radius, arcDegrees
+- angle_roll: Angle iron. Fields: material, legSize (e.g. "3x3"), thickness, radius/diameter, arcDegrees
+- channel_roll: C-channel. Fields: material, sectionSize (e.g. "C8x11.5"), radius/diameter, arcDegrees
+- beam_roll: I/H-beam. Fields: material, sectionSize (e.g. "W8x31"), radius/diameter, arcDegrees
+- tube_roll: Square/rect tube. Fields: material, sectionSize (e.g. "4x4x1/4"), radius/diameter, arcDegrees
+- flat_bar: Flat/square bar. Fields: material, barSize (e.g. "4x1/2"), radius/diameter, arcDegrees
+- tee_bar: Structural tee. Fields: material, sectionSize (e.g. "WT5x15"), radius/diameter, arcDegrees
+- press_brake: Press brake forming. Fields: material, thickness, description
+- flat_stock: Ship flat (no rolling). Fields: material, thickness, width, length, description
+- fab_service: Welding/fitting. Fields: fabType, parentPartIndex, description
+- shop_rate: Hourly work. Fields: description, laborHours, laborRate
+
+Thickness format: Use fractions like '1/2"', '3/8"'. Only decimals if no fraction match.
+
+${generalNotes ? `GENERAL SHOP NOTES:\n${generalNotes}\n` : ''}
+${clientNotes ? `CLIENT-SPECIFIC NOTES:\n${clientNotes}\n` : ''}
+
+Respond ONLY with valid JSON (no markdown, no backticks):
+{
+  "parts": [
+    {
+      "partType": "plate_roll",
+      "quantity": 1,
+      "material": "A36",
+      "thickness": "1/2\\"",
+      "width": "120",
+      "length": "452",
+      "outerDiameter": "144",
+      "radius": null,
+      "arcDegrees": "360",
+      "rollType": "easy_way",
+      "legSize": null,
+      "sectionSize": null,
+      "barSize": null,
+      "wallThickness": null,
+      "innerDiameter": null,
+      "specialInstructions": "",
+      "clientPartNumber": "",
+      "description": "auto-generated material description",
+      "missingFields": ["thickness"],
+      "missingFieldNotes": "No thickness given"
+    }
+  ],
+  "notes": "any delivery or project notes found",
+  "documentType": "drawing" or "rfq" or "spec_sheet" or "po" or "other",
+  "aiNotes": "summary of what was found and any issues"
+}`;
+
+    const requestBody = JSON.stringify({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 4000,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: contentItems }]
+    });
+
+    const https = require('https');
+    const responseText = await new Promise((resolve, reject) => {
+      const apiReq = https.request({
+        hostname: 'api.anthropic.com',
+        path: '/v1/messages',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': process.env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'Content-Length': Buffer.byteLength(requestBody)
+        }
+      }, (apiRes) => {
+        let data = '';
+        apiRes.on('data', chunk => data += chunk);
+        apiRes.on('end', () => {
+          if (apiRes.statusCode !== 200) {
+            console.error(`[AI-Parse] API error ${apiRes.statusCode}: ${data.substring(0, 500)}`);
+            reject(new Error(`AI API ${apiRes.statusCode}: ${data.substring(0, 200)}`));
+          } else {
+            resolve(data);
+          }
+        });
+      });
+      apiReq.on('error', reject);
+      apiReq.write(requestBody);
+      apiReq.end();
+    });
+
+    const data = JSON.parse(responseText);
+    const text = data.content?.[0]?.text || '';
+    console.log(`[AI-Parse] Response (first 300): ${text.substring(0, 300)}`);
+
+    const clean = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+    const parsed = JSON.parse(clean);
+
+    // Use buildFormData from email scanner to convert to our form format
+    const { buildFormData } = require('../services/emailScanner');
+    const partsWithFormData = (parsed.parts || []).map((p, i) => {
+      const formData = buildFormData(p);
+      return {
+        ...p,
+        partNumber: (estimate.parts?.length || 0) + i + 1,
+        formData
+      };
+    });
+
+    // Cleanup uploaded file
+    try { fs.unlinkSync(filePath); } catch {}
+
+    console.log(`[AI-Parse] Parsed ${partsWithFormData.length} parts from ${req.file.originalname}`);
+
+    res.json({
+      data: {
+        parts: partsWithFormData,
+        notes: parsed.notes || '',
+        documentType: parsed.documentType || 'unknown',
+        aiNotes: parsed.aiNotes || '',
+        fileName: req.file.originalname
+      },
+      message: `Parsed ${partsWithFormData.length} parts from document`
+    });
+  } catch (error) {
+    // Cleanup on error
+    if (req.file?.path) try { fs.unlinkSync(req.file.path); } catch {}
+    console.error('[AI-Parse] Error:', error.message);
+    next(error);
+  }
+});
+
 module.exports = router;

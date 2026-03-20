@@ -935,4 +935,61 @@ router.post('/vendor-po/:workOrderId', async (req, res, next) => {
   }
 });
 
+// ==================== DOCUMENT AI PARSER ====================
+
+const multer = require('multer');
+const docUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } }); // 20MB max
+
+// POST /api/email-scanner/parse-document - Upload image/PDF and parse with AI
+router.post('/parse-document', docUpload.single('file'), async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: { message: 'No file uploaded' } });
+
+    const { clientName, parsingNotes } = req.body;
+    const mimeType = req.file.mimetype;
+
+    // Validate file type
+    const allowedTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/tiff'];
+    if (!allowedTypes.includes(mimeType)) {
+      return res.status(400).json({ error: { message: `Unsupported file type: ${mimeType}. Upload a PDF or image (JPEG, PNG).` } });
+    }
+
+    console.log(`[DocParser] Parsing ${req.file.originalname} (${mimeType}, ${Math.round(req.file.size / 1024)}KB) for client: ${clientName || 'Unknown'}`);
+
+    const { parseDocumentWithAI, buildFormData } = require('../services/emailScanner');
+    const parsed = await parseDocumentWithAI(req.file.buffer, mimeType, clientName || '', parsingNotes || '');
+
+    if (!parsed) {
+      return res.status(500).json({ error: { message: 'AI could not parse the document' } });
+    }
+
+    // Process parts through buildFormData to get proper form fields
+    const processedParts = (parsed.parts || []).map((p, i) => {
+      const fd = buildFormData(p);
+      return {
+        ...p,
+        partNumber: i + 1,
+        formData: fd,
+        // Flatten key fields for the frontend
+        _materialDescription: fd._materialDescription || p.description || '',
+        materialDescription: fd._materialDescription || p.description || ''
+      };
+    });
+
+    res.json({
+      data: {
+        confidence: parsed.confidence || 'medium',
+        parts: processedParts,
+        notes: parsed.notes || '',
+        aiNotes: parsed.aiNotes || '',
+        rawParsed: parsed
+      },
+      message: `Parsed ${processedParts.length} part(s) from document`
+    });
+  } catch (error) {
+    console.error('[DocParser] Route error:', error.message);
+    res.status(500).json({ error: { message: `AI parsing failed: ${error.message}` } });
+  }
+});
+
 module.exports = router;

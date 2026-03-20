@@ -1716,16 +1716,13 @@ router.put('/:id', async (req, res, next) => {
   }
 });
 
-// DELETE /api/workorders/:id - Delete work order
+// DELETE /api/workorders/:id - Delete work order (use void for DR-numbered orders instead)
 router.delete('/:id', async (req, res, next) => {
   const transaction = await sequelize.transaction();
   
   try {
-    // Support both UUID and orderNumber
     const idParam = req.params.id;
     let workOrder;
-    
-    // Check if it's a UUID format
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     if (uuidRegex.test(idParam)) {
       workOrder = await WorkOrder.findByPk(idParam, {
@@ -1736,7 +1733,6 @@ router.delete('/:id', async (req, res, next) => {
         transaction
       });
     } else {
-      // Try to find by orderNumber or drNumber
       workOrder = await WorkOrder.findOne({
         where: idParam.startsWith('DR-') 
           ? { drNumber: parseInt(idParam.replace('DR-', '')) }
@@ -1754,87 +1750,42 @@ router.delete('/:id', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Work order not found' } });
     }
 
+    // Suggest void instead of delete for DR-numbered orders
+    if (workOrder.drNumber) {
+      await transaction.rollback();
+      return res.status(400).json({ error: { message: `DR-${workOrder.drNumber} should be voided instead of deleted. Use DR Numbers → Void to preserve the record for accounting.` } });
+    }
+
     console.log('Deleting work order:', workOrder.id);
 
-    // FIRST: Clear ALL foreign key references before deleting anything
-    console.log('Clearing DR number references...');
-    await DRNumber.update(
-      { workOrderId: null }, 
-      { where: { workOrderId: workOrder.id }, transaction }
-    );
-    
-    console.log('Clearing PO number references...');
-    await PONumber.update(
-      { workOrderId: null }, 
-      { where: { workOrderId: workOrder.id }, transaction }
-    );
-    
-    console.log('Clearing estimate references...');
-    await Estimate.update(
-      { workOrderId: null, status: 'accepted' }, 
-      { where: { workOrderId: workOrder.id }, transaction }
-    );
+    await DRNumber.update({ workOrderId: null }, { where: { workOrderId: workOrder.id }, transaction });
+    await PONumber.update({ workOrderId: null }, { where: { workOrderId: workOrder.id }, transaction });
+    await Estimate.update({ workOrderId: null, status: 'accepted' }, { where: { workOrderId: workOrder.id }, transaction });
 
-    // Get inbound order IDs from parts before deleting
-    const inboundOrderIds = workOrder.parts
-      .filter(p => p.inboundOrderId)
-      .map(p => p.inboundOrderId);
+    const inboundOrderIds = workOrder.parts.filter(p => p.inboundOrderId).map(p => p.inboundOrderId);
 
-    // Delete files from Cloudinary (outside transaction - best effort)
     for (const part of workOrder.parts || []) {
       for (const file of part.files || []) {
-        if (file.cloudinaryId) {
-          try {
-            await fileStorage.deleteFile(file.cloudinaryId);
-          } catch (e) {
-            console.error('Failed to delete from Cloudinary:', e);
-          }
-        }
+        if (file.cloudinaryId) try { await fileStorage.deleteFile(file.cloudinaryId); } catch {}
       }
     }
-
-    // Delete documents from Cloudinary
     for (const doc of workOrder.documents || []) {
-      if (doc.cloudinaryId) {
-        try {
-          await fileStorage.deleteFile(doc.cloudinaryId);
-        } catch (e) {
-          console.error('Failed to delete document from Cloudinary:', e);
-        }
-      }
+      if (doc.cloudinaryId) try { await fileStorage.deleteFile(doc.cloudinaryId); } catch {}
     }
 
-    // Delete documents
-    console.log('Deleting documents...');
     await WorkOrderDocument.destroy({ where: { workOrderId: workOrder.id }, transaction });
-
-    // Delete part files
-    console.log('Deleting part files...');
     for (const part of workOrder.parts || []) {
       await WorkOrderPartFile.destroy({ where: { workOrderPartId: part.id }, transaction });
     }
-    
-    // Delete parts
-    console.log('Deleting parts...');
     await WorkOrderPart.destroy({ where: { workOrderId: workOrder.id }, transaction });
 
-    // Delete associated inbound orders
     if (inboundOrderIds.length > 0) {
-      console.log('Deleting inbound orders:', inboundOrderIds);
-      // First clear PO references to these inbound orders
-      await PONumber.update(
-        { inboundOrderId: null },
-        { where: { inboundOrderId: inboundOrderIds }, transaction }
-      );
+      await PONumber.update({ inboundOrderId: null }, { where: { inboundOrderId: inboundOrderIds }, transaction });
       await InboundOrder.destroy({ where: { id: inboundOrderIds }, transaction });
     }
 
-    // Finally delete the work order
-    console.log('Deleting work order record...');
     await workOrder.destroy({ transaction });
-
     await transaction.commit();
-    console.log('Work order deleted successfully');
 
     res.json({ message: 'Work order deleted successfully' });
   } catch (error) {

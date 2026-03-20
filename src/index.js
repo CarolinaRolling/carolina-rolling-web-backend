@@ -917,6 +917,34 @@ async function startServer() {
     });
     console.log('Email scanner cron configured for every 5 minutes');
 
+    // Trash cleanup — permanently delete estimates trashed > 30 days ago (runs daily at 2 AM)
+    cron.schedule('0 2 * * *', async () => {
+      try {
+        const { Estimate, EstimatePart, EstimateFile, EstimatePartFile } = require('./models');
+        const { Op } = require('sequelize');
+        const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+        const trashed = await Estimate.findAll({
+          where: { trashedAt: { [Op.lt]: cutoff } },
+          include: [{ model: EstimateFile, as: 'files' }]
+        });
+        if (trashed.length > 0) {
+          for (const est of trashed) {
+            for (const file of est.files || []) {
+              if (file.cloudinaryId) try { const cloudinary = require('cloudinary').v2; await cloudinary.uploader.destroy(file.cloudinaryId); } catch {}
+            }
+            await EstimatePartFile.destroy({ where: { '$part.estimateId$': est.id }, include: [{ model: EstimatePart, as: 'part' }] }).catch(() => {});
+            await EstimatePart.destroy({ where: { estimateId: est.id } });
+            await EstimateFile.destroy({ where: { estimateId: est.id } });
+            await est.destroy();
+          }
+          console.log(`[Trash] Permanently deleted ${trashed.length} estimates older than 30 days`);
+        }
+      } catch (err) {
+        console.error('[Trash] Cleanup error:', err.message);
+      }
+    });
+    console.log('Trash cleanup cron configured (daily at 2 AM, 30-day retention)');
+
   } catch (error) {
     console.error('Startup error (server still running):', error.message);
   }

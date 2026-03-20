@@ -506,12 +506,27 @@ router.post('/recalculate-all', async (req, res, next) => {
   }
 });
 
+// GET /api/estimates/trash - Get trashed estimates
+router.get('/trash', async (req, res, next) => {
+  try {
+    const estimates = await Estimate.findAll({
+      where: { trashedAt: { [Op.ne]: null } },
+      include: [{ model: EstimatePart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'partTotal', 'quantity'] }],
+      order: [['trashedAt', 'DESC']],
+      limit: 100
+    });
+    res.json({ data: estimates });
+  } catch (error) { next(error); }
+});
+
 // GET /api/estimates - Get all estimates
 router.get('/', async (req, res, next) => {
   try {
     const { status, archived, clientName, search, limit = 200, offset = 0 } = req.query;
     
-    const where = {};
+    const where = {
+      [Op.or]: [{ trashedAt: null }, { trashedAt: { [Op.is]: null } }]
+    };
     
     // If searching, search across ALL statuses (including archived/accepted)
     if (search) {
@@ -826,8 +841,38 @@ router.put('/:id', async (req, res, next) => {
   }
 });
 
-// DELETE /api/estimates/:id - Delete estimate
+// DELETE /api/estimates/:id - Move estimate to trash (soft delete)
 router.delete('/:id', async (req, res, next) => {
+  try {
+    const estimate = await Estimate.findByPk(req.params.id);
+
+    if (!estimate) {
+      return res.status(404).json({ error: { message: 'Estimate not found' } });
+    }
+
+    await estimate.update({
+      trashedAt: new Date(),
+      trashedBy: req.body.trashedBy || 'admin'
+    });
+
+    res.json({ message: 'Estimate moved to trash' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/estimates/:id/restore - Restore from trash
+router.post('/:id/restore', async (req, res, next) => {
+  try {
+    const estimate = await Estimate.findByPk(req.params.id);
+    if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
+    await estimate.update({ trashedAt: null, trashedBy: null });
+    res.json({ data: estimate, message: 'Estimate restored' });
+  } catch (error) { next(error); }
+});
+
+// DELETE /api/estimates/:id/permanent - Permanently delete
+router.delete('/:id/permanent', async (req, res, next) => {
   try {
     const estimate = await Estimate.findByPk(req.params.id, {
       include: [{ model: EstimateFile, as: 'files' }]
@@ -850,7 +895,7 @@ router.delete('/:id', async (req, res, next) => {
 
     await estimate.destroy();
 
-    res.json({ message: 'Estimate deleted successfully' });
+    res.json({ message: 'Estimate permanently deleted' });
   } catch (error) {
     next(error);
   }

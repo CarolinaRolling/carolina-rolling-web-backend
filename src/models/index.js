@@ -1266,6 +1266,15 @@ const Estimate = sequelize.define('Estimate', {
   rfqSentAt: {
     type: DataTypes.DATE,
     allowNull: true
+  },
+  // Trash system
+  trashedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  trashedBy: {
+    type: DataTypes.STRING,
+    allowNull: true
   }
 }, {
   tableName: 'estimates',

@@ -229,24 +229,26 @@ router.post('/:drNumber/void', async (req, res, next) => {
       return res.status(400).json({ error: { message: `DR-${drNumber} is already voided` } });
     }
 
-    // Delete associated work order and parts
+    // Mark associated work order as voided — keep the record intact for expense tracking
     if (drEntry.workOrderId) {
       const workOrder = await WorkOrder.findByPk(drEntry.workOrderId, { transaction });
       if (workOrder) {
-        // Delete work order parts first
-        await WorkOrderPart.destroy({ where: { workOrderId: workOrder.id }, transaction });
-        // Delete work order
-        await workOrder.destroy({ transaction });
+        await workOrder.update({
+          isVoided: true,
+          voidedAt: new Date(),
+          voidedBy: voidedBy || 'admin',
+          voidReason: reason,
+          notes: (workOrder.notes || '') + `\n\n⛔ VOIDED: ${reason} (by ${voidedBy || 'admin'} on ${new Date().toLocaleDateString()})`
+        }, { transaction });
       }
     }
 
-    // Update DR entry to void
+    // Update DR entry to void — keep workOrderId for reference
     await drEntry.update({
       status: 'void',
       voidedAt: new Date(),
       voidedBy: voidedBy || 'admin',
-      voidReason: reason,
-      workOrderId: null
+      voidReason: reason
     }, { transaction });
 
     // Log activity
@@ -265,6 +267,53 @@ router.post('/:drNumber/void', async (req, res, next) => {
       data: drEntry,
       message: `DR-${drNumber} has been voided`
     });
+  } catch (error) {
+    await transaction.rollback();
+    next(error);
+  }
+});
+
+// POST /api/dr-numbers/:drNumber/unvoid - Restore a voided DR number
+router.post('/:drNumber/unvoid', async (req, res, next) => {
+  const transaction = await sequelize.transaction();
+  try {
+    const drNumber = parseInt(req.params.drNumber);
+    const drEntry = await DRNumber.findOne({ where: { drNumber }, transaction });
+    
+    if (!drEntry) {
+      await transaction.rollback();
+      return res.status(404).json({ error: { message: `DR-${drNumber} not found` } });
+    }
+    if (drEntry.status !== 'void') {
+      await transaction.rollback();
+      return res.status(400).json({ error: { message: `DR-${drNumber} is not voided` } });
+    }
+
+    // Restore work order
+    if (drEntry.workOrderId) {
+      const workOrder = await WorkOrder.findByPk(drEntry.workOrderId, { transaction });
+      if (workOrder) {
+        await workOrder.update({
+          isVoided: false,
+          voidedAt: null,
+          voidedBy: null,
+          voidReason: null,
+          notes: (workOrder.notes || '').replace(/\n\n⛔ VOIDED:.*$/s, '')
+        }, { transaction });
+      }
+    }
+
+    await drEntry.update({
+      status: 'active',
+      voidedAt: null,
+      voidedBy: null,
+      voidReason: null
+    }, { transaction });
+
+    await logActivity('restored', 'dr_number', drEntry.id, `DR-${drNumber}`, drEntry.clientName, `DR-${drNumber} restored from void`);
+    await transaction.commit();
+
+    res.json({ data: drEntry, message: `DR-${drNumber} has been restored` });
   } catch (error) {
     await transaction.rollback();
     next(error);

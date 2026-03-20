@@ -67,6 +67,11 @@ async function resolveClient(wo) {
 }
 
 async function buildInvoiceIIF(wo, parts, client, invoiceNum) {
+  // Skip void work orders
+  if (wo.isVoided || wo.status === 'void') {
+    console.log(`[IIF] Skipping void WO: DR-${wo.drNumber}`);
+    return null;
+  }
   const lines = [];
   const SERVICE_TYPES = ['fab_service', 'shop_rate', 'rush_service'];
   

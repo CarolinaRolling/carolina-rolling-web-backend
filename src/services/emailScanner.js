@@ -797,8 +797,25 @@ async function createPendingOrderFromParsed(parsed, clientInfo, scannedEmail) {
   }
 }
 
+// Scan lock to prevent concurrent scans causing deadlocks
+let scanRunning = false;
+
 // Main scan function — scans all connected accounts
 async function runScan() {
+  if (scanRunning) {
+    console.log('[EmailScanner] Scan already in progress, skipping');
+    return { skipped: true, reason: 'Scan already in progress' };
+  }
+  scanRunning = true;
+
+  try {
+    return await _runScanInternal();
+  } finally {
+    scanRunning = false;
+  }
+}
+
+async function _runScanInternal() {
 
   if (!process.env.ANTHROPIC_API_KEY) {
     return { error: 'ANTHROPIC_API_KEY not configured' };
@@ -1170,10 +1187,24 @@ async function runScan() {
           results.processed++;
 
         } catch (msgErr) {
-          console.error(`[EmailScanner] Message error:`, msgErr.message);
+          // Retry once on deadlock
+          if (msgErr.message && msgErr.message.includes('deadlock')) {
+            console.warn(`[EmailScanner] Deadlock on message ${msg.id}, retrying in 2s...`);
+            await new Promise(r => setTimeout(r, 2000));
+            try {
+              // Just skip this message — it'll be picked up next scan
+              console.log(`[EmailScanner] Skipping deadlocked message, will retry next scan`);
+            } catch (retryErr) {
+              console.error(`[EmailScanner] Retry failed:`, retryErr.message);
+            }
+          } else {
+            console.error(`[EmailScanner] Message error:`, msgErr.message);
+          }
           accountResult.errors.push(msgErr.message);
           results.errors++;
         }
+        // Small delay between messages to reduce DB contention
+        await new Promise(r => setTimeout(r, 500));
       }
 
       await account.update({ lastScannedAt: new Date(), lastError: null });

@@ -689,7 +689,8 @@ router.get('/invoicing/queue', async (req, res, next) => {
           { invoiceNumber: '' }
         ],
         [Op.and]: [
-          { [Op.or]: [{ invoiceSkipped: null }, { invoiceSkipped: false }] }
+          { [Op.or]: [{ invoiceSkipped: null }, { invoiceSkipped: false }] },
+          { [Op.or]: [{ isVoided: null }, { isVoided: false }] }
         ]
       },
       include: [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'partTotal', 'quantity'] }],
@@ -705,7 +706,8 @@ router.get('/invoicing/history', async (req, res, next) => {
     const { Op } = require('sequelize');
     const workOrders = await WorkOrder.findAll({
       where: {
-        invoiceNumber: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] }
+        invoiceNumber: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] },
+        [Op.or]: [{ isVoided: null }, { isVoided: false }]
       },
       include: [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'partTotal', 'quantity'] }],
       order: [['invoiceDate', 'DESC']],
@@ -719,7 +721,10 @@ router.get('/invoicing/history', async (req, res, next) => {
 router.get('/invoicing/skipped', async (req, res, next) => {
   try {
     const workOrders = await WorkOrder.findAll({
-      where: { invoiceSkipped: true },
+      where: { 
+        invoiceSkipped: true,
+        [Op.or]: [{ isVoided: null }, { isVoided: false }]
+      },
       include: [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'partTotal', 'quantity'] }],
       order: [['invoiceSkippedAt', 'DESC']]
     });
@@ -1606,7 +1611,12 @@ router.put('/:id', async (req, res, next) => {
       minimumOverride,
       minimumOverrideReason,
       // Priority
-      priority
+      priority,
+      // Void
+      isVoided,
+      voidedAt,
+      voidedBy,
+      voidReason
     } = req.body;
 
     // Helper to check if value was provided (including empty string)
@@ -1654,6 +1664,12 @@ router.put('/:id', async (req, res, next) => {
     if (taxExemptCertNumber !== undefined) updates.taxExemptCertNumber = taxExemptCertNumber || null;
     if (minimumOverride !== undefined) updates.minimumOverride = minimumOverride;
     if (minimumOverrideReason !== undefined) updates.minimumOverrideReason = minimumOverrideReason || null;
+
+    // Void fields
+    if (isVoided !== undefined) updates.isVoided = isVoided;
+    if (voidedAt !== undefined) updates.voidedAt = voidedAt || null;
+    if (voidedBy !== undefined) updates.voidedBy = voidedBy || null;
+    if (voidReason !== undefined) updates.voidReason = voidReason || null;
 
     if (status) {
       updates.status = status;

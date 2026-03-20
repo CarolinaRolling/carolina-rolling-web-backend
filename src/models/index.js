@@ -663,6 +663,23 @@ const WorkOrder = sequelize.define('WorkOrder', {
   invoiceSkippedAt: {
     type: DataTypes.DATE,
     allowNull: true
+  },
+  // Void tracking
+  isVoided: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  voidedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  voidedBy: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  voidReason: {
+    type: DataTypes.TEXT,
+    allowNull: true
   }
 }, {
   tableName: 'work_orders',

@@ -191,6 +191,21 @@ async function buildInvoiceIIF(wo, parts, client, invoiceNum) {
       if (s.cost > 0) lineItems.push(filler(`${s.label}: $${s.cost.toFixed(2)}`));
     }
     
+    // Outside processing filler line
+    if (part.outsideProcessingVendorName) {
+      const opCost = parseFloat(part.outsideProcessingCost) || 0;
+      const opMarkup = parseFloat(part.outsideProcessingMarkupPercent) || 0;
+      const opBilled = Math.round(opCost * (1 + opMarkup / 100) * 100) / 100;
+      const opTransport = parseFloat(part.outsideProcessingTransportCost) || 0;
+      const opLabel = part.outsideProcessingDescription || 'Outside Processing';
+      lineItems.push(filler(`${opLabel} (${part.outsideProcessingVendorName}): $${opBilled.toFixed(2)}`));
+      if (opTransport > 0) {
+        const tMarkup = parseFloat(part.outsideProcessingTransportMarkupPercent) || 0;
+        const tBilled = Math.round(opTransport * (1 + tMarkup / 100) * 100) / 100;
+        lineItems.push(filler(`Transport: $${tBilled.toFixed(2)}`));
+      }
+    }
+    
     // Blank line between parts (not after the last one)
     if (pi < regularParts.length - 1) {
       lineItems.push(blank());

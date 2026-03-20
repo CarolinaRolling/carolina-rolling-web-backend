@@ -924,7 +924,7 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     
     // Calculate part totals (skip for ea-priced types which compute their own partTotal)
     const mergedPart = { ...part.toJSON(), ...updates };
-    if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'].includes(mergedPart.partType)) {
+    if (!['plate_roll', 'shaped_plate', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'].includes(mergedPart.partType)) {
       const totals = calculatePartTotals(mergedPart);
       Object.assign(updates, totals);
     }
@@ -2941,6 +2941,154 @@ Respond ONLY with valid JSON (no markdown, no backticks):
     // Cleanup on error
     if (req.file?.path) try { fs.unlinkSync(req.file.path); } catch {}
     console.error('[AI-Parse] Error:', error.message);
+    next(error);
+  }
+});
+
+// POST /api/estimates/:id/parts/:partId/outside-processing-po - Generate outside processing PO
+router.post('/:id/parts/:partId/outside-processing-po', async (req, res, next) => {
+  try {
+    const estimate = await Estimate.findByPk(req.params.id);
+    if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
+
+    const part = await EstimatePart.findByPk(req.params.partId);
+    if (!part) return res.status(404).json({ error: { message: 'Part not found' } });
+
+    if (!part.outsideProcessingVendorId) {
+      return res.status(400).json({ error: { message: 'No vendor set for outside processing on this part' } });
+    }
+
+    const { Vendor, AppSettings } = require('../models');
+    const vendor = await Vendor.findByPk(part.outsideProcessingVendorId);
+    if (!vendor) return res.status(400).json({ error: { message: 'Vendor not found' } });
+
+    // Generate PO number
+    const poSetting = await AppSettings.findOne({ where: { key: 'next_po_number' } });
+    let poNum = poSetting?.value?.nextNumber || 1001;
+    const poNumber = `OP${poNum}`;
+
+    // Update settings
+    if (poSetting) {
+      await poSetting.update({ value: { nextNumber: poNum + 1 } });
+    } else {
+      await AppSettings.create({ key: 'next_po_number', value: { nextNumber: poNum + 1 } });
+    }
+
+    // Save PO number on part
+    await part.update({
+      outsideProcessingPONumber: poNumber,
+      outsideProcessingPOSentAt: new Date()
+    });
+
+    // Build PO details
+    const fd = part.formData && typeof part.formData === 'object' ? part.formData : {};
+    const materialDesc = fd._materialDescription || part.materialDescription || `Part #${part.partNumber}`;
+    const qty = part.quantity || 1;
+
+    const poDetails = {
+      poNumber,
+      vendorName: vendor.name,
+      vendorContact: vendor.contactName,
+      vendorEmail: vendor.contactEmail,
+      vendorAddress: vendor.address,
+      estimateNumber: estimate.estimateNumber,
+      clientName: estimate.clientName,
+      date: new Date().toLocaleDateString(),
+      parts: [{
+        partNumber: part.partNumber,
+        description: materialDesc,
+        quantity: qty,
+        service: part.outsideProcessingDescription || 'Outside Processing',
+        unitCost: parseFloat(part.outsideProcessingCost) || 0,
+        total: (parseFloat(part.outsideProcessingCost) || 0) * qty,
+        specialInstructions: part.specialInstructions || ''
+      }],
+      transportCost: parseFloat(part.outsideProcessingTransportCost) || 0,
+      notes: req.body.notes || ''
+    };
+
+    console.log(`[OutsidePO] Generated ${poNumber} for ${vendor.name}: ${materialDesc}`);
+
+    res.json({
+      data: { poNumber, poDetails, vendorEmail: vendor.contactEmail },
+      message: `Outside processing PO ${poNumber} generated for ${vendor.name}`
+    });
+  } catch (error) {
+    console.error('[OutsidePO] Error:', error.message);
+    next(error);
+  }
+});
+
+// POST /api/estimates/:id/parts/:partId/outside-processing-email - Email outside processing PO to vendor
+router.post('/:id/parts/:partId/outside-processing-email', async (req, res, next) => {
+  try {
+    const estimate = await Estimate.findByPk(req.params.id);
+    if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
+
+    const part = await EstimatePart.findByPk(req.params.partId);
+    if (!part) return res.status(404).json({ error: { message: 'Part not found' } });
+    if (!part.outsideProcessingVendorId) return res.status(400).json({ error: { message: 'No vendor set' } });
+    if (!part.outsideProcessingPONumber) return res.status(400).json({ error: { message: 'Generate PO first' } });
+
+    const { Vendor, GmailAccount } = require('../models');
+    const vendor = await Vendor.findByPk(part.outsideProcessingVendorId);
+    if (!vendor) return res.status(400).json({ error: { message: 'Vendor not found' } });
+
+    const toEmail = req.body.contactEmail || vendor.contactEmail;
+    if (!toEmail) return res.status(400).json({ error: { message: 'No vendor email' } });
+
+    const gmailAccount = await GmailAccount.findOne({ where: { isActive: true }, order: [['createdAt', 'ASC']] });
+    if (!gmailAccount) return res.status(400).json({ error: { message: 'No Gmail account connected' } });
+
+    const { getGmailClient } = require('../services/emailScanner');
+    const gmail = await getGmailClient(gmailAccount);
+
+    const fd = part.formData && typeof part.formData === 'object' ? part.formData : {};
+    const materialDesc = fd._materialDescription || part.materialDescription || `Part #${part.partNumber}`;
+    const qty = part.quantity || 1;
+    const unitCost = parseFloat(part.outsideProcessingCost) || 0;
+    const transportCost = parseFloat(part.outsideProcessingTransportCost) || 0;
+
+    const subject = `${part.outsideProcessingPONumber} — Outside Processing — ${estimate.estimateNumber}`;
+    const bodyText = `Hi ${vendor.contactName || ''},
+
+Purchase Order: ${part.outsideProcessingPONumber}
+Reference: ${estimate.estimateNumber}
+Client: ${estimate.clientName}
+
+Service Required: ${part.outsideProcessingDescription || 'Outside Processing'}
+
+Material:
+  (${qty}) ${materialDesc}
+
+Unit Price: $${unitCost.toFixed(2)}
+Total: $${(unitCost * qty).toFixed(2)}
+${transportCost > 0 ? `Transport: $${transportCost.toFixed(2)} (we will arrange unless you advise otherwise)` : ''}
+
+${part.specialInstructions ? `Special Instructions:\n${part.specialInstructions}\n` : ''}
+Please confirm receipt and estimated turnaround.
+
+Thank you,
+Carolina Rolling Co.`;
+
+    const rawMessage = [
+      `MIME-Version: 1.0`, `To: ${toEmail}`, `Subject: ${subject}`,
+      `Content-Type: text/plain; charset="UTF-8"`, '', bodyText
+    ].join('\r\n');
+
+    const encodedMessage = Buffer.from(rawMessage).toString('base64url');
+    const draft = await gmail.users.drafts.create({
+      userId: 'me',
+      requestBody: { message: { raw: encodedMessage } }
+    });
+
+    const draftMsgId = draft.data.message?.id || draft.data.id;
+    const draftUrl = `https://mail.google.com/mail/?authuser=${encodeURIComponent(gmailAccount.email)}#inbox/${draftMsgId}`;
+
+    console.log(`[OutsidePO] Email draft for ${part.outsideProcessingPONumber} → ${toEmail}`);
+    res.json({ data: { draftUrl, draftId: draft.data.id }, message: `PO email draft created for ${vendor.name}` });
+  } catch (error) {
+    console.error('[OutsidePO Email] Error:', error.message);
     next(error);
   }
 });

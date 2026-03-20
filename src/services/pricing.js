@@ -30,9 +30,16 @@ function calculatePartTotal(part) {
   const labEach = parseFloat(part.laborTotal) || parseFloat(fd.laborTotal) || 0;
   const setup = parseFloat(part.setupCharge) || parseFloat(fd.setupCharge) || 0;
   const other = parseFloat(part.otherCharges) || parseFloat(fd.otherCharges) || 0;
+  // Outside processing with markup
+  const opCost = parseFloat(part.outsideProcessingCost) || 0;
+  const opMarkup = parseFloat(part.outsideProcessingMarkupPercent) || 0;
+  const opEach = Math.round(opCost * (1 + opMarkup / 100) * 100) / 100;
+  const opTransport = parseFloat(part.outsideProcessingTransportCost) || 0;
+  const opTransportMarkup = parseFloat(part.outsideProcessingTransportMarkupPercent) || 0;
+  const opTransportEach = Math.round(opTransport * (1 + opTransportMarkup / 100) * 100) / 100;
   const qty = parseInt(part.quantity) || 1;
 
-  return Math.round((matEach + labEach + setup + other) * qty * 100) / 100;
+  return Math.round((matEach + labEach + setup + other + opEach + opTransportEach) * qty * 100) / 100;
 }
 
 // Load labor minimums from settings
@@ -197,6 +204,11 @@ const PART_SHARED_FIELDS = [
   // Pricing
   'laborTotal', 'materialUnitCost', 'materialMarkupPercent', 'materialTotal',
   'setupCharge', 'otherCharges', 'partTotal',
+  // Outside Processing
+  'outsideProcessingVendorId', 'outsideProcessingVendorName', 'outsideProcessingDescription',
+  'outsideProcessingCost', 'outsideProcessingMarkupPercent',
+  'outsideProcessingTransportCost', 'outsideProcessingTransportMarkupPercent',
+  'outsideProcessingPONumber', 'outsideProcessingPOSentAt',
   // Form data (the big one)
   'formData'
 ];

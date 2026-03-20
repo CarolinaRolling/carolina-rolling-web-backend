@@ -901,6 +901,43 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
     type: DataTypes.DECIMAL(10, 2),
     allowNull: true
   },
+  // Outside Processing
+  outsideProcessingVendorId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
+  outsideProcessingVendorName: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  outsideProcessingDescription: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  outsideProcessingCost: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0
+  },
+  outsideProcessingMarkupPercent: {
+    type: DataTypes.DECIMAL(5, 2),
+    defaultValue: 20
+  },
+  outsideProcessingTransportCost: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0
+  },
+  outsideProcessingTransportMarkupPercent: {
+    type: DataTypes.DECIMAL(5, 2),
+    defaultValue: 20
+  },
+  outsideProcessingPONumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  outsideProcessingPOSentAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
   // JSONB to persist form display data (rolling descriptions, specs, etc.)
   formData: {
     type: DataTypes.JSONB,
@@ -1476,6 +1513,43 @@ const EstimatePart = sequelize.define('EstimatePart', {
   },
   inboundOrderId: {
     type: DataTypes.UUID,
+    allowNull: true
+  },
+  // Outside Processing
+  outsideProcessingVendorId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
+  outsideProcessingVendorName: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  outsideProcessingDescription: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  outsideProcessingCost: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0
+  },
+  outsideProcessingMarkupPercent: {
+    type: DataTypes.DECIMAL(5, 2),
+    defaultValue: 20
+  },
+  outsideProcessingTransportCost: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0
+  },
+  outsideProcessingTransportMarkupPercent: {
+    type: DataTypes.DECIMAL(5, 2),
+    defaultValue: 20
+  },
+  outsideProcessingPONumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  outsideProcessingPOSentAt: {
+    type: DataTypes.DATE,
     allowNull: true
   },
   // JSONB column to persist form-specific state (underscore-prefixed fields)

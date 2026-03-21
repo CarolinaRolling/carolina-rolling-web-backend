@@ -593,7 +593,17 @@ router.post('/restore', async (req, res, next) => {
     const { clearExisting = false } = options;
     const results = {};
 
-    // Simple restore helper — no parent transaction, each record is independent
+    // Strip columns that don't exist on the model
+    const cleanRecord = (model, record) => {
+      const validCols = Object.keys(model.rawAttributes);
+      const cleaned = {};
+      for (const [k, v] of Object.entries(record)) {
+        if (validCols.includes(k)) cleaned[k] = v;
+      }
+      return cleaned;
+    };
+
+    // Upsert helper — creates or updates each record
     const restoreSimple = async (model, data, label) => {
       if (!data || !data.length) return;
       results[label] = { restored: 0, skipped: 0, errors: [] };
@@ -604,16 +614,20 @@ router.post('/restore', async (req, res, next) => {
       }
       for (const record of data) {
         try {
-          const existing = await model.findByPk(record.id);
-          if (existing && !clearExisting) { results[label].skipped++; continue; }
-          if (existing) await existing.destroy({ force: true });
-          await model.create(record, { hooks: false });
+          const clean = cleanRecord(model, record);
+          const existing = await model.findByPk(clean.id);
+          if (existing) {
+            await existing.update(clean, { hooks: false, silent: true });
+          } else {
+            await model.create(clean, { hooks: false, validate: false });
+          }
           results[label].restored++;
         } catch (e) {
           results[label].skipped++;
-          if (results[label].errors.length < 5) results[label].errors.push(e.message);
+          if (results[label].errors.length < 10) results[label].errors.push(`${record.id?.substring(0,8)}: ${e.message.substring(0, 100)}`);
         }
       }
+      console.log(`[restore] ${label}: ${results[label].restored} restored, ${results[label].skipped} skipped`);
     };
 
     // Clients & Vendors first (referenced by other tables)
@@ -632,22 +646,22 @@ router.post('/restore', async (req, res, next) => {
       for (const sd of backup.data.shipments) {
         try {
           const { photos, documents, ...shipment } = sd;
-          const existing = await Shipment.findByPk(shipment.id);
-          if (existing && !clearExisting) { results.shipments.skipped++; continue; }
+          const clean = cleanRecord(Shipment, shipment);
+          const existing = await Shipment.findByPk(clean.id);
           if (existing) {
-            await ShipmentPhoto.destroy({ where: { shipmentId: existing.id } });
-            await ShipmentDocument.destroy({ where: { shipmentId: existing.id } });
-            await existing.destroy({ force: true });
+            await existing.update(clean, { hooks: false, silent: true });
+          } else {
+            await Shipment.create(clean, { hooks: false, validate: false });
           }
-          const created = await Shipment.create(shipment, { hooks: false });
-          if (photos) for (const p of photos) { try { await ShipmentPhoto.create({ ...p, shipmentId: created.id }, { hooks: false }); } catch {} }
-          if (documents) for (const d of documents) { try { await ShipmentDocument.create({ ...d, shipmentId: created.id }, { hooks: false }); } catch {} }
+          if (photos) for (const p of photos) { try { const cp = cleanRecord(ShipmentPhoto, { ...p, shipmentId: clean.id }); await ShipmentPhoto.findByPk(cp.id).then(ex => ex ? ex.update(cp, { hooks: false, silent: true }) : ShipmentPhoto.create(cp, { hooks: false, validate: false })); } catch {} }
+          if (documents) for (const d of documents) { try { const cd = cleanRecord(ShipmentDocument, { ...d, shipmentId: clean.id }); await ShipmentDocument.findByPk(cd.id).then(ex => ex ? ex.update(cd, { hooks: false, silent: true }) : ShipmentDocument.create(cd, { hooks: false, validate: false })); } catch {} }
           results.shipments.restored++;
         } catch (e) {
           results.shipments.skipped++;
-          if (results.shipments.errors.length < 5) results.shipments.errors.push(e.message);
+          if (results.shipments.errors.length < 10) results.shipments.errors.push(e.message.substring(0, 100));
         }
       }
+      console.log(`[restore] shipments: ${results.shipments.restored} restored, ${results.shipments.skipped} skipped`);
     }
 
     // Work Orders with parts, files, documents
@@ -659,30 +673,34 @@ router.post('/restore', async (req, res, next) => {
       for (const od of backup.data.workOrders) {
         try {
           const { parts, documents, ...order } = od;
-          const existing = await WorkOrder.findByPk(order.id);
-          if (existing && !clearExisting) { results.workOrders.skipped++; continue; }
+          const clean = cleanRecord(WorkOrder, order);
+          const existing = await WorkOrder.findByPk(clean.id);
           if (existing) {
-            const existingParts = await WorkOrderPart.findAll({ where: { workOrderId: existing.id } });
-            for (const ep of existingParts) { await WorkOrderPartFile.destroy({ where: { workOrderPartId: ep.id } }); }
-            await WorkOrderPart.destroy({ where: { workOrderId: existing.id } });
-            await WorkOrderDocument.destroy({ where: { workOrderId: existing.id } });
-            await existing.destroy({ force: true });
+            await existing.update(clean, { hooks: false, silent: true });
+          } else {
+            await WorkOrder.create(clean, { hooks: false, validate: false });
           }
-          const created = await WorkOrder.create(order, { hooks: false });
           if (parts) for (const pd of parts) {
             try {
               const { files, ...part } = pd;
-              const cp = await WorkOrderPart.create({ ...part, workOrderId: created.id }, { hooks: false });
-              if (files) for (const f of files) { try { await WorkOrderPartFile.create({ ...f, workOrderPartId: cp.id }, { hooks: false }); } catch {} }
+              const cp = cleanRecord(WorkOrderPart, { ...part, workOrderId: clean.id });
+              const existingPart = await WorkOrderPart.findByPk(cp.id);
+              if (existingPart) {
+                await existingPart.update(cp, { hooks: false, silent: true });
+              } else {
+                await WorkOrderPart.create(cp, { hooks: false, validate: false });
+              }
+              if (files) for (const f of files) { try { const cf = cleanRecord(WorkOrderPartFile, { ...f, workOrderPartId: cp.id }); await WorkOrderPartFile.findByPk(cf.id).then(ex => ex ? ex.update(cf, { hooks: false, silent: true }) : WorkOrderPartFile.create(cf, { hooks: false, validate: false })); } catch {} }
             } catch {}
           }
-          if (documents) for (const d of documents) { try { await WorkOrderDocument.create({ ...d, workOrderId: created.id }, { hooks: false }); } catch {} }
+          if (documents) for (const d of documents) { try { const cd = cleanRecord(WorkOrderDocument, { ...d, workOrderId: clean.id }); await WorkOrderDocument.findByPk(cd.id).then(ex => ex ? ex.update(cd, { hooks: false, silent: true }) : WorkOrderDocument.create(cd, { hooks: false, validate: false })); } catch {} }
           results.workOrders.restored++;
         } catch (e) {
           results.workOrders.skipped++;
-          if (results.workOrders.errors.length < 5) results.workOrders.errors.push(e.message);
+          if (results.workOrders.errors.length < 10) results.workOrders.errors.push(e.message.substring(0, 100));
         }
       }
+      console.log(`[restore] workOrders: ${results.workOrders.restored} restored, ${results.workOrders.skipped} skipped`);
     }
 
     // Estimates with parts, part files, estimate files
@@ -694,30 +712,34 @@ router.post('/restore', async (req, res, next) => {
       for (const ed of backup.data.estimates) {
         try {
           const { parts, files, ...estimate } = ed;
-          const existing = await Estimate.findByPk(estimate.id);
-          if (existing && !clearExisting) { results.estimates.skipped++; continue; }
+          const clean = cleanRecord(Estimate, estimate);
+          const existing = await Estimate.findByPk(clean.id);
           if (existing) {
-            const existingParts = await EstimatePart.findAll({ where: { estimateId: existing.id } });
-            for (const ep of existingParts) { await EstimatePartFile.destroy({ where: { partId: ep.id } }); }
-            await EstimatePart.destroy({ where: { estimateId: existing.id } });
-            await EstimateFile.destroy({ where: { estimateId: existing.id } });
-            await existing.destroy({ force: true });
+            await existing.update(clean, { hooks: false, silent: true });
+          } else {
+            await Estimate.create(clean, { hooks: false, validate: false });
           }
-          const created = await Estimate.create(estimate, { hooks: false });
           if (parts) for (const pd of parts) {
             try {
               const { files: pf, ...part } = pd;
-              const cp = await EstimatePart.create({ ...part, estimateId: created.id }, { hooks: false });
-              if (pf) for (const f of pf) { try { await EstimatePartFile.create({ ...f, partId: cp.id }, { hooks: false }); } catch {} }
+              const cp = cleanRecord(EstimatePart, { ...part, estimateId: clean.id });
+              const existingPart = await EstimatePart.findByPk(cp.id);
+              if (existingPart) {
+                await existingPart.update(cp, { hooks: false, silent: true });
+              } else {
+                await EstimatePart.create(cp, { hooks: false, validate: false });
+              }
+              if (pf) for (const f of pf) { try { const cf = cleanRecord(EstimatePartFile, { ...f, partId: cp.id }); await EstimatePartFile.findByPk(cf.id).then(ex => ex ? ex.update(cf, { hooks: false, silent: true }) : EstimatePartFile.create(cf, { hooks: false, validate: false })); } catch {} }
             } catch {}
           }
-          if (files) for (const f of files) { try { await EstimateFile.create({ ...f, estimateId: created.id }, { hooks: false }); } catch {} }
+          if (files) for (const f of files) { try { const cf = cleanRecord(EstimateFile, { ...f, estimateId: clean.id }); await EstimateFile.findByPk(cf.id).then(ex => ex ? ex.update(cf, { hooks: false, silent: true }) : EstimateFile.create(cf, { hooks: false, validate: false })); } catch {} }
           results.estimates.restored++;
         } catch (e) {
           results.estimates.skipped++;
-          if (results.estimates.errors.length < 5) results.estimates.errors.push(e.message);
+          if (results.estimates.errors.length < 10) results.estimates.errors.push(e.message.substring(0, 100));
         }
       }
+      console.log(`[restore] estimates: ${results.estimates.restored} restored, ${results.estimates.skipped} skipped`);
     }
 
     // Settings

@@ -593,38 +593,69 @@ router.post('/restore', async (req, res, next) => {
     const { clearExisting = false } = options;
     const results = {};
 
-    // Strip columns that don't exist on the model
+    // Use a transaction to pin all queries to ONE database connection
+    // (session_replication_role is per-connection, not per-query)
+    const t = await sequelize.transaction();
+
+    // Disable FK constraint checking on THIS connection
+    await sequelize.query("SET session_replication_role = 'replica'", { transaction: t });
+    console.log('[restore] FK constraints disabled (pinned to transaction connection)');
+
+    try {
+
+    // Strip columns that don't exist on the model and fix JSONB values
     const cleanRecord = (model, record) => {
       const validCols = Object.keys(model.rawAttributes);
       const cleaned = {};
       for (const [k, v] of Object.entries(record)) {
-        if (validCols.includes(k)) cleaned[k] = v;
+        if (!validCols.includes(k)) continue;
+        const colDef = model.rawAttributes[k];
+        if (colDef && (colDef.type.key === 'JSONB' || colDef.type.key === 'JSON')) {
+          if (v === null || v === undefined || v === '') {
+            cleaned[k] = null;
+          } else if (typeof v === 'string') {
+            try { cleaned[k] = JSON.parse(v); } catch { cleaned[k] = null; }
+          } else {
+            cleaned[k] = v;
+          }
+        } else {
+          cleaned[k] = v;
+        }
       }
       return cleaned;
     };
 
-    // Upsert helper — creates or updates each record
+    // Raw upsert — all queries go through the pinned transaction connection
+    const rawUpsert = async (model, record) => {
+      const clean = cleanRecord(model, record);
+      const cols = Object.keys(clean);
+      if (cols.length === 0) return;
+      const vals = cols.map(c => {
+        const v = clean[c];
+        if (v !== null && typeof v === 'object' && !(v instanceof Date)) return JSON.stringify(v);
+        return v;
+      });
+      const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
+      const updates = cols.filter(c => c !== 'id').map(c => `"${c}" = EXCLUDED."${c}"`).join(', ');
+      const colNames = cols.map(c => `"${c}"`).join(', ');
+      await sequelize.query(
+        `INSERT INTO "${model.getTableName()}" (${colNames}) VALUES (${placeholders}) ON CONFLICT ("id") DO UPDATE SET ${updates}`,
+        { bind: vals, type: sequelize.QueryTypes.INSERT, transaction: t }
+      );
+    };
+
+    // Upsert helper for simple models
     const restoreSimple = async (model, data, label) => {
       if (!data || !data.length) return;
       results[label] = { restored: 0, skipped: 0, errors: [] };
       if (clearExisting) {
-        try { await model.destroy({ where: {}, force: true }); } catch (e) {
+        try { await model.destroy({ where: {}, force: true, transaction: t }); } catch (e) {
           console.warn(`[restore] Clear ${label} failed: ${e.message}`);
         }
       }
       for (const record of data) {
         try {
-          const clean = cleanRecord(model, record);
-          // Use raw upsert to avoid Sequelize ORM issues
-          const cols = Object.keys(clean);
-          const vals = Object.values(clean);
-          const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
-          const updates = cols.filter(c => c !== 'id').map(c => `"${c}" = EXCLUDED."${c}"`).join(', ');
-          const colNames = cols.map(c => `"${c}"`).join(', ');
-          await sequelize.query(
-            `INSERT INTO "${model.getTableName()}" (${colNames}) VALUES (${placeholders}) ON CONFLICT ("id") DO UPDATE SET ${updates}`,
-            { bind: vals, type: sequelize.QueryTypes.INSERT }
-          );
+          await rawUpsert(model, record);
           results[label].restored++;
         } catch (e) {
           results[label].skipped++;
@@ -641,21 +672,6 @@ router.post('/restore', async (req, res, next) => {
     await restoreSimple(DRNumber, backup.data.drNumbers, 'drNumbers');
     await restoreSimple(PONumber, backup.data.poNumbers, 'poNumbers');
     await restoreSimple(InboundOrder, backup.data.inboundOrders, 'inboundOrders');
-
-    // Raw upsert helper for any model
-    const rawUpsert = async (model, record) => {
-      const clean = cleanRecord(model, record);
-      const cols = Object.keys(clean);
-      if (cols.length === 0) return;
-      const vals = Object.values(clean);
-      const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
-      const updates = cols.filter(c => c !== 'id').map(c => `"${c}" = EXCLUDED."${c}"`).join(', ');
-      const colNames = cols.map(c => `"${c}"`).join(', ');
-      await sequelize.query(
-        `INSERT INTO "${model.getTableName()}" (${colNames}) VALUES (${placeholders}) ON CONFLICT ("id") DO UPDATE SET ${updates}`,
-        { bind: vals, type: sequelize.QueryTypes.INSERT }
-      );
-    };
 
     // Shipments with children
     if (backup.data.shipments) {
@@ -740,12 +756,17 @@ router.post('/restore', async (req, res, next) => {
       results.settings = { restored: 0, skipped: 0 };
       for (const sd of backup.data.settings) {
         try {
-          const [s, created] = await AppSettings.findOrCreate({ where: { key: sd.key }, defaults: sd });
-          if (!created && clearExisting) await s.update({ value: sd.value });
+          const [s, created] = await AppSettings.findOrCreate({ where: { key: sd.key }, defaults: sd, transaction: t });
+          if (!created && clearExisting) await s.update({ value: sd.value }, { transaction: t });
           results.settings.restored++;
         } catch (e) { results.settings.skipped++; }
       }
     }
+
+    // Re-enable FK constraints and commit
+    await sequelize.query("SET session_replication_role = 'DEFAULT'", { transaction: t });
+    await t.commit();
+    console.log('[restore] FK constraints re-enabled, transaction committed');
 
     // After restore: re-upload any files from backup that are missing on Cloudinary
     let fileResults = { checked: 0, reuploaded: 0, alreadyExist: 0, failed: 0 };
@@ -763,7 +784,6 @@ router.post('/restore', async (req, res, next) => {
         req.end();
       });
 
-      // Collect all file records from all models that have URLs in the backup
       const allFileRecords = [];
       const woPartFiles = await WorkOrderPartFile.findAll();
       woPartFiles.forEach(f => allFileRecords.push({ model: WorkOrderPartFile, record: f }));
@@ -789,7 +809,6 @@ router.post('/restore', async (req, res, next) => {
             continue;
           }
 
-          // File missing from Cloudinary — re-upload
           const buffer = Buffer.from(backupFile.data, 'base64');
           const base64Data = buffer.toString('base64');
           const mimeType = record.mimeType || 'application/octet-stream';
@@ -811,6 +830,12 @@ router.post('/restore', async (req, res, next) => {
     }
 
     res.json({ message: 'Backup restored successfully', results, fileResults });
+    } catch (innerErr) {
+      // Re-enable FK constraints and rollback on error
+      try { await sequelize.query("SET session_replication_role = 'DEFAULT'", { transaction: t }); } catch {}
+      try { await t.rollback(); } catch {}
+      throw innerErr;
+    }
   } catch (error) {
     console.error('[restore] Error:', error.message);
     next(error);

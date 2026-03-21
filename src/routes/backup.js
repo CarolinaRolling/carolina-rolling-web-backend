@@ -584,8 +584,6 @@ router.post('/test', async (req, res, next) => {
 
 // POST /api/backup/restore - Restore from backup JSON
 router.post('/restore', async (req, res, next) => {
-  const transaction = await sequelize.transaction();
-  
   try {
     const { backup, options = {} } = req.body;
     if (!backup || !backup.data) {
@@ -595,19 +593,26 @@ router.post('/restore', async (req, res, next) => {
     const { clearExisting = false } = options;
     const results = {};
 
-    // Simple restore helper
+    // Simple restore helper — no parent transaction, each record is independent
     const restoreSimple = async (model, data, label) => {
       if (!data || !data.length) return;
-      results[label] = { restored: 0, skipped: 0 };
-      if (clearExisting) await model.destroy({ where: {}, transaction });
+      results[label] = { restored: 0, skipped: 0, errors: [] };
+      if (clearExisting) {
+        try { await model.destroy({ where: {}, force: true }); } catch (e) {
+          console.warn(`[restore] Clear ${label} failed: ${e.message}`);
+        }
+      }
       for (const record of data) {
         try {
-          const existing = await model.findByPk(record.id, { transaction });
+          const existing = await model.findByPk(record.id);
           if (existing && !clearExisting) { results[label].skipped++; continue; }
-          if (existing) await existing.destroy({ transaction });
-          await model.create(record, { transaction });
+          if (existing) await existing.destroy({ force: true });
+          await model.create(record, { hooks: false });
           results[label].restored++;
-        } catch (e) { results[label].skipped++; }
+        } catch (e) {
+          results[label].skipped++;
+          if (results[label].errors.length < 5) results[label].errors.push(e.message);
+        }
       }
     };
 
@@ -620,63 +625,98 @@ router.post('/restore', async (req, res, next) => {
 
     // Shipments with children
     if (backup.data.shipments) {
-      results.shipments = { restored: 0, skipped: 0 };
-      if (clearExisting) { await ShipmentDocument.destroy({ where: {}, transaction }); await ShipmentPhoto.destroy({ where: {}, transaction }); await Shipment.destroy({ where: {}, transaction }); }
+      results.shipments = { restored: 0, skipped: 0, errors: [] };
+      if (clearExisting) {
+        try { await ShipmentDocument.destroy({ where: {}, force: true }); await ShipmentPhoto.destroy({ where: {}, force: true }); await Shipment.destroy({ where: {}, force: true }); } catch {}
+      }
       for (const sd of backup.data.shipments) {
         try {
           const { photos, documents, ...shipment } = sd;
-          const existing = await Shipment.findByPk(shipment.id, { transaction });
+          const existing = await Shipment.findByPk(shipment.id);
           if (existing && !clearExisting) { results.shipments.skipped++; continue; }
-          if (existing) await existing.destroy({ transaction });
-          const created = await Shipment.create(shipment, { transaction });
-          if (photos) for (const p of photos) await ShipmentPhoto.create({ ...p, shipmentId: created.id }, { transaction });
-          if (documents) for (const d of documents) await ShipmentDocument.create({ ...d, shipmentId: created.id }, { transaction });
+          if (existing) {
+            await ShipmentPhoto.destroy({ where: { shipmentId: existing.id } });
+            await ShipmentDocument.destroy({ where: { shipmentId: existing.id } });
+            await existing.destroy({ force: true });
+          }
+          const created = await Shipment.create(shipment, { hooks: false });
+          if (photos) for (const p of photos) { try { await ShipmentPhoto.create({ ...p, shipmentId: created.id }, { hooks: false }); } catch {} }
+          if (documents) for (const d of documents) { try { await ShipmentDocument.create({ ...d, shipmentId: created.id }, { hooks: false }); } catch {} }
           results.shipments.restored++;
-        } catch (e) { results.shipments.skipped++; }
+        } catch (e) {
+          results.shipments.skipped++;
+          if (results.shipments.errors.length < 5) results.shipments.errors.push(e.message);
+        }
       }
     }
 
     // Work Orders with parts, files, documents
     if (backup.data.workOrders) {
-      results.workOrders = { restored: 0, skipped: 0 };
-      if (clearExisting) { await WorkOrderPartFile.destroy({ where: {}, transaction }); await WorkOrderPart.destroy({ where: {}, transaction }); await WorkOrderDocument.destroy({ where: {}, transaction }); await WorkOrder.destroy({ where: {}, transaction }); }
+      results.workOrders = { restored: 0, skipped: 0, errors: [] };
+      if (clearExisting) {
+        try { await WorkOrderPartFile.destroy({ where: {}, force: true }); await WorkOrderPart.destroy({ where: {}, force: true }); await WorkOrderDocument.destroy({ where: {}, force: true }); await WorkOrder.destroy({ where: {}, force: true }); } catch {}
+      }
       for (const od of backup.data.workOrders) {
         try {
           const { parts, documents, ...order } = od;
-          const existing = await WorkOrder.findByPk(order.id, { transaction });
+          const existing = await WorkOrder.findByPk(order.id);
           if (existing && !clearExisting) { results.workOrders.skipped++; continue; }
-          if (existing) await existing.destroy({ transaction });
-          const created = await WorkOrder.create(order, { transaction });
-          if (parts) for (const pd of parts) {
-            const { files, ...part } = pd;
-            const cp = await WorkOrderPart.create({ ...part, workOrderId: created.id }, { transaction });
-            if (files) for (const f of files) await WorkOrderPartFile.create({ ...f, workOrderPartId: cp.id }, { transaction });
+          if (existing) {
+            const existingParts = await WorkOrderPart.findAll({ where: { workOrderId: existing.id } });
+            for (const ep of existingParts) { await WorkOrderPartFile.destroy({ where: { workOrderPartId: ep.id } }); }
+            await WorkOrderPart.destroy({ where: { workOrderId: existing.id } });
+            await WorkOrderDocument.destroy({ where: { workOrderId: existing.id } });
+            await existing.destroy({ force: true });
           }
-          if (documents) for (const d of documents) await WorkOrderDocument.create({ ...d, workOrderId: created.id }, { transaction });
+          const created = await WorkOrder.create(order, { hooks: false });
+          if (parts) for (const pd of parts) {
+            try {
+              const { files, ...part } = pd;
+              const cp = await WorkOrderPart.create({ ...part, workOrderId: created.id }, { hooks: false });
+              if (files) for (const f of files) { try { await WorkOrderPartFile.create({ ...f, workOrderPartId: cp.id }, { hooks: false }); } catch {} }
+            } catch {}
+          }
+          if (documents) for (const d of documents) { try { await WorkOrderDocument.create({ ...d, workOrderId: created.id }, { hooks: false }); } catch {} }
           results.workOrders.restored++;
-        } catch (e) { results.workOrders.skipped++; }
+        } catch (e) {
+          results.workOrders.skipped++;
+          if (results.workOrders.errors.length < 5) results.workOrders.errors.push(e.message);
+        }
       }
     }
 
     // Estimates with parts, part files, estimate files
     if (backup.data.estimates) {
-      results.estimates = { restored: 0, skipped: 0 };
-      if (clearExisting) { await EstimatePartFile.destroy({ where: {}, transaction }); await EstimatePart.destroy({ where: {}, transaction }); await EstimateFile.destroy({ where: {}, transaction }); await Estimate.destroy({ where: {}, transaction }); }
+      results.estimates = { restored: 0, skipped: 0, errors: [] };
+      if (clearExisting) {
+        try { await EstimatePartFile.destroy({ where: {}, force: true }); await EstimatePart.destroy({ where: {}, force: true }); await EstimateFile.destroy({ where: {}, force: true }); await Estimate.destroy({ where: {}, force: true }); } catch {}
+      }
       for (const ed of backup.data.estimates) {
         try {
           const { parts, files, ...estimate } = ed;
-          const existing = await Estimate.findByPk(estimate.id, { transaction });
+          const existing = await Estimate.findByPk(estimate.id);
           if (existing && !clearExisting) { results.estimates.skipped++; continue; }
-          if (existing) await existing.destroy({ transaction });
-          const created = await Estimate.create(estimate, { transaction });
-          if (parts) for (const pd of parts) {
-            const { files: pf, ...part } = pd;
-            const cp = await EstimatePart.create({ ...part, estimateId: created.id }, { transaction });
-            if (pf) for (const f of pf) await EstimatePartFile.create({ ...f, estimatePartId: cp.id }, { transaction });
+          if (existing) {
+            const existingParts = await EstimatePart.findAll({ where: { estimateId: existing.id } });
+            for (const ep of existingParts) { await EstimatePartFile.destroy({ where: { partId: ep.id } }); }
+            await EstimatePart.destroy({ where: { estimateId: existing.id } });
+            await EstimateFile.destroy({ where: { estimateId: existing.id } });
+            await existing.destroy({ force: true });
           }
-          if (files) for (const f of files) await EstimateFile.create({ ...f, estimateId: created.id }, { transaction });
+          const created = await Estimate.create(estimate, { hooks: false });
+          if (parts) for (const pd of parts) {
+            try {
+              const { files: pf, ...part } = pd;
+              const cp = await EstimatePart.create({ ...part, estimateId: created.id }, { hooks: false });
+              if (pf) for (const f of pf) { try { await EstimatePartFile.create({ ...f, partId: cp.id }, { hooks: false }); } catch {} }
+            } catch {}
+          }
+          if (files) for (const f of files) { try { await EstimateFile.create({ ...f, estimateId: created.id }, { hooks: false }); } catch {} }
           results.estimates.restored++;
-        } catch (e) { results.estimates.skipped++; }
+        } catch (e) {
+          results.estimates.skipped++;
+          if (results.estimates.errors.length < 5) results.estimates.errors.push(e.message);
+        }
       }
     }
 
@@ -685,14 +725,12 @@ router.post('/restore', async (req, res, next) => {
       results.settings = { restored: 0, skipped: 0 };
       for (const sd of backup.data.settings) {
         try {
-          const [s, created] = await AppSettings.findOrCreate({ where: { key: sd.key }, defaults: sd, transaction });
-          if (!created && clearExisting) await s.update({ value: sd.value }, { transaction });
+          const [s, created] = await AppSettings.findOrCreate({ where: { key: sd.key }, defaults: sd });
+          if (!created && clearExisting) await s.update({ value: sd.value });
           results.settings.restored++;
         } catch (e) { results.settings.skipped++; }
       }
     }
-
-    await transaction.commit();
 
     // After restore: re-upload any files from backup that are missing on Cloudinary
     let fileResults = { checked: 0, reuploaded: 0, alreadyExist: 0, failed: 0 };
@@ -759,7 +797,7 @@ router.post('/restore', async (req, res, next) => {
 
     res.json({ message: 'Backup restored successfully', results, fileResults });
   } catch (error) {
-    await transaction.rollback();
+    console.error('[restore] Error:', error.message);
     next(error);
   }
 });

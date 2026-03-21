@@ -647,7 +647,17 @@ router.post('/restore', async (req, res, next) => {
       if (cols.length === 0) return;
       const vals = cols.map(c => {
         const v = clean[c];
-        if (v !== null && typeof v === 'object' && !(v instanceof Date)) return JSON.stringify(v);
+        if (v === null || v === undefined) return null;
+        // Check if this is a Postgres ARRAY column — keep as JS array, don't stringify
+        const colDef = model.rawAttributes[c];
+        if (colDef && colDef.type && colDef.type.key === 'ARRAY') {
+          // Ensure it's an actual array
+          if (Array.isArray(v)) return v;
+          if (typeof v === 'string') { try { return JSON.parse(v); } catch { return null; } }
+          return null;
+        }
+        // JSONB/JSON — stringify objects
+        if (typeof v === 'object' && !(v instanceof Date)) return JSON.stringify(v);
         return v;
       });
       const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');

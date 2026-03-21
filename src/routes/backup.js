@@ -593,15 +593,18 @@ router.post('/restore', async (req, res, next) => {
     const { clearExisting = false } = options;
     const results = {};
 
-    // Use a transaction to pin all queries to ONE database connection
-    // (session_replication_role is per-connection, not per-query)
-    const t = await sequelize.transaction();
+    // FK columns that reference other tables — null these on first pass, set in second pass
+    const FK_COLS = {
+      dr_numbers: ['workOrderId'],
+      po_numbers: ['workOrderId', 'inboundOrderId'],
+      inbound_orders: ['workOrderId'],
+      shipments: ['workOrderId'],
+      work_orders: ['estimateId', 'clientId'],
+      estimates: ['workOrderId']
+    };
 
-    // Disable FK constraint checking on THIS connection
-    await sequelize.query("SET session_replication_role = 'replica'", { transaction: t });
-    console.log('[restore] FK constraints disabled (pinned to transaction connection)');
-
-    try {
+    // Deferred FK updates: { tableName: [{ id, col, value }, ...] }
+    const deferredUpdates = {};
 
     // Strip columns that don't exist on the model and fix JSONB values
     const cleanRecord = (model, record) => {
@@ -625,9 +628,21 @@ router.post('/restore', async (req, res, next) => {
       return cleaned;
     };
 
-    // Raw upsert — all queries go through the pinned transaction connection
-    const rawUpsert = async (model, record) => {
+    // Raw upsert — nulls out FK cols and defers them for second pass
+    const rawUpsert = async (model, record, nullFKs = true) => {
       const clean = cleanRecord(model, record);
+      const tableName = model.getTableName();
+      const fkCols = nullFKs ? (FK_COLS[tableName] || []) : [];
+
+      // Save FK values for deferred update, then null them
+      for (const fk of fkCols) {
+        if (clean[fk] !== null && clean[fk] !== undefined) {
+          if (!deferredUpdates[tableName]) deferredUpdates[tableName] = [];
+          deferredUpdates[tableName].push({ id: clean.id, col: fk, value: clean[fk] });
+          clean[fk] = null;
+        }
+      }
+
       const cols = Object.keys(clean);
       if (cols.length === 0) return;
       const vals = cols.map(c => {
@@ -639,8 +654,8 @@ router.post('/restore', async (req, res, next) => {
       const updates = cols.filter(c => c !== 'id').map(c => `"${c}" = EXCLUDED."${c}"`).join(', ');
       const colNames = cols.map(c => `"${c}"`).join(', ');
       await sequelize.query(
-        `INSERT INTO "${model.getTableName()}" (${colNames}) VALUES (${placeholders}) ON CONFLICT ("id") DO UPDATE SET ${updates}`,
-        { bind: vals, type: sequelize.QueryTypes.INSERT, transaction: t }
+        `INSERT INTO "${tableName}" (${colNames}) VALUES (${placeholders}) ON CONFLICT ("id") DO UPDATE SET ${updates}`,
+        { bind: vals, type: sequelize.QueryTypes.INSERT }
       );
     };
 
@@ -649,7 +664,7 @@ router.post('/restore', async (req, res, next) => {
       if (!data || !data.length) return;
       results[label] = { restored: 0, skipped: 0, errors: [] };
       if (clearExisting) {
-        try { await model.destroy({ where: {}, force: true, transaction: t }); } catch (e) {
+        try { await model.destroy({ where: {}, force: true }); } catch (e) {
           console.warn(`[restore] Clear ${label} failed: ${e.message}`);
         }
       }
@@ -665,6 +680,8 @@ router.post('/restore', async (req, res, next) => {
       console.log(`[restore] ${label}: ${results[label].restored} restored, ${results[label].skipped} skipped`);
       if (results[label].errors.length > 0) console.log(`[restore] ${label} errors:`, results[label].errors);
     };
+
+    try {
 
     // Clients & Vendors first (referenced by other tables)
     await restoreSimple(Client, backup.data.clients, 'clients');
@@ -756,17 +773,32 @@ router.post('/restore', async (req, res, next) => {
       results.settings = { restored: 0, skipped: 0 };
       for (const sd of backup.data.settings) {
         try {
-          const [s, created] = await AppSettings.findOrCreate({ where: { key: sd.key }, defaults: sd, transaction: t });
-          if (!created && clearExisting) await s.update({ value: sd.value }, { transaction: t });
+          const [s, created] = await AppSettings.findOrCreate({ where: { key: sd.key }, defaults: sd });
+          if (!created && clearExisting) await s.update({ value: sd.value });
           results.settings.restored++;
         } catch (e) { results.settings.skipped++; }
       }
     }
 
-    // Re-enable FK constraints and commit
-    await sequelize.query("SET session_replication_role = 'DEFAULT'", { transaction: t });
-    await t.commit();
-    console.log('[restore] FK constraints re-enabled, transaction committed');
+    // ===== SECOND PASS: Apply deferred FK updates =====
+    // Now that all records exist, set the FK columns that were nulled during insert
+    let fkUpdated = 0, fkFailed = 0;
+    for (const [tableName, updates] of Object.entries(deferredUpdates)) {
+      for (const { id, col, value } of updates) {
+        try {
+          await sequelize.query(
+            `UPDATE "${tableName}" SET "${col}" = $1 WHERE "id" = $2`,
+            { bind: [value, id], type: sequelize.QueryTypes.UPDATE }
+          );
+          fkUpdated++;
+        } catch (e) {
+          fkFailed++;
+          // FK target may not exist (deleted record) — that's OK
+        }
+      }
+    }
+    console.log(`[restore] FK second pass: ${fkUpdated} updated, ${fkFailed} failed (target missing)`);
+    results.fkUpdates = { updated: fkUpdated, failed: fkFailed };
 
     // After restore: re-upload any files from backup that are missing on Cloudinary
     let fileResults = { checked: 0, reuploaded: 0, alreadyExist: 0, failed: 0 };
@@ -831,9 +863,6 @@ router.post('/restore', async (req, res, next) => {
 
     res.json({ message: 'Backup restored successfully', results, fileResults });
     } catch (innerErr) {
-      // Re-enable FK constraints and rollback on error
-      try { await sequelize.query("SET session_replication_role = 'DEFAULT'", { transaction: t }); } catch {}
-      try { await t.rollback(); } catch {}
       throw innerErr;
     }
   } catch (error) {

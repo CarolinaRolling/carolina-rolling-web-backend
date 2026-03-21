@@ -87,6 +87,7 @@ async function buildBackup(includeFiles = false) {
   backup.data.liabilities = (await Liability.findAll()).map(l => l.toJSON());
   backup.data.employees = (await Employee.findAll()).map(e => e.toJSON());
   backup.data.payrollWeeks = (await PayrollWeek.findAll({ include: [{ model: PayrollEntry, as: 'entries' }] })).map(p => p.toJSON());
+  backup.data.businessEvents = (await require('../models').BusinessEvent.findAll()).map(e => e.toJSON());
 
   // Counts
   backup.counts = {};
@@ -829,6 +830,7 @@ router.post('/restore', async (req, res, next) => {
     const { Liability, Employee, PayrollWeek, PayrollEntry } = require('../models');
     await restoreSimple(Liability, backup.data.liabilities, 'liabilities');
     await restoreSimple(Employee, backup.data.employees, 'employees');
+    await restoreSimple(require('../models').BusinessEvent, backup.data.businessEvents, 'businessEvents');
     if (backup.data.payrollWeeks) {
       results.payrollWeeks = { restored: 0, skipped: 0, errors: [] };
       for (const pw of backup.data.payrollWeeks) {

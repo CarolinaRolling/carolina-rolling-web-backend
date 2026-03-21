@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { Op } = require('sequelize');
-const { Liability, Employee, PayrollWeek, PayrollEntry } = require('../models');
+const { Liability, Employee, PayrollWeek, PayrollEntry, BusinessEvent } = require('../models');
 
 // ============= LIABILITIES =============
 
@@ -246,6 +246,111 @@ router.post('/payroll/:id/submit', async (req, res, next) => {
     if (!payroll) return res.status(404).json({ error: { message: 'Not found' } });
     await payroll.update({ status: 'submitted', submittedAt: new Date(), submittedBy: req.body.submittedBy || 'admin' });
     res.json({ data: payroll, message: 'Payroll submitted' });
+  } catch (error) { next(error); }
+});
+
+// ============= CALENDAR =============
+
+// GET /api/business/calendar
+router.get('/calendar', async (req, res, next) => {
+  try {
+    const { year } = req.query;
+    const where = {};
+    if (year) {
+      where.eventDate = {
+        [Op.gte]: `${year}-01-01`,
+        [Op.lte]: `${year}-12-31`
+      };
+    }
+    const events = await BusinessEvent.findAll({ where, order: [['eventDate', 'ASC']] });
+
+    // Auto-mark overdue
+    const now = new Date();
+    for (const evt of events) {
+      if (evt.status === 'upcoming' && evt.eventDate && new Date(evt.eventDate) < now) {
+        await evt.update({ status: 'overdue' });
+        evt.status = 'overdue';
+      }
+    }
+
+    res.json({ data: events });
+  } catch (error) { next(error); }
+});
+
+// GET /api/business/calendar/upcoming - Events due within reminderDays
+router.get('/calendar/upcoming', async (req, res, next) => {
+  try {
+    const events = await BusinessEvent.findAll({
+      where: { status: { [Op.in]: ['upcoming', 'overdue'] } },
+      order: [['eventDate', 'ASC']]
+    });
+    const now = new Date();
+    const reminders = events.filter(evt => {
+      const due = new Date(evt.eventDate);
+      const daysUntil = Math.ceil((due - now) / (1000 * 60 * 60 * 24));
+      return daysUntil <= (evt.reminderDays || 30);
+    });
+    res.json({ data: reminders });
+  } catch (error) { next(error); }
+});
+
+// POST /api/business/calendar
+router.post('/calendar', async (req, res, next) => {
+  try {
+    const event = await BusinessEvent.create(req.body);
+    res.json({ data: event, message: 'Event added' });
+  } catch (error) { next(error); }
+});
+
+// PUT /api/business/calendar/:id
+router.put('/calendar/:id', async (req, res, next) => {
+  try {
+    const event = await BusinessEvent.findByPk(req.params.id);
+    if (!event) return res.status(404).json({ error: { message: 'Not found' } });
+    await event.update(req.body);
+    res.json({ data: event, message: 'Updated' });
+  } catch (error) { next(error); }
+});
+
+// POST /api/business/calendar/:id/complete - Mark completed, create next if recurring
+router.post('/calendar/:id/complete', async (req, res, next) => {
+  try {
+    const event = await BusinessEvent.findByPk(req.params.id);
+    if (!event) return res.status(404).json({ error: { message: 'Not found' } });
+    await event.update({ status: 'completed', completedAt: new Date() });
+
+    if (event.recurring && event.recurringInterval) {
+      const nextDate = new Date(event.eventDate);
+      switch (event.recurringInterval) {
+        case 'monthly': nextDate.setMonth(nextDate.getMonth() + 1); break;
+        case 'quarterly': nextDate.setMonth(nextDate.getMonth() + 3); break;
+        case 'yearly': nextDate.setFullYear(nextDate.getFullYear() + 1); break;
+      }
+      await BusinessEvent.create({
+        title: event.title,
+        description: event.description,
+        category: event.category,
+        eventDate: nextDate.toISOString().split('T')[0],
+        reminderDays: event.reminderDays,
+        recurring: true,
+        recurringInterval: event.recurringInterval,
+        cost: event.cost,
+        notes: event.notes,
+        status: 'upcoming'
+      });
+    }
+
+    res.json({ data: event, message: `Completed${event.recurring ? ' — next occurrence created' : ''}` });
+  } catch (error) { next(error); }
+});
+
+// DELETE /api/business/calendar/:id
+router.delete('/calendar/:id', async (req, res, next) => {
+  try {
+    const event = await BusinessEvent.findByPk(req.params.id);
+    if (!event) return res.status(404).json({ error: { message: 'Not found' } });
+    await event.destroy();
+    res.json({ message: 'Deleted' });
   } catch (error) { next(error); }
 });
 

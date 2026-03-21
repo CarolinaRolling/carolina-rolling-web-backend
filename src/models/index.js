@@ -2838,6 +2838,62 @@ PayrollWeek.hasMany(PayrollEntry, { foreignKey: 'payrollWeekId', as: 'entries' }
 PayrollEntry.belongsTo(PayrollWeek, { foreignKey: 'payrollWeekId' });
 PayrollEntry.belongsTo(Employee, { foreignKey: 'employeeId' });
 
+// Business Calendar Event
+const BusinessEvent = sequelize.define('BusinessEvent', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  title: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  description: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  category: {
+    type: DataTypes.STRING,
+    defaultValue: 'reminder' // license, insurance, tax, inspection, permit, renewal, reminder, other
+  },
+  eventDate: {
+    type: DataTypes.DATEONLY,
+    allowNull: false
+  },
+  reminderDays: {
+    type: DataTypes.INTEGER,
+    defaultValue: 30 // days before to start reminding
+  },
+  recurring: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  recurringInterval: {
+    type: DataTypes.STRING,
+    allowNull: true // yearly, quarterly, monthly
+  },
+  status: {
+    type: DataTypes.STRING,
+    defaultValue: 'upcoming' // upcoming, completed, overdue
+  },
+  completedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  cost: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: true
+  },
+  notes: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  }
+}, {
+  tableName: 'business_events',
+  timestamps: true
+});
+
 module.exports = {
   sequelize,
   User,
@@ -2872,5 +2928,6 @@ module.exports = {
   Liability,
   Employee,
   PayrollWeek,
-  PayrollEntry
+  PayrollEntry,
+  BusinessEvent
 };

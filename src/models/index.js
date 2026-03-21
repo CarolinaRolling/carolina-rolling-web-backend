@@ -2642,6 +2642,202 @@ const TodoItem = sequelize.define('TodoItem', {
   timestamps: true
 });
 
+// ============= BUSINESS MODELS =============
+
+// Liability / Bill tracking
+const Liability = sequelize.define('Liability', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  name: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  category: {
+    type: DataTypes.STRING,
+    defaultValue: 'other' // materials, insurance, supplies, utilities, rent, equipment, other
+  },
+  amount: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: false
+  },
+  dueDate: {
+    type: DataTypes.DATEONLY,
+    allowNull: true
+  },
+  recurring: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  recurringInterval: {
+    type: DataTypes.STRING,
+    allowNull: true // weekly, monthly, quarterly, yearly
+  },
+  status: {
+    type: DataTypes.STRING,
+    defaultValue: 'unpaid' // unpaid, paid, overdue
+  },
+  paidAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  paidAmount: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: true
+  },
+  vendor: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  notes: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  referenceNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  }
+}, {
+  tableName: 'liabilities',
+  timestamps: true
+});
+
+// Employee
+const Employee = sequelize.define('Employee', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  name: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  phone: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  hourlyRate: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: false
+  },
+  role: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  startDate: {
+    type: DataTypes.DATEONLY,
+    allowNull: true
+  },
+  isActive: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: true
+  }
+}, {
+  tableName: 'employees',
+  timestamps: true
+});
+
+// PayrollWeek — one record per weekly payroll
+const PayrollWeek = sequelize.define('PayrollWeek', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  weekStart: {
+    type: DataTypes.DATEONLY,
+    allowNull: false
+  },
+  weekEnd: {
+    type: DataTypes.DATEONLY,
+    allowNull: false
+  },
+  status: {
+    type: DataTypes.STRING,
+    defaultValue: 'draft' // draft, submitted
+  },
+  submittedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  submittedBy: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  totalGross: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0
+  },
+  notes: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  }
+}, {
+  tableName: 'payroll_weeks',
+  timestamps: true
+});
+
+// PayrollEntry — one per employee per payroll week
+const PayrollEntry = sequelize.define('PayrollEntry', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  payrollWeekId: {
+    type: DataTypes.UUID,
+    allowNull: false
+  },
+  employeeId: {
+    type: DataTypes.UUID,
+    allowNull: false
+  },
+  employeeName: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  hourlyRate: {
+    type: DataTypes.DECIMAL(10, 2),
+    allowNull: false
+  },
+  regularHours: {
+    type: DataTypes.DECIMAL(5, 1),
+    defaultValue: 0
+  },
+  overtimeHours: {
+    type: DataTypes.DECIMAL(5, 1),
+    defaultValue: 0
+  },
+  vacationHours: {
+    type: DataTypes.DECIMAL(5, 1),
+    defaultValue: 0
+  },
+  bonus: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0
+  },
+  // Detailed OT records: [{ date: '2026-03-21', hours: 2.5 }, ...]
+  overtimeDetails: {
+    type: DataTypes.JSONB,
+    defaultValue: []
+  },
+  grossPay: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0
+  }
+}, {
+  tableName: 'payroll_entries',
+  timestamps: true
+});
+
+// Associations
+PayrollWeek.hasMany(PayrollEntry, { foreignKey: 'payrollWeekId', as: 'entries' });
+PayrollEntry.belongsTo(PayrollWeek, { foreignKey: 'payrollWeekId' });
+PayrollEntry.belongsTo(Employee, { foreignKey: 'employeeId' });
+
 module.exports = {
   sequelize,
   User,
@@ -2672,5 +2868,9 @@ module.exports = {
   InvoiceNumber,
   GmailAccount,
   ScannedEmail,
-  PendingOrder
+  PendingOrder,
+  Liability,
+  Employee,
+  PayrollWeek,
+  PayrollEntry
 };

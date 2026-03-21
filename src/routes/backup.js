@@ -73,18 +73,20 @@ async function buildBackup(includeFiles = false) {
   // Settings
   backup.data.settings = (await AppSettings.findAll()).map(s => s.toJSON());
 
-  // Users (without password hashes)
-  backup.data.users = (await User.findAll({
-    attributes: ['id', 'username', 'role', 'isActive', 'createdAt', 'updatedAt']
-  })).map(u => u.toJSON());
+  // Users (including password hashes for restore)
+  backup.data.users = (await User.findAll()).map(u => u.toJSON());
 
-  // API Keys (metadata only - no key values)
-  backup.data.apiKeys = (await ApiKey.findAll({
-    attributes: ['id', 'name', 'clientName', 'isActive', 'lastUsedAt', 'createdAt']
-  })).map(k => k.toJSON());
+  // API Keys (full data for restore)
+  backup.data.apiKeys = (await ApiKey.findAll()).map(k => k.toJSON());
 
   // Email logs (last 500)
   backup.data.emailLogs = (await EmailLog.findAll({ order: [['createdAt', 'DESC']], limit: 500 })).map(e => e.toJSON());
+
+  // Business data
+  const { Liability, Employee, PayrollWeek, PayrollEntry } = require('../models');
+  backup.data.liabilities = (await Liability.findAll()).map(l => l.toJSON());
+  backup.data.employees = (await Employee.findAll()).map(e => e.toJSON());
+  backup.data.payrollWeeks = (await PayrollWeek.findAll({ include: [{ model: PayrollEntry, as: 'entries' }] })).map(p => p.toJSON());
 
   // Counts
   backup.counts = {};
@@ -316,7 +318,25 @@ async function runAutoBackup(includeFiles = false) {
     console.log(`[auto-backup] Database backup uploaded: ${(uploadResult.size / 1024).toFixed(0)}KB compressed in ${duration}s`);
     console.log(`[auto-backup] Counts:`, JSON.stringify(dbBackup.counts));
 
-    // Save last backup info to settings
+    // Save to backup history (keep last 10 entries)
+    let history = [];
+    try {
+      const histSetting = await AppSettings.findOne({ where: { key: 'backup_history' } });
+      if (histSetting && histSetting.value) {
+        history = typeof histSetting.value === 'string' ? JSON.parse(histSetting.value) : histSetting.value;
+        if (!Array.isArray(history)) history = [];
+      }
+    } catch {}
+    history.unshift({
+      ...uploadResult,
+      counts: dbBackup.counts,
+      duration: `${duration}s`,
+      createdAt: new Date().toISOString()
+    });
+    history = history.slice(0, 10); // keep last 10
+    await AppSettings.upsert({ key: 'backup_history', value: JSON.stringify(history) });
+
+    // Also save last backup info (legacy)
     await AppSettings.upsert({
       key: 'last_auto_backup',
       value: JSON.stringify({
@@ -334,8 +354,8 @@ async function runAutoBackup(includeFiles = false) {
         .max_results(50)
         .execute();
       
-      if (searchResult.resources && searchResult.resources.length > 10) {
-        const toDelete = searchResult.resources.slice(10);
+      if (searchResult.resources && searchResult.resources.length > 8) {
+        const toDelete = searchResult.resources.slice(8);
         for (const old of toDelete) {
           await cloudinary.uploader.destroy(old.public_id, { resource_type: 'raw' });
           console.log(`[auto-backup] Deleted old backup: ${old.public_id}`);
@@ -385,6 +405,15 @@ router.get('/info', async (req, res, next) => {
       }
     } catch (e) { /* ignore */ }
 
+    let backupHistory = [];
+    try {
+      const histSetting = await AppSettings.findOne({ where: { key: 'backup_history' } });
+      if (histSetting && histSetting.value) {
+        backupHistory = typeof histSetting.value === 'string' ? JSON.parse(histSetting.value) : histSetting.value;
+        if (!Array.isArray(backupHistory)) backupHistory = [];
+      }
+    } catch {}
+
     let cloudBackups = [];
     try {
       const searchResult = await cloudinary.search
@@ -409,6 +438,7 @@ router.get('/info', async (req, res, next) => {
           estimates: estimateCount, settings: settingsCount, users: userCount },
         storageProvider: getProvider(),
         lastAutoBackup,
+        backupHistory,
         cloudBackups
       }
     });
@@ -793,6 +823,25 @@ router.post('/restore', async (req, res, next) => {
           results.settings.restored++;
         } catch (e) { results.settings.skipped++; }
       }
+    }
+
+    // Business data
+    const { Liability, Employee, PayrollWeek, PayrollEntry } = require('../models');
+    await restoreSimple(Liability, backup.data.liabilities, 'liabilities');
+    await restoreSimple(Employee, backup.data.employees, 'employees');
+    if (backup.data.payrollWeeks) {
+      results.payrollWeeks = { restored: 0, skipped: 0, errors: [] };
+      for (const pw of backup.data.payrollWeeks) {
+        try {
+          const { entries, ...week } = pw;
+          await rawUpsert(PayrollWeek, week);
+          if (entries) for (const e of entries) { try { await rawUpsert(PayrollEntry, { ...e, payrollWeekId: week.id }); } catch {} }
+          results.payrollWeeks.restored++;
+        } catch (e) {
+          results.payrollWeeks.skipped++;
+        }
+      }
+      console.log(`[restore] payrollWeeks: ${results.payrollWeeks.restored} restored, ${results.payrollWeeks.skipped} skipped`);
     }
 
     // ===== SECOND PASS: Apply deferred FK updates =====

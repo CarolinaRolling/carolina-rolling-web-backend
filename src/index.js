@@ -131,6 +131,8 @@ app.use('/api/inbound', authenticate, inboundRoutes);
 app.use('/api/workorders', authenticate, workordersRoutes);
 app.use('/api/estimates', authenticate, estimatesRoutes);
 app.use('/api/backup', authenticate, backupRoutes);
+const businessRoutes = require('./routes/business');
+app.use('/api/business', authenticate, businessRoutes);
 app.use('/api/dr-numbers', authenticate, drNumbersRoutes);
 app.use('/api/po-numbers', authenticate, poNumbersRoutes);
 app.use('/api/email', authenticate, emailRoutes);
@@ -866,11 +868,10 @@ async function startServer() {
     });
     console.log('Annual CDTFA permit verification configured for January 2nd at 3:00 AM Pacific');
 
-    // Auto-backup to Cloudinary every Friday at midnight Pacific
-    // NOTE: Files NOT included — they're already on Cloudinary. Use manual download for full file backup.
+    // Auto-backup to Cloudinary every Saturday at 11 PM Pacific
     const { runAutoBackup } = require('./routes/backup');
-    cron.schedule('0 0 * * 5', async () => {
-      console.log('[CRON] Running scheduled Friday auto-backup (database only)...');
+    cron.schedule('0 23 * * 6', async () => {
+      console.log('[CRON] Running scheduled Saturday night auto-backup...');
       try {
         const result = await runAutoBackup(false);
         if (result.success) {
@@ -884,7 +885,7 @@ async function startServer() {
     }, {
       timezone: 'America/Los_Angeles'
     });
-    console.log('Auto-backup configured for every Friday at midnight Pacific (database only — files already on Cloudinary)');
+    console.log('Auto-backup configured for every Saturday at 11 PM Pacific');
 
     // Auto-archive old estimates daily at 1:00 AM Pacific
     cron.schedule('0 1 * * *', async () => {

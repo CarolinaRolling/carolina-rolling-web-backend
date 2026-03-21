@@ -693,6 +693,11 @@ router.post('/restore', async (req, res, next) => {
 
     try {
 
+    // Users & API keys first
+    const { User, ApiKey } = require('../models');
+    await restoreSimple(User, backup.data.users, 'users');
+    await restoreSimple(ApiKey, backup.data.apiKeys, 'apiKeys');
+
     // Clients & Vendors first (referenced by other tables)
     await restoreSimple(Client, backup.data.clients, 'clients');
     await restoreSimple(Vendor, backup.data.vendors, 'vendors');

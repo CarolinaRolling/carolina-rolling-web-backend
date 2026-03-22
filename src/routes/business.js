@@ -1,7 +1,82 @@
 const express = require('express');
 const router = express.Router();
 const { Op } = require('sequelize');
-const { Liability, Employee, PayrollWeek, PayrollEntry, BusinessEvent } = require('../models');
+const { Liability, Employee, PayrollWeek, PayrollEntry, WorkOrder } = require('../models');
+
+// ============= PAYMENTS =============
+
+// GET /api/business/payments/outstanding - Invoiced but unpaid WOs
+router.get('/payments/outstanding', async (req, res, next) => {
+  try {
+    const wos = await WorkOrder.findAll({
+      where: {
+        invoiceNumber: { [Op.ne]: null },
+        paymentDate: null,
+        isVoided: { [Op.or]: [null, false] }
+      },
+      attributes: ['id', 'orderNumber', 'drNumber', 'clientName', 'invoiceNumber', 'invoiceDate', 'grandTotal', 'clientPurchaseOrderNumber', 'createdAt'],
+      order: [['invoiceDate', 'ASC']]
+    });
+    
+    // Calculate aging
+    const now = new Date();
+    const data = wos.map(wo => {
+      const inv = wo.invoiceDate ? new Date(wo.invoiceDate) : new Date(wo.createdAt);
+      const daysOut = Math.floor((now - inv) / 86400000);
+      return { ...wo.toJSON(), daysOutstanding: daysOut };
+    });
+    
+    const totalOutstanding = data.reduce((s, w) => s + (parseFloat(w.grandTotal) || 0), 0);
+    const over30 = data.filter(w => w.daysOutstanding > 30);
+    const over60 = data.filter(w => w.daysOutstanding > 60);
+    const over90 = data.filter(w => w.daysOutstanding > 90);
+    
+    res.json({ data: { invoices: data, totalOutstanding, count: data.length, over30: over30.length, over60: over60.length, over90: over90.length } });
+  } catch (error) { next(error); }
+});
+
+// GET /api/business/payments/history - Paid WOs
+router.get('/payments/history', async (req, res, next) => {
+  try {
+    const { limit = 100 } = req.query;
+    const wos = await WorkOrder.findAll({
+      where: {
+        paymentDate: { [Op.ne]: null },
+        isVoided: { [Op.or]: [null, false] }
+      },
+      attributes: ['id', 'orderNumber', 'drNumber', 'clientName', 'invoiceNumber', 'invoiceDate', 'grandTotal', 'paymentDate', 'paymentMethod', 'paymentReference', 'paymentRecordedBy', 'clientPurchaseOrderNumber'],
+      order: [['paymentDate', 'DESC']],
+      limit: parseInt(limit)
+    });
+    const totalReceived = wos.reduce((s, w) => s + (parseFloat(w.grandTotal) || 0), 0);
+    res.json({ data: { payments: wos, totalReceived, count: wos.length } });
+  } catch (error) { next(error); }
+});
+
+// POST /api/business/payments/:woId/record - Record payment on a WO
+router.post('/payments/:woId/record', async (req, res, next) => {
+  try {
+    const wo = await WorkOrder.findByPk(req.params.woId);
+    if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
+    await wo.update({
+      paymentDate: req.body.paymentDate || new Date(),
+      paymentMethod: req.body.paymentMethod || '',
+      paymentReference: req.body.paymentReference || '',
+      paymentRecordedBy: req.body.recordedBy || 'admin'
+    });
+    res.json({ data: wo, message: `Payment recorded for ${wo.invoiceNumber}` });
+  } catch (error) { next(error); }
+});
+
+// POST /api/business/payments/:woId/clear - Clear payment (undo)
+router.post('/payments/:woId/clear', async (req, res, next) => {
+  try {
+    const wo = await WorkOrder.findByPk(req.params.woId);
+    if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
+    await wo.update({ paymentDate: null, paymentMethod: null, paymentReference: null, paymentRecordedBy: null });
+    res.json({ data: wo, message: 'Payment cleared' });
+  } catch (error) { next(error); }
+});
 
 // ============= LIABILITIES =============
 
@@ -236,6 +311,17 @@ router.put('/payroll/:id/entries/:entryId', async (req, res, next) => {
     await PayrollWeek.update({ totalGross }, { where: { id: req.params.id } });
 
     res.json({ data: entry, message: 'Updated' });
+  } catch (error) { next(error); }
+});
+
+// PUT /api/business/payroll/:id - Update payroll week (dates, notes)
+router.put('/payroll/:id', async (req, res, next) => {
+  try {
+    const payroll = await PayrollWeek.findByPk(req.params.id);
+    if (!payroll) return res.status(404).json({ error: { message: 'Not found' } });
+    await payroll.update(req.body);
+    const full = await PayrollWeek.findByPk(payroll.id, { include: [{ model: PayrollEntry, as: 'entries' }] });
+    res.json({ data: full, message: 'Updated' });
   } catch (error) { next(error); }
 });
 

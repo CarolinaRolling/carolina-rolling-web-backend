@@ -440,4 +440,71 @@ router.delete('/calendar/:id', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// ============= VENDOR HISTORY =============
+
+// GET /api/business/vendor-history/:vendorId
+router.get('/vendor-history/:vendorId', async (req, res, next) => {
+  try {
+    const { Vendor, PONumber, InboundOrder, WorkOrderPart, WorkOrder, sequelize } = require('../models');
+    const { Op } = require('sequelize');
+    const vendorId = req.params.vendorId;
+    
+    const vendor = await Vendor.findByPk(vendorId);
+    if (!vendor) return res.status(404).json({ error: { message: 'Vendor not found' } });
+
+    // PO Numbers for this vendor
+    const poNumbers = await PONumber.findAll({
+      where: { vendorId },
+      order: [['poNumber', 'DESC']]
+    });
+
+    // Work order parts supplied by this vendor
+    const woParts = await WorkOrderPart.findAll({
+      where: { vendorId },
+      attributes: ['id', 'partNumber', 'materialDescription', 'materialTotal', 'materialPurchaseOrderNumber', 'workOrderId', 'quantity'],
+      order: [['createdAt', 'DESC']]
+    });
+
+    // Get unique WO ids and load them
+    const woIds = [...new Set(woParts.map(p => p.workOrderId).filter(Boolean))];
+    const workOrders = woIds.length > 0 ? await WorkOrder.findAll({
+      where: { id: woIds },
+      attributes: ['id', 'orderNumber', 'drNumber', 'clientName', 'status', 'grandTotal', 'invoiceNumber', 'paymentDate', 'createdAt']
+    }) : [];
+    const woMap = {};
+    workOrders.forEach(wo => { woMap[wo.id] = wo.toJSON(); });
+
+    // Enrich parts with WO info
+    const enrichedParts = woParts.map(p => ({
+      ...p.toJSON(),
+      workOrder: woMap[p.workOrderId] || null
+    }));
+
+    // Liabilities linked to this vendor
+    const liabilities = await Liability.findAll({
+      where: { vendor: { [Op.iLike]: `%${vendor.name}%` } },
+      order: [['dueDate', 'DESC']],
+      limit: 50
+    });
+
+    // Inbound orders from this vendor
+    const inboundOrders = await InboundOrder.findAll({
+      where: { vendorId },
+      order: [['createdAt', 'DESC']],
+      limit: 50
+    });
+
+    res.json({
+      data: {
+        poNumbers: poNumbers.map(p => p.toJSON()),
+        parts: enrichedParts,
+        workOrders: workOrders.map(w => w.toJSON()),
+        liabilities: liabilities.map(l => l.toJSON()),
+        inboundOrders: inboundOrders.map(o => o.toJSON()),
+        totalMaterialValue: enrichedParts.reduce((s, p) => s + (parseFloat(p.materialTotal) || 0) * (parseInt(p.quantity) || 1), 0)
+      }
+    });
+  } catch (error) { next(error); }
+});
+
 module.exports = router;

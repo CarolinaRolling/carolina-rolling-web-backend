@@ -403,6 +403,48 @@ async function startServer() {
       const count = results?.rowCount || results?.length || 0;
       if (count > 0) console.log(`Migrated ${count} work orders from picked_up to shipped`);
     } catch (e) { /* ignore */ }
+
+    // Backfill vendorId on POs and InboundOrders that only have supplier name
+    try {
+      const [poFixed] = await sequelize.query(`
+        UPDATE po_numbers SET "vendorId" = v.id 
+        FROM vendors v 
+        WHERE po_numbers."vendorId" IS NULL 
+        AND po_numbers.supplier IS NOT NULL 
+        AND LOWER(po_numbers.supplier) = LOWER(v.name)
+      `);
+      const [ioFixed] = await sequelize.query(`
+        UPDATE inbound_orders SET "vendorId" = v.id 
+        FROM vendors v 
+        WHERE inbound_orders."vendorId" IS NULL 
+        AND (
+          (inbound_orders."supplierName" IS NOT NULL AND LOWER(inbound_orders."supplierName") = LOWER(v.name))
+          OR (inbound_orders.supplier IS NOT NULL AND LOWER(inbound_orders.supplier) = LOWER(v.name))
+        )
+      `);
+      const poCount = poFixed?.rowCount || 0;
+      const ioCount = ioFixed?.rowCount || 0;
+      if (poCount > 0 || ioCount > 0) console.log(`Backfilled vendorId: ${poCount} POs, ${ioCount} inbound orders`);
+    } catch (e) { console.log('VendorId backfill skipped:', e.message); }
+
+    // Backfill clientId on WOs, Estimates, etc. that only have clientName
+    try {
+      const tables = ['work_orders', 'estimates', 'po_numbers', 'inbound_orders', 'dr_numbers'];
+      let totalFixed = 0;
+      for (const tbl of tables) {
+        try {
+          const [fixed] = await sequelize.query(`
+            UPDATE "${tbl}" SET "clientId" = c.id 
+            FROM clients c 
+            WHERE "${tbl}"."clientId" IS NULL 
+            AND "${tbl}"."clientName" IS NOT NULL 
+            AND LOWER("${tbl}"."clientName") = LOWER(c.name)
+          `);
+          totalFixed += fixed?.rowCount || 0;
+        } catch {}
+      }
+      if (totalFixed > 0) console.log(`Backfilled clientId: ${totalFixed} records across tables`);
+    } catch (e) { console.log('ClientId backfill skipped:', e.message); }
     
     // Ensure critical columns exist (sync may fail silently with enum conflicts)
     try {

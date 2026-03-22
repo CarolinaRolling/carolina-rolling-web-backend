@@ -1408,6 +1408,7 @@ router.post('/:id/order-material', async (req, res, next) => {
       }, 0);
 
       // Create PONumber record
+      const vendorId = parts[0]?.vendorId || null;
       try {
         const existingPO = await PONumber.findOne({ where: { poNumber: poNumber }, transaction });
         if (!existingPO) {
@@ -1415,6 +1416,7 @@ router.post('/:id/order-material', async (req, res, next) => {
             poNumber: poNumber,
             status: 'active',
             supplier: supplier,
+            vendorId: vendorId,
             estimateId: estimate.id,
             clientName: estimate.clientName,
             description: materialDescriptions
@@ -1428,6 +1430,8 @@ router.post('/:id/order-material', async (req, res, next) => {
       const inboundOrder = await InboundOrder.create({
         purchaseOrderNumber: poNumberFormatted,
         supplier: supplier,
+        supplierName: supplier,
+        vendorId: vendorId,
         description: materialDescriptions,
         clientName: estimate.clientName,
         estimateId: estimate.id,

@@ -502,7 +502,7 @@ async function archiveLinkedShipments(workOrderId) {
 // GET /api/workorders - Get all work orders
 router.get('/', async (req, res, next) => {
   try {
-    const { status, clientName, archived, drNumber, search, limit = 50, offset = 0, view } = req.query;
+    const { status, clientName, clientId, archived, drNumber, search, limit = 50, offset = 0, view } = req.query;
     
     const where = {};
     
@@ -534,7 +534,8 @@ router.get('/', async (req, res, next) => {
       where.status = { [Op.notIn]: ['archived', 'shipped'] };
     }
     
-    if (clientName) where.clientName = { [Op.iLike]: `%${clientName}%` };
+    if (clientId) where.clientId = clientId;
+    else if (clientName) where.clientName = { [Op.iLike]: `%${clientName}%` };
     if (drNumber) where.drNumber = parseInt(drNumber);
     }
 
@@ -2607,10 +2608,11 @@ router.post('/:id/archive', async (req, res, next) => {
 // GET /api/workorders/archived - Get archived/shipped work orders
 router.get('/archived', async (req, res, next) => {
   try {
-    const { clientName, drNumber, limit = 50, offset = 0 } = req.query;
+    const { clientName, clientId, drNumber, limit = 50, offset = 0 } = req.query;
     
     const where = { status: { [Op.in]: ['archived', 'shipped'] } };
-    if (clientName) where.clientName = { [Op.iLike]: `%${clientName}%` };
+    if (clientId) where.clientId = clientId;
+    else if (clientName) where.clientName = { [Op.iLike]: `%${clientName}%` };
     if (drNumber) where.drNumber = parseInt(drNumber);
 
     const workOrders = await WorkOrder.findAndCountAll({

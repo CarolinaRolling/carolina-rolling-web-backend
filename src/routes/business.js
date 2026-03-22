@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { Op } = require('sequelize');
-const { Liability, Employee, PayrollWeek, PayrollEntry, WorkOrder } = require('../models');
+const { Liability, Employee, PayrollWeek, PayrollEntry, WorkOrder, WorkOrderPart, Vendor, PONumber, InboundOrder, sequelize } = require('../models');
 
 // ============= PAYMENTS =============
 
@@ -445,22 +445,30 @@ router.delete('/calendar/:id', async (req, res, next) => {
 // GET /api/business/vendor-history/:vendorId
 router.get('/vendor-history/:vendorId', async (req, res, next) => {
   try {
-    const { Vendor, PONumber, InboundOrder, WorkOrderPart, WorkOrder, sequelize } = require('../models');
-    const { Op } = require('sequelize');
     const vendorId = req.params.vendorId;
     
     const vendor = await Vendor.findByPk(vendorId);
     if (!vendor) return res.status(404).json({ error: { message: 'Vendor not found' } });
 
-    // PO Numbers for this vendor
+    // PO Numbers for this vendor (by vendorId or supplier name)
     const poNumbers = await PONumber.findAll({
-      where: { vendorId },
+      where: {
+        [Op.or]: [
+          { vendorId },
+          { supplier: { [Op.iLike]: `%${vendor.name}%` } }
+        ]
+      },
       order: [['poNumber', 'DESC']]
     });
 
-    // Work order parts supplied by this vendor
+    // Work order parts supplied by this vendor (by vendorId or supplierName)
     const woParts = await WorkOrderPart.findAll({
-      where: { vendorId },
+      where: {
+        [Op.or]: [
+          { vendorId },
+          { supplierName: { [Op.iLike]: `%${vendor.name}%` } }
+        ]
+      },
       attributes: ['id', 'partNumber', 'materialDescription', 'materialTotal', 'materialPurchaseOrderNumber', 'workOrderId', 'quantity'],
       order: [['createdAt', 'DESC']]
     });
@@ -489,7 +497,13 @@ router.get('/vendor-history/:vendorId', async (req, res, next) => {
 
     // Inbound orders from this vendor
     const inboundOrders = await InboundOrder.findAll({
-      where: { vendorId },
+      where: {
+        [Op.or]: [
+          { vendorId },
+          { supplierName: { [Op.iLike]: `%${vendor.name}%` } },
+          { supplier: { [Op.iLike]: `%${vendor.name}%` } }
+        ]
+      },
       order: [['createdAt', 'DESC']],
       limit: 50
     });

@@ -938,6 +938,19 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
     type: DataTypes.DATE,
     allowNull: true
   },
+  // RFQ contact tracking
+  rfqContactName: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  rfqContactEmail: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  rfqSentAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
   // JSONB to persist form display data (rolling descriptions, specs, etc.)
   formData: {
     type: DataTypes.JSONB,
@@ -1561,6 +1574,19 @@ const EstimatePart = sequelize.define('EstimatePart', {
     type: DataTypes.DATE,
     allowNull: true
   },
+  // RFQ contact tracking
+  rfqContactName: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  rfqContactEmail: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  rfqSentAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
   // JSONB column to persist form-specific state (underscore-prefixed fields)
   formData: {
     type: DataTypes.JSONB,
@@ -2007,7 +2033,19 @@ const Client = sequelize.define('Client', {
     type: DataTypes.JSONB,
     defaultValue: [],
     allowNull: true
-    // Array of { name, phone, email, isPrimary }
+    // Array of { name, phone, email, role }
+  },
+  accountingContactName: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  accountingContactEmail: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  accountingContactPhone: {
+    type: DataTypes.STRING,
+    allowNull: true
   },
   requiresPartLabels: {
     type: DataTypes.BOOLEAN,
@@ -2332,7 +2370,19 @@ const Vendor = sequelize.define('Vendor', {
     type: DataTypes.JSONB,
     defaultValue: [],
     allowNull: true
-    // Array of { name, phone, email, isPrimary }
+    // Array of { name, phone, email, role }
+  },
+  accountingContactName: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  accountingContactEmail: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  accountingContactPhone: {
+    type: DataTypes.STRING,
+    allowNull: true
   },
   emailScanEnabled: {
     type: DataTypes.BOOLEAN,

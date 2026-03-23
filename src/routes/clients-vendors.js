@@ -210,7 +210,11 @@ router.put('/clients/:id', async (req, res, next) => {
       quickbooksName: req.body.quickbooksName !== undefined ? (req.body.quickbooksName || null) : client.quickbooksName,
       emailScanEnabled: req.body.emailScanEnabled !== undefined ? req.body.emailScanEnabled : client.emailScanEnabled,
       emailScanAddresses: req.body.emailScanAddresses !== undefined ? req.body.emailScanAddresses : client.emailScanAddresses,
-      emailScanParsingNotes: req.body.emailScanParsingNotes !== undefined ? (req.body.emailScanParsingNotes || null) : client.emailScanParsingNotes
+      emailScanParsingNotes: req.body.emailScanParsingNotes !== undefined ? (req.body.emailScanParsingNotes || null) : client.emailScanParsingNotes,
+      accountingContactName: req.body.accountingContactName !== undefined ? (req.body.accountingContactName || null) : client.accountingContactName,
+      accountingContactEmail: req.body.accountingContactEmail !== undefined ? (req.body.accountingContactEmail || null) : client.accountingContactEmail,
+      accountingContactPhone: req.body.accountingContactPhone !== undefined ? (req.body.accountingContactPhone || null) : client.accountingContactPhone,
+      apEmail: req.body.apEmail !== undefined ? (req.body.apEmail || null) : client.apEmail
     });
     
     // Propagate name change to all work orders and estimates
@@ -410,6 +414,9 @@ router.put('/vendors/:id', async (req, res, next) => {
       notes: notes !== undefined ? notes : vendor.notes,
       isActive: isActive !== undefined ? isActive : vendor.isActive,
       contacts: req.body.contacts !== undefined ? req.body.contacts : vendor.contacts,
+      accountingContactName: req.body.accountingContactName !== undefined ? (req.body.accountingContactName || null) : vendor.accountingContactName,
+      accountingContactEmail: req.body.accountingContactEmail !== undefined ? (req.body.accountingContactEmail || null) : vendor.accountingContactEmail,
+      accountingContactPhone: req.body.accountingContactPhone !== undefined ? (req.body.accountingContactPhone || null) : vendor.accountingContactPhone,
       emailScanEnabled: req.body.emailScanEnabled !== undefined ? req.body.emailScanEnabled : vendor.emailScanEnabled,
       emailScanAddresses: req.body.emailScanAddresses !== undefined ? req.body.emailScanAddresses : vendor.emailScanAddresses
     });

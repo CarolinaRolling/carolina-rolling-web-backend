@@ -757,6 +757,14 @@ router.post('/vendor-rfq/:estimateId', async (req, res, next) => {
       rfqSentAt: new Date()
     });
 
+    // Save which contact the RFQ was sent to on the affected parts
+    const contactName = req.body.contactName || vendor.contactName || '';
+    for (const p of partsToQuote) {
+      try {
+        await p.update({ rfqContactName: contactName, rfqContactEmail: toEmail, rfqSentAt: new Date() });
+      } catch {}
+    }
+
     const draftUrl = `https://mail.google.com/mail/?authuser=${encodeURIComponent(gmailAccount.email)}#inbox/${draftMsgId}`;
 
     console.log(`[VendorRFQ] Draft created for ${estimate.estimateNumber} → ${toEmail}, thread=${threadId}`);
@@ -780,15 +788,19 @@ router.get('/vendor-contacts/:vendorId', async (req, res, next) => {
     const contacts = [];
     // Add primary contact
     if (vendor.contactEmail) {
-      contacts.push({ name: vendor.contactName || vendor.name, email: vendor.contactEmail, isPrimary: true });
+      contacts.push({ name: vendor.contactName || vendor.name, email: vendor.contactEmail, phone: vendor.contactPhone || '', role: 'Primary', isPrimary: true });
     }
     // Add additional contacts from contacts array
     if (vendor.contacts && Array.isArray(vendor.contacts)) {
       for (const c of vendor.contacts) {
         if (c.email && !contacts.find(x => x.email === c.email)) {
-          contacts.push({ name: c.name || '', email: c.email, isPrimary: c.isPrimary || false });
+          contacts.push({ name: c.name || '', email: c.email, phone: c.phone || '', role: c.role || '', isPrimary: false });
         }
       }
+    }
+    // Add accounting contact
+    if (vendor.accountingContactEmail && !contacts.find(x => x.email === vendor.accountingContactEmail)) {
+      contacts.push({ name: vendor.accountingContactName || 'Accounting', email: vendor.accountingContactEmail, phone: vendor.accountingContactPhone || '', role: 'Accounting', isPrimary: false });
     }
     res.json({ data: contacts });
   } catch (error) { next(error); }

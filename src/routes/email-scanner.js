@@ -456,8 +456,31 @@ router.delete('/history/:id', async (req, res, next) => {
   try {
     const email = await ScannedEmail.findByPk(req.params.id);
     if (!email) return res.status(404).json({ error: { message: 'Not found' } });
+    
+    // Remove cr-processed label from Gmail so rescan can pick it up
+    if (email.gmailMessageId && email.gmailAccountId) {
+      try {
+        const account = await GmailAccount.findByPk(email.gmailAccountId);
+        if (account && account.isActive) {
+          const { getGmailClient } = require('../services/emailScanner');
+          const gmail = await getGmailClient(account);
+          const labelsRes = await gmail.users.labels.list({ userId: 'me' });
+          const label = labelsRes.data.labels.find(l => l.name === 'cr-processed');
+          if (label) {
+            await gmail.users.messages.modify({
+              userId: 'me', id: email.gmailMessageId,
+              requestBody: { removeLabelIds: [label.id] }
+            });
+            console.log(`[EmailScanner] Removed cr-processed label from ${email.gmailMessageId}`);
+          }
+        }
+      } catch (labelErr) {
+        console.warn('[EmailScanner] Could not remove Gmail label:', labelErr.message);
+      }
+    }
+    
     await email.destroy();
-    res.json({ message: 'Deleted' });
+    res.json({ message: 'Deleted — email will be picked up on next scan' });
   } catch (error) { next(error); }
 });
 

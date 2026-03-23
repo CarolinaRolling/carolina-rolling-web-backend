@@ -1,7 +1,20 @@
 const express = require('express');
 const router = express.Router();
 const { Op } = require('sequelize');
+const multer = require('multer');
+const path = require('path');
 const { Liability, Employee, PayrollWeek, PayrollEntry, WorkOrder, WorkOrderPart, Vendor, PONumber, InboundOrder, sequelize } = require('../models');
+const fileStorage = require('../utils/storage');
+
+// Multer config for bill attachments
+const billUpload = multer({
+  dest: path.join(__dirname, '../../uploads/'),
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'application/pdf' || file.mimetype.startsWith('image/')) cb(null, true);
+    else cb(new Error('Only PDF and images allowed'));
+  }
+}).single('file');
 
 // ============= PAYMENTS =============
 
@@ -153,8 +166,73 @@ router.delete('/liabilities/:id', async (req, res, next) => {
   try {
     const liability = await Liability.findByPk(req.params.id);
     if (!liability) return res.status(404).json({ error: { message: 'Not found' } });
+    // Clean up file if exists
+    if (liability.invoiceFileCloudinaryId) {
+      try { await fileStorage.deleteFile(liability.invoiceFileCloudinaryId); } catch {}
+    }
     await liability.destroy();
     res.json({ message: 'Deleted' });
+  } catch (error) { next(error); }
+});
+
+// POST /api/business/liabilities/:id/upload - Upload invoice file
+router.post('/liabilities/:id/upload', (req, res, next) => {
+  billUpload(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: { message: err.message } });
+    try {
+      const liability = await Liability.findByPk(req.params.id);
+      if (!liability) return res.status(404).json({ error: { message: 'Not found' } });
+      if (!req.file) return res.status(400).json({ error: { message: 'No file' } });
+
+      // Delete old file
+      if (liability.invoiceFileCloudinaryId) {
+        try { await fileStorage.deleteFile(liability.invoiceFileCloudinaryId); } catch {}
+      }
+
+      const result = await fileStorage.uploadFile(req.file.path, {
+        folder: 'bill-invoices',
+        resource_type: 'raw',
+        public_id: `bill-${liability.id}-${Date.now()}`
+      });
+
+      await liability.update({
+        invoiceFileUrl: result.url,
+        invoiceFileCloudinaryId: result.storageId
+      });
+
+      // Clean up temp file
+      try { require('fs').unlinkSync(req.file.path); } catch {}
+
+      res.json({ data: liability, message: 'Invoice uploaded' });
+    } catch (error) { next(error); }
+  });
+});
+
+// POST /api/business/liabilities/:id/approve - Approve pending bill
+router.post('/liabilities/:id/approve', async (req, res, next) => {
+  try {
+    const liability = await Liability.findByPk(req.params.id);
+    if (!liability) return res.status(404).json({ error: { message: 'Not found' } });
+    // Apply any corrections from the request body
+    const updates = { status: 'unpaid' };
+    ['name', 'amount', 'dueDate', 'vendor', 'category', 'poNumber', 'vendorInvoiceNumber', 'notes'].forEach(f => {
+      if (req.body[f] !== undefined) updates[f] = req.body[f];
+    });
+    await liability.update(updates);
+    res.json({ data: liability, message: 'Bill approved' });
+  } catch (error) { next(error); }
+});
+
+// POST /api/business/liabilities/:id/reject - Reject pending bill
+router.post('/liabilities/:id/reject', async (req, res, next) => {
+  try {
+    const liability = await Liability.findByPk(req.params.id);
+    if (!liability) return res.status(404).json({ error: { message: 'Not found' } });
+    if (liability.invoiceFileCloudinaryId) {
+      try { await fileStorage.deleteFile(liability.invoiceFileCloudinaryId); } catch {}
+    }
+    await liability.destroy();
+    res.json({ message: 'Bill rejected and deleted' });
   } catch (error) { next(error); }
 });
 
@@ -183,7 +261,9 @@ router.get('/liabilities/summary', async (req, res, next) => {
       byCategory[l.category] += parseFloat(l.amount) || 0;
     });
 
-    res.json({ data: { totalUnpaid, totalOverdue, totalDueThisWeek, overdueCount: overdue.length, dueThisWeekCount: dueThisWeek.length, byCategory } });
+    const pendingReview = await Liability.count({ where: { status: 'pending_review' } });
+
+    res.json({ data: { totalUnpaid, totalOverdue, totalDueThisWeek, overdueCount: overdue.length, dueThisWeekCount: dueThisWeek.length, byCategory, pendingReview } });
   } catch (error) { next(error); }
 });
 

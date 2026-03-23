@@ -1123,8 +1123,176 @@ async function _runScanInternal() {
           }
 
           if (vendorInfo && !clientInfo) {
-            // Vendor email that didn't match any RFQ thread — skip
-            console.log(`[EmailScanner] Skipping — vendor email from ${fromEmail} (${vendorInfo.vendorName}) but no matching RFQ thread`);
+            // Vendor email that didn't match any RFQ thread — check for invoice
+            const invoiceKeywords = /invoice|payment\s*due|remittance|amount\s*due|net\s*\d+|statement|billing|past\s*due|balance\s*due/i;
+            const looksLikeInvoice = invoiceKeywords.test(subject) || invoiceKeywords.test(bodyText.substring(0, 1000));
+            
+            // Check for PDF attachment
+            let pdfAttachment = null;
+            const checkParts = (parts) => {
+              if (!parts) return;
+              for (const part of parts) {
+                if (part.mimeType === 'application/pdf' || (part.filename && part.filename.match(/\.pdf$/i))) {
+                  pdfAttachment = part;
+                  return;
+                }
+                if (part.parts) checkParts(part.parts);
+              }
+            };
+            checkParts(fullMsg.data.payload?.parts);
+
+            if (looksLikeInvoice || pdfAttachment) {
+              console.log(`[EmailScanner] Vendor invoice detected from ${vendorInfo.vendorName}: "${subject}" (pdf=${!!pdfAttachment})`);
+              
+              // Create scanned email record
+              const scannedEmail = await ScannedEmail.create({
+                gmailMessageId: msg.id,
+                gmailThreadId: fullMsg.data.threadId || null,
+                gmailAccountId: account.id,
+                fromEmail, fromName, subject,
+                receivedAt: date ? new Date(date) : new Date(),
+                emailType: 'vendor_invoice',
+                status: 'processed',
+                gmailLink,
+                rawBody: bodyText.substring(0, 10000)
+              });
+
+              // Download PDF if present
+              let pdfBuffer = null;
+              let pdfFilename = 'invoice.pdf';
+              if (pdfAttachment && pdfAttachment.body?.attachmentId) {
+                try {
+                  const attRes = await gmail.users.messages.attachments.get({
+                    userId: 'me', messageId: msg.id, id: pdfAttachment.body.attachmentId
+                  });
+                  pdfBuffer = Buffer.from(attRes.data.data, 'base64');
+                  pdfFilename = pdfAttachment.filename || 'invoice.pdf';
+                } catch (e) { console.warn('[EmailScanner] Failed to download PDF:', e.message); }
+              }
+
+              // AI parse the invoice (use email body + PDF text if available)
+              let invoiceData = null;
+              try {
+                const https = require('https');
+                const messages = [{ role: 'user', content: [] }];
+                
+                // Add PDF as document if available
+                if (pdfBuffer) {
+                  messages[0].content.push({
+                    type: 'document',
+                    source: { type: 'base64', media_type: 'application/pdf', data: pdfBuffer.toString('base64') }
+                  });
+                }
+                messages[0].content.push({
+                  type: 'text',
+                  text: `Vendor: ${vendorInfo.vendorName}\nEmail subject: ${subject}\n\nEmail body:\n${bodyText.substring(0, 3000)}\n\nExtract invoice details from this vendor email/document.`
+                });
+
+                const parseBody = JSON.stringify({
+                  model: 'claude-sonnet-4-20250514', max_tokens: 1000,
+                  system: `Extract invoice/bill information. Return ONLY valid JSON:\n{\n  "vendorInvoiceNumber": "vendor's invoice/reference number or null",\n  "poNumber": "our PO number referenced (PO followed by digits) or null",\n  "amount": 0.00,\n  "dueDate": "YYYY-MM-DD or null",\n  "description": "brief description of what the invoice is for",\n  "lineItems": [{"description": "item", "amount": 0.00}]\n}`,
+                  messages
+                });
+
+                const parseText = await new Promise((resolve, reject) => {
+                  const req = https.request({
+                    hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(parseBody) }
+                  }, (res) => {
+                    let data = '';
+                    res.on('data', chunk => data += chunk);
+                    res.on('end', () => {
+                      if (res.statusCode === 200) {
+                        try { resolve(JSON.parse(data).content?.[0]?.text || ''); } catch { resolve(''); }
+                      } else { console.error(`[EmailScanner] Invoice AI error: ${res.statusCode}`); resolve(''); }
+                    });
+                  });
+                  req.on('error', () => resolve(''));
+                  req.write(parseBody); req.end();
+                });
+
+                if (parseText.trim()) {
+                  const clean = parseText.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+                  invoiceData = JSON.parse(clean);
+                  console.log(`[EmailScanner] AI extracted: invoice=${invoiceData.vendorInvoiceNumber}, amount=${invoiceData.amount}, PO=${invoiceData.poNumber}`);
+                }
+              } catch (e) { console.error('[EmailScanner] Invoice AI parse error:', e.message); }
+
+              // Upload PDF to Cloudinary
+              let fileUrl = null, fileCloudinaryId = null;
+              if (pdfBuffer) {
+                try {
+                  const tmpPath = require('path').join(__dirname, `../../uploads/invoice-${Date.now()}.pdf`);
+                  require('fs').writeFileSync(tmpPath, pdfBuffer);
+                  const uploadResult = await fileStorage.uploadFile(tmpPath, {
+                    folder: 'bill-invoices', resource_type: 'raw',
+                    public_id: `vendor-invoice-${Date.now()}`
+                  });
+                  fileUrl = uploadResult.url;
+                  fileCloudinaryId = uploadResult.storageId;
+                  try { require('fs').unlinkSync(tmpPath); } catch {}
+                } catch (e) { console.warn('[EmailScanner] PDF upload failed:', e.message); }
+              }
+
+              // Try to match our PO
+              let linkedPOId = null;
+              if (invoiceData?.poNumber) {
+                const poNum = parseInt((invoiceData.poNumber + '').replace(/\D/g, ''));
+                if (poNum) {
+                  const po = await PONumber.findOne({ where: { poNumber: poNum } });
+                  if (po) linkedPOId = po.id;
+                }
+              }
+
+              // Create pending bill
+              const liability = await Liability.create({
+                name: invoiceData?.description || `Invoice from ${vendorInfo.vendorName}`,
+                category: 'materials',
+                amount: invoiceData?.amount || 0,
+                dueDate: invoiceData?.dueDate || null,
+                vendor: vendorInfo.vendorName,
+                vendorId: vendorInfo.vendorId || null,
+                vendorInvoiceNumber: invoiceData?.vendorInvoiceNumber || null,
+                poNumber: invoiceData?.poNumber || null,
+                linkedPOId,
+                status: 'pending_review',
+                invoiceFileUrl: fileUrl,
+                invoiceFileCloudinaryId: fileCloudinaryId,
+                createdBy: 'email_scanner',
+                scannedEmailId: scannedEmail.id,
+                lineItems: invoiceData?.lineItems || null,
+                notes: `Auto-detected from email: "${subject}"\n📧 ${gmailLink}`
+              });
+
+              await scannedEmail.update({ status: 'vendor_invoice', parsedData: invoiceData });
+
+              // Create todo
+              const { TodoItem, User } = require('../models');
+              const headEstimator = await User.findOne({ where: { isHeadEstimator: true, isActive: true } });
+              await TodoItem.create({
+                title: `📨 Vendor invoice: ${vendorInfo.vendorName} — $${(invoiceData?.amount || 0).toFixed(2)}`,
+                description: `Invoice ${invoiceData?.vendorInvoiceNumber || '(no number)'}${invoiceData?.poNumber ? ` for ${invoiceData.poNumber}` : ''}\n📧 ${gmailLink}`,
+                type: 'general', priority: 'high',
+                assignedTo: headEstimator?.username || null,
+                createdBy: 'Email Scanner'
+              });
+
+              // Label as processed
+              try {
+                let labelId;
+                const labelsRes = await gmail.users.labels.list({ userId: 'me' });
+                const existingLabel = labelsRes.data.labels.find(l => l.name === 'cr-processed');
+                if (existingLabel) { labelId = existingLabel.id; }
+                else { const created = await gmail.users.labels.create({ userId: 'me', requestBody: { name: 'cr-processed', labelListVisibility: 'labelShow', messageListVisibility: 'show' } }); labelId = created.data.id; }
+                await gmail.users.messages.modify({ userId: 'me', id: msg.id, requestBody: { addLabelIds: [labelId] } });
+              } catch {}
+
+              accountResult.processed++;
+              results.processed++;
+              continue;
+            }
+
+            console.log(`[EmailScanner] Skipping — vendor email from ${fromEmail} (${vendorInfo.vendorName}) — not an RFQ response or invoice`);
             continue;
           }
 

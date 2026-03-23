@@ -2748,6 +2748,47 @@ const Liability = sequelize.define('Liability', {
   referenceNumber: {
     type: DataTypes.STRING,
     allowNull: true
+  },
+  // Vendor invoice tracking
+  vendorInvoiceNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  poNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  linkedPOId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
+  vendorId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
+  // File attachment
+  invoiceFileUrl: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  invoiceFileCloudinaryId: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  // Source tracking
+  createdBy: {
+    type: DataTypes.STRING,
+    defaultValue: 'manual' // manual, email_scanner
+  },
+  scannedEmailId: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
+  // Line items from vendor invoice (AI extracted)
+  lineItems: {
+    type: DataTypes.JSONB,
+    defaultValue: null,
+    allowNull: true
   }
 }, {
   tableName: 'liabilities',

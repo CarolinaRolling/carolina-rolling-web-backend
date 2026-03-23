@@ -317,7 +317,24 @@ If the email does NOT contain any parts, material requests, or RFQ/PO content:
 - Set emailType to "general"
 - Set parts to an empty array []
 - Still extract any reference numbers, dates, and notes
-- This includes emails like: general inquiries, scheduling questions, status updates, thank you notes, delivery coordination, etc.`,
+- This includes emails like: general inquiries, scheduling questions, status updates, thank you notes, delivery coordination, etc.
+
+CRITICAL — FOLLOW-UP DETECTION:
+Many emails are FOLLOW-UPS to a previous quote or RFQ conversation, NOT new requests. Classify these as "general", NOT "rfq":
+- "Thank you" / "Thanks" / "Got it" / "Sounds good" / "We'll be in touch" → general
+- Questions about a quote already sent (pricing questions, lead time, delivery, availability) → general  
+- "When can you have this done?" / "What's the lead time?" → general
+- "Can you send the quote again?" / "I didn't receive the PDF" → general
+- "We're reviewing and will get back to you" / "Let me check with my team" → general
+- "Please hold off on this" / "We'll pass on this one" → general
+- Status updates about material or delivery → general
+- Replies that quote/forward the SAME parts from a previous email but add no NEW parts → general
+- If the email body is mostly quoted/forwarded text from a previous conversation with only a short new message → general
+- Short emails (under 50 words of NEW content, not counting quoted/forwarded text) that don't contain specific part dimensions → general
+
+Only classify as "rfq" if the email contains GENUINELY NEW part requests with specific dimensions, quantities, or material specifications that were NOT in a previous email in the thread.
+
+Add a "summary" field in your response: a 1-2 sentence plain-English summary of what the email is about (for all email types).`,
       messages: [
         { role: 'user', content: `Email from: ${clientName}\nSubject: ${subject}\n\n${emailBody}` }
       ]
@@ -1133,7 +1150,81 @@ async function _runScanInternal() {
             rawBody: bodyText.substring(0, 10000) // Cap at 10k chars
           });
 
-          // Parse with AI
+          // THREAD DEDUP: Check if this Gmail thread already created an estimate
+          // If so, this is a follow-up — skip AI parsing entirely, just create a todo
+          const thisThreadId = fullMsg.data.threadId;
+          if (thisThreadId) {
+            const prevInThread = await ScannedEmail.findOne({
+              where: { 
+                gmailThreadId: thisThreadId,
+                status: { [Op.in]: ['estimate_created', 'pending_order'] },
+                id: { [Op.ne]: scannedEmail.id }
+              }
+            });
+            if (prevInThread && prevInThread.estimateId) {
+              const existingEstimate = await Estimate.findByPk(prevInThread.estimateId);
+              if (existingEstimate) {
+                console.log(`[EmailScanner] Follow-up in thread ${thisThreadId} for ${existingEstimate.estimateNumber}: "${subject}"`);
+                
+                // Quick AI summary (cheap, no full parse needed)
+                let summary = `Follow-up from ${clientInfo.clientName}: "${subject}"`;
+                try {
+                  const https = require('https');
+                  const sumBody = JSON.stringify({
+                    model: 'claude-sonnet-4-20250514', max_tokens: 200,
+                    system: 'Summarize this email in 1-2 sentences. Be concise. Just the key point.',
+                    messages: [{ role: 'user', content: bodyText.substring(0, 2000) }]
+                  });
+                  const sumText = await new Promise((resolve, reject) => {
+                    const req = https.request({
+                      hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
+                      headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(sumBody) }
+                    }, (res) => {
+                      let data = '';
+                      res.on('data', chunk => data += chunk);
+                      res.on('end', () => { try { resolve(res.statusCode === 200 ? JSON.parse(data).content?.[0]?.text || '' : ''); } catch { resolve(''); } });
+                    });
+                    req.on('error', () => resolve(''));
+                    req.write(sumBody); req.end();
+                  });
+                  if (sumText.trim()) summary = sumText.trim();
+                } catch {}
+
+                const headEstimator = await User.findOne({ where: { isHeadEstimator: true, isActive: true } });
+                await TodoItem.create({
+                  title: `📩 Follow-up: ${existingEstimate.estimateNumber} — ${clientInfo.clientName}`,
+                  description: `${summary}\n\n📧 ${gmailLink}`,
+                  type: 'estimate_review', priority: 'medium',
+                  assignedTo: headEstimator?.username || null,
+                  estimateId: existingEstimate.id,
+                  estimateNumber: existingEstimate.estimateNumber,
+                  createdBy: 'Email Scanner'
+                });
+
+                await scannedEmail.update({ 
+                  status: 'follow_up', emailType: 'general',
+                  estimateId: existingEstimate.id,
+                  parsedData: { followUpTo: existingEstimate.estimateNumber, summary }
+                });
+
+                // Label as processed
+                try {
+                  let labelId;
+                  const labelsRes = await gmail.users.labels.list({ userId: 'me' });
+                  const existingLabel = labelsRes.data.labels.find(l => l.name === 'cr-processed');
+                  if (existingLabel) { labelId = existingLabel.id; }
+                  else { const created = await gmail.users.labels.create({ userId: 'me', requestBody: { name: 'cr-processed', labelListVisibility: 'labelShow', messageListVisibility: 'show' } }); labelId = created.data.id; }
+                  await gmail.users.messages.modify({ userId: 'me', id: msg.id, requestBody: { addLabelIds: [labelId] } });
+                } catch {}
+
+                accountResult.processed++;
+                results.processed++;
+                continue; // Skip full AI parsing
+              }
+            }
+          }
+
+          // Parse with AI (only reaches here for genuinely new conversations)
           const parsed = await parseEmailWithAI(bodyText, subject, clientInfo.clientName, clientInfo.parsingNotes, generalNotes);
 
           if (!parsed) {
@@ -1153,13 +1244,24 @@ async function _runScanInternal() {
           const hasParts = (parsed.parts || []).length > 0;
           
           if (parsed.emailType === 'general' || !hasParts) {
-            // No parts — create notification instead of estimate
+            // No parts — create todo notification with summary
+            const summary = parsed.summary || parsed.aiNotes || `General email: "${subject}"`;
+            
+            const headEstimator = await User.findOne({ where: { isHeadEstimator: true, isActive: true } });
+            await TodoItem.create({
+              title: `📧 ${clientInfo.clientName}: ${subject}`,
+              description: `${summary}\n\n📧 ${gmailLink}`,
+              type: 'general', priority: 'low',
+              assignedTo: headEstimator?.username || null,
+              createdBy: 'Email Scanner'
+            });
+
             await scannedEmail.update({ 
               status: 'notification', 
               emailType: 'general',
               errorMessage: null 
             });
-            console.log(`[EmailScanner] General email from ${clientInfo.clientName} — "${subject}" — notification created`);
+            console.log(`[EmailScanner] General email from ${clientInfo.clientName} — "${subject}" — todo created`);
             accountResult.processed++;
             results.processed++;
           } else if (parsed.emailType === 'po') {

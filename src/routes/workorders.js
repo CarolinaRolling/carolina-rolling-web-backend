@@ -2943,7 +2943,7 @@ router.get('/:id/documents/:documentId/signed-url', async (req, res, next) => {
   }
 });
 
-// GET /api/workorders/:id/documents/:documentId/download - Stream document from Cloudinary
+// GET /api/workorders/:id/documents/:documentId/download - Get document URL
 router.get('/:id/documents/:documentId/download', async (req, res, next) => {
   try {
     const document = await WorkOrderDocument.findOne({
@@ -2965,7 +2965,7 @@ router.get('/:id/documents/:documentId/download', async (req, res, next) => {
       }
     }
 
-    // S3 files: redirect directly — URLs are permanent and public
+    // S3 files: redirect directly
     if (document.cloudinaryId && document.cloudinaryId.startsWith('s3:')) {
       return res.redirect(document.url);
     }
@@ -2975,114 +2975,103 @@ router.get('/:id/documents/:documentId/download', async (req, res, next) => {
 
     const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
     const pubId = document.cloudinaryId;
-    console.log(`[doc-proxy] Downloading document ${document.id} (${document.originalName}), cloudinaryId: ${pubId}`);
 
-    // Helper to stream response
-    const streamDoc = (upstream) => {
-      const contentType = document.mimeType || upstream.headers['content-type'] || 'application/pdf';
-      res.setHeader('Content-Type', contentType);
-      if (upstream.headers['content-length']) res.setHeader('Content-Length', upstream.headers['content-length']);
-      res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(document.originalName || 'document.pdf')}"`);
-      upstream.pipe(res);
-    };
-
-    // Strategy 1: Try stored URL directly first (works for public uploads and S3)
-    if (pubId && cloudName) {
-      const pubIdNoExt = pubId.replace(/\.[^/.]+$/, '');
-      const ext = path.extname(document.originalName || '') || '.pdf';
-      const urlsToTry = [];
-
-      // Stored URL first — new uploads are public and this just works
-      if (document.url) urlsToTry.push(document.url);
-
-      // Public upload URL (type: upload, no signing needed)
-      for (const pid of [pubId, pubIdNoExt]) {
-        try { urlsToTry.push(cloudinary.url(pid, { resource_type: 'raw', type: 'upload', secure: true })); } catch (e) {}
-      }
-
-      // Signed URL with type: private (legacy docs)
-      for (const pid of [pubId, pubIdNoExt]) {
-        try { urlsToTry.push(cloudinary.url(pid, { resource_type: 'raw', type: 'private', sign_url: true, secure: true })); } catch (e) {}
-      }
-      // Signed URL with type: authenticated (old legacy docs)
-      for (const pid of [pubId, pubIdNoExt]) {
-        try { urlsToTry.push(cloudinary.url(pid, { resource_type: 'raw', type: 'authenticated', sign_url: true, secure: true })); } catch (e) {}
-      }
-      // private_download_url
-      for (const pid of [pubId, pubIdNoExt]) {
-        try {
-          const hasFileExt = pid.match(/\.(\w+)$/);
-          const format = hasFileExt ? hasFileExt[1] : ext.replace('.', '');
-          urlsToTry.push(cloudinary.utils.private_download_url(pid, format, {
-            resource_type: 'raw', expires_at: Math.floor(Date.now() / 1000) + 3600
-          }));
-        } catch (e) {}
-      }
-
-      const uniqueUrls = [...new Set(urlsToTry)];
-      for (let i = 0; i < uniqueUrls.length; i++) {
-        console.log(`[doc-proxy] Attempt ${i + 1}: ${uniqueUrls[i].substring(0, 150)}`);
-        const upstream = await fetchWithRedirects(uniqueUrls[i]);
-        if (upstream) {
-          console.log(`[doc-proxy] SUCCESS on attempt ${i + 1}`);
-          streamDoc(upstream);
-          return;
-        }
-      }
+    if (!pubId || !cloudName) {
+      // No Cloudinary info — try stored URL
+      if (document.url) return res.redirect(document.url);
+      return res.status(404).json({ error: { message: 'Document file not found' } });
     }
 
-    // Strategy 2: Old files with access_mode:'authenticated' — re-upload as type:'private'
-    if (pubId) {
-      console.log(`[doc-proxy] Signed URLs failed. Checking for authenticated resource to re-upload...`);
-      const pubIdNoExt = pubId.replace(/\.[^/.]+$/, '');
-      for (const resType of ['raw', 'image', 'video']) {
-        for (const pid of [pubId, pubIdNoExt]) {
-          try {
-            const resource = await cloudinary.api.resource(pid, { resource_type: resType });
-            if (resource) {
-              console.log(`[doc-proxy] Found resource: type=${resType}, id=${pid}, access_mode=${resource.access_mode}`);
-              // Re-upload as type:'private' — use signed authenticated URL as source
-              try {
-                // Generate a signed URL to access the authenticated resource
-                let sourceUrl;
-                try {
-                  sourceUrl = cloudinary.url(pid, { resource_type: resType, type: 'authenticated', sign_url: true, secure: true });
-                } catch (e) {
-                  sourceUrl = resource.secure_url;
-                }
-                console.log(`[doc-proxy] Re-uploading from: ${sourceUrl.substring(0, 120)}`);
-                
-                const reuploadResult = await cloudinary.uploader.upload(sourceUrl, {
-                  resource_type: 'raw',
-                  public_id: pubIdNoExt,
-                  overwrite: true
-                });
-                console.log(`[doc-proxy] Re-uploaded as public: ${reuploadResult.public_id}`);
-                await document.update({ url: reuploadResult.secure_url, cloudinaryId: reuploadResult.public_id });
-                
-                // Serve via direct URL
-                const upstream = await fetchWithRedirects(reuploadResult.secure_url);
-                if (upstream) {
-                  console.log(`[doc-proxy] SUCCESS after re-upload`);
-                  streamDoc(upstream);
-                  // Delete old authenticated version in background
-                  setImmediate(async () => {
-                    try { await fileStorage.deleteFile(pid); } catch (e) {}
-                  });
-                  return;
-                }
-              } catch (reupErr) {
-                console.log(`[doc-proxy] Re-upload failed: ${reupErr.message}`);
-              }
-            }
-          } catch (e) {}
+    const pubIdNoExt = pubId.replace(/\.[^/.]+$/, '');
+
+    // Strategy 1: Try stored URL directly (works for public uploads)
+    if (document.url) {
+      try {
+        const testResp = await new Promise((resolve) => {
+          const mod = document.url.startsWith('https') ? require('https') : require('http');
+          const req = mod.request(document.url, { method: 'HEAD', timeout: 5000 }, (res) => resolve(res));
+          req.on('error', () => resolve(null));
+          req.on('timeout', () => { req.destroy(); resolve(null); });
+          req.end();
+        });
+        if (testResp && testResp.statusCode >= 200 && testResp.statusCode < 400) {
+          return res.redirect(document.url);
         }
+      } catch {}
+    }
+
+    // Strategy 2: Generate public upload URL
+    try {
+      const publicUrl = cloudinary.url(pubId, { resource_type: 'raw', type: 'upload', secure: true });
+      const testResp = await new Promise((resolve) => {
+        const req = require('https').request(publicUrl, { method: 'HEAD', timeout: 5000 }, (res) => resolve(res));
+        req.on('error', () => resolve(null));
+        req.on('timeout', () => { req.destroy(); resolve(null); });
+        req.end();
+      });
+      if (testResp && testResp.statusCode >= 200 && testResp.statusCode < 400) {
+        // Update stored URL for next time
+        await document.update({ url: publicUrl });
+        return res.redirect(publicUrl);
+      }
+    } catch {}
+
+    // Strategy 3: Signed private URL (legacy uploads)
+    for (const pid of [pubId, pubIdNoExt]) {
+      try {
+        const signedUrl = cloudinary.url(pid, { resource_type: 'raw', type: 'private', sign_url: true, secure: true });
+        const testResp = await new Promise((resolve) => {
+          const req = require('https').request(signedUrl, { method: 'HEAD', timeout: 5000 }, (res) => resolve(res));
+          req.on('error', () => resolve(null));
+          req.on('timeout', () => { req.destroy(); resolve(null); });
+          req.end();
+        });
+        if (testResp && testResp.statusCode >= 200 && testResp.statusCode < 400) {
+          return res.redirect(signedUrl);
+        }
+      } catch {}
+    }
+
+    // Strategy 4: Signed authenticated URL (very old uploads)
+    for (const pid of [pubId, pubIdNoExt]) {
+      try {
+        const signedUrl = cloudinary.url(pid, { resource_type: 'raw', type: 'authenticated', sign_url: true, secure: true });
+        const testResp = await new Promise((resolve) => {
+          const req = require('https').request(signedUrl, { method: 'HEAD', timeout: 5000 }, (res) => resolve(res));
+          req.on('error', () => resolve(null));
+          req.on('timeout', () => { req.destroy(); resolve(null); });
+          req.end();
+        });
+        if (testResp && testResp.statusCode >= 200 && testResp.statusCode < 400) {
+          return res.redirect(signedUrl);
+        }
+      } catch {}
+    }
+
+    // Strategy 5: Re-upload as public if we can find the resource
+    for (const resType of ['raw', 'image']) {
+      for (const pid of [pubId, pubIdNoExt]) {
+        try {
+          const resource = await cloudinary.api.resource(pid, { resource_type: resType });
+          if (resource) {
+            let sourceUrl;
+            try { sourceUrl = cloudinary.url(pid, { resource_type: resType, type: 'authenticated', sign_url: true, secure: true }); }
+            catch { sourceUrl = resource.secure_url; }
+            
+            const reuploadResult = await cloudinary.uploader.upload(sourceUrl, {
+              resource_type: 'raw', public_id: pubIdNoExt, overwrite: true
+            });
+            await document.update({ url: reuploadResult.secure_url, cloudinaryId: reuploadResult.public_id });
+            console.log(`[doc-proxy] Re-uploaded ${document.originalName} as public`);
+            return res.redirect(reuploadResult.secure_url);
+          }
+        } catch {}
       }
     }
 
     // FALLBACK: If this is a purchase order, regenerate the PDF on the fly
     if (document.documentType === 'purchase_order') {
-      console.log(`[doc-proxy] All URLs failed — regenerating PO PDF on the fly for document ${document.id}`);
+      console.log(`[doc-proxy] All URLs failed — regenerating PO PDF on the fly`);
       try {
         const workOrder = await WorkOrder.findByPk(req.params.id, {
           include: [{ model: WorkOrderPart, as: 'parts' }]
@@ -3093,49 +3082,36 @@ router.get('/:id/documents/:documentId/download', async (req, res, next) => {
           const supplierMatch = document.originalName?.match(/^PO\d+\s*-\s*(.+?)\.pdf$/i);
           let supplier = supplierMatch ? supplierMatch[1].trim() : 'Unknown Supplier';
           
-          // Try to find actual vendor name from parts
           const poParts = workOrder.parts.filter(p => p.materialPurchaseOrderNumber === poNumber);
           if (poParts.length > 0 && poParts[0].vendorId) {
             const vendor = await Vendor.findByPk(poParts[0].vendorId);
             if (vendor) supplier = vendor.name;
           }
           const partsForPdf = poParts.length > 0 ? poParts : workOrder.parts;
-
           const pdfBuffer = await generatePurchaseOrderPDF(poNumber, supplier, partsForPdf, workOrder);
           
-          console.log(`[doc-proxy] Regenerated ${poNumber} on the fly (${pdfBuffer.length} bytes)`);
           res.setHeader('Content-Type', 'application/pdf');
           res.setHeader('Content-Length', pdfBuffer.length);
           res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(document.originalName || 'PO.pdf')}"`);
           res.send(pdfBuffer);
           
-          // Re-upload to Cloudinary in the background so next time it works from cache
           setImmediate(async () => {
             try {
               const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, {
-                folder: 'purchase-orders',
-                filename: `${poNumber}-${workOrder.drNumber}.pdf`,
-                mimeType: 'application/pdf'
+                folder: 'purchase-orders', filename: `${poNumber}-${workOrder.drNumber}.pdf`, mimeType: 'application/pdf'
               });
               await document.update({ url: uploadResult.url, cloudinaryId: uploadResult.storageId, size: pdfBuffer.length });
-              console.log(`[doc-proxy] Background re-upload success: ${uploadResult.secure_url}`);
-            } catch (uploadErr) {
-              console.error(`[doc-proxy] Background re-upload failed:`, uploadErr.message);
-            }
+            } catch {}
           });
           return;
         }
-      } catch (regenErr) {
-        console.error(`[doc-proxy] Fallback regeneration failed:`, regenErr.message);
-      }
+      } catch (e) { console.error('[doc-proxy] PO regeneration failed:', e.message); }
     }
 
-    console.error(`[doc-proxy] ALL strategies failed for document ${document.id} (cloudinaryId: ${document.cloudinaryId})`);
-    res.status(502).json({ 
-      error: { message: 'Unable to retrieve document from storage.' },
-      debug: { cloudinaryId: document.cloudinaryId, storedUrl: document.url ? 'present' : 'NULL' }
-    });
+    console.error(`[doc-proxy] All strategies failed for document ${document.id} (${document.originalName})`);
+    res.status(404).json({ error: { message: 'Could not retrieve document file. Try re-uploading.' } });
   } catch (error) {
+    console.error('[doc-proxy] Error:', error.message);
     next(error);
   }
 });

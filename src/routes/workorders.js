@@ -2965,11 +2965,21 @@ router.get('/:id/documents/:documentId/download', async (req, res, next) => {
       }
     }
 
-    // S3 files: redirect directly
+    // S3 files: generate presigned URL and redirect
     if (document.cloudinaryId && document.cloudinaryId.startsWith('s3:')) {
-      return res.redirect(document.url);
+      const presignedUrl = await fileStorage.getPresignedUrl(document.cloudinaryId);
+      if (presignedUrl) return res.redirect(presignedUrl);
+      return res.status(500).json({ error: { message: 'Failed to generate download URL' } });
     }
     if (document.url && document.url.includes('.s3.') && document.url.includes('amazonaws.com')) {
+      // Try to extract key from URL and generate presigned
+      try {
+        const urlObj = new URL(document.url);
+        const key = decodeURIComponent(urlObj.pathname.slice(1)); // remove leading /
+        const presignedUrl = await fileStorage.getPresignedUrl('s3:' + key);
+        if (presignedUrl) return res.redirect(presignedUrl);
+      } catch {}
+      // Fallback to direct URL
       return res.redirect(document.url);
     }
 

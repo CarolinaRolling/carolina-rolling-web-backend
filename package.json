@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1010.0",
+    "@aws-sdk/s3-request-presigner": "^3.1010.0",
     "@sparticuz/chromium": "^131.0.0",
     "bcryptjs": "^2.4.3",
     "cloudinary": "^1.41.0",

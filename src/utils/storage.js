@@ -10,7 +10,8 @@
  * Falls back to Cloudinary if S3 is not configured.
  */
 
-const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const cloudinary = require('cloudinary').v2;
 const path = require('path');
 const fs = require('fs');
@@ -153,10 +154,27 @@ function getProvider() {
   return useS3() ? 's3' : 'cloudinary';
 }
 
+/**
+ * Get a presigned URL for an S3 object (temporary access, expires in 1 hour).
+ * @param {string} storageId - The storageId (s3:key format)
+ * @param {number} expiresIn - Seconds until expiry (default 3600 = 1 hour)
+ * @returns {string|null} Presigned URL or null if not S3
+ */
+async function getPresignedUrl(storageId, expiresIn = 3600) {
+  if (!storageId || !storageId.startsWith('s3:') || !useS3()) return null;
+  const key = storageId.slice(3);
+  const command = new GetObjectCommand({
+    Bucket: BUCKET(),
+    Key: key
+  });
+  return await getSignedUrl(getS3(), command, { expiresIn });
+}
+
 module.exports = {
   uploadFile,
   uploadBuffer,
   deleteFile,
   getProvider,
-  useS3
+  useS3,
+  getPresignedUrl
 };

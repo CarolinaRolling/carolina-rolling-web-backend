@@ -1151,7 +1151,7 @@ async function _runScanInternal() {
           });
 
           // THREAD DEDUP: Check if this Gmail thread already created an estimate
-          // If so, this is a follow-up — skip AI parsing entirely, just create a todo
+          // If so, check if this is a PO (should create pending order) or just a follow-up (todo only)
           const thisThreadId = fullMsg.data.threadId;
           if (thisThreadId) {
             const prevInThread = await ScannedEmail.findOne({
@@ -1164,31 +1164,74 @@ async function _runScanInternal() {
             if (prevInThread && prevInThread.estimateId) {
               const existingEstimate = await Estimate.findByPk(prevInThread.estimateId);
               if (existingEstimate) {
-                console.log(`[EmailScanner] Follow-up in thread ${thisThreadId} for ${existingEstimate.estimateNumber}: "${subject}"`);
+                console.log(`[EmailScanner] Thread match for ${existingEstimate.estimateNumber}: "${subject}" — checking if PO...`);
                 
-                // Quick AI summary (cheap, no full parse needed)
+                // Do full AI parse to check if this is a PO
+                const parsed = await parseEmailWithAI(bodyText, subject, clientInfo.clientName, clientInfo.parsingNotes, generalNotes);
+                
+                if (parsed && parsed.emailType === 'po') {
+                  // This is a PO for an existing estimate — create pending order
+                  console.log(`[EmailScanner] PO detected in thread for ${existingEstimate.estimateNumber}`);
+                  parsed.referencesQuote = parsed.referencesQuote || existingEstimate.estimateNumber;
+                  
+                  await scannedEmail.update({
+                    emailType: 'po',
+                    parsedData: parsed,
+                    parseConfidence: parsed.confidence || 'medium',
+                    estimateId: existingEstimate.id
+                  });
+
+                  const poResult = await createPendingOrderFromParsed(parsed, clientInfo, scannedEmail);
+                  if (poResult.pendingOrderId) {
+                    await scannedEmail.update({ status: 'pending_order', pendingOrderId: poResult.pendingOrderId });
+                    results.pendingOrders++;
+                  }
+
+                  // Label as processed
+                  try {
+                    let labelId;
+                    const labelsRes = await gmail.users.labels.list({ userId: 'me' });
+                    const existingLabel = labelsRes.data.labels.find(l => l.name === 'cr-processed');
+                    if (existingLabel) { labelId = existingLabel.id; }
+                    else { const created = await gmail.users.labels.create({ userId: 'me', requestBody: { name: 'cr-processed', labelListVisibility: 'labelShow', messageListVisibility: 'show' } }); labelId = created.data.id; }
+                    await gmail.users.messages.modify({ userId: 'me', id: msg.id, requestBody: { addLabelIds: [labelId] } });
+                  } catch {}
+
+                  accountResult.processed++;
+                  results.processed++;
+                  continue;
+                }
+
+                // Not a PO — treat as follow-up
                 let summary = `Follow-up from ${clientInfo.clientName}: "${subject}"`;
-                try {
-                  const https = require('https');
-                  const sumBody = JSON.stringify({
-                    model: 'claude-sonnet-4-20250514', max_tokens: 200,
-                    system: 'Summarize this email in 1-2 sentences. Be concise. Just the key point.',
-                    messages: [{ role: 'user', content: bodyText.substring(0, 2000) }]
-                  });
-                  const sumText = await new Promise((resolve, reject) => {
-                    const req = https.request({
-                      hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
-                      headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(sumBody) }
-                    }, (res) => {
-                      let data = '';
-                      res.on('data', chunk => data += chunk);
-                      res.on('end', () => { try { resolve(res.statusCode === 200 ? JSON.parse(data).content?.[0]?.text || '' : ''); } catch { resolve(''); } });
+                if (parsed && parsed.summary) {
+                  summary = parsed.summary;
+                } else if (parsed && parsed.aiNotes) {
+                  summary = parsed.aiNotes;
+                } else {
+                  // Quick AI summary
+                  try {
+                    const https = require('https');
+                    const sumBody = JSON.stringify({
+                      model: 'claude-sonnet-4-20250514', max_tokens: 200,
+                      system: 'Summarize this email in 1-2 sentences. Be concise. Just the key point.',
+                      messages: [{ role: 'user', content: bodyText.substring(0, 2000) }]
                     });
-                    req.on('error', () => resolve(''));
-                    req.write(sumBody); req.end();
-                  });
-                  if (sumText.trim()) summary = sumText.trim();
-                } catch {}
+                    const sumText = await new Promise((resolve, reject) => {
+                      const req = https.request({
+                        hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(sumBody) }
+                      }, (res) => {
+                        let data = '';
+                        res.on('data', chunk => data += chunk);
+                        res.on('end', () => { try { resolve(res.statusCode === 200 ? JSON.parse(data).content?.[0]?.text || '' : ''); } catch { resolve(''); } });
+                      });
+                      req.on('error', () => resolve(''));
+                      req.write(sumBody); req.end();
+                    });
+                    if (sumText.trim()) summary = sumText.trim();
+                  } catch {}
+                }
 
                 const headEstimator = await User.findOne({ where: { isHeadEstimator: true, isActive: true } });
                 await TodoItem.create({

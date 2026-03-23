@@ -2986,17 +2986,25 @@ router.get('/:id/documents/:documentId/download', async (req, res, next) => {
       upstream.pipe(res);
     };
 
-    // Strategy 1: Signed URLs (same approach as part files — type: private)
+    // Strategy 1: Try stored URL directly first (works for public uploads and S3)
     if (pubId && cloudName) {
       const pubIdNoExt = pubId.replace(/\.[^/.]+$/, '');
       const ext = path.extname(document.originalName || '') || '.pdf';
       const urlsToTry = [];
 
-      // Signed URL with type: private (how new docs are uploaded)
+      // Stored URL first — new uploads are public and this just works
+      if (document.url) urlsToTry.push(document.url);
+
+      // Public upload URL (type: upload, no signing needed)
+      for (const pid of [pubId, pubIdNoExt]) {
+        try { urlsToTry.push(cloudinary.url(pid, { resource_type: 'raw', type: 'upload', secure: true })); } catch (e) {}
+      }
+
+      // Signed URL with type: private (legacy docs)
       for (const pid of [pubId, pubIdNoExt]) {
         try { urlsToTry.push(cloudinary.url(pid, { resource_type: 'raw', type: 'private', sign_url: true, secure: true })); } catch (e) {}
       }
-      // Signed URL with type: authenticated (how old docs were uploaded)
+      // Signed URL with type: authenticated (old legacy docs)
       for (const pid of [pubId, pubIdNoExt]) {
         try { urlsToTry.push(cloudinary.url(pid, { resource_type: 'raw', type: 'authenticated', sign_url: true, secure: true })); } catch (e) {}
       }
@@ -3010,8 +3018,6 @@ router.get('/:id/documents/:documentId/download', async (req, res, next) => {
           }));
         } catch (e) {}
       }
-      // Stored URL
-      if (document.url) urlsToTry.push(document.url);
 
       const uniqueUrls = [...new Set(urlsToTry)];
       for (let i = 0; i < uniqueUrls.length; i++) {
@@ -3048,18 +3054,14 @@ router.get('/:id/documents/:documentId/download', async (req, res, next) => {
                 
                 const reuploadResult = await cloudinary.uploader.upload(sourceUrl, {
                   resource_type: 'raw',
-                  type: 'private',
                   public_id: pubIdNoExt,
                   overwrite: true
                 });
-                console.log(`[doc-proxy] Re-uploaded as private: ${reuploadResult.public_id}`);
+                console.log(`[doc-proxy] Re-uploaded as public: ${reuploadResult.public_id}`);
                 await document.update({ url: reuploadResult.secure_url, cloudinaryId: reuploadResult.public_id });
                 
-                // Serve via signed URL
-                const signedUrl = cloudinary.url(reuploadResult.public_id, {
-                  resource_type: 'raw', type: 'private', sign_url: true, secure: true
-                });
-                const upstream = await fetchWithRedirects(signedUrl);
+                // Serve via direct URL
+                const upstream = await fetchWithRedirects(reuploadResult.secure_url);
                 if (upstream) {
                   console.log(`[doc-proxy] SUCCESS after re-upload`);
                   streamDoc(upstream);

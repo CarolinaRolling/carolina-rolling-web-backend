@@ -59,18 +59,18 @@ async function uploadFile(filePath, options = {}) {
       Bucket: BUCKET(),
       Key: key,
       Body: fileBuffer,
-      ContentType: mimeType
+      ContentType: mimeType,
+      ACL: 'public-read'
     }));
 
     const url = `https://${BUCKET()}.s3.${REGION()}.amazonaws.com/${key}`;
     return { url, storageId: `s3:${key}`, provider: 's3' };
   }
 
-  // Fallback to Cloudinary
+  // Fallback to Cloudinary — use 'upload' type for publicly accessible URLs
   const result = await cloudinary.uploader.upload(filePath, {
     folder,
     resource_type: resourceType,
-    type: 'private',
     use_filename: true,
     unique_filename: true
   });
@@ -99,7 +99,8 @@ async function uploadBuffer(buffer, options = {}) {
       Bucket: BUCKET(),
       Key: key,
       Body: buffer,
-      ContentType: mimeType
+      ContentType: mimeType,
+      ACL: 'public-read'
     }));
 
     const url = `https://${BUCKET()}.s3.${REGION()}.amazonaws.com/${key}`;

@@ -215,7 +215,7 @@ press_brake — Press brake forming:
 
 fab_service — Fabrication service (welding, fitting, etc.):
   Fields: specialInstructions, description, fabType, parentPartIndex
-  fabType values: "weld_100" (100% weld/full pen weld), "tack_weld", "bevel", "bracing", "fit" (fit only), "cut_to_fit", "finishing", "other"
+  fabType values: "weld_100" (100% weld/full pen weld), "tack_weld", "bevel", "bracing", "fit" (fit only), "cut_to_size", "finishing", "other"
   IMPORTANT: fab_service parts MUST have a "parentPartIndex" field set to the 0-based index of the rolling/forming part they belong to.
   Example: If part index 0 is a plate_roll and they want it tack welded, create a fab_service with parentPartIndex=0.
   Only create a SEPARATE fab_service if the email explicitly requests welding/beveling/fitting AS A SERVICE.
@@ -286,7 +286,7 @@ Respond ONLY with valid JSON (no markdown, no backticks). Format:
       "barSize": "for flat_bar: e.g. 4x1/2",
       "wallThickness": "for pipe_roll",
       "flangeOut": false,
-      "fabType": "for fab_service: weld_100, tack_weld, bevel, bracing, fit, cut_to_fit, finishing, other",
+      "fabType": "for fab_service: weld_100, tack_weld, bevel, bracing, fit, cut_to_size, finishing, other",
       "parentPartIndex": "for fab_service: 0-based index of the parent part in this array (e.g. 0 for first part)",
       "specialInstructions": "Rolled and tack welded, no bevel",
       "clientPartNumber": "127250-535S1",
@@ -1707,7 +1707,7 @@ flat_stock — Ship flat, no rolling:
   Fields: material, thickness, width, length, description
 
 fab_service — Welding, fitting, cut-to-fit:
-  Fields: fabType (weld_100, tack_weld, bevel, bracing, fit, cut_to_fit, finishing, other), parentPartIndex, description
+  Fields: fabType (weld_100, tack_weld, bevel, bracing, fit, cut_to_size, finishing, other), parentPartIndex, description
 
 ${generalNotes ? `\nGENERAL SHOP NOTES:\n${generalNotes}\n` : ''}
 ${parsingNotes ? `\nCLIENT-SPECIFIC NOTES:\n${parsingNotes}\n` : ''}

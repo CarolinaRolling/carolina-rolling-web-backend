@@ -2534,6 +2534,53 @@ router.get('/:id/pdf', async (req, res, next) => {
     doc.text(`Manual (3.5% + $0.15): ${formatCurrency(ccManualTotal)}`, 50, yPos, { align: 'right', width: 512, lineBreak: false });
     yPos += 25;
 
+    // ========== DUAL PRICING (Option A / Option B) ==========
+    if (estimate.showDualPricing) {
+      if (yPos > 640) { doc.addPage(); yPos = 50; }
+      
+      // Calculate labor-only total
+      let laborOnlySubtotal = 0;
+      for (const part of sortedParts) {
+        if (['fab_service', 'shop_rate', 'rush_service'].includes(part.partType)) {
+          laborOnlySubtotal += parseFloat(part.partTotal) || 0;
+        } else {
+          const qty = parseInt(part.quantity) || 1;
+          const labEach = parseFloat(part.laborTotal) || 0;
+          const opCost = parseFloat(part.outsideProcessingCost) || 0;
+          const opMarkup = parseFloat(part.outsideProcessingMarkupPercent) || 0;
+          const opEach = Math.round(opCost * (1 + opMarkup / 100) * 100) / 100;
+          const opTransport = parseFloat(part.outsideProcessingTransportCost) || 0;
+          const opTransportMarkup = parseFloat(part.outsideProcessingTransportMarkupPercent) || 0;
+          const opTransportEach = Math.round(opTransport * (1 + opTransportMarkup / 100) * 100) / 100;
+          laborOnlySubtotal += (labEach + opEach + opTransportEach) * qty;
+        }
+      }
+      const discPct = parseFloat(estimate.discountPercent) || 0;
+      const discAmt = parseFloat(estimate.discountAmount) || 0;
+      const laborDiscount = discPct > 0 ? laborOnlySubtotal * (discPct / 100) : discAmt;
+      const laborAfterDiscount = laborOnlySubtotal - laborDiscount;
+      const laborTax = estimate.taxExempt ? 0 : laborAfterDiscount * (parseFloat(estimate.taxRate) / 100);
+      const laborOnlyTotal = laborAfterDiscount + laborTax + (parseFloat(estimate.truckingCost) || 0);
+
+      doc.strokeColor('#1565c0').lineWidth(1.5).moveTo(50, yPos).lineTo(562, yPos).stroke();
+      yPos += 12;
+
+      // Option A
+      doc.rect(50, yPos, 245, 50).fillAndStroke('#e3f2fd', '#90caf9');
+      doc.fillColor('#1565c0').fontSize(9).font('Helvetica-Bold').text('Option A — With Material', 60, yPos + 6);
+      doc.fillColor('#666').fontSize(7.5).font('Helvetica').text('We supply all material', 60, yPos + 18);
+      doc.fillColor('#1565c0').fontSize(14).font('Helvetica-Bold').text(formatCurrency(grandTotal), 60, yPos + 30, { width: 225 });
+
+      // Option B
+      doc.rect(310, yPos, 252, 50).fillAndStroke('#fff8e1', '#ffcc80');
+      doc.fillColor('#e65100').fontSize(9).font('Helvetica-Bold').text('Option B — Labor Only', 320, yPos + 6);
+      doc.fillColor('#666').fontSize(7.5).font('Helvetica').text('Customer supplies material', 320, yPos + 18);
+      doc.fillColor('#e65100').fontSize(14).font('Helvetica-Bold').text(formatCurrency(laborOnlyTotal), 320, yPos + 30, { width: 232 });
+      
+      doc.font('Helvetica');
+      yPos += 65;
+    }
+
     // ========== NOTES ==========
     if (estimate.notes) {
       if (yPos > 680) { doc.addPage(); yPos = 50; }

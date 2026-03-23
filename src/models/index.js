@@ -591,6 +591,11 @@ const WorkOrder = sequelize.define('WorkOrder', {
     type: DataTypes.STRING,
     allowNull: true
   },
+  // Dual pricing — show quote with and without material
+  showDualPricing: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
   // Tax exempt
   taxExempt: {
     type: DataTypes.BOOLEAN,

@@ -59,8 +59,7 @@ async function uploadFile(filePath, options = {}) {
       Bucket: BUCKET(),
       Key: key,
       Body: fileBuffer,
-      ContentType: mimeType,
-      ACL: 'public-read'
+      ContentType: mimeType
     }));
 
     const url = `https://${BUCKET()}.s3.${REGION()}.amazonaws.com/${key}`;
@@ -99,8 +98,7 @@ async function uploadBuffer(buffer, options = {}) {
       Bucket: BUCKET(),
       Key: key,
       Body: buffer,
-      ContentType: mimeType,
-      ACL: 'public-read'
+      ContentType: mimeType
     }));
 
     const url = `https://${BUCKET()}.s3.${REGION()}.amazonaws.com/${key}`;

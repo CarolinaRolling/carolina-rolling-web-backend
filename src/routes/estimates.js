@@ -1210,14 +1210,23 @@ router.get('/:id/parts/:partId/files/:fileId/download', async (req, res, next) =
       return res.status(404).json({ error: { message: 'File not found' } });
     }
 
-    // S3 files: use presigned URLs (bucket has no public access)
-    if (file.cloudinaryId && file.cloudinaryId.startsWith('s3:')) {
-      const presignedUrl = await fileStorage.getPresignedUrl(file.cloudinaryId);
-      return res.redirect(presignedUrl || file.url);
-    }
-    if (file.url && file.url.includes('.s3.') && file.url.includes('amazonaws.com')) {
-      try { const u = new URL(file.url); const presignedUrl = await fileStorage.getPresignedUrl('s3:' + decodeURIComponent(u.pathname.slice(1))); if (presignedUrl) return res.redirect(presignedUrl); } catch {}
-      return res.redirect(file.url);
+    // S3 files: stream through backend (bucket is private)
+    if ((file.cloudinaryId && file.cloudinaryId.startsWith('s3:')) ||
+        (file.url && file.url.includes('.s3.') && file.url.includes('amazonaws.com'))) {
+      try {
+        let sid = file.cloudinaryId;
+        if (!sid || !sid.startsWith('s3:')) {
+          const urlObj = new URL(file.url);
+          sid = 's3:' + decodeURIComponent(urlObj.pathname.slice(1));
+        }
+        const streamed = await fileStorage.streamToResponse(sid, res, {
+          filename: file.originalName || 'file',
+          contentType: file.mimeType || 'application/octet-stream'
+        });
+        if (streamed) return;
+      } catch (s3Err) {
+        console.error('[file-download] S3 stream failed:', s3Err.message);
+      }
     }
 
     // Build list of candidate URLs to try
@@ -1597,14 +1606,23 @@ router.get('/:id/files/:fileId/download', async (req, res, next) => {
       }
     }
 
-    // S3 files: use presigned URLs (bucket has no public access)
-    if (file.cloudinaryId && file.cloudinaryId.startsWith('s3:')) {
-      const presignedUrl = await fileStorage.getPresignedUrl(file.cloudinaryId);
-      return res.redirect(presignedUrl || file.url);
-    }
-    if (file.url && file.url.includes('.s3.') && file.url.includes('amazonaws.com')) {
-      try { const u = new URL(file.url); const presignedUrl = await fileStorage.getPresignedUrl('s3:' + decodeURIComponent(u.pathname.slice(1))); if (presignedUrl) return res.redirect(presignedUrl); } catch {}
-      return res.redirect(file.url);
+    // S3 files: stream through backend (bucket is private)
+    if ((file.cloudinaryId && file.cloudinaryId.startsWith('s3:')) ||
+        (file.url && file.url.includes('.s3.') && file.url.includes('amazonaws.com'))) {
+      try {
+        let sid = file.cloudinaryId;
+        if (!sid || !sid.startsWith('s3:')) {
+          const urlObj = new URL(file.url);
+          sid = 's3:' + decodeURIComponent(urlObj.pathname.slice(1));
+        }
+        const streamed = await fileStorage.streamToResponse(sid, res, {
+          filename: file.originalName || 'file',
+          contentType: file.mimeType || 'application/octet-stream'
+        });
+        if (streamed) return;
+      } catch (s3Err) {
+        console.error('[file-download] S3 stream failed:', s3Err.message);
+      }
     }
 
     const urlsToTry = [];

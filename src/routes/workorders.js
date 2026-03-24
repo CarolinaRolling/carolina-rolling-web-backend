@@ -2965,22 +2965,23 @@ router.get('/:id/documents/:documentId/download', async (req, res, next) => {
       }
     }
 
-    // S3 files: generate presigned URL and redirect
-    if (document.cloudinaryId && document.cloudinaryId.startsWith('s3:')) {
-      const presignedUrl = await fileStorage.getPresignedUrl(document.cloudinaryId);
-      if (presignedUrl) return res.redirect(presignedUrl);
-      return res.status(500).json({ error: { message: 'Failed to generate download URL' } });
-    }
-    if (document.url && document.url.includes('.s3.') && document.url.includes('amazonaws.com')) {
-      // Try to extract key from URL and generate presigned
+    // S3 files: stream through backend (bucket is private, no public access)
+    if ((document.cloudinaryId && document.cloudinaryId.startsWith('s3:')) || 
+        (document.url && document.url.includes('.s3.') && document.url.includes('amazonaws.com'))) {
       try {
-        const urlObj = new URL(document.url);
-        const key = decodeURIComponent(urlObj.pathname.slice(1)); // remove leading /
-        const presignedUrl = await fileStorage.getPresignedUrl('s3:' + key);
-        if (presignedUrl) return res.redirect(presignedUrl);
-      } catch {}
-      // Fallback to direct URL
-      return res.redirect(document.url);
+        let sid = document.cloudinaryId;
+        if (!sid || !sid.startsWith('s3:')) {
+          const urlObj = new URL(document.url);
+          sid = 's3:' + decodeURIComponent(urlObj.pathname.slice(1));
+        }
+        const streamed = await fileStorage.streamToResponse(sid, res, {
+          filename: document.originalName || 'document.pdf',
+          contentType: document.mimeType || 'application/pdf'
+        });
+        if (streamed) return;
+      } catch (s3Err) {
+        console.error('[doc-download] S3 stream failed:', s3Err.message);
+      }
     }
 
     const cloudName = process.env.CLOUDINARY_CLOUD_NAME;

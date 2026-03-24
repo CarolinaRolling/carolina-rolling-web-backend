@@ -170,11 +170,40 @@ async function getPresignedUrl(storageId, expiresIn = 3600) {
   return await getSignedUrl(getS3(), command, { expiresIn });
 }
 
+/**
+ * Stream an S3 file directly to a response object.
+ * @param {string} storageId - The storageId (s3:key format)
+ * @param {object} res - Express response object
+ * @param {object} options - { filename, contentType }
+ * @returns {boolean} true if streamed, false if not S3
+ */
+async function streamToResponse(storageId, res, options = {}) {
+  if (!storageId || !storageId.startsWith('s3:') || !useS3()) return false;
+  const key = storageId.slice(3);
+  const command = new GetObjectCommand({
+    Bucket: BUCKET(),
+    Key: key
+  });
+  const response = await getS3().send(command);
+  
+  const contentType = options.contentType || response.ContentType || 'application/octet-stream';
+  const filename = options.filename || key.split('/').pop();
+  
+  res.setHeader('Content-Type', contentType);
+  if (response.ContentLength) res.setHeader('Content-Length', response.ContentLength);
+  res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(filename)}"`);
+  
+  // response.Body is a readable stream
+  response.Body.pipe(res);
+  return true;
+}
+
 module.exports = {
   uploadFile,
   uploadBuffer,
   deleteFile,
   getProvider,
   useS3,
-  getPresignedUrl
+  getPresignedUrl,
+  streamToResponse
 };

@@ -304,7 +304,14 @@ Respond ONLY with valid JSON (no markdown, no backticks). Format:
 CRITICAL: For missingFields, list any field the client did NOT provide that is needed to complete the estimate. Common missing fields: thickness, material, diameter/radius, arcDegrees, length, rollType. Add a human-readable note in missingFieldNotes explaining what's missing.
 
 If this is a PO (purchase order) rather than an RFQ:
-- Set emailType to "po"
+- Set emailType to "po" ONLY if the email contains EXPLICIT order language such as:
+  * An actual PO number ("PO #12345", "Purchase Order 67890")
+  * Clear order instructions ("Please proceed", "Go ahead with the order", "We'd like to place an order", "Approved — please schedule")
+  * Formal purchase authorization language
+- Set emailType to "po" ONLY if there is CLEAR, UNAMBIGUOUS intent to place an order
+- Do NOT set emailType to "po" for vague affirmations like "thank you", "sounds good", "looks good", "great", "perfect", "ok", "got it", "thanks for the quote", "we appreciate it"
+- A "thank you" reply to a quote is NOT a purchase order — it is "general"
+- The presence of quoted/forwarded quote text below a short reply does NOT make it a PO
 - Extract the client's PO number into "poNumber"
 - Look CAREFULLY for any reference to a previous quote, estimate, or OR number. Check:
   * Subject line for patterns like "RE: Quote...", "OR#12345", "EST-240319-001", "Ref: ..."
@@ -320,8 +327,10 @@ If the email does NOT contain any parts, material requests, or RFQ/PO content:
 - This includes emails like: general inquiries, scheduling questions, status updates, thank you notes, delivery coordination, etc.
 
 CRITICAL — FOLLOW-UP DETECTION:
-Many emails are FOLLOW-UPS to a previous quote or RFQ conversation, NOT new requests. Classify these as "general", NOT "rfq":
-- "Thank you" / "Thanks" / "Got it" / "Sounds good" / "We'll be in touch" → general
+Many emails are FOLLOW-UPS to a previous quote or RFQ conversation, NOT new requests. Classify these as "general", NOT "rfq" or "po":
+- "Thank you" / "Thanks" / "Got it" / "Sounds good" / "Looks good" / "Great" / "Perfect" / "OK" → ALWAYS "general", NEVER "po"
+- "Thanks for the quote" / "We appreciate it" / "Received" → ALWAYS "general"
+- Any reply under 20 words of NEW content (excluding quoted/forwarded text) → ALWAYS "general" unless it contains an explicit PO number
 - Questions about a quote already sent (pricing questions, lead time, delivery, availability) → general  
 - "When can you have this done?" / "What's the lead time?" → general
 - "Can you send the quote again?" / "I didn't receive the PDF" → general
@@ -1337,6 +1346,20 @@ async function _runScanInternal() {
                 // Do full AI parse to check if this is a PO
                 const parsed = await parseEmailWithAI(bodyText, subject, clientInfo.clientName, clientInfo.parsingNotes, generalNotes);
                 
+                // Safeguard: short replies like "thank you" should never be POs
+                // Strip quoted/forwarded text and check actual new content length
+                const newContent = bodyText.replace(/^>.*$/gm, '').replace(/On .*wrote:/g, '').replace(/-{2,}.*Original Message.*-{2,}[\s\S]*/i, '').replace(/From:.*Sent:.*To:.*Subject:[\s\S]*/i, '').trim();
+                const wordCount = newContent.split(/\s+/).filter(w => w.length > 0).length;
+                const shortReplyPatterns = /^\s*(thank|thanks|thx|got it|sounds good|looks good|great|perfect|ok|okay|received|appreciate|will review|we('ll| will) (review|look|check|get back))/i;
+                const hasPONumber = parsed && parsed.poNumber && parsed.poNumber.length > 0;
+                const isShortReply = wordCount < 25 && !hasPONumber;
+                const isThankYou = shortReplyPatterns.test(newContent);
+                
+                if (parsed && parsed.emailType === 'po' && (isShortReply || isThankYou)) {
+                  console.log(`[EmailScanner] Override: AI said PO but content is too short (${wordCount} words) or is a thank-you reply. Treating as general follow-up.`);
+                  parsed.emailType = 'general';
+                }
+                
                 if (parsed && parsed.emailType === 'po') {
                   // This is a PO for an existing estimate — create pending order
                   console.log(`[EmailScanner] PO detected in thread for ${existingEstimate.estimateNumber}`);
@@ -1476,6 +1499,18 @@ async function _runScanInternal() {
             accountResult.processed++;
             results.processed++;
           } else if (parsed.emailType === 'po') {
+            // Safeguard: short replies should never be POs
+            const newContent2 = bodyText.replace(/^>.*$/gm, '').replace(/On .*wrote:/g, '').replace(/-{2,}.*Original Message.*-{2,}[\s\S]*/i, '').replace(/From:.*Sent:.*To:.*Subject:[\s\S]*/i, '').trim();
+            const wc2 = newContent2.split(/\s+/).filter(w => w.length > 0).length;
+            const hasPO2 = parsed.poNumber && parsed.poNumber.length > 0;
+            const shortPat = /^\s*(thank|thanks|thx|got it|sounds good|looks good|great|perfect|ok|okay|received|appreciate)/i;
+            if ((wc2 < 25 && !hasPO2) || shortPat.test(newContent2)) {
+              console.log(`[EmailScanner] Override: AI said PO but content too short (${wc2} words). Treating as general.`);
+              parsed.emailType = 'general';
+            }
+          }
+          
+          if (parsed.emailType === 'po') {
             // PO → create pending order
             const poResult = await createPendingOrderFromParsed(parsed, clientInfo, scannedEmail);
             if (poResult.pendingOrderId) {
@@ -1484,7 +1519,7 @@ async function _runScanInternal() {
             } else if (poResult.duplicate) {
               await scannedEmail.update({ status: 'ignored', errorMessage: 'Duplicate PO' });
             }
-          } else {
+          } else if (parsed.emailType === 'rfq') {
             // RFQ → create estimate
             const estResult = await createEstimateFromParsed(parsed, clientInfo, scannedEmail);
             if (estResult.estimateId) {
@@ -1496,6 +1531,21 @@ async function _runScanInternal() {
               await scannedEmail.update({ status: 'error', errorMessage: estResult.error });
               results.errors++;
             }
+          } else {
+            // Overridden to general (e.g. "thank you" that AI mistakenly called a PO)
+            const summary = parsed.summary || parsed.aiNotes || `Follow-up email: "${subject}"`;
+            const headEstimator = await User.findOne({ where: { isHeadEstimator: true, isActive: true } });
+            await TodoItem.create({
+              title: `📧 ${clientInfo.clientName}: ${subject}`,
+              description: `${summary}\n\n📧 ${gmailLink}`,
+              type: 'general', priority: 'low',
+              assignedTo: headEstimator?.username || null,
+              createdBy: 'Email Scanner'
+            });
+            await scannedEmail.update({ status: 'notification', emailType: 'general', errorMessage: null });
+            console.log(`[EmailScanner] Overridden to general: ${clientInfo.clientName} — "${subject}"`);
+            accountResult.processed++;
+            results.processed++;
           }
 
           // Label email as processed in Gmail

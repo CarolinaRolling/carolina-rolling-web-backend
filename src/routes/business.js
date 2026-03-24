@@ -446,9 +446,10 @@ router.post('/payroll/:id/submit', async (req, res, next) => {
           // Add entries from vacation dates if available
           const dates = entry.vacationDates && entry.vacationDates.length > 0 ? entry.vacationDates : [];
           if (dates.length > 0) {
-            const hoursPerDate = vacHours / dates.length;
             for (const d of dates) {
-              log.push({ date: d, hours: parseFloat(hoursPerDate.toFixed(1)), note: '', source: 'payroll', payrollWeekId: payroll.id });
+              const dateStr = typeof d === 'string' ? d : d.date;
+              const hrs = typeof d === 'object' && d.hours ? parseFloat(d.hours) : (vacHours / dates.length);
+              log.push({ date: dateStr, hours: parseFloat(hrs.toFixed(1)), note: '', source: 'payroll', payrollWeekId: payroll.id });
             }
           } else {
             log.push({ date: payroll.weekEnd, hours: vacHours, note: `Week of ${payroll.weekStart}`, source: 'payroll', payrollWeekId: payroll.id });

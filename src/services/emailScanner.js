@@ -141,12 +141,14 @@ function extractName(fromStr) {
 // Use Claude API to parse email content
 async function parseEmailWithAI(emailBody, subject, clientName, parsingNotes, generalNotes) {
   try {
-    console.log(`[EmailScanner] Calling Anthropic API for: "${subject}" from ${clientName}`);
+    // Truncate very long emails to avoid API token limits
+    const truncatedBody = emailBody && emailBody.length > 8000 ? emailBody.substring(0, 8000) + '\n...[truncated]' : (emailBody || '');
+    console.log(`[EmailScanner] Calling Anthropic API for: "${subject}" from ${clientName} (body: ${truncatedBody.length} chars)`);
     console.log(`[EmailScanner] API key present: ${!!process.env.ANTHROPIC_API_KEY} (${(process.env.ANTHROPIC_API_KEY || '').substring(0, 10)}...)`);
     
     const requestBody = JSON.stringify({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 2000,
+      max_tokens: 4000,
       system: `You are an expert at parsing emails from clients requesting quotes for metal rolling, forming, and fabrication services. 
 You work for Carolina Rolling Company, a metal rolling shop.
 
@@ -345,7 +347,7 @@ Only classify as "rfq" if the email contains GENUINELY NEW part requests with sp
 
 Add a "summary" field in your response: a 1-2 sentence plain-English summary of what the email is about (for all email types).`,
       messages: [
-        { role: 'user', content: `Email from: ${clientName}\nSubject: ${subject}\n\n${emailBody}` }
+        { role: 'user', content: `Email from: ${clientName}\nSubject: ${subject}\n\n${truncatedBody}` }
       ]
     });
 
@@ -385,11 +387,30 @@ Add a "summary" field in your response: a 1-2 sentence plain-English summary of 
     
     // Clean and parse JSON
     const clean = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-    const parsed = JSON.parse(clean);
+    let parsed;
+    try {
+      parsed = JSON.parse(clean);
+    } catch (jsonErr) {
+      console.error(`[EmailScanner] JSON parse failed. Raw response (first 500): ${text.substring(0, 500)}`);
+      console.error(`[EmailScanner] Clean text (first 500): ${clean.substring(0, 500)}`);
+      // Try to extract partial JSON if it was truncated
+      const lastBrace = clean.lastIndexOf('}');
+      if (lastBrace > 0) {
+        try {
+          parsed = JSON.parse(clean.substring(0, lastBrace + 1));
+          console.log(`[EmailScanner] Recovered partial JSON (truncated at char ${lastBrace})`);
+        } catch {
+          throw new Error(`Invalid JSON from AI: ${jsonErr.message}`);
+        }
+      } else {
+        throw new Error(`Invalid JSON from AI: ${jsonErr.message}`);
+      }
+    }
     console.log(`[EmailScanner] Parsed: type=${parsed.emailType}, parts=${(parsed.parts || []).length}, confidence=${parsed.confidence}`);
     return parsed;
   } catch (err) {
-    console.error('[EmailScanner] AI parse error:', err.message, err.stack);
+    console.error('[EmailScanner] AI parse error:', err.message);
+    // Return a structured error so callers can see what went wrong
     return null;
   }
 }

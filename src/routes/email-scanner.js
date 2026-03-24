@@ -354,11 +354,17 @@ router.post('/retry/:id', async (req, res, next) => {
     const { parseEmailWithAI, getScanConfig, buildFormData } = require('../services/emailScanner');
     const generalNotesSetting = await require('../models').AppSettings.findOne({ where: { key: 'email_scanner_general_notes' } });
     const generalNotes = generalNotesSetting?.value || '';
-    const parsed = await parseEmailWithAI(email.rawBody, email.subject || '', clientName, parsingNotes, generalNotes);
+    let parsed;
+    try {
+      parsed = await parseEmailWithAI(email.rawBody, email.subject || '', clientName, parsingNotes, generalNotes);
+    } catch (parseErr) {
+      await email.update({ status: 'error', errorMessage: `AI parse error: ${parseErr.message}` });
+      return res.status(400).json({ error: { message: `AI parsing failed: ${parseErr.message}` } });
+    }
 
     if (!parsed) {
-      await email.update({ status: 'error', errorMessage: 'AI parsing returned no result (retry)' });
-      return res.status(400).json({ error: { message: 'AI parsing failed again. Check Anthropic API key and credits.' } });
+      await email.update({ status: 'error', errorMessage: 'AI parsing returned no result (retry). The email may be too long or contain unusual formatting.' });
+      return res.status(400).json({ error: { message: 'AI parsing returned no result. Check Heroku logs for details (API status code, error message).' } });
     }
 
     await email.update({

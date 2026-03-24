@@ -2830,6 +2830,32 @@ const Employee = sequelize.define('Employee', {
   isActive: {
     type: DataTypes.BOOLEAN,
     defaultValue: true
+  },
+  // Payroll service fields
+  controlNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  deductions: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  description: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  // Vacation tracking
+  annualVacationDays: {
+    type: DataTypes.DECIMAL(5, 1),
+    defaultValue: 0
+  },
+  vacationDaysUsed: {
+    type: DataTypes.DECIMAL(5, 1),
+    defaultValue: 0
+  },
+  vacationResetYear: {
+    type: DataTypes.INTEGER,
+    allowNull: true
   }
 }, {
   tableName: 'employees',
@@ -2919,6 +2945,15 @@ const PayrollEntry = sequelize.define('PayrollEntry', {
   overtimeDetails: {
     type: DataTypes.JSONB,
     defaultValue: []
+  },
+  // Vacation date records: ['2026-03-21', '2026-03-22']
+  vacationDates: {
+    type: DataTypes.JSONB,
+    defaultValue: []
+  },
+  bonusNotes: {
+    type: DataTypes.STRING,
+    allowNull: true
   },
   grossPay: {
     type: DataTypes.DECIMAL(10, 2),

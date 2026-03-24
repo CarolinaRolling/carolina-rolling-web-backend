@@ -404,6 +404,16 @@ async function startServer() {
       if (count > 0) console.log(`Migrated ${count} work orders from picked_up to shipped`);
     } catch (e) { /* ignore */ }
 
+    // Reset vacation days on Jan 1 each year
+    try {
+      const currentYear = new Date().getFullYear();
+      const [vacReset] = await sequelize.query(
+        `UPDATE employees SET "vacationDaysUsed" = 0, "vacationResetYear" = ${currentYear} WHERE "vacationResetYear" IS NULL OR "vacationResetYear" < ${currentYear}`
+      );
+      const vacCount = vacReset?.rowCount || vacReset?.length || 0;
+      if (vacCount > 0) console.log(`Reset vacation days for ${vacCount} employees (year ${currentYear})`);
+    } catch (e) { /* ignore */ }
+
     // Backfill vendorId on POs and InboundOrders that only have supplier name
     try {
       const [poFixed] = await sequelize.query(`

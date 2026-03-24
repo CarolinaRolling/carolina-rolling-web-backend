@@ -283,7 +283,11 @@ router.get('/employees', async (req, res, next) => {
 // POST /api/business/employees
 router.post('/employees', async (req, res, next) => {
   try {
-    const employee = await Employee.create(req.body);
+    const data = { ...req.body };
+    if (data.annualVacationDays === '' || data.annualVacationDays === null) data.annualVacationDays = 0;
+    if (data.hourlyRate === '') data.hourlyRate = 0;
+    if (data.vacationDaysUsed === '' || data.vacationDaysUsed === null) data.vacationDaysUsed = 0;
+    const employee = await Employee.create(data);
     res.json({ data: employee, message: 'Employee added' });
   } catch (error) { next(error); }
 });
@@ -293,7 +297,10 @@ router.put('/employees/:id', async (req, res, next) => {
   try {
     const employee = await Employee.findByPk(req.params.id);
     if (!employee) return res.status(404).json({ error: { message: 'Not found' } });
-    await employee.update(req.body);
+    const data = { ...req.body };
+    if (data.annualVacationDays === '' || data.annualVacationDays === null) data.annualVacationDays = 0;
+    if (data.hourlyRate === '') data.hourlyRate = 0;
+    await employee.update(data);
     res.json({ data: employee, message: 'Updated' });
   } catch (error) { next(error); }
 });
@@ -408,9 +415,25 @@ router.put('/payroll/:id', async (req, res, next) => {
 // POST /api/business/payroll/:id/submit - Submit payroll
 router.post('/payroll/:id/submit', async (req, res, next) => {
   try {
-    const payroll = await PayrollWeek.findByPk(req.params.id);
+    const payroll = await PayrollWeek.findByPk(req.params.id, {
+      include: [{ model: PayrollEntry, as: 'entries' }]
+    });
     if (!payroll) return res.status(404).json({ error: { message: 'Not found' } });
     await payroll.update({ status: 'submitted', submittedAt: new Date(), submittedBy: req.body.submittedBy || 'admin' });
+    
+    // Update vacation days used for each employee
+    for (const entry of (payroll.entries || [])) {
+      const vacHours = parseFloat(entry.vacationHours) || 0;
+      if (vacHours > 0 && entry.employeeId) {
+        const emp = await Employee.findByPk(entry.employeeId);
+        if (emp) {
+          const vacDays = vacHours / 8; // Convert hours to days
+          const currentUsed = parseFloat(emp.vacationDaysUsed) || 0;
+          await emp.update({ vacationDaysUsed: currentUsed + vacDays });
+        }
+      }
+    }
+    
     res.json({ data: payroll, message: 'Payroll submitted' });
   } catch (error) { next(error); }
 });

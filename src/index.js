@@ -408,7 +408,7 @@ async function startServer() {
     try {
       const currentYear = new Date().getFullYear();
       const [vacReset] = await sequelize.query(
-        `UPDATE employees SET "vacationDaysUsed" = 0, "vacationResetYear" = ${currentYear} WHERE "vacationResetYear" IS NULL OR "vacationResetYear" < ${currentYear}`
+        `UPDATE employees SET "vacationDaysUsed" = 0, "vacationLog" = '[]', "vacationResetYear" = ${currentYear} WHERE "vacationResetYear" IS NULL OR "vacationResetYear" < ${currentYear}`
       );
       const vacCount = vacReset?.rowCount || vacReset?.length || 0;
       if (vacCount > 0) console.log(`Reset vacation days for ${vacCount} employees (year ${currentYear})`);

@@ -2853,6 +2853,11 @@ const Employee = sequelize.define('Employee', {
     type: DataTypes.DECIMAL(5, 1),
     defaultValue: 0
   },
+  // Detailed vacation log: [{ date, hours, note, source }]
+  vacationLog: {
+    type: DataTypes.JSONB,
+    defaultValue: []
+  },
   vacationResetYear: {
     type: DataTypes.INTEGER,
     allowNull: true

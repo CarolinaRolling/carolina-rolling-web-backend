@@ -315,6 +315,19 @@ router.delete('/employees/:id', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// PUT /api/business/employees/:id/vacation-log - Update vacation log
+router.put('/employees/:id/vacation-log', async (req, res, next) => {
+  try {
+    const employee = await Employee.findByPk(req.params.id);
+    if (!employee) return res.status(404).json({ error: { message: 'Not found' } });
+    const log = req.body.vacationLog || [];
+    const totalHours = log.reduce((s, e) => s + (parseFloat(e.hours) || 0), 0);
+    const totalDays = totalHours / 8;
+    await employee.update({ vacationLog: log, vacationDaysUsed: totalDays });
+    res.json({ data: employee, message: 'Vacation log updated' });
+  } catch (error) { next(error); }
+});
+
 // ============= PAYROLL =============
 
 // GET /api/business/payroll - List payroll weeks
@@ -427,14 +440,37 @@ router.post('/payroll/:id/submit', async (req, res, next) => {
       if (vacHours > 0 && entry.employeeId) {
         const emp = await Employee.findByPk(entry.employeeId);
         if (emp) {
-          const vacDays = vacHours / 8; // Convert hours to days
+          const vacDays = vacHours / 8;
           const currentUsed = parseFloat(emp.vacationDaysUsed) || 0;
-          await emp.update({ vacationDaysUsed: currentUsed + vacDays });
+          const log = Array.isArray(emp.vacationLog) ? [...emp.vacationLog] : [];
+          // Add entries from vacation dates if available
+          const dates = entry.vacationDates && entry.vacationDates.length > 0 ? entry.vacationDates : [];
+          if (dates.length > 0) {
+            const hoursPerDate = vacHours / dates.length;
+            for (const d of dates) {
+              log.push({ date: d, hours: parseFloat(hoursPerDate.toFixed(1)), note: '', source: 'payroll', payrollWeekId: payroll.id });
+            }
+          } else {
+            log.push({ date: payroll.weekEnd, hours: vacHours, note: `Week of ${payroll.weekStart}`, source: 'payroll', payrollWeekId: payroll.id });
+          }
+          await emp.update({ vacationDaysUsed: currentUsed + vacDays, vacationLog: log });
         }
       }
     }
     
     res.json({ data: payroll, message: 'Payroll submitted' });
+  } catch (error) { next(error); }
+});
+
+// DELETE /api/business/payroll/:id - Delete a draft payroll
+router.delete('/payroll/:id', async (req, res, next) => {
+  try {
+    const payroll = await PayrollWeek.findByPk(req.params.id);
+    if (!payroll) return res.status(404).json({ error: { message: 'Not found' } });
+    if (payroll.status === 'submitted') return res.status(400).json({ error: { message: 'Cannot delete submitted payroll' } });
+    await PayrollEntry.destroy({ where: { payrollWeekId: payroll.id } });
+    await payroll.destroy();
+    res.json({ message: 'Payroll draft deleted' });
   } catch (error) { next(error); }
 });
 

@@ -3956,7 +3956,7 @@ router.post('/:id/coc', async (req, res, next) => {
     let pageNum = 1;
     const writeFooter = () => {
       doc.font('Helvetica').fontSize(7).fillColor(grayColor);
-      doc.text('Carolina Rolling Co. Inc. | (562) 633-1044 | keepitrolling@carolinarolling.com          Page ' + pageNum, 50, 750, { width: 512, align: 'center' });
+      doc.text('Carolina Rolling Co. Inc. | (562) 633-1044 | keepitrolling@carolinarolling.com          Page ' + pageNum, 50, 748, { width: 512, align: 'center', lineBreak: false });
     };
     const newPage = () => { writeFooter(); pageNum++; doc.addPage(); };
     const yellowcakePath = path.join(__dirname, '../assets/fonts/Yellowcake-Regular.ttf');

@@ -3948,11 +3948,17 @@ router.post('/:id/coc', async (req, res, next) => {
     const wps = wpsId ? await WeldProcedure.findByPk(wpsId) : null;
     const dateStr = certDate ? new Date(certDate + 'T12:00:00').toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }) : new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
 
-    const doc = new PDFDocument({ margin: 50, size: 'letter', bufferPages: true });
+    const doc = new PDFDocument({ margin: 50, size: 'letter' });
     const chunks = [];
     doc.on('data', c => chunks.push(c));
     const logoFile = [path.join(__dirname, '../assets/logo.png'), path.join(__dirname, '../assets/logo.jpg')].find(p => fs.existsSync(p));
     const primaryColor = '#1976d2', darkColor = '#333', grayColor = '#666';
+    let pageNum = 1;
+    const writeFooter = () => {
+      doc.font('Helvetica').fontSize(7).fillColor(grayColor);
+      doc.text('Carolina Rolling Co. Inc. | (562) 633-1044 | keepitrolling@carolinarolling.com          Page ' + pageNum, 50, 750, { width: 512, align: 'center' });
+    };
+    const newPage = () => { writeFooter(); pageNum++; doc.addPage(); };
     const yellowcakePath = path.join(__dirname, '../assets/fonts/Yellowcake-Regular.ttf');
     let hasYellowcake = false;
     try { if (fs.existsSync(yellowcakePath)) { doc.registerFont('Yellowcake', yellowcakePath); hasYellowcake = true; } } catch {}
@@ -3998,7 +4004,7 @@ router.post('/:id/coc', async (req, res, next) => {
       if (client.zip) cl += ' ' + client.zip;
       if (cl) { doc.text(cl, 50, y); y += 12; }
     }
-    y += 2;
+    y += 6;
     doc.font('Helvetica').fontSize(9).fillColor(grayColor);
     doc.text('Customer P.O: ' + (workOrder.clientPurchaseOrderNumber || '—'), 50, y);
     y += 20;
@@ -4017,7 +4023,7 @@ router.post('/:id/coc', async (req, res, next) => {
     const parts = (workOrder.parts || []).filter(p => !['fab_service', 'shop_rate', 'rush_service'].includes(p.partType));
     for (let i = 0; i < parts.length; i++) {
       // Page break — no header on continuation pages, just start from top margin
-      if (y > 690) { doc.addPage(); y = 50; }
+      if (y > 690) { newPage(); y = 50; }
       const p = parts[i];
       const fd = p.formData && typeof p.formData === 'object' ? p.formData : {};
       const matDesc = fd._materialDescription || p.materialDescription || '';
@@ -4050,7 +4056,7 @@ router.post('/:id/coc', async (req, res, next) => {
     }
 
     // Certification — check if fits, else new page
-    if (y > 640) { doc.addPage(); y = 50; }
+    if (y > 640) { newPage(); y = 50; }
     y += 16;
     doc.moveTo(50, y).lineTo(562, y).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
     y += 12;
@@ -4067,7 +4073,7 @@ router.post('/:id/coc', async (req, res, next) => {
 
     // WPS page
     if (wps) {
-      doc.addPage();
+      newPage();
       // WPS header — only on WPS page
       if (logoFile) try { doc.image(logoFile, 50, 22, { width: 65 }); } catch {}
       drawCompanyName(130, 30);
@@ -4102,16 +4108,8 @@ router.post('/:id/coc', async (req, res, next) => {
       doc.text('Signature: ' + (wps.updatedBy || 'Jason Thornton'), 50, wy);
     }
 
-    // Add page numbers to all pages
-    const totalPages = doc.bufferedPageRange().count;
-    for (let i = 0; i < totalPages; i++) {
-      doc.switchToPage(i);
-      doc.font('Helvetica').fontSize(7).fillColor(grayColor);
-      doc.text(
-        'Carolina Rolling Co. Inc. | (562) 633-1044 | keepitrolling@carolinarolling.com' + '          Page ' + (i + 1) + ' of ' + totalPages,
-        50, 750, { width: 512, align: 'center' }
-      );
-    }
+    // Write footer on final page
+    writeFooter();
 
     doc.end();
     await new Promise(resolve => doc.on('end', resolve));

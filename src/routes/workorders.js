@@ -1510,8 +1510,8 @@ router.post('/:id/pickup', async (req, res, next) => {
     // Generate pickup receipt PDF and save to documents
     try {
       const PDFDocument = require('pdfkit');
-      const latestEntry = workOrder.pickupHistory[workOrder.pickupHistory.length - 1];
-      const pickupNum = workOrder.pickupHistory.length;
+      const latestEntry = history[history.length - 1];
+      const pickupNum = history.length;
       const receiptDoc = new PDFDocument({ margin: 50, size: 'letter' });
       const rChunks = [];
       receiptDoc.on('data', c => rChunks.push(c));

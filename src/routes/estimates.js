@@ -1130,10 +1130,15 @@ router.get('/:id/parts/:partId/files/:fileId/view', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'File not found' } });
     }
 
-    // Return direct S3 URL or proxy URL for Cloudinary
+    // Return presigned S3 URL or proxy URL for Cloudinary
     const isS3 = (file.cloudinaryId && file.cloudinaryId.startsWith('s3:')) || (file.url && file.url.includes('amazonaws.com'));
     if (isS3) {
-      res.json({ data: { url: file.url, originalName: file.originalName } });
+      let sid = file.cloudinaryId;
+      if (!sid || !sid.startsWith('s3:')) {
+        try { const u = new URL(file.url); sid = 's3:' + decodeURIComponent(u.pathname.slice(1)); } catch {}
+      }
+      const presignedUrl = sid ? await fileStorage.getPresignedUrl(sid, 3600, file.originalName) : file.url;
+      res.json({ data: { url: presignedUrl || file.url, originalName: file.originalName } });
     } else {
       const baseUrl = `${req.protocol}://${req.get('host')}`;
       const url = `${baseUrl}/api/estimates/${req.params.id}/parts/${req.params.partId}/files/${req.params.fileId}/download`;

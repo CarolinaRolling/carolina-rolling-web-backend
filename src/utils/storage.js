@@ -160,13 +160,18 @@ function getProvider() {
  * @param {number} expiresIn - Seconds until expiry (default 3600 = 1 hour)
  * @returns {string|null} Presigned URL or null if not S3
  */
-async function getPresignedUrl(storageId, expiresIn = 3600) {
+async function getPresignedUrl(storageId, expiresIn = 3600, originalName = null) {
   if (!storageId || !storageId.startsWith('s3:') || !useS3()) return null;
   const key = storageId.slice(3);
-  const command = new GetObjectCommand({
+  const params = {
     Bucket: BUCKET(),
     Key: key
-  });
+  };
+  // Set Content-Disposition so browser downloads with original filename
+  if (originalName) {
+    params.ResponseContentDisposition = `attachment; filename="${encodeURIComponent(originalName)}"`;
+  }
+  const command = new GetObjectCommand(params);
   return await getSignedUrl(getS3(), command, { expiresIn });
 }
 

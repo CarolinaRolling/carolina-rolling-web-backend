@@ -4030,7 +4030,9 @@ router.post('/:id/coc', async (req, res, next) => {
       if (y > 690) { newPage(); y = 50; }
       const p = parts[i];
       const fd = p.formData && typeof p.formData === 'object' ? p.formData : {};
-      const matDesc = fd._materialDescription || p.materialDescription || '';
+      let matDesc = fd._materialDescription || p.materialDescription || '';
+      // Strip leading "1pc: " or "5pc: " prefix — qty is already in its own column
+      matDesc = matDesc.replace(/^\d+pc:\s*/i, '');
       const rollDesc = fd._rollingDescription || p.rollingDescription || '';
 
       doc.font('Helvetica-Bold').fontSize(10).fillColor(darkColor);

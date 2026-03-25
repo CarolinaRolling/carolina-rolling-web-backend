@@ -3941,280 +3941,175 @@ router.post('/:id/coc', async (req, res, next) => {
   try {
     const PDFDocument = require('pdfkit');
     const { WeldProcedure } = require('../models');
-    
-    const workOrder = await WorkOrder.findByPk(req.params.id, {
-      include: [{ model: WorkOrderPart, as: 'parts' }]
-    });
+    const workOrder = await WorkOrder.findByPk(req.params.id, { include: [{ model: WorkOrderPart, as: 'parts' }] });
     if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
 
     const { wpsId, certifiedBy, certDate } = req.body;
     const wps = wpsId ? await WeldProcedure.findByPk(wpsId) : null;
+    const dateStr = certDate ? new Date(certDate + 'T12:00:00').toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }) : new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
 
     const doc = new PDFDocument({ margin: 50, size: 'letter' });
     const chunks = [];
     doc.on('data', c => chunks.push(c));
+    const logoFile = [path.join(__dirname, '../assets/logo.png'), path.join(__dirname, '../assets/logo.jpg')].find(p => fs.existsSync(p));
+    const primaryColor = '#1976d2', darkColor = '#333', grayColor = '#666';
 
-    const logoPath = path.join(__dirname, '../assets/logo.png');
-    const logoPathJpg = path.join(__dirname, '../assets/logo.jpg');
-    const hasLogo = fs.existsSync(logoPath) || fs.existsSync(logoPathJpg);
-    const logoFile = fs.existsSync(logoPath) ? logoPath : logoPathJpg;
+    const drawHeader = () => {
+      if (logoFile) try { doc.image(logoFile, 50, 22, { width: 65 }); } catch {}
+      doc.font('Helvetica-Bold').fontSize(15).fillColor(darkColor);
+      doc.text('CAROLINA ROLLING CO. INC.', 130, 32);
+      doc.font('Helvetica').fontSize(8.5).fillColor(grayColor);
+      doc.text('9152 Sonrisa St., Bellflower, CA 90706', 130, 52);
+      doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 130, 63);
+    };
 
-    // Colors — match estimate PDF
-    const primaryColor = '#1976d2';
-    const darkColor = '#333';
-    const grayColor = '#666';
-    const lightGray = '#e0e0e0';
-
-    // ===== PAGE 1: CERTIFICATE OF CONFORMANCE =====
-    // Header — logo left, company info, same as estimate
-    if (hasLogo) {
-      try { doc.image(logoFile, 50, 22, { width: 65 }); } catch {}
-    }
-    doc.fontSize(15).fillColor(darkColor).font('Helvetica-Bold')
-      .text('CAROLINA ROLLING CO. INC.', 130, 32, { lineBreak: false });
-    doc.font('Helvetica').fontSize(8.5).fillColor(grayColor);
-    doc.text('9152 Sonrisa St., Bellflower, CA 90706', 130, 52, { lineBreak: false });
-    doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 130, 63, { lineBreak: false });
-
-    // Title — top right, like estimate
-    doc.fontSize(11).fillColor(primaryColor).font('Helvetica-Bold');
-    doc.text('CERTIFICATE OF', 380, 28, { width: 182, align: 'right', lineBreak: false });
-    doc.text('CONFORMANCE', 380, 42, { width: 182, align: 'right', lineBreak: false });
+    // ===== PAGE 1 =====
+    drawHeader();
+    doc.font('Helvetica-Bold').fontSize(11).fillColor(primaryColor);
+    doc.text('CERTIFICATE OF CONFORMANCE', 340, 30, { width: 222, align: 'right' });
     doc.font('Helvetica-Bold').fontSize(10).fillColor(darkColor);
-    doc.text('Job No: ' + String(workOrder.drNumber || ''), 380, 58, { width: 182, align: 'right', lineBreak: false });
-    const dateStr = certDate ? new Date(certDate + 'T12:00:00').toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }) : new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
+    doc.text('Job No: ' + String(workOrder.drNumber || ''), 340, 48, { width: 222, align: 'right' });
     doc.font('Helvetica').fontSize(9).fillColor(grayColor);
-    doc.text('Date: ' + dateStr, 380, 71, { width: 182, align: 'right', lineBreak: false });
+    doc.text('Date: ' + dateStr, 340, 62, { width: 222, align: 'right' });
+    doc.moveTo(50, 82).lineTo(562, 82).lineWidth(1).strokeColor('#e0e0e0').stroke();
 
-    // Divider
-    doc.strokeColor(lightGray).lineWidth(1).moveTo(50, 90).lineTo(562, 90).stroke();
-
-    // Customer info — left side, like estimate
-    let y = 102;
-    doc.fontSize(10).fillColor(primaryColor).font('Helvetica-Bold').text('CUSTOMER:', 50, y, { lineBreak: false });
-    y += 16;
-    const clientName = workOrder.clientName || '';
-    doc.fontSize(12).fillColor(darkColor).font('Helvetica-Bold').text(clientName, 50, y, { lineBreak: false });
-    doc.font('Helvetica');
-    y += 16;
-    const client = await Client.findOne({ where: { name: clientName } });
+    // Customer — all left, unbolded
+    let y = 92;
+    doc.font('Helvetica').fontSize(9).fillColor(grayColor);
+    doc.text('Customer', 50, y); y += 12;
+    doc.font('Helvetica').fontSize(10).fillColor(darkColor);
+    doc.text(workOrder.clientName || '', 50, y); y += 13;
+    const client = await Client.findOne({ where: { name: workOrder.clientName || '' } });
     if (client) {
-      if (client.address) { doc.fontSize(9).fillColor(grayColor).text(client.address, 50, y, { lineBreak: false }); y += 12; }
-      let cityLine = '';
-      if (client.city) cityLine += client.city;
-      if (client.state) cityLine += (cityLine ? ', ' : '') + client.state;
-      if (client.zip) cityLine += ' ' + client.zip;
-      if (cityLine) { doc.text(cityLine, 50, y, { lineBreak: false }); y += 12; }
+      doc.font('Helvetica').fontSize(9).fillColor(grayColor);
+      if (client.address) { doc.text(client.address, 50, y); y += 11; }
+      let cl = '';
+      if (client.city) cl += client.city;
+      if (client.state) cl += (cl ? ', ' : '') + client.state;
+      if (client.zip) cl += ' ' + client.zip;
+      if (cl) { doc.text(cl, 50, y); y += 11; }
     }
+    y += 3;
+    doc.font('Helvetica').fontSize(9).fillColor(grayColor);
+    doc.text('Customer P.O: ' + (workOrder.clientPurchaseOrderNumber || '—'), 50, y);
+    y += 18;
 
-    // PO — right side
-    doc.fontSize(9).fillColor(grayColor).font('Helvetica-Bold').text('Customer P.O:', 380, 102, { lineBreak: false });
-    doc.font('Helvetica').fontSize(10).fillColor(darkColor)
-      .text(workOrder.clientPurchaseOrderNumber || '—', 380, 115, { lineBreak: false });
-
-    // Parts section
-    y = Math.max(y + 10, 158);
-    doc.strokeColor(lightGray).lineWidth(1).moveTo(50, y).lineTo(562, y).stroke();
-    y += 10;
+    // Parts divider + header
+    doc.moveTo(50, y).lineTo(562, y).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
+    y += 8;
+    doc.font('Helvetica-Bold').fontSize(8).fillColor(grayColor);
+    doc.text('QTY', 50, y, { width: 30 });
+    doc.text('PART NUMBER', 85, y);
+    doc.text('SIZE / MATERIAL', 200, y);
+    y += 12;
+    doc.moveTo(50, y).lineTo(562, y).lineWidth(0.3).strokeColor('#ddd').stroke();
+    y += 7;
 
     const parts = (workOrder.parts || []).filter(p => !['fab_service', 'shop_rate', 'rush_service'].includes(p.partType));
-
-    // Table header
-    doc.fontSize(8).fillColor(grayColor).font('Helvetica-Bold');
-    doc.text('QTY', 50, y, { width: 35, align: 'center', lineBreak: false });
-    doc.text('PART NUMBER', 90, y, { lineBreak: false });
-    doc.text('SIZE / MATERIAL', 200, y, { lineBreak: false });
-    y += 12;
-    doc.strokeColor(lightGray).lineWidth(0.5).moveTo(50, y).lineTo(562, y).stroke();
-    y += 8;
-
-    parts.forEach((p, idx) => {
+    for (let i = 0; i < parts.length; i++) {
+      if (y > 660) { doc.addPage(); drawHeader(); y = 90; }
+      const p = parts[i];
       const fd = p.formData && typeof p.formData === 'object' ? p.formData : {};
       const matDesc = fd._materialDescription || p.materialDescription || '';
       const rollDesc = fd._rollingDescription || p.rollingDescription || '';
-      const qty = p.quantity || 1;
-      const partNum = p.clientPartNumber || 'SEE DESCRIPTION';
 
-      // Row
-      doc.fontSize(10).font('Helvetica-Bold').fillColor(darkColor);
-      doc.text(String(qty), 50, y, { width: 35, align: 'center', lineBreak: false });
-      doc.fontSize(9).font('Helvetica').fillColor(darkColor);
-      doc.text(partNum, 90, y, { width: 105, lineBreak: false });
-
-      // Material desc (may wrap)
-      doc.fontSize(9).font('Helvetica').fillColor(darkColor);
-      doc.text(matDesc, 200, y, { width: 362 });
-      const matH = doc.heightOfString(matDesc, { width: 362 });
-      y += Math.max(14, matH + 2);
-
-      // Rolling instructions on next line
+      doc.font('Helvetica-Bold').fontSize(10).fillColor(darkColor);
+      doc.text(String(p.quantity || 1), 50, y, { width: 30 });
+      doc.font('Helvetica').fontSize(9).fillColor(darkColor);
+      doc.text(p.clientPartNumber || 'SEE DESCRIPTION', 85, y, { width: 110 });
+      if (matDesc) {
+        doc.font('Helvetica').fontSize(9).fillColor(darkColor);
+        doc.text(matDesc, 200, y, { width: 360 });
+        y += doc.heightOfString(matDesc, { width: 360 }) + 2;
+      } else { y += 12; }
       if (rollDesc) {
-        doc.fontSize(8.5).font('Helvetica').fillColor(grayColor);
-        doc.text(rollDesc, 200, y, { width: 362 });
-        y += doc.heightOfString(rollDesc, { width: 362 }) + 2;
+        doc.font('Helvetica').fontSize(8.5).fillColor(grayColor);
+        doc.text(rollDesc, 200, y, { width: 360 });
+        y += doc.heightOfString(rollDesc, { width: 360 }) + 2;
       }
-
-      // Special instructions
       if (p.specialInstructions) {
-        doc.fontSize(8).font('Helvetica-Oblique').fillColor('#888');
-        doc.text(p.specialInstructions, 200, y, { width: 362 });
-        y += doc.heightOfString(p.specialInstructions, { width: 362 }) + 2;
+        doc.font('Helvetica-Oblique').fontSize(8).fillColor('#999');
+        doc.text(p.specialInstructions, 200, y, { width: 360 });
+        y += doc.heightOfString(p.specialInstructions, { width: 360 }) + 2;
       }
-
-      y += 4;
-      if (idx < parts.length - 1) {
-        doc.strokeColor('#eee').lineWidth(0.3).moveTo(90, y).lineTo(562, y).stroke();
-        y += 6;
+      y += 5;
+      if (i < parts.length - 1) {
+        doc.moveTo(85, y).lineTo(562, y).lineWidth(0.3).strokeColor('#eee').stroke();
+        y += 5;
       }
-    });
+    }
 
-    // Certification statement
+    // Certification
     y += 20;
-    doc.strokeColor(lightGray).lineWidth(1).moveTo(50, y).lineTo(562, y).stroke();
-    y += 14;
-    doc.fontSize(9).font('Helvetica').fillColor(darkColor)
-      .text('We hereby certify that parts described above were cold formed and comply with', 50, y, { width: 512, align: 'center' });
-    y += 14;
-    doc.fontSize(10).font('Helvetica-Bold').fillColor(darkColor)
-      .text('ASME Section VIII Div.1, UG-79, UG-80, & UCS-79', 50, y, { width: 512, align: 'center' });
-
-    // Signature block
-    y += 30;
-    doc.fontSize(9).font('Helvetica-Bold').fillColor(darkColor).text('Certified By:', 50, y);
-    y += 14;
-    doc.fontSize(11).font('Helvetica-Bold').text(certifiedBy || 'Jason Thornton', 50, y);
-    y += 14;
-    doc.fontSize(9).font('Helvetica').fillColor(grayColor).text('Carolina Rolling Co., Inc.', 50, y);
-    y += 14;
+    if (y > 680) { doc.addPage(); drawHeader(); y = 90; }
+    doc.moveTo(50, y).lineTo(562, y).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
+    y += 12;
+    doc.font('Helvetica').fontSize(9).fillColor(darkColor);
+    doc.text('We hereby certify that parts described above were cold formed and comply with', 50, y, { width: 512, align: 'center' });
+    y += 13;
+    doc.font('Helvetica-Bold').fontSize(10).fillColor(darkColor);
+    doc.text('ASME Section VIII Div.1, UG-79, UG-80, & UCS-79', 50, y, { width: 512, align: 'center' });
+    y += 28;
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(darkColor).text('Certified By:', 50, y); y += 13;
+    doc.font('Helvetica-Bold').fontSize(11).text(certifiedBy || 'Jason Thornton', 50, y); y += 13;
+    doc.font('Helvetica').fontSize(9).fillColor(grayColor).text('Carolina Rolling Co., Inc.', 50, y); y += 13;
     doc.text('Date: ' + dateStr, 50, y);
+    doc.font('Helvetica').fontSize(7).fillColor(grayColor);
+    doc.text('Carolina Rolling Co. Inc. | 9152 Sonrisa St., Bellflower, CA 90706 | (562) 633-1044 | keepitrolling@carolinarolling.com', 50, 740, { width: 512, align: 'center' });
 
-    // Footer
-    doc.fontSize(7).fillColor(grayColor).text(
-      'Carolina Rolling Co. Inc. | 9152 Sonrisa St., Bellflower, CA 90706 | (562) 633-1044 | keepitrolling@carolinarolling.com',
-      50, 740, { width: 512, align: 'center' }
-    );
-
-    // ===== PAGE 2 (optional): WELD PROCEDURE SPECIFICATION =====
+    // ===== PAGE 2: WPS =====
     if (wps) {
       doc.addPage();
-      
-      // Same header
-      if (hasLogo) {
-        try { doc.image(logoFile, 50, 22, { width: 65 }); } catch {}
-      }
-      doc.fontSize(15).fillColor(darkColor).font('Helvetica-Bold')
-        .text('CAROLINA ROLLING CO. INC.', 130, 32, { lineBreak: false });
-      doc.font('Helvetica').fontSize(8.5).fillColor(grayColor);
-      doc.text('9152 Sonrisa St., Bellflower, CA 90706', 130, 52, { lineBreak: false });
-      doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 130, 63, { lineBreak: false });
-
-      // WPS title — top right
-      doc.fontSize(11).fillColor(primaryColor).font('Helvetica-Bold');
-      doc.text('WELDING PROCEDURE', 350, 28, { width: 212, align: 'right', lineBreak: false });
-      doc.text('SPECIFICATION', 350, 42, { width: 212, align: 'right', lineBreak: false });
+      drawHeader();
+      doc.font('Helvetica-Bold').fontSize(11).fillColor(primaryColor);
+      doc.text('WELDING PROCEDURE SPECIFICATION', 340, 30, { width: 222, align: 'right' });
       doc.font('Helvetica-Bold').fontSize(10).fillColor(darkColor);
-      doc.text('WPS: ' + (wps.wpsNumber || ''), 350, 58, { width: 212, align: 'right', lineBreak: false });
+      doc.text('WPS: ' + (wps.wpsNumber || ''), 340, 48, { width: 222, align: 'right' });
       doc.font('Helvetica').fontSize(9).fillColor(grayColor);
-      doc.text('Date: ' + new Date(wps.updatedAt || wps.createdAt).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: '2-digit' }), 350, 71, { width: 212, align: 'right', lineBreak: false });
+      doc.text('Date: ' + new Date(wps.updatedAt || wps.createdAt).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: '2-digit' }), 340, 62, { width: 222, align: 'right' });
+      doc.moveTo(50, 82).lineTo(562, 82).lineWidth(1).strokeColor('#e0e0e0').stroke();
 
-      doc.strokeColor(lightGray).lineWidth(1).moveTo(50, 90).lineTo(562, 90).stroke();
+      let wy = 94;
+      const wR = (l, v) => { if (!v) return; doc.font('Helvetica-Bold').fontSize(9).fillColor(grayColor).text(l, 50, wy, { width: 130 }); doc.font('Helvetica').fontSize(9).fillColor(darkColor).text(v, 185, wy, { width: 370 }); wy += 15; };
+      const wH = (t) => { wy += 5; doc.font('Helvetica-Bold').fontSize(9).fillColor(primaryColor).text(t, 50, wy); wy += 12; doc.moveTo(50, wy).lineTo(562, wy).lineWidth(0.3).strokeColor('#ddd').stroke(); wy += 7; };
 
-      let wy = 104;
-      const wRow = (label, val) => {
-        if (!val) return;
-        doc.fontSize(9).font('Helvetica-Bold').fillColor(grayColor).text(label, 50, wy, { width: 130, lineBreak: false });
-        doc.font('Helvetica').fillColor(darkColor).text(val, 185, wy, { width: 370 });
-        wy += 16;
-      };
-      const wHead = (title) => {
-        wy += 4;
-        doc.fontSize(9).fillColor(primaryColor).font('Helvetica-Bold').text(title, 50, wy);
-        wy += 14;
-        doc.strokeColor(lightGray).lineWidth(0.5).moveTo(50, wy).lineTo(562, wy).stroke();
-        wy += 8;
-      };
-
-      wRow('Process', wps.process);
-      wRow('Type', wps.processType);
-      wHead('Base Materials');
-      wRow('Base Materials', wps.baseMaterials);
-      wHead('Filler');
-      wRow('SFA Specification', wps.sfaSpecification);
-      wRow('AWS Classification', wps.awsClassification);
-      wRow('Size', wps.fillerSize);
-      wHead('Technique');
-      wRow('Welding Position', wps.weldingPosition);
-      wRow('Bead Type', wps.beadType);
-      wRow('Joint Type', wps.jointType);
-      wRow('Back Gouging', wps.backGouging);
-      wRow('Pass Type', wps.passType);
-      wRow('Preheat', wps.preheat);
-      wRow('Current', wps.current);
-      wRow('Voltage', wps.voltage);
-
+      wR('Process', wps.process); wR('Type', wps.processType);
+      wH('Base Materials'); wR('Base Materials', wps.baseMaterials);
+      wH('Filler'); wR('SFA Specification', wps.sfaSpecification); wR('AWS Classification', wps.awsClassification); wR('Size', wps.fillerSize);
+      wH('Technique'); wR('Welding Position', wps.weldingPosition); wR('Bead Type', wps.beadType); wR('Joint Type', wps.jointType);
+      wR('Back Gouging', wps.backGouging); wR('Pass Type', wps.passType); wR('Preheat', wps.preheat); wR('Current', wps.current); wR('Voltage', wps.voltage);
       if (wps.notes) {
-        wHead('Notes / Procedure');
-        doc.fontSize(8.5).font('Helvetica').fillColor(darkColor);
-        wps.notes.split('\n').forEach(line => {
-          if (line.trim()) {
-            doc.text(line.trim(), 50, wy, { width: 512 });
-            wy += doc.heightOfString(line.trim(), { width: 512 }) + 2;
-          }
-        });
+        wH('Notes / Procedure');
+        doc.font('Helvetica').fontSize(8.5).fillColor(darkColor);
+        wps.notes.split('\n').forEach(ln => { if (ln.trim()) { doc.text(ln.trim(), 50, wy, { width: 512 }); wy += doc.heightOfString(ln.trim(), { width: 512 }) + 2; } });
       }
-
-      wy += 16;
-      doc.strokeColor(lightGray).lineWidth(1).moveTo(50, wy).lineTo(562, wy).stroke();
-      wy += 10;
-      doc.fontSize(8).font('Helvetica').fillColor(grayColor)
-        .text('This document was updated by: ' + (wps.updatedBy || 'Jason Thornton'), 50, wy);
-      wy += 12;
-      doc.text('Date of update: ' + new Date(wps.updatedAt || wps.createdAt).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: '2-digit' }), 50, wy);
-      wy += 12;
+      wy += 14; doc.moveTo(50, wy).lineTo(562, wy).lineWidth(0.5).strokeColor('#e0e0e0').stroke(); wy += 10;
+      doc.font('Helvetica').fontSize(8).fillColor(grayColor);
+      doc.text('Updated by: ' + (wps.updatedBy || 'Jason Thornton'), 50, wy); wy += 11;
+      doc.text('Date: ' + new Date(wps.updatedAt || wps.createdAt).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: '2-digit' }), 50, wy); wy += 11;
       doc.text('Signature: ' + (wps.updatedBy || 'Jason Thornton'), 50, wy);
-
-      // Footer
-      doc.fontSize(7).fillColor(grayColor).text(
-        'Carolina Rolling Co. Inc. | 9152 Sonrisa St., Bellflower, CA 90706 | (562) 633-1044 | keepitrolling@carolinarolling.com',
-        50, 740, { width: 512, align: 'center' }
-      );
+      doc.font('Helvetica').fontSize(7).fillColor(grayColor);
+      doc.text('Carolina Rolling Co. Inc. | 9152 Sonrisa St., Bellflower, CA 90706 | (562) 633-1044 | keepitrolling@carolinarolling.com', 50, 740, { width: 512, align: 'center' });
     }
 
     doc.end();
     await new Promise(resolve => doc.on('end', resolve));
     const pdfBuffer = Buffer.concat(chunks);
 
-    // Save a copy to WO documents
+    // Auto-save to WO documents
     try {
       const cocFilename = `COC-${workOrder.drNumber}${wps ? '-WPS-' + wps.wpsNumber : ''}.pdf`;
-      const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, {
-        folder: `work-orders/${workOrder.id}/documents`,
-        filename: cocFilename,
-        mimeType: 'application/pdf'
-      });
+      const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, { folder: `work-orders/${workOrder.id}/documents`, filename: cocFilename, mimeType: 'application/pdf' });
       const prevCoc = await WorkOrderDocument.findOne({ where: { workOrderId: workOrder.id, documentType: 'coc' } });
       if (prevCoc) await prevCoc.destroy();
-      await WorkOrderDocument.create({
-        workOrderId: workOrder.id,
-        originalName: cocFilename,
-        mimeType: 'application/pdf',
-        size: pdfBuffer.length,
-        url: uploadResult.url,
-        cloudinaryId: uploadResult.storageId,
-        documentType: 'coc'
-      });
-    } catch (saveErr) {
-      console.error('[COC] Failed to save to documents:', saveErr.message);
-    }
+      await WorkOrderDocument.create({ workOrderId: workOrder.id, originalName: cocFilename, mimeType: 'application/pdf', size: pdfBuffer.length, url: uploadResult.url, cloudinaryId: uploadResult.storageId, documentType: 'coc' });
+    } catch (saveErr) { console.error('[COC] Save error:', saveErr.message); }
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Length', pdfBuffer.length);
     res.setHeader('Content-Disposition', `inline; filename="COC-DR${workOrder.drNumber}.pdf"`);
     res.send(pdfBuffer);
-  } catch (error) {
-    console.error('[COC] Generation error:', error);
-    next(error);
-  }
+  } catch (error) { console.error('[COC] Error:', error); next(error); }
 });
 
 module.exports = router;

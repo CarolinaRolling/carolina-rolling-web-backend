@@ -1460,12 +1460,12 @@ router.post('/:id/pickup', async (req, res, next) => {
         items: pickupItems
       });
       
-      await workOrder.update({
-        status: 'shipped',
-        pickedUpAt: now,
-        pickedUpBy: pickedUpBy || 'unknown',
-        pickupHistory: history
-      });
+      workOrder.pickupHistory = JSON.parse(JSON.stringify(history));
+      workOrder.status = 'shipped';
+      workOrder.pickedUpAt = now;
+      workOrder.pickedUpBy = pickedUpBy || 'unknown';
+      workOrder.changed('pickupHistory', true);
+      await workOrder.save();
     } else {
       // Partial pickup: only selected items
       if (!items || items.length === 0) {
@@ -1494,14 +1494,14 @@ router.post('/:id/pickup', async (req, res, next) => {
         return picked >= (p.quantity || 1);
       });
 
-      const updateData = { pickupHistory: history };
+      workOrder.pickupHistory = JSON.parse(JSON.stringify(history));
       if (allPickedUp) {
-        updateData.status = 'shipped';
-        updateData.pickedUpAt = now;
-        updateData.pickedUpBy = pickedUpBy || 'unknown';
+        workOrder.status = 'shipped';
+        workOrder.pickedUpAt = now;
+        workOrder.pickedUpBy = pickedUpBy || 'unknown';
       }
-      
-      await workOrder.update(updateData);
+      workOrder.changed('pickupHistory', true);
+      await workOrder.save();
     }
     
     // Reload and return
@@ -1545,7 +1545,11 @@ router.post('/:id/pickup', async (req, res, next) => {
       receiptDoc.font('Helvetica').fontSize(10).fillColor('#333').text(workOrder.clientName || '', 50, ry); ry += 14;
       receiptDoc.font('Helvetica').fontSize(9).fillColor('#666');
       receiptDoc.text('P.O: ' + (workOrder.clientPurchaseOrderNumber || '—'), 50, ry); ry += 12;
-      receiptDoc.text('Picked Up By: ' + (latestEntry.pickedUpBy || '—'), 50, ry); ry += 20;
+      receiptDoc.text('Picked Up By: ' + (latestEntry.pickedUpBy || '—'), 50, ry); ry += 12;
+      const pickupDateStr = pickupDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+      const pickupTimeStr = pickupDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+      receiptDoc.font('Helvetica-Bold').fontSize(9).fillColor('#333');
+      receiptDoc.text('Date & Time: ' + pickupDateStr + ' at ' + pickupTimeStr, 50, ry); ry += 20;
 
       // Items
       receiptDoc.moveTo(50, ry).lineTo(562, ry).lineWidth(0.5).strokeColor('#e0e0e0').stroke(); ry += 8;

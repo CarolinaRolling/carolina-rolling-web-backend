@@ -927,7 +927,7 @@ router.post('/:id/parts', async (req, res, next) => {
     partData = extractFormData(partData);
 
     // Calculate part totals (skip for ea-priced types which compute their own partTotal)
-    if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'].includes(partData.partType)) {
+    if (!['plate_roll', 'shaped_plate', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'].includes(partData.partType)) {
       const totals = calculatePartTotals(partData);
       Object.assign(partData, totals);
     }

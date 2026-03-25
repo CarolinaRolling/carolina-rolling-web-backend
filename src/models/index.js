@@ -2235,6 +2235,14 @@ const ScannedEmail = sequelize.define('ScannedEmail', {
   rawBody: {
     type: DataTypes.TEXT,
     allowNull: true
+  },
+  retryCount: {
+    type: DataTypes.INTEGER,
+    defaultValue: 0
+  },
+  nextRetryAt: {
+    type: DataTypes.DATE,
+    allowNull: true
   }
 }, {
   tableName: 'scanned_emails',

@@ -1367,6 +1367,24 @@ async function _runScanInternal() {
                 // Do full AI parse to check if this is a PO
                 const parsed = await parseEmailWithAI(bodyText, subject, clientInfo.clientName, clientInfo.parsingNotes, generalNotes);
                 
+                // If AI failed, schedule retry
+                if (!parsed) {
+                  const retryCount = (scannedEmail.retryCount || 0) + 1;
+                  const retryDelays = [60, 120, 240, 480, 960];
+                  if (retryCount <= 5) {
+                    const delaySec = retryDelays[Math.min(retryCount - 1, retryDelays.length - 1)];
+                    const nextRetry = new Date(Date.now() + delaySec * 1000);
+                    await scannedEmail.update({ status: 'error', errorMessage: `AI parse failed (attempt ${retryCount}/5)`, retryCount, nextRetryAt: nextRetry });
+                    await manageAIWarningTodo(retryCount, subject, clientInfo.clientName);
+                  } else {
+                    await scannedEmail.update({ status: 'error', errorMessage: 'AI parsing failed after 5 attempts', retryCount, nextRetryAt: null });
+                    await manageAIWarningTodo(retryCount, subject, clientInfo.clientName);
+                  }
+                  accountResult.errors.push(`${subject}: AI parse failed (thread)`);
+                  results.errors++;
+                  continue;
+                }
+                
                 // Safeguard: short replies like "thank you" should never be POs
                 // Strip quoted/forwarded text and check actual new content length
                 const newContent = bodyText.replace(/^>.*$/gm, '').replace(/On .*wrote:/g, '').replace(/-{2,}.*Original Message.*-{2,}[\s\S]*/i, '').replace(/From:.*Sent:.*To:.*Subject:[\s\S]*/i, '').trim();
@@ -1483,7 +1501,29 @@ async function _runScanInternal() {
           const parsed = await parseEmailWithAI(bodyText, subject, clientInfo.clientName, clientInfo.parsingNotes, generalNotes);
 
           if (!parsed) {
-            await scannedEmail.update({ status: 'error', errorMessage: 'AI parsing returned no result' });
+            const retryCount = (scannedEmail.retryCount || 0) + 1;
+            const retryDelays = [60, 120, 240, 480, 960]; // 1m, 2m, 4m, 8m, 16m
+            if (retryCount <= 5) {
+              const delaySec = retryDelays[Math.min(retryCount - 1, retryDelays.length - 1)];
+              const nextRetry = new Date(Date.now() + delaySec * 1000);
+              await scannedEmail.update({ 
+                status: 'error', 
+                errorMessage: `AI parse failed (attempt ${retryCount}/5). Auto-retry at ${nextRetry.toLocaleTimeString()}.`,
+                retryCount,
+                nextRetryAt: nextRetry
+              });
+              console.log(`[EmailScanner] AI parse failed for "${subject}" — retry ${retryCount}/5 scheduled in ${delaySec}s`);
+              // Manage warning todo (single instance)
+              await manageAIWarningTodo(retryCount, subject, clientInfo.clientName);
+            } else {
+              await scannedEmail.update({ 
+                status: 'error', 
+                errorMessage: `AI parsing failed after 5 attempts. Manual retry required.`,
+                retryCount,
+                nextRetryAt: null
+              });
+              await manageAIWarningTodo(retryCount, subject, clientInfo.clientName);
+            }
             accountResult.errors.push(`${subject}: AI parse failed`);
             results.errors++;
             continue;
@@ -1631,6 +1671,141 @@ async function _runScanInternal() {
   return results;
 }
 
+// Manage a single AI warning todo (create or update, never duplicate)
+async function manageAIWarningTodo(retryCount, subject, clientName) {
+  const { TodoItem } = require('../models');
+  const WARNING_TITLE = '⚠️ AI Email Parsing Error';
+
+  // Find existing warning todo
+  const existing = await TodoItem.findOne({
+    where: { title: WARNING_TITLE, type: 'general', createdBy: 'Email Scanner' },
+    order: [['createdAt', 'DESC']]
+  });
+
+  if (retryCount > 5) {
+    // Permanent failure
+    const desc = `🔴 AI has failed to parse 5 times. Please check AI status.\n\nLast failed email: "${subject}" from ${clientName}.\n\nTroubleshooting:\n• Check Anthropic API key and credits\n• Check Heroku logs for error details\n• Try manual retry from Admin → Email Scanner`;
+    if (existing && !existing.completed) {
+      await existing.update({ description: desc, priority: 'high' });
+    } else {
+      await TodoItem.create({ title: WARNING_TITLE, description: desc, type: 'general', priority: 'high', createdBy: 'Email Scanner' });
+    }
+  } else {
+    // Retrying
+    const desc = `AI parsing error on "${subject}" from ${clientName}.\nAttempt ${retryCount}/5 — auto-retrying.\n\nThis warning will be removed if the retry succeeds.`;
+    if (existing && !existing.completed) {
+      await existing.update({ description: desc, priority: 'medium' });
+    } else {
+      await TodoItem.create({ title: WARNING_TITLE, description: desc, type: 'general', priority: 'medium', createdBy: 'Email Scanner' });
+    }
+  }
+}
+
+// Remove AI warning todo (called on success)
+async function clearAIWarningTodo() {
+  const { TodoItem } = require('../models');
+  const existing = await TodoItem.findOne({
+    where: { title: '⚠️ AI Email Parsing Error', type: 'general', createdBy: 'Email Scanner', completed: false },
+    order: [['createdAt', 'DESC']]
+  });
+  if (existing) {
+    await existing.update({ completed: true });
+    console.log('[EmailScanner] Cleared AI warning todo');
+  }
+}
+
+// Process pending retries — called on a timer
+async function processRetries() {
+  const { ScannedEmail, Client } = require('../models');
+  const { Op } = require('sequelize');
+  
+  const pendingRetries = await ScannedEmail.findAll({
+    where: {
+      status: 'error',
+      nextRetryAt: { [Op.lte]: new Date() },
+      retryCount: { [Op.lte]: 5 }
+    },
+    order: [['nextRetryAt', 'ASC']],
+    limit: 3 // Process max 3 at a time to avoid API overload
+  });
+
+  if (pendingRetries.length === 0) return;
+
+  console.log(`[EmailScanner] Processing ${pendingRetries.length} retry(ies)`);
+
+  const generalNotesSetting = await require('../models').AppSettings.findOne({ where: { key: 'email_scanner_general_notes' } });
+  const generalNotes = generalNotesSetting?.value || '';
+
+  for (const email of pendingRetries) {
+    if (!email.rawBody) {
+      await email.update({ status: 'error', errorMessage: 'No raw body stored — cannot retry', nextRetryAt: null });
+      continue;
+    }
+
+    const client = email.clientId ? await Client.findByPk(email.clientId) : null;
+    const clientName = client?.name || 'Unknown';
+    const parsingNotes = client?.emailScanParsingNotes || '';
+
+    console.log(`[EmailScanner] Retry ${email.retryCount}/5 for "${email.subject}" from ${clientName}`);
+
+    try {
+      const parsed = await parseEmailWithAI(email.rawBody, email.subject || '', clientName, parsingNotes, generalNotes);
+      
+      if (parsed) {
+        // Success! Clear error state
+        await email.update({
+          status: 'processed',
+          emailType: parsed.emailType || 'rfq',
+          parsedData: parsed,
+          parseConfidence: parsed.confidence || 'medium',
+          errorMessage: null,
+          nextRetryAt: null
+        });
+        console.log(`[EmailScanner] Retry SUCCESS for "${email.subject}"`);
+        
+        // Clear warning todo if no more pending retries
+        const remaining = await ScannedEmail.count({
+          where: { status: 'error', nextRetryAt: { [Op.not]: null }, retryCount: { [Op.lte]: 5 } }
+        });
+        if (remaining === 0) {
+          await clearAIWarningTodo();
+        }
+      } else {
+        // Still failing
+        const retryCount = (email.retryCount || 0) + 1;
+        const retryDelays = [60, 120, 240, 480, 960];
+        if (retryCount <= 5) {
+          const delaySec = retryDelays[Math.min(retryCount - 1, retryDelays.length - 1)];
+          const nextRetry = new Date(Date.now() + delaySec * 1000);
+          await email.update({
+            errorMessage: `AI parse failed (attempt ${retryCount}/5). Next retry at ${nextRetry.toLocaleTimeString()}.`,
+            retryCount,
+            nextRetryAt: nextRetry
+          });
+          await manageAIWarningTodo(retryCount, email.subject, clientName);
+        } else {
+          await email.update({
+            errorMessage: 'AI parsing failed after 5 attempts. Manual retry required.',
+            retryCount,
+            nextRetryAt: null
+          });
+          await manageAIWarningTodo(retryCount, email.subject, clientName);
+        }
+      }
+    } catch (err) {
+      console.error(`[EmailScanner] Retry error for "${email.subject}":`, err.message);
+      const retryCount = (email.retryCount || 0) + 1;
+      if (retryCount <= 5) {
+        const nextRetry = new Date(Date.now() + 120000); // 2 min fallback
+        await email.update({ retryCount, nextRetryAt: nextRetry, errorMessage: `Retry error: ${err.message}` });
+      } else {
+        await email.update({ retryCount, nextRetryAt: null, errorMessage: `Failed after 5 retries: ${err.message}` });
+        await manageAIWarningTodo(retryCount, email.subject, 'Unknown');
+      }
+    }
+  }
+}
+
 module.exports = {
   getOAuth2Client,
   getGmailClient,
@@ -1639,7 +1814,8 @@ module.exports = {
   parseEmailWithAI,
   parseDocumentWithAI,
   getScanConfig,
-  buildFormData
+  buildFormData,
+  processRetries
 };
 
 // Parse an uploaded image or PDF with Claude Vision API

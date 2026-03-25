@@ -970,6 +970,17 @@ async function startServer() {
     });
     console.log('Email scanner cron configured for every 5 minutes');
 
+    // AI Parse Retry — check every minute for emails needing retry
+    cron.schedule('* * * * *', async () => {
+      try {
+        const { processRetries } = require('./services/emailScanner');
+        await processRetries();
+      } catch (err) {
+        console.error('[EmailScanner] Retry cron error:', err.message);
+      }
+    });
+    console.log('AI parse retry timer configured (every minute)');
+
     // Trash cleanup — permanently delete estimates trashed > 30 days ago (runs daily at 2 AM)
     cron.schedule('0 2 * * *', async () => {
       try {

@@ -684,26 +684,47 @@ router.post('/vendor-rfq/:estimateId', async (req, res, next) => {
 
     // Collect DXF/STEP files from parts
     const attachments = [];
+    const fileStorage = require('../utils/storage');
     for (const p of partsToQuote) {
       if (p.files) {
         for (const f of p.files) {
           if (f.fileType === 'cut_file' || (f.originalName || '').match(/\.(dxf|step|stp)$/i)) {
             try {
-              const https = require('https');
-              const fileUrl = f.url;
+              let fileUrl = f.url;
+              // For S3 files, generate presigned URL
+              if (f.cloudinaryId && f.cloudinaryId.startsWith('s3:')) {
+                fileUrl = await fileStorage.getPresignedUrl(f.cloudinaryId);
+              } else if (fileUrl && fileUrl.includes('.s3.') && fileUrl.includes('amazonaws.com')) {
+                try {
+                  const urlObj = new URL(fileUrl);
+                  fileUrl = await fileStorage.getPresignedUrl('s3:' + decodeURIComponent(urlObj.pathname.slice(1)));
+                } catch {}
+              }
               if (fileUrl) {
+                const https = require('https');
+                const http = require('http');
+                const mod = fileUrl.startsWith('https') ? https : http;
                 const fileData = await new Promise((resolve, reject) => {
-                  https.get(fileUrl, (res) => {
-                    const chunks = [];
-                    res.on('data', chunk => chunks.push(chunk));
-                    res.on('end', () => resolve(Buffer.concat(chunks)));
-                    res.on('error', reject);
+                  mod.get(fileUrl, (res) => {
+                    if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                      mod.get(res.headers.location, (res2) => {
+                        const chunks = [];
+                        res2.on('data', chunk => chunks.push(chunk));
+                        res2.on('end', () => resolve(Buffer.concat(chunks)));
+                        res2.on('error', reject);
+                      }).on('error', reject);
+                    } else {
+                      const chunks = [];
+                      res.on('data', chunk => chunks.push(chunk));
+                      res.on('end', () => resolve(Buffer.concat(chunks)));
+                      res.on('error', reject);
+                    }
                   }).on('error', reject);
                 });
                 attachments.push({ name: f.originalName || `part${p.partNumber}.dxf`, data: fileData, mimeType: f.mimeType || 'application/octet-stream' });
               }
             } catch (e) {
-              console.warn(`[VendorRFQ] Failed to fetch DXF file: ${f.originalName}`, e.message);
+              console.warn(`[VendorRFQ] Failed to fetch cut file: ${f.originalName}`, e.message);
             }
           }
         }

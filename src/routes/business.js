@@ -475,6 +475,58 @@ router.delete('/payroll/:id', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// ============= WELD PROCEDURES (WPS) =============
+
+// GET /api/business/wps - Get all weld procedures
+router.get('/wps', async (req, res, next) => {
+  try {
+    const { WeldProcedure } = require('../models');
+    const wps = await WeldProcedure.findAll({ order: [['wpsNumber', 'ASC']] });
+    res.json({ data: wps });
+  } catch (error) { next(error); }
+});
+
+// GET /api/business/wps/:id - Get single WPS
+router.get('/wps/:id', async (req, res, next) => {
+  try {
+    const { WeldProcedure } = require('../models');
+    const wps = await WeldProcedure.findByPk(req.params.id);
+    if (!wps) return res.status(404).json({ error: { message: 'WPS not found' } });
+    res.json({ data: wps });
+  } catch (error) { next(error); }
+});
+
+// POST /api/business/wps - Create WPS
+router.post('/wps', async (req, res, next) => {
+  try {
+    const { WeldProcedure } = require('../models');
+    const wps = await WeldProcedure.create(req.body);
+    res.json({ data: wps, message: 'WPS created' });
+  } catch (error) { next(error); }
+});
+
+// PUT /api/business/wps/:id - Update WPS
+router.put('/wps/:id', async (req, res, next) => {
+  try {
+    const { WeldProcedure } = require('../models');
+    const wps = await WeldProcedure.findByPk(req.params.id);
+    if (!wps) return res.status(404).json({ error: { message: 'WPS not found' } });
+    await wps.update(req.body);
+    res.json({ data: wps, message: 'WPS updated' });
+  } catch (error) { next(error); }
+});
+
+// DELETE /api/business/wps/:id - Delete WPS
+router.delete('/wps/:id', async (req, res, next) => {
+  try {
+    const { WeldProcedure } = require('../models');
+    const wps = await WeldProcedure.findByPk(req.params.id);
+    if (!wps) return res.status(404).json({ error: { message: 'WPS not found' } });
+    await wps.destroy();
+    res.json({ message: 'WPS deleted' });
+  } catch (error) { next(error); }
+});
+
 // ============= CALENDAR =============
 
 // GET /api/business/calendar

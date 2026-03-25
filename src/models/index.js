@@ -3034,6 +3034,38 @@ const BusinessEvent = sequelize.define('BusinessEvent', {
   timestamps: true
 });
 
+// WeldProcedure — Weld Procedure Specifications (WPS)
+const WeldProcedure = sequelize.define('WeldProcedure', {
+  id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+  wpsNumber: { type: DataTypes.STRING, allowNull: false }, // e.g. "P-1-S-A-02VLH"
+  name: { type: DataTypes.STRING, allowNull: false }, // e.g. "SMAW Carbon Steel Butt Weld"
+  process: { type: DataTypes.STRING, allowNull: true }, // SMAW, GMAW (MIG), GTAW (TIG), FCAW
+  processType: { type: DataTypes.STRING, allowNull: true }, // Manual, Semi-Automatic, Automatic
+  // Base Materials
+  baseMaterials: { type: DataTypes.STRING, allowNull: true }, // e.g. "P1 Group 1&2 to P1 Group 1&2"
+  // Filler
+  sfaSpecification: { type: DataTypes.STRING, allowNull: true }, // e.g. "A5.1"
+  awsClassification: { type: DataTypes.STRING, allowNull: true }, // e.g. "E7018"
+  fillerSize: { type: DataTypes.STRING, allowNull: true }, // e.g. '1/8" - 3/16"'
+  // Technique
+  weldingPosition: { type: DataTypes.STRING, allowNull: true }, // e.g. "G2"
+  beadType: { type: DataTypes.STRING, allowNull: true }, // Weave, Stringer
+  jointType: { type: DataTypes.STRING, allowNull: true }, // Butt, Fillet, Lap, etc.
+  backGouging: { type: DataTypes.STRING, allowNull: true }, // e.g. "Air Carbon Arc as Necessary"
+  passType: { type: DataTypes.STRING, allowNull: true }, // e.g. "Intermittent as Necessary"
+  preheat: { type: DataTypes.STRING, allowNull: true }, // e.g. "175° Fahrenheit"
+  current: { type: DataTypes.STRING, allowNull: true }, // e.g. "50-850 Amp DC"
+  voltage: { type: DataTypes.STRING, allowNull: true }, // e.g. "40"
+  // Notes / procedure steps
+  notes: { type: DataTypes.TEXT, allowNull: true },
+  // Metadata
+  updatedBy: { type: DataTypes.STRING, allowNull: true },
+  isActive: { type: DataTypes.BOOLEAN, defaultValue: true }
+}, {
+  tableName: 'weld_procedures',
+  timestamps: true
+});
+
 module.exports = {
   sequelize,
   User,
@@ -3069,5 +3101,6 @@ module.exports = {
   Employee,
   PayrollWeek,
   PayrollEntry,
-  BusinessEvent
+  BusinessEvent,
+  WeldProcedure
 };

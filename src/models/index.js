@@ -1645,6 +1645,10 @@ const EstimatePartFile = sequelize.define('EstimatePartFile', {
   fileType: {
     type: DataTypes.STRING,
     defaultValue: 'other'
+  },
+  fileLastModified: {
+    type: DataTypes.DATE,
+    allowNull: true
   }
 }, {
   tableName: 'estimate_part_files',

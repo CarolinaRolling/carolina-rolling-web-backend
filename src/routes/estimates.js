@@ -1080,9 +1080,9 @@ router.post('/:id/parts/:partId/files', upload.array('files', 10), async (req, r
       // Determine file type from extension
       const ext = path.extname(file.originalname).toLowerCase();
       let detectedType = fileType;
-      if (ext === '.pdf') detectedType = 'drawing';
+      if (ext === '.pdf') detectedType = fileType === 'cut_file' ? 'cut_file' : 'drawing';
       else if (ext === '.stp' || ext === '.step') detectedType = 'step_file';
-      else if (ext === '.dxf') detectedType = 'drawing';
+      else if (ext === '.dxf') detectedType = 'cut_file';
 
       // Upload file
       const result = await fileStorage.uploadFile(file.path, {
@@ -1094,6 +1094,9 @@ router.post('/:id/parts/:partId/files', upload.array('files', 10), async (req, r
       // Clean up local file
       try { fs.unlinkSync(file.path); } catch(e){}
 
+      // Parse fileLastModified from body (sent as epoch ms)
+      const lastMod = req.body.fileLastModified ? new Date(parseInt(req.body.fileLastModified)) : null;
+
       // Create file record
       const partFile = await EstimatePartFile.create({
         partId: part.id,
@@ -1103,7 +1106,8 @@ router.post('/:id/parts/:partId/files', upload.array('files', 10), async (req, r
         size: file.size,
         url: result.url,
         cloudinaryId: result.storageId,
-        fileType: detectedType
+        fileType: detectedType,
+        fileLastModified: lastMod
       });
 
       return partFile;

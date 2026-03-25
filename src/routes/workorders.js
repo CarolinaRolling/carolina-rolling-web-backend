@@ -3948,53 +3948,62 @@ router.post('/:id/coc', async (req, res, next) => {
     const wps = wpsId ? await WeldProcedure.findByPk(wpsId) : null;
     const dateStr = certDate ? new Date(certDate + 'T12:00:00').toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }) : new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
 
-    const doc = new PDFDocument({ margin: 50, size: 'letter' });
+    const doc = new PDFDocument({ margin: 50, size: 'letter', bufferPages: true });
     const chunks = [];
     doc.on('data', c => chunks.push(c));
     const logoFile = [path.join(__dirname, '../assets/logo.png'), path.join(__dirname, '../assets/logo.jpg')].find(p => fs.existsSync(p));
     const primaryColor = '#1976d2', darkColor = '#333', grayColor = '#666';
+    const yellowcakePath = path.join(__dirname, '../assets/fonts/Yellowcake-Regular.ttf');
+    let hasYellowcake = false;
+    try { if (fs.existsSync(yellowcakePath)) { doc.registerFont('Yellowcake', yellowcakePath); hasYellowcake = true; } } catch {}
 
-    const drawHeader = () => {
-      if (logoFile) try { doc.image(logoFile, 50, 22, { width: 65 }); } catch {}
-      doc.font('Helvetica-Bold').fontSize(15).fillColor(darkColor);
-      doc.text('CAROLINA ROLLING CO. INC.', 130, 32);
-      doc.font('Helvetica').fontSize(8.5).fillColor(grayColor);
-      doc.text('9152 Sonrisa St., Bellflower, CA 90706', 130, 52);
-      doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 130, 63);
+    const drawCompanyName = (x, yy) => {
+      if (hasYellowcake) doc.font('Yellowcake').fontSize(15).fillColor(darkColor).text('Carolina Rolling Co. Inc.', x, yy);
+      else doc.font('Helvetica-Bold').fontSize(15).fillColor(darkColor).text('CAROLINA ROLLING CO. INC.', x, yy);
     };
 
-    // ===== PAGE 1 =====
-    drawHeader();
+    // ===== PAGE 1 HEADER (only on first page) =====
+    if (logoFile) try { doc.image(logoFile, 50, 22, { width: 65 }); } catch {}
+    drawCompanyName(130, 30);
+    doc.font('Helvetica').fontSize(8.5).fillColor(grayColor);
+    doc.text('9152 Sonrisa St., Bellflower, CA 90706', 130, 50);
+    doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 130, 62);
+
+    // Title block — top right
     doc.font('Helvetica-Bold').fontSize(11).fillColor(primaryColor);
-    doc.text('CERTIFICATE OF CONFORMANCE', 340, 30, { width: 222, align: 'right' });
+    doc.text('CERTIFICATE OF CONFORMANCE', 340, 28, { width: 222, align: 'right' });
     doc.font('Helvetica-Bold').fontSize(10).fillColor(darkColor);
     doc.text('Job No: ' + String(workOrder.drNumber || ''), 340, 48, { width: 222, align: 'right' });
     doc.font('Helvetica').fontSize(9).fillColor(grayColor);
     doc.text('Date: ' + dateStr, 340, 62, { width: 222, align: 'right' });
-    doc.moveTo(50, 82).lineTo(562, 82).lineWidth(1).strokeColor('#e0e0e0').stroke();
 
-    // Customer — all left, unbolded
-    let y = 92;
-    doc.font('Helvetica').fontSize(9).fillColor(grayColor);
-    doc.text('Customer', 50, y); y += 12;
+    // Divider below header
+    doc.moveTo(50, 96).lineTo(562, 96).lineWidth(1).strokeColor('#e0e0e0').stroke();
+
+    // Customer section — left justified, not bold, proper spacing
+    let y = 110;
+    doc.font('Helvetica').fontSize(8).fillColor(grayColor);
+    doc.text('Customer', 50, y);
+    y += 14;
     doc.font('Helvetica').fontSize(10).fillColor(darkColor);
-    doc.text(workOrder.clientName || '', 50, y); y += 13;
+    doc.text(workOrder.clientName || '', 50, y);
+    y += 14;
     const client = await Client.findOne({ where: { name: workOrder.clientName || '' } });
     if (client) {
       doc.font('Helvetica').fontSize(9).fillColor(grayColor);
-      if (client.address) { doc.text(client.address, 50, y); y += 11; }
+      if (client.address) { doc.text(client.address, 50, y); y += 12; }
       let cl = '';
       if (client.city) cl += client.city;
       if (client.state) cl += (cl ? ', ' : '') + client.state;
       if (client.zip) cl += ' ' + client.zip;
-      if (cl) { doc.text(cl, 50, y); y += 11; }
+      if (cl) { doc.text(cl, 50, y); y += 12; }
     }
-    y += 3;
+    y += 2;
     doc.font('Helvetica').fontSize(9).fillColor(grayColor);
     doc.text('Customer P.O: ' + (workOrder.clientPurchaseOrderNumber || '—'), 50, y);
-    y += 18;
+    y += 20;
 
-    // Parts divider + header
+    // Parts table
     doc.moveTo(50, y).lineTo(562, y).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
     y += 8;
     doc.font('Helvetica-Bold').fontSize(8).fillColor(grayColor);
@@ -4007,7 +4016,8 @@ router.post('/:id/coc', async (req, res, next) => {
 
     const parts = (workOrder.parts || []).filter(p => !['fab_service', 'shop_rate', 'rush_service'].includes(p.partType));
     for (let i = 0; i < parts.length; i++) {
-      if (y > 660) { doc.addPage(); drawHeader(); y = 90; }
+      // Page break — no header on continuation pages, just start from top margin
+      if (y > 690) { doc.addPage(); y = 50; }
       const p = parts[i];
       const fd = p.formData && typeof p.formData === 'object' ? p.formData : {};
       const matDesc = fd._materialDescription || p.materialDescription || '';
@@ -4020,28 +4030,28 @@ router.post('/:id/coc', async (req, res, next) => {
       if (matDesc) {
         doc.font('Helvetica').fontSize(9).fillColor(darkColor);
         doc.text(matDesc, 200, y, { width: 360 });
-        y += doc.heightOfString(matDesc, { width: 360 }) + 2;
+        y += doc.heightOfString(matDesc, { width: 360 }) + 1;
       } else { y += 12; }
       if (rollDesc) {
         doc.font('Helvetica').fontSize(8.5).fillColor(grayColor);
         doc.text(rollDesc, 200, y, { width: 360 });
-        y += doc.heightOfString(rollDesc, { width: 360 }) + 2;
+        y += doc.heightOfString(rollDesc, { width: 360 }) + 1;
       }
       if (p.specialInstructions) {
         doc.font('Helvetica-Oblique').fontSize(8).fillColor('#999');
         doc.text(p.specialInstructions, 200, y, { width: 360 });
-        y += doc.heightOfString(p.specialInstructions, { width: 360 }) + 2;
+        y += doc.heightOfString(p.specialInstructions, { width: 360 }) + 1;
       }
-      y += 5;
+      y += 4;
       if (i < parts.length - 1) {
         doc.moveTo(85, y).lineTo(562, y).lineWidth(0.3).strokeColor('#eee').stroke();
-        y += 5;
+        y += 4;
       }
     }
 
-    // Certification
-    y += 20;
-    if (y > 680) { doc.addPage(); drawHeader(); y = 90; }
+    // Certification — check if fits, else new page
+    if (y > 640) { doc.addPage(); y = 50; }
+    y += 16;
     doc.moveTo(50, y).lineTo(562, y).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
     y += 12;
     doc.font('Helvetica').fontSize(9).fillColor(darkColor);
@@ -4049,30 +4059,32 @@ router.post('/:id/coc', async (req, res, next) => {
     y += 13;
     doc.font('Helvetica-Bold').fontSize(10).fillColor(darkColor);
     doc.text('ASME Section VIII Div.1, UG-79, UG-80, & UCS-79', 50, y, { width: 512, align: 'center' });
-    y += 28;
+    y += 26;
     doc.font('Helvetica-Bold').fontSize(9).fillColor(darkColor).text('Certified By:', 50, y); y += 13;
     doc.font('Helvetica-Bold').fontSize(11).text(certifiedBy || 'Jason Thornton', 50, y); y += 13;
     doc.font('Helvetica').fontSize(9).fillColor(grayColor).text('Carolina Rolling Co., Inc.', 50, y); y += 13;
     doc.text('Date: ' + dateStr, 50, y);
-    doc.font('Helvetica').fontSize(7).fillColor(grayColor);
-    doc.text('Carolina Rolling Co. Inc. | 9152 Sonrisa St., Bellflower, CA 90706 | (562) 633-1044 | keepitrolling@carolinarolling.com', 50, 740, { width: 512, align: 'center' });
 
-    // ===== PAGE 2: WPS =====
+    // WPS page
     if (wps) {
       doc.addPage();
-      drawHeader();
+      // WPS header — only on WPS page
+      if (logoFile) try { doc.image(logoFile, 50, 22, { width: 65 }); } catch {}
+      drawCompanyName(130, 30);
+      doc.font('Helvetica').fontSize(8.5).fillColor(grayColor);
+      doc.text('9152 Sonrisa St., Bellflower, CA 90706', 130, 50);
+      doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 130, 62);
       doc.font('Helvetica-Bold').fontSize(11).fillColor(primaryColor);
-      doc.text('WELDING PROCEDURE SPECIFICATION', 340, 30, { width: 222, align: 'right' });
+      doc.text('WELDING PROCEDURE SPECIFICATION', 340, 28, { width: 222, align: 'right' });
       doc.font('Helvetica-Bold').fontSize(10).fillColor(darkColor);
       doc.text('WPS: ' + (wps.wpsNumber || ''), 340, 48, { width: 222, align: 'right' });
       doc.font('Helvetica').fontSize(9).fillColor(grayColor);
       doc.text('Date: ' + new Date(wps.updatedAt || wps.createdAt).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: '2-digit' }), 340, 62, { width: 222, align: 'right' });
-      doc.moveTo(50, 82).lineTo(562, 82).lineWidth(1).strokeColor('#e0e0e0').stroke();
+      doc.moveTo(50, 96).lineTo(562, 96).lineWidth(1).strokeColor('#e0e0e0').stroke();
 
-      let wy = 94;
+      let wy = 110;
       const wR = (l, v) => { if (!v) return; doc.font('Helvetica-Bold').fontSize(9).fillColor(grayColor).text(l, 50, wy, { width: 130 }); doc.font('Helvetica').fontSize(9).fillColor(darkColor).text(v, 185, wy, { width: 370 }); wy += 15; };
       const wH = (t) => { wy += 5; doc.font('Helvetica-Bold').fontSize(9).fillColor(primaryColor).text(t, 50, wy); wy += 12; doc.moveTo(50, wy).lineTo(562, wy).lineWidth(0.3).strokeColor('#ddd').stroke(); wy += 7; };
-
       wR('Process', wps.process); wR('Type', wps.processType);
       wH('Base Materials'); wR('Base Materials', wps.baseMaterials);
       wH('Filler'); wR('SFA Specification', wps.sfaSpecification); wR('AWS Classification', wps.awsClassification); wR('Size', wps.fillerSize);
@@ -4088,8 +4100,17 @@ router.post('/:id/coc', async (req, res, next) => {
       doc.text('Updated by: ' + (wps.updatedBy || 'Jason Thornton'), 50, wy); wy += 11;
       doc.text('Date: ' + new Date(wps.updatedAt || wps.createdAt).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: '2-digit' }), 50, wy); wy += 11;
       doc.text('Signature: ' + (wps.updatedBy || 'Jason Thornton'), 50, wy);
+    }
+
+    // Add page numbers to all pages
+    const totalPages = doc.bufferedPageRange().count;
+    for (let i = 0; i < totalPages; i++) {
+      doc.switchToPage(i);
       doc.font('Helvetica').fontSize(7).fillColor(grayColor);
-      doc.text('Carolina Rolling Co. Inc. | 9152 Sonrisa St., Bellflower, CA 90706 | (562) 633-1044 | keepitrolling@carolinarolling.com', 50, 740, { width: 512, align: 'center' });
+      doc.text(
+        'Carolina Rolling Co. Inc. | (562) 633-1044 | keepitrolling@carolinarolling.com' + '          Page ' + (i + 1) + ' of ' + totalPages,
+        50, 750, { width: 512, align: 'center' }
+      );
     }
 
     doc.end();

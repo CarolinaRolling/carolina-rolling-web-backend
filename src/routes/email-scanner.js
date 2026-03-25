@@ -674,9 +674,11 @@ router.post('/vendor-rfq/:estimateId', async (req, res, next) => {
       const fd = p.formData && typeof p.formData === 'object' ? p.formData : {};
       const desc = fd._materialDescription || p.materialDescription || '';
       const qty = p.quantity || 1;
+      const cutPerPrint = fd._cutPerPrint || p._cutPerPrint;
       const cutFile = p.cutFileReference ? `\n   Cut File: ${p.cutFileReference} (attached)` : '';
+      const cutNote = cutPerPrint ? `\n   *** CUT PER PRINT — see attached drawing ***` : '';
       const specialInstr = p.specialInstructions ? `\n   Notes: ${p.specialInstructions}` : '';
-      return `${i + 1}. (${qty}) ${desc}${cutFile}${specialInstr}`;
+      return `${i + 1}. (${qty}) ${desc}${cutNote}${cutFile}${specialInstr}`;
     }).join('\n\n');
 
     const subject = `RFQ-${estimate.estimateNumber}`;

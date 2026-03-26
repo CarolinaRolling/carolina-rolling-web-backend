@@ -1551,7 +1551,7 @@ router.get('/:id/pickup/:index/receipt', async (req, res, next) => {
     doc.font('Helvetica').fontSize(8).fillColor('#666');
     doc.text('9152 Sonrisa St., Bellflower, CA 90706', 125, 46);
     doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 125, 57);
-    doc.moveTo(50, 80).lineTo(562, 80).lineWidth(1).strokeColor('#e0e0e0').stroke();
+    doc.moveTo(50, 92).lineTo(562, 92).lineWidth(1).strokeColor('#e0e0e0').stroke();
 
     // Pacific time helper
     const fmtDatePT = (d) => d.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: '2-digit', day: '2-digit', year: 'numeric' });
@@ -1561,14 +1561,14 @@ router.get('/:id/pickup/:index/receipt', async (req, res, next) => {
 
     // Title
     const titleLabel = entry.type === 'full' ? 'PICKUP RECEIPT — FULL SHIPMENT' : `PICKUP RECEIPT — PARTIAL SHIPMENT #${pickupNum}`;
-    doc.font('Helvetica-Bold').fontSize(11).fillColor('#e65100').text(titleLabel, 50, 90);
-    doc.font('Helvetica-Bold').fontSize(10).fillColor('#333').text('DR-' + String(workOrder.drNumber || ''), 400, 90, { width: 162, align: 'right' });
+    doc.font('Helvetica-Bold').fontSize(11).fillColor('#e65100').text(titleLabel, 50, 102);
+    doc.font('Helvetica-Bold').fontSize(10).fillColor('#333').text('DR-' + String(workOrder.drNumber || ''), 400, 102, { width: 162, align: 'right' });
     doc.font('Helvetica').fontSize(8).fillColor('#666');
-    doc.text(fmtDatePT(pickupDate) + '  ' + fmtTimePT(pickupDate) + ' PT', 400, 104, { width: 162, align: 'right' });
-    doc.moveTo(50, 116).lineTo(562, 116).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
+    doc.text(fmtDatePT(pickupDate) + '  ' + fmtTimePT(pickupDate) + ' PT', 400, 116, { width: 162, align: 'right' });
+    doc.moveTo(50, 128).lineTo(562, 128).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
 
     // Customer info
-    let ry = 126;
+    let ry = 138;
     doc.font('Helvetica').fontSize(8).fillColor('#666').text('Customer', 50, ry); ry += 12;
     doc.font('Helvetica').fontSize(10).fillColor('#333').text(workOrder.clientName || '', 50, ry); ry += 14;
     doc.font('Helvetica').fontSize(9).fillColor('#666');

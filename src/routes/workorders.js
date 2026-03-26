@@ -1507,111 +1507,6 @@ router.post('/:id/pickup', async (req, res, next) => {
     // Reload and return
     await workOrder.reload({ include: [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }] });
     
-    // Generate pickup receipt PDF and save to documents
-    try {
-      const PDFDocument = require('pdfkit');
-      const latestEntry = history[history.length - 1];
-      const pickupNum = history.length;
-      const receiptDoc = new PDFDocument({ margin: 50, size: 'letter' });
-      const rChunks = [];
-      receiptDoc.on('data', c => rChunks.push(c));
-
-      const logoFile = [path.join(__dirname, '../assets/logo.png'), path.join(__dirname, '../assets/logo.jpg')].find(p => fs.existsSync(p));
-      const yellowcakePath = path.join(__dirname, '../assets/fonts/Yellowcake-Regular.ttf');
-      let hasYellowcake = false;
-      try { if (fs.existsSync(yellowcakePath)) { receiptDoc.registerFont('Yellowcake', yellowcakePath); hasYellowcake = true; } } catch {}
-
-      // Header — company left, title below
-      if (logoFile) try { receiptDoc.image(logoFile, 50, 22, { width: 60 }); } catch {}
-      if (hasYellowcake) receiptDoc.font('Yellowcake').fontSize(14).fillColor('#333').text('Carolina Rolling Co. Inc.', 125, 28);
-      else receiptDoc.font('Helvetica-Bold').fontSize(14).fillColor('#333').text('CAROLINA ROLLING CO. INC.', 125, 28);
-      receiptDoc.font('Helvetica').fontSize(8).fillColor('#666');
-      receiptDoc.text('9152 Sonrisa St., Bellflower, CA 90706', 125, 46);
-      receiptDoc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 125, 57);
-
-      receiptDoc.moveTo(50, 72).lineTo(562, 72).lineWidth(1).strokeColor('#e0e0e0').stroke();
-
-      // Title bar
-      const pickupDate = new Date(latestEntry.date);
-      const titleLabel = type === 'full' ? 'PICKUP RECEIPT — FULL SHIPMENT' : `PICKUP RECEIPT — PARTIAL SHIPMENT #${pickupNum}`;
-      receiptDoc.font('Helvetica-Bold').fontSize(11).fillColor('#e65100');
-      receiptDoc.text(titleLabel, 50, 82);
-      receiptDoc.font('Helvetica-Bold').fontSize(10).fillColor('#333');
-      receiptDoc.text('DR-' + String(workOrder.drNumber || ''), 400, 82, { width: 162, align: 'right' });
-      receiptDoc.font('Helvetica').fontSize(8).fillColor('#666');
-      receiptDoc.text(pickupDate.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }) + '  ' + pickupDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }), 400, 96, { width: 162, align: 'right' });
-
-      receiptDoc.moveTo(50, 108).lineTo(562, 108).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
-
-      let ry = 118;
-      receiptDoc.font('Helvetica').fontSize(8).fillColor('#666').text('Customer', 50, ry); ry += 12;
-      receiptDoc.font('Helvetica').fontSize(10).fillColor('#333').text(workOrder.clientName || '', 50, ry); ry += 14;
-      receiptDoc.font('Helvetica').fontSize(9).fillColor('#666');
-      receiptDoc.text('P.O: ' + (workOrder.clientPurchaseOrderNumber || '—'), 50, ry); ry += 12;
-      receiptDoc.text('Picked Up By: ' + (latestEntry.pickedUpBy || '—'), 50, ry); ry += 12;
-      const pickupDateStr = pickupDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
-      const pickupTimeStr = pickupDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' });
-      receiptDoc.font('Helvetica-Bold').fontSize(9).fillColor('#333');
-      receiptDoc.text('Date & Time: ' + pickupDateStr + ' at ' + pickupTimeStr, 50, ry); ry += 20;
-
-      // Items
-      receiptDoc.moveTo(50, ry).lineTo(562, ry).lineWidth(0.5).strokeColor('#e0e0e0').stroke(); ry += 8;
-      receiptDoc.font('Helvetica-Bold').fontSize(8).fillColor('#666');
-      receiptDoc.text('QTY', 50, ry, { width: 35 });
-      receiptDoc.text('PART #', 90, ry);
-      receiptDoc.text('DESCRIPTION', 200, ry);
-      ry += 12;
-      receiptDoc.moveTo(50, ry).lineTo(562, ry).lineWidth(0.3).strokeColor('#ddd').stroke(); ry += 7;
-
-      (latestEntry.items || []).forEach((item, idx) => {
-        receiptDoc.font('Helvetica-Bold').fontSize(10).fillColor('#333');
-        receiptDoc.text(String(item.quantity || 0), 50, ry, { width: 35 });
-        receiptDoc.font('Helvetica').fontSize(9).fillColor('#333');
-        receiptDoc.text(item.clientPartNumber || item.partNumber || '', 90, ry, { width: 105 });
-        let desc = (item.description || '').replace(/^\d+pc:\s*/i, '');
-        receiptDoc.text(desc, 200, ry, { width: 360 });
-        ry += receiptDoc.heightOfString(desc, { width: 360 }) + 1;
-        if (item.rollingDescription) {
-          receiptDoc.font('Helvetica').fontSize(8.5).fillColor('#666');
-          receiptDoc.text(item.rollingDescription, 200, ry, { width: 360 });
-          ry += receiptDoc.heightOfString(item.rollingDescription, { width: 360 }) + 1;
-        }
-        ry += 5;
-        if (idx < latestEntry.items.length - 1) {
-          receiptDoc.moveTo(90, ry).lineTo(562, ry).lineWidth(0.3).strokeColor('#eee').stroke(); ry += 4;
-        }
-      });
-
-      // Total
-      ry += 10;
-      receiptDoc.moveTo(50, ry).lineTo(562, ry).lineWidth(0.5).strokeColor('#e0e0e0').stroke(); ry += 10;
-      const totalItems = (latestEntry.items || []).reduce((s, i) => s + (i.quantity || 0), 0);
-      receiptDoc.font('Helvetica-Bold').fontSize(10).fillColor('#333');
-      receiptDoc.text('Total items shipped: ' + totalItems, 50, ry);
-
-      // Signature line
-      ry += 40;
-      receiptDoc.moveTo(50, ry).lineTo(250, ry).lineWidth(0.5).strokeColor('#999').stroke();
-      receiptDoc.font('Helvetica').fontSize(8).fillColor('#666').text('Signature', 50, ry + 4);
-      receiptDoc.moveTo(300, ry).lineTo(500, ry).lineWidth(0.5).strokeColor('#999').stroke();
-      receiptDoc.text('Date', 300, ry + 4);
-
-      // Footer
-      receiptDoc.page.margins.bottom = 0;
-      receiptDoc.font('Helvetica').fontSize(7).fillColor('#666');
-      receiptDoc.text('Carolina Rolling Co. Inc. | (562) 633-1044 | keepitrolling@carolinarolling.com', 50, 755, { width: 512, align: 'center', lineBreak: false });
-
-      receiptDoc.end();
-      await new Promise(resolve => receiptDoc.on('end', resolve));
-      const receiptBuffer = Buffer.concat(rChunks);
-
-      const receiptName = `Pickup-${type === 'full' ? 'Full' : 'Partial-' + pickupNum}-DR${workOrder.drNumber}.pdf`;
-      const uploadResult = await fileStorage.uploadBuffer(receiptBuffer, { folder: `work-orders/${workOrder.id}/documents`, filename: receiptName, mimeType: 'application/pdf' });
-      await WorkOrderDocument.create({ workOrderId: workOrder.id, originalName: receiptName, mimeType: 'application/pdf', size: receiptBuffer.length, url: uploadResult.url, cloudinaryId: uploadResult.storageId, documentType: 'pickup_receipt' });
-      console.log(`[Pickup] Saved receipt ${receiptName}`);
-    } catch (pdfErr) {
-      console.error('[Pickup] Receipt PDF error:', pdfErr.message);
-    }
 
     // Auto-archive linked shipments if order is now shipped
     if (workOrder.status === 'shipped') {
@@ -1620,6 +1515,120 @@ router.post('/:id/pickup', async (req, res, next) => {
     
     res.json({ data: workOrder.toJSON(), message: type === 'full' ? 'Full pickup recorded' : 'Partial pickup recorded' });
   } catch (error) {
+    next(error);
+  }
+});
+
+// GET /:id/pickup/:index/receipt - Generate pickup receipt PDF on demand
+router.get('/:id/pickup/:index/receipt', async (req, res, next) => {
+  try {
+    const PDFDocument = require('pdfkit');
+    const workOrder = await WorkOrder.findByPk(req.params.id, { include: [{ model: WorkOrderPart, as: 'parts' }] });
+    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+
+    const idx = parseInt(req.params.index);
+    const history = workOrder.pickupHistory || [];
+    if (idx < 0 || idx >= history.length) return res.status(400).json({ error: { message: 'Invalid pickup index' } });
+
+    const entry = history[idx];
+    const pickupNum = idx + 1;
+    const pickupDate = new Date(entry.date);
+    const totalItems = (entry.items || []).reduce((s, i) => s + (i.quantity || 0), 0);
+
+    const doc = new PDFDocument({ margin: 50, size: 'letter' });
+    const chunks = [];
+    doc.on('data', c => chunks.push(c));
+
+    const logoFile = [path.join(__dirname, '../assets/logo.png'), path.join(__dirname, '../assets/logo.jpg')].find(p => fs.existsSync(p));
+    const yellowcakePath = path.join(__dirname, '../assets/fonts/Yellowcake-Regular.ttf');
+    let hasYellowcake = false;
+    try { if (fs.existsSync(yellowcakePath)) { doc.registerFont('Yellowcake', yellowcakePath); hasYellowcake = true; } } catch {}
+
+    // Header
+    if (logoFile) try { doc.image(logoFile, 50, 22, { width: 60 }); } catch {}
+    if (hasYellowcake) doc.font('Yellowcake').fontSize(14).fillColor('#333').text('Carolina Rolling Co. Inc.', 125, 28);
+    else doc.font('Helvetica-Bold').fontSize(14).fillColor('#333').text('CAROLINA ROLLING CO. INC.', 125, 28);
+    doc.font('Helvetica').fontSize(8).fillColor('#666');
+    doc.text('9152 Sonrisa St., Bellflower, CA 90706', 125, 46);
+    doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 125, 57);
+    doc.moveTo(50, 72).lineTo(562, 72).lineWidth(1).strokeColor('#e0e0e0').stroke();
+
+    // Title
+    const titleLabel = entry.type === 'full' ? 'PICKUP RECEIPT — FULL SHIPMENT' : `PICKUP RECEIPT — PARTIAL SHIPMENT #${pickupNum}`;
+    doc.font('Helvetica-Bold').fontSize(11).fillColor('#e65100').text(titleLabel, 50, 82);
+    doc.font('Helvetica-Bold').fontSize(10).fillColor('#333').text('DR-' + String(workOrder.drNumber || ''), 400, 82, { width: 162, align: 'right' });
+    doc.font('Helvetica').fontSize(8).fillColor('#666');
+    doc.text(pickupDate.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }) + '  ' + pickupDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }), 400, 96, { width: 162, align: 'right' });
+    doc.moveTo(50, 108).lineTo(562, 108).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
+
+    // Customer info
+    let ry = 118;
+    doc.font('Helvetica').fontSize(8).fillColor('#666').text('Customer', 50, ry); ry += 12;
+    doc.font('Helvetica').fontSize(10).fillColor('#333').text(workOrder.clientName || '', 50, ry); ry += 14;
+    doc.font('Helvetica').fontSize(9).fillColor('#666');
+    doc.text('P.O: ' + (workOrder.clientPurchaseOrderNumber || '—'), 50, ry); ry += 12;
+    doc.text('Picked Up By: ' + (entry.pickedUpBy || '—'), 50, ry); ry += 12;
+    const pickupDateStr = pickupDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+    const pickupTimeStr = pickupDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+    doc.font('Helvetica-Bold').fontSize(9).fillColor('#333');
+    doc.text('Date & Time: ' + pickupDateStr + ' at ' + pickupTimeStr, 50, ry); ry += 20;
+
+    // Items table
+    doc.moveTo(50, ry).lineTo(562, ry).lineWidth(0.5).strokeColor('#e0e0e0').stroke(); ry += 8;
+    doc.font('Helvetica-Bold').fontSize(8).fillColor('#666');
+    doc.text('QTY', 50, ry, { width: 35 });
+    doc.text('PART #', 90, ry);
+    doc.text('DESCRIPTION', 200, ry);
+    ry += 12;
+    doc.moveTo(50, ry).lineTo(562, ry).lineWidth(0.3).strokeColor('#ddd').stroke(); ry += 7;
+
+    (entry.items || []).forEach((item, i) => {
+      doc.font('Helvetica-Bold').fontSize(10).fillColor('#333');
+      doc.text(String(item.quantity || 0), 50, ry, { width: 35 });
+      doc.font('Helvetica').fontSize(9).fillColor('#333');
+      doc.text(item.clientPartNumber || item.partNumber || '', 90, ry, { width: 105 });
+      let desc = (item.description || '').replace(/^\d+pc:\s*/i, '');
+      doc.text(desc, 200, ry, { width: 360 });
+      ry += doc.heightOfString(desc, { width: 360 }) + 1;
+      if (item.rollingDescription) {
+        doc.font('Helvetica').fontSize(8.5).fillColor('#666');
+        doc.text(item.rollingDescription, 200, ry, { width: 360 });
+        ry += doc.heightOfString(item.rollingDescription, { width: 360 }) + 1;
+      }
+      ry += 5;
+      if (i < entry.items.length - 1) {
+        doc.moveTo(90, ry).lineTo(562, ry).lineWidth(0.3).strokeColor('#eee').stroke(); ry += 4;
+      }
+    });
+
+    // Total
+    ry += 10;
+    doc.moveTo(50, ry).lineTo(562, ry).lineWidth(0.5).strokeColor('#e0e0e0').stroke(); ry += 10;
+    doc.font('Helvetica-Bold').fontSize(10).fillColor('#333');
+    doc.text('Total items shipped: ' + totalItems, 50, ry);
+
+    // Signature lines
+    ry += 40;
+    doc.moveTo(50, ry).lineTo(250, ry).lineWidth(0.5).strokeColor('#999').stroke();
+    doc.font('Helvetica').fontSize(8).fillColor('#666').text('Signature', 50, ry + 4);
+    doc.moveTo(300, ry).lineTo(500, ry).lineWidth(0.5).strokeColor('#999').stroke();
+    doc.text('Date', 300, ry + 4);
+
+    // Footer
+    doc.page.margins.bottom = 0;
+    doc.font('Helvetica').fontSize(7).fillColor('#666');
+    doc.text('Carolina Rolling Co. Inc. | (562) 633-1044 | keepitrolling@carolinarolling.com', 50, 755, { width: 512, align: 'center', lineBreak: false });
+
+    doc.end();
+    await new Promise(resolve => doc.on('end', resolve));
+    const pdfBuffer = Buffer.concat(chunks);
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Length', pdfBuffer.length);
+    res.setHeader('Content-Disposition', `inline; filename="Pickup-${entry.type === 'full' ? 'Full' : 'Partial-' + pickupNum}-DR${workOrder.drNumber}.pdf"`);
+    res.send(pdfBuffer);
+  } catch (error) {
+    console.error('[Pickup Receipt] Error:', error);
     next(error);
   }
 });

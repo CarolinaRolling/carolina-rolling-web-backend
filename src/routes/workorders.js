@@ -1521,27 +1521,30 @@ router.post('/:id/pickup', async (req, res, next) => {
       let hasYellowcake = false;
       try { if (fs.existsSync(yellowcakePath)) { receiptDoc.registerFont('Yellowcake', yellowcakePath); hasYellowcake = true; } } catch {}
 
-      // Header
-      if (logoFile) try { receiptDoc.image(logoFile, 50, 22, { width: 65 }); } catch {}
-      if (hasYellowcake) receiptDoc.font('Yellowcake').fontSize(15).fillColor('#333').text('Carolina Rolling Co. Inc.', 130, 30);
-      else receiptDoc.font('Helvetica-Bold').fontSize(15).fillColor('#333').text('CAROLINA ROLLING CO. INC.', 130, 30);
-      receiptDoc.font('Helvetica').fontSize(8.5).fillColor('#666');
-      receiptDoc.text('9152 Sonrisa St., Bellflower, CA 90706', 130, 50);
-      receiptDoc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 130, 62);
+      // Header — company left, title below
+      if (logoFile) try { receiptDoc.image(logoFile, 50, 22, { width: 60 }); } catch {}
+      if (hasYellowcake) receiptDoc.font('Yellowcake').fontSize(14).fillColor('#333').text('Carolina Rolling Co. Inc.', 125, 28);
+      else receiptDoc.font('Helvetica-Bold').fontSize(14).fillColor('#333').text('CAROLINA ROLLING CO. INC.', 125, 28);
+      receiptDoc.font('Helvetica').fontSize(8).fillColor('#666');
+      receiptDoc.text('9152 Sonrisa St., Bellflower, CA 90706', 125, 46);
+      receiptDoc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 125, 57);
 
-      // Title
-      receiptDoc.font('Helvetica-Bold').fontSize(11).fillColor('#e65100');
-      receiptDoc.text(type === 'full' ? 'PICKUP RECEIPT — FULL SHIPMENT' : 'PICKUP RECEIPT — PARTIAL SHIPMENT #' + pickupNum, 340, 28, { width: 222, align: 'right' });
-      receiptDoc.font('Helvetica-Bold').fontSize(10).fillColor('#333');
-      receiptDoc.text('DR-' + String(workOrder.drNumber || ''), 340, 48, { width: 222, align: 'right' });
+      receiptDoc.moveTo(50, 72).lineTo(562, 72).lineWidth(1).strokeColor('#e0e0e0').stroke();
+
+      // Title bar
       const pickupDate = new Date(latestEntry.date);
-      receiptDoc.font('Helvetica').fontSize(9).fillColor('#666');
-      receiptDoc.text(pickupDate.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }) + ' ' + pickupDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }), 340, 62, { width: 222, align: 'right' });
+      const titleLabel = type === 'full' ? 'PICKUP RECEIPT — FULL SHIPMENT' : `PICKUP RECEIPT — PARTIAL SHIPMENT #${pickupNum}`;
+      receiptDoc.font('Helvetica-Bold').fontSize(11).fillColor('#e65100');
+      receiptDoc.text(titleLabel, 50, 82);
+      receiptDoc.font('Helvetica-Bold').fontSize(10).fillColor('#333');
+      receiptDoc.text('DR-' + String(workOrder.drNumber || ''), 400, 82, { width: 162, align: 'right' });
+      receiptDoc.font('Helvetica').fontSize(8).fillColor('#666');
+      receiptDoc.text(pickupDate.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }) + '  ' + pickupDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }), 400, 96, { width: 162, align: 'right' });
 
-      receiptDoc.moveTo(50, 82).lineTo(562, 82).lineWidth(1).strokeColor('#e0e0e0').stroke();
+      receiptDoc.moveTo(50, 108).lineTo(562, 108).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
 
-      let ry = 96;
-      receiptDoc.font('Helvetica').fontSize(9).fillColor('#666').text('Customer', 50, ry); ry += 12;
+      let ry = 118;
+      receiptDoc.font('Helvetica').fontSize(8).fillColor('#666').text('Customer', 50, ry); ry += 12;
       receiptDoc.font('Helvetica').fontSize(10).fillColor('#333').text(workOrder.clientName || '', 50, ry); ry += 14;
       receiptDoc.font('Helvetica').fontSize(9).fillColor('#666');
       receiptDoc.text('P.O: ' + (workOrder.clientPurchaseOrderNumber || '—'), 50, ry); ry += 12;
@@ -1619,6 +1622,92 @@ router.post('/:id/pickup', async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+// DELETE /:id/pickup/:index - Delete a pickup history entry
+router.delete('/:id/pickup/:index', async (req, res, next) => {
+  try {
+    const workOrder = await WorkOrder.findByPk(req.params.id, {
+      include: [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }]
+    });
+    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+
+    const idx = parseInt(req.params.index);
+    const history = JSON.parse(JSON.stringify(workOrder.pickupHistory || []));
+    if (idx < 0 || idx >= history.length) return res.status(400).json({ error: { message: 'Invalid pickup index' } });
+
+    history.splice(idx, 1);
+    workOrder.pickupHistory = history;
+    workOrder.changed('pickupHistory', true);
+
+    // Recalculate if still fully shipped
+    if (history.length === 0) {
+      workOrder.status = workOrder.status === 'shipped' ? 'stored' : workOrder.status;
+      workOrder.pickedUpAt = null;
+      workOrder.pickedUpBy = null;
+    } else {
+      const totalPickedByPart = {};
+      history.forEach(entry => {
+        (entry.items || []).forEach(item => {
+          const key = item.partId || item.partNumber;
+          totalPickedByPart[key] = (totalPickedByPart[key] || 0) + (item.quantity || 0);
+        });
+      });
+      const allPickedUp = workOrder.parts.every(p => {
+        const picked = (totalPickedByPart[p.id] || 0) + (totalPickedByPart[p.partNumber] || 0);
+        return picked >= (p.quantity || 1);
+      });
+      if (!allPickedUp && workOrder.status === 'shipped') {
+        workOrder.status = 'stored';
+      }
+    }
+    await workOrder.save();
+    await workOrder.reload({ include: [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }] });
+    res.json({ data: workOrder.toJSON(), message: 'Pickup entry deleted' });
+  } catch (error) { next(error); }
+});
+
+// PUT /:id/pickup/:index - Edit a pickup history entry (update quantities)
+router.put('/:id/pickup/:index', async (req, res, next) => {
+  try {
+    const workOrder = await WorkOrder.findByPk(req.params.id, {
+      include: [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }]
+    });
+    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+
+    const idx = parseInt(req.params.index);
+    const history = JSON.parse(JSON.stringify(workOrder.pickupHistory || []));
+    if (idx < 0 || idx >= history.length) return res.status(400).json({ error: { message: 'Invalid pickup index' } });
+
+    const { items, pickedUpBy } = req.body;
+    if (items) history[idx].items = items;
+    if (pickedUpBy !== undefined) history[idx].pickedUpBy = pickedUpBy;
+
+    workOrder.pickupHistory = history;
+    workOrder.changed('pickupHistory', true);
+
+    // Recalculate shipped status
+    const totalPickedByPart = {};
+    history.forEach(entry => {
+      (entry.items || []).forEach(item => {
+        const key = item.partId || item.partNumber;
+        totalPickedByPart[key] = (totalPickedByPart[key] || 0) + (item.quantity || 0);
+      });
+    });
+    const allPickedUp = workOrder.parts.every(p => {
+      const picked = (totalPickedByPart[p.id] || 0) + (totalPickedByPart[p.partNumber] || 0);
+      return picked >= (p.quantity || 1);
+    });
+    if (allPickedUp && workOrder.status !== 'shipped') {
+      workOrder.status = 'shipped';
+    } else if (!allPickedUp && workOrder.status === 'shipped') {
+      workOrder.status = 'stored';
+    }
+
+    await workOrder.save();
+    await workOrder.reload({ include: [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }] });
+    res.json({ data: workOrder.toJSON(), message: 'Pickup entry updated' });
+  } catch (error) { next(error); }
 });
 
 // PUT /:id/dr-number - Change DR number (must be unique)

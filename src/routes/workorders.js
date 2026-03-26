@@ -1545,33 +1545,37 @@ router.get('/:id/pickup/:index/receipt', async (req, res, next) => {
     try { if (fs.existsSync(yellowcakePath)) { doc.registerFont('Yellowcake', yellowcakePath); hasYellowcake = true; } } catch {}
 
     // Header
-    if (logoFile) try { doc.image(logoFile, 50, 22, { width: 60 }); } catch {}
+    if (logoFile) try { doc.image(logoFile, 50, 20, { width: 60 }); } catch {}
     if (hasYellowcake) doc.font('Yellowcake').fontSize(14).fillColor('#333').text('Carolina Rolling Co. Inc.', 125, 28);
     else doc.font('Helvetica-Bold').fontSize(14).fillColor('#333').text('CAROLINA ROLLING CO. INC.', 125, 28);
     doc.font('Helvetica').fontSize(8).fillColor('#666');
     doc.text('9152 Sonrisa St., Bellflower, CA 90706', 125, 46);
     doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 125, 57);
-    doc.moveTo(50, 72).lineTo(562, 72).lineWidth(1).strokeColor('#e0e0e0').stroke();
+    doc.moveTo(50, 80).lineTo(562, 80).lineWidth(1).strokeColor('#e0e0e0').stroke();
+
+    // Pacific time helper
+    const fmtDatePT = (d) => d.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: '2-digit', day: '2-digit', year: 'numeric' });
+    const fmtTimePT = (d) => d.toLocaleTimeString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', minute: '2-digit' });
+    const fmtDateLongPT = (d) => d.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+    const fmtTimeFullPT = (d) => d.toLocaleTimeString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', minute: '2-digit', second: '2-digit' });
 
     // Title
     const titleLabel = entry.type === 'full' ? 'PICKUP RECEIPT — FULL SHIPMENT' : `PICKUP RECEIPT — PARTIAL SHIPMENT #${pickupNum}`;
-    doc.font('Helvetica-Bold').fontSize(11).fillColor('#e65100').text(titleLabel, 50, 82);
-    doc.font('Helvetica-Bold').fontSize(10).fillColor('#333').text('DR-' + String(workOrder.drNumber || ''), 400, 82, { width: 162, align: 'right' });
+    doc.font('Helvetica-Bold').fontSize(11).fillColor('#e65100').text(titleLabel, 50, 90);
+    doc.font('Helvetica-Bold').fontSize(10).fillColor('#333').text('DR-' + String(workOrder.drNumber || ''), 400, 90, { width: 162, align: 'right' });
     doc.font('Helvetica').fontSize(8).fillColor('#666');
-    doc.text(pickupDate.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }) + '  ' + pickupDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }), 400, 96, { width: 162, align: 'right' });
-    doc.moveTo(50, 108).lineTo(562, 108).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
+    doc.text(fmtDatePT(pickupDate) + '  ' + fmtTimePT(pickupDate) + ' PT', 400, 104, { width: 162, align: 'right' });
+    doc.moveTo(50, 116).lineTo(562, 116).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
 
     // Customer info
-    let ry = 118;
+    let ry = 126;
     doc.font('Helvetica').fontSize(8).fillColor('#666').text('Customer', 50, ry); ry += 12;
     doc.font('Helvetica').fontSize(10).fillColor('#333').text(workOrder.clientName || '', 50, ry); ry += 14;
     doc.font('Helvetica').fontSize(9).fillColor('#666');
     doc.text('P.O: ' + (workOrder.clientPurchaseOrderNumber || '—'), 50, ry); ry += 12;
     doc.text('Picked Up By: ' + (entry.pickedUpBy || '—'), 50, ry); ry += 12;
-    const pickupDateStr = pickupDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
-    const pickupTimeStr = pickupDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' });
     doc.font('Helvetica-Bold').fontSize(9).fillColor('#333');
-    doc.text('Date & Time: ' + pickupDateStr + ' at ' + pickupTimeStr, 50, ry); ry += 20;
+    doc.text('Date & Time: ' + fmtDateLongPT(pickupDate) + ' at ' + fmtTimeFullPT(pickupDate) + ' PT', 50, ry); ry += 20;
 
     // Items table
     doc.moveTo(50, ry).lineTo(562, ry).lineWidth(0.5).strokeColor('#e0e0e0').stroke(); ry += 8;
@@ -4150,7 +4154,7 @@ router.post('/:id/coc', async (req, res, next) => {
 
     const { wpsId, certifiedBy, certDate } = req.body;
     const wps = wpsId ? await WeldProcedure.findByPk(wpsId) : null;
-    const dateStr = certDate ? new Date(certDate + 'T12:00:00').toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }) : new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
+    const dateStr = certDate ? new Date(certDate + 'T12:00:00').toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: '2-digit', day: '2-digit', year: 'numeric' }) : new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: '2-digit', day: '2-digit', year: 'numeric' });
 
     const doc = new PDFDocument({ margin: 50, size: 'letter' });
     const chunks = [];
@@ -4177,11 +4181,11 @@ router.post('/:id/coc', async (req, res, next) => {
     };
 
     // ===== PAGE 1 HEADER (only on first page) =====
-    if (logoFile) try { doc.image(logoFile, 50, 22, { width: 65 }); } catch {}
-    drawCompanyName(130, 30);
+    if (logoFile) try { doc.image(logoFile, 50, 18, { width: 58 }); } catch {}
+    drawCompanyName(125, 28);
     doc.font('Helvetica').fontSize(8.5).fillColor(grayColor);
-    doc.text('9152 Sonrisa St., Bellflower, CA 90706', 130, 50);
-    doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 130, 62);
+    doc.text('9152 Sonrisa St., Bellflower, CA 90706', 125, 48);
+    doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 125, 60);
 
     // Title block — top right
     doc.font('Helvetica-Bold').fontSize(11).fillColor(primaryColor);
@@ -4192,10 +4196,10 @@ router.post('/:id/coc', async (req, res, next) => {
     doc.text('Date: ' + dateStr, 340, 62, { width: 222, align: 'right' });
 
     // Divider below header
-    doc.moveTo(50, 96).lineTo(562, 96).lineWidth(1).strokeColor('#e0e0e0').stroke();
+    doc.moveTo(50, 82).lineTo(562, 82).lineWidth(1).strokeColor('#e0e0e0').stroke();
 
     // Customer section — left justified, not bold, proper spacing
-    let y = 110;
+    let y = 94;
     doc.font('Helvetica').fontSize(8).fillColor(grayColor);
     doc.text('Customer', 50, y);
     y += 14;
@@ -4285,20 +4289,20 @@ router.post('/:id/coc', async (req, res, next) => {
     if (wps) {
       newPage();
       // WPS header — only on WPS page
-      if (logoFile) try { doc.image(logoFile, 50, 22, { width: 65 }); } catch {}
-      drawCompanyName(130, 30);
+      if (logoFile) try { doc.image(logoFile, 50, 18, { width: 58 }); } catch {}
+      drawCompanyName(125, 28);
       doc.font('Helvetica').fontSize(8.5).fillColor(grayColor);
-      doc.text('9152 Sonrisa St., Bellflower, CA 90706', 130, 50);
-      doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 130, 62);
+      doc.text('9152 Sonrisa St., Bellflower, CA 90706', 125, 48);
+      doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 125, 60);
       doc.font('Helvetica-Bold').fontSize(11).fillColor(primaryColor);
       doc.text('WELDING PROCEDURE SPECIFICATION', 340, 28, { width: 222, align: 'right' });
       doc.font('Helvetica-Bold').fontSize(10).fillColor(darkColor);
       doc.text('WPS: ' + (wps.wpsNumber || ''), 340, 48, { width: 222, align: 'right' });
       doc.font('Helvetica').fontSize(9).fillColor(grayColor);
-      doc.text('Date: ' + new Date(wps.updatedAt || wps.createdAt).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: '2-digit' }), 340, 62, { width: 222, align: 'right' });
-      doc.moveTo(50, 96).lineTo(562, 96).lineWidth(1).strokeColor('#e0e0e0').stroke();
+      doc.text('Date: ' + new Date(wps.updatedAt || wps.createdAt).toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: '2-digit', day: '2-digit', year: '2-digit' }), 340, 62, { width: 222, align: 'right' });
+      doc.moveTo(50, 82).lineTo(562, 82).lineWidth(1).strokeColor('#e0e0e0').stroke();
 
-      let wy = 110;
+      let wy = 96;
       const wR = (l, v) => { if (!v) return; doc.font('Helvetica-Bold').fontSize(9).fillColor(grayColor).text(l, 50, wy, { width: 130 }); doc.font('Helvetica').fontSize(9).fillColor(darkColor).text(v, 185, wy, { width: 370 }); wy += 15; };
       const wH = (t) => { wy += 5; doc.font('Helvetica-Bold').fontSize(9).fillColor(primaryColor).text(t, 50, wy); wy += 12; doc.moveTo(50, wy).lineTo(562, wy).lineWidth(0.3).strokeColor('#ddd').stroke(); wy += 7; };
       wR('Process', wps.process); wR('Type', wps.processType);
@@ -4314,7 +4318,7 @@ router.post('/:id/coc', async (req, res, next) => {
       wy += 14; doc.moveTo(50, wy).lineTo(562, wy).lineWidth(0.5).strokeColor('#e0e0e0').stroke(); wy += 10;
       doc.font('Helvetica').fontSize(8).fillColor(grayColor);
       doc.text('Updated by: ' + (wps.updatedBy || 'Jason Thornton'), 50, wy); wy += 11;
-      doc.text('Date: ' + new Date(wps.updatedAt || wps.createdAt).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: '2-digit' }), 50, wy); wy += 11;
+      doc.text('Date: ' + new Date(wps.updatedAt || wps.createdAt).toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: '2-digit', day: '2-digit', year: '2-digit' }), 50, wy); wy += 11;
       doc.text('Signature: ' + (wps.updatedBy || 'Jason Thornton'), 50, wy);
     }
 

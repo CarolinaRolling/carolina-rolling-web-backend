@@ -143,6 +143,79 @@ app.use('/api/shop-supplies', authenticate, shopSuppliesRoutes);
 const todoRoutes = require('./routes/todos');
 app.use('/api/todos', authenticate, todoRoutes);
 
+// Client Portal routes — mounted at /api/portal for portal app access
+const portalRouter = require('express').Router();
+const portalModels = require('./models');
+const portalFileStorage = require('./utils/storage');
+
+// GET /api/portal/:drNumber/documents - list portal-visible documents for a DR
+portalRouter.get('/:drNumber/documents', async (req, res, next) => {
+  try {
+    const drNumber = parseInt(req.params.drNumber);
+    if (!drNumber) return res.status(400).json({ error: { message: 'Invalid DR number' } });
+    const workOrder = await portalModels.WorkOrder.findOne({ where: { drNumber } });
+    if (!workOrder) return res.status(404).json({ error: { message: 'Order not found' } });
+    const documents = await portalModels.WorkOrderDocument.findAll({
+      where: { workOrderId: workOrder.id, portalVisible: true },
+      order: [['createdAt', 'DESC']]
+    });
+    res.json({ data: documents.map(d => ({ id: d.id, name: d.originalName, type: d.documentType, size: d.size, date: d.createdAt, workOrderId: workOrder.id, drNumber })) });
+  } catch (error) { next(error); }
+});
+
+// GET /api/portal/:drNumber/documents/:docId/download - download a portal-visible document
+portalRouter.get('/:drNumber/documents/:docId/download', async (req, res, next) => {
+  try {
+    const drNumber = parseInt(req.params.drNumber);
+    if (!drNumber) return res.status(400).json({ error: { message: 'Invalid DR number' } });
+    const workOrder = await portalModels.WorkOrder.findOne({ where: { drNumber } });
+    if (!workOrder) return res.status(404).json({ error: { message: 'Order not found' } });
+    const document = await portalModels.WorkOrderDocument.findOne({
+      where: { id: req.params.docId, workOrderId: workOrder.id, portalVisible: true }
+    });
+    if (!document) return res.status(404).json({ error: { message: 'Document not found or not available' } });
+    if (document.url) {
+      const presignedUrl = await portalFileStorage.getPresignedUrl(document.url, document.originalName);
+      res.json({ data: { url: presignedUrl, name: document.originalName } });
+    } else {
+      res.status(404).json({ error: { message: 'File not available' } });
+    }
+  } catch (error) { next(error); }
+});
+
+// GET /api/portal/estimate/:estimateNumber/files - list portal-visible files for an estimate
+portalRouter.get('/estimate/:estimateNumber/files', async (req, res, next) => {
+  try {
+    const estimate = await portalModels.Estimate.findOne({ where: { estimateNumber: req.params.estimateNumber } });
+    if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
+    const parts = await portalModels.EstimatePart.findAll({ where: { estimateId: estimate.id }, include: [{ model: portalModels.EstimatePartFile, as: 'files', where: { portalVisible: true }, required: true }] });
+    const files = parts.flatMap(p => (p.files || []).map(f => ({
+      id: f.id, name: f.originalName || f.filename, type: f.fileType, size: f.size, date: f.createdAt,
+      partNumber: p.partNumber, partType: p.partType
+    })));
+    res.json({ data: files });
+  } catch (error) { next(error); }
+});
+
+// GET /api/portal/estimate/:estimateNumber/files/:fileId/download - download a portal-visible estimate file
+portalRouter.get('/estimate/:estimateNumber/files/:fileId/download', async (req, res, next) => {
+  try {
+    const estimate = await portalModels.Estimate.findOne({ where: { estimateNumber: req.params.estimateNumber } });
+    if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
+    const parts = await portalModels.EstimatePart.findAll({ where: { estimateId: estimate.id }, include: [{ model: portalModels.EstimatePartFile, as: 'files' }] });
+    const file = parts.flatMap(p => p.files || []).find(f => f.id === req.params.fileId && f.portalVisible);
+    if (!file) return res.status(404).json({ error: { message: 'File not found or not available' } });
+    if (file.url) {
+      const presignedUrl = await portalFileStorage.getPresignedUrl(file.url, file.originalName || file.filename);
+      res.json({ data: { url: presignedUrl, name: file.originalName || file.filename } });
+    } else {
+      res.status(404).json({ error: { message: 'File not available' } });
+    }
+  } catch (error) { next(error); }
+});
+
+app.use('/api/portal', authenticate, portalRouter);
+
 // Email Scanner (authenticated routes only - callback handled above)
 const emailScannerRoutes = require('./routes/email-scanner');
 app.use('/api/email-scanner', authenticate, emailScannerRoutes);
@@ -815,7 +888,17 @@ async function startServer() {
     
     // Run cleanup every 24 hours
     setInterval(cleanupOldShippedItems, 24 * 60 * 60 * 1000);
-    
+
+    // Ensure portalVisible column exists on work_order_documents and estimate_part_files
+    try {
+      await sequelize.query(`ALTER TABLE work_order_documents ADD COLUMN IF NOT EXISTS "portalVisible" BOOLEAN DEFAULT false`);
+      console.log('Ensured portalVisible column on work_order_documents');
+    } catch (e) { console.log('portalVisible migration (wo_docs):', e.message); }
+    try {
+      await sequelize.query(`ALTER TABLE estimate_part_files ADD COLUMN IF NOT EXISTS "portalVisible" BOOLEAN DEFAULT false`);
+      console.log('Ensured portalVisible column on estimate_part_files');
+    } catch (e) { console.log('portalVisible migration (est_files):', e.message); }
+
     // Comprehensive morning digest at 5:00 AM Pacific
     cron.schedule('0 5 * * *', async () => {
       console.log('Running 5:00 AM comprehensive daily digest...');

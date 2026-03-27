@@ -3379,42 +3379,6 @@ router.patch('/:id/documents/:documentId/portal', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-// GET /api/workorders/portal/:drNumber/documents - Client portal: get visible documents for a DR
-router.get('/portal/:drNumber/documents', async (req, res, next) => {
-  try {
-    const drNumber = parseInt(req.params.drNumber);
-    if (!drNumber) return res.status(400).json({ error: { message: 'Invalid DR number' } });
-    const workOrder = await WorkOrder.findOne({ where: { drNumber } });
-    if (!workOrder) return res.status(404).json({ error: { message: 'Order not found' } });
-    const documents = await WorkOrderDocument.findAll({
-      where: { workOrderId: workOrder.id, portalVisible: true },
-      order: [['createdAt', 'DESC']]
-    });
-    res.json({ data: documents.map(d => ({ id: d.id, name: d.originalName, type: d.documentType, size: d.size, date: d.createdAt })) });
-  } catch (error) { next(error); }
-});
-
-// GET /api/workorders/portal/:drNumber/documents/:documentId/download - Client portal: download a visible document
-router.get('/portal/:drNumber/documents/:documentId/download', async (req, res, next) => {
-  try {
-    const drNumber = parseInt(req.params.drNumber);
-    if (!drNumber) return res.status(400).json({ error: { message: 'Invalid DR number' } });
-    const workOrder = await WorkOrder.findOne({ where: { drNumber } });
-    if (!workOrder) return res.status(404).json({ error: { message: 'Order not found' } });
-    const document = await WorkOrderDocument.findOne({
-      where: { id: req.params.documentId, workOrderId: workOrder.id, portalVisible: true }
-    });
-    if (!document) return res.status(404).json({ error: { message: 'Document not found or not available' } });
-    // Return presigned URL for download
-    if (document.url) {
-      const presignedUrl = await fileStorage.getPresignedUrl(document.url, document.originalName);
-      res.json({ data: { url: presignedUrl, name: document.originalName } });
-    } else {
-      res.status(404).json({ error: { message: 'File not available' } });
-    }
-  } catch (error) { next(error); }
-});
-
 // POST /api/workorders/:id/documents/:documentId/regenerate - Regenerate a purchase order PDF
 router.post('/:id/documents/:documentId/regenerate', async (req, res, next) => {
   try {

@@ -1356,6 +1356,31 @@ router.delete('/:id/parts/:partId/files/:fileId', async (req, res, next) => {
   }
 });
 
+// PATCH /:id/parts/:partId/files/:fileId/portal - Toggle portal visibility for estimate file
+router.patch('/:id/parts/:partId/files/:fileId/portal', async (req, res, next) => {
+  try {
+    const file = await EstimatePartFile.findOne({ where: { id: req.params.fileId, partId: req.params.partId } });
+    if (!file) return res.status(404).json({ error: { message: 'File not found' } });
+    const newVal = req.body.portalVisible !== undefined ? !!req.body.portalVisible : !file.portalVisible;
+    await file.update({ portalVisible: newVal });
+    res.json({ data: file.toJSON(), message: `File ${newVal ? 'visible' : 'hidden'} on client portal` });
+  } catch (error) { next(error); }
+});
+
+// GET /api/estimates/portal/:estimateNumber/files - Client portal: get visible files for an estimate
+router.get('/portal/:estimateNumber/files', async (req, res, next) => {
+  try {
+    const estimate = await Estimate.findOne({ where: { estimateNumber: req.params.estimateNumber } });
+    if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
+    const parts = await EstimatePart.findAll({ where: { estimateId: estimate.id }, include: [{ model: EstimatePartFile, as: 'files', where: { portalVisible: true }, required: true }] });
+    const files = parts.flatMap(p => (p.files || []).map(f => ({
+      id: f.id, name: f.originalName || f.filename, type: f.fileType, size: f.size, date: f.createdAt,
+      partNumber: p.partNumber, partType: p.partType
+    })));
+    res.json({ data: files });
+  } catch (error) { next(error); }
+});
+
 // ============= ORDER MATERIAL =============
 
 // POST /api/estimates/:id/order-material - Create purchase orders for materials

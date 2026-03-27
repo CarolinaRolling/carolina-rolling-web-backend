@@ -1057,6 +1057,11 @@ const WorkOrderDocument = sequelize.define('WorkOrderDocument', {
   description: {
     type: DataTypes.STRING,
     allowNull: true
+  },
+  portalVisible: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false,
+    allowNull: false
   }
 }, {
   tableName: 'work_order_documents',
@@ -1649,6 +1654,11 @@ const EstimatePartFile = sequelize.define('EstimatePartFile', {
   fileLastModified: {
     type: DataTypes.DATE,
     allowNull: true
+  },
+  portalVisible: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false,
+    allowNull: false
   }
 }, {
   tableName: 'estimate_part_files',
@@ -1693,6 +1703,11 @@ const EstimateFile = sequelize.define('EstimateFile', {
   cloudinaryId: {
     type: DataTypes.STRING,
     allowNull: true
+  },
+  portalVisible: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false,
+    allowNull: false
   }
 }, {
   tableName: 'estimate_files',

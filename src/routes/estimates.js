@@ -556,8 +556,10 @@ router.get('/', async (req, res, next) => {
     // API key client scoping — restrict to key's allowed client
     if (req.apiKey && req.apiKey.clientName) {
       where.clientName = { [Op.iLike]: `%${req.apiKey.clientName}%` };
-      // Portal clients see all statuses except trashed
-      delete where.status;
+      // Portal: if no explicit status/archived param, show all non-voided
+      if (!status && !archived) {
+        delete where.status;
+      }
     }
 
     const estimates = await Estimate.findAndCountAll({

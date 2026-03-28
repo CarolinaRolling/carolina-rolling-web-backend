@@ -159,7 +159,16 @@ portalRouter.get('/:drNumber/documents', async (req, res, next) => {
       where: { workOrderId: workOrder.id, portalVisible: true },
       order: [['createdAt', 'DESC']]
     });
-    res.json({ data: documents.map(d => ({ id: d.id, name: d.originalName, type: d.documentType, size: d.size, date: d.createdAt, workOrderId: workOrder.id, drNumber })) });
+    const data = await Promise.all(documents.map(async (d) => {
+      let downloadUrl = null;
+      try {
+        const sid = d.cloudinaryId || d.url;
+        if (sid) downloadUrl = await portalFileStorage.getPresignedUrl(sid, 3600, d.originalName);
+        if (!downloadUrl) downloadUrl = d.url; // fallback to raw URL
+      } catch {}
+      return { id: d.id, name: d.originalName, type: d.documentType, mimeType: d.mimeType, size: d.size, date: d.createdAt, workOrderId: workOrder.id, drNumber, downloadUrl };
+    }));
+    res.json({ data });
   } catch (error) { next(error); }
 });
 
@@ -174,9 +183,11 @@ portalRouter.get('/:drNumber/documents/:docId/download', async (req, res, next) 
       where: { id: req.params.docId, workOrderId: workOrder.id, portalVisible: true }
     });
     if (!document) return res.status(404).json({ error: { message: 'Document not found or not available' } });
-    if (document.url) {
-      const presignedUrl = await portalFileStorage.getPresignedUrl(document.url, document.originalName);
-      res.json({ data: { url: presignedUrl, name: document.originalName } });
+    const sid = document.cloudinaryId || document.url;
+    if (sid) {
+      let presignedUrl = await portalFileStorage.getPresignedUrl(sid, 3600, document.originalName);
+      if (!presignedUrl) presignedUrl = document.url;
+      res.json({ data: { url: presignedUrl, name: document.originalName, mimeType: document.mimeType } });
     } else {
       res.status(404).json({ error: { message: 'File not available' } });
     }
@@ -189,9 +200,14 @@ portalRouter.get('/estimate/:estimateNumber/files', async (req, res, next) => {
     const estimate = await portalModels.Estimate.findOne({ where: { estimateNumber: req.params.estimateNumber } });
     if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
     const parts = await portalModels.EstimatePart.findAll({ where: { estimateId: estimate.id }, include: [{ model: portalModels.EstimatePartFile, as: 'files', where: { portalVisible: true }, required: true }] });
-    const files = parts.flatMap(p => (p.files || []).map(f => ({
-      id: f.id, name: f.originalName || f.filename, type: f.fileType, size: f.size, date: f.createdAt,
-      partNumber: p.partNumber, partType: p.partType
+    const files = await Promise.all(parts.flatMap(p => (p.files || []).map(async (f) => {
+      let downloadUrl = null;
+      try {
+        const sid = f.cloudinaryId || f.url;
+        if (sid) downloadUrl = await portalFileStorage.getPresignedUrl(sid, 3600, f.originalName || f.filename);
+        if (!downloadUrl) downloadUrl = f.url;
+      } catch {}
+      return { id: f.id, name: f.originalName || f.filename, type: f.fileType, mimeType: f.mimeType, size: f.size, date: f.createdAt, partNumber: p.partNumber, partType: p.partType, downloadUrl };
     })));
     res.json({ data: files });
   } catch (error) { next(error); }
@@ -205,9 +221,11 @@ portalRouter.get('/estimate/:estimateNumber/files/:fileId/download', async (req,
     const parts = await portalModels.EstimatePart.findAll({ where: { estimateId: estimate.id }, include: [{ model: portalModels.EstimatePartFile, as: 'files' }] });
     const file = parts.flatMap(p => p.files || []).find(f => f.id === req.params.fileId && f.portalVisible);
     if (!file) return res.status(404).json({ error: { message: 'File not found or not available' } });
-    if (file.url) {
-      const presignedUrl = await portalFileStorage.getPresignedUrl(file.url, file.originalName || file.filename);
-      res.json({ data: { url: presignedUrl, name: file.originalName || file.filename } });
+    const sid = file.cloudinaryId || file.url;
+    if (sid) {
+      let presignedUrl = await portalFileStorage.getPresignedUrl(sid, 3600, file.originalName || file.filename);
+      if (!presignedUrl) presignedUrl = file.url;
+      res.json({ data: { url: presignedUrl, name: file.originalName || file.filename, mimeType: file.mimeType } });
     } else {
       res.status(404).json({ error: { message: 'File not available' } });
     }

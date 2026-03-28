@@ -542,6 +542,8 @@ router.get('/', async (req, res, next) => {
     // API key client scoping — force filter to the key's allowed client
     if (req.apiKey && req.apiKey.clientName) {
       where.clientName = { [Op.iLike]: `%${req.apiKey.clientName}%` };
+      // Portal clients see all statuses
+      delete where.status;
     }
 
     // For list views, skip file includes to speed up query significantly

@@ -952,6 +952,19 @@ router.post('/:id/parts', async (req, res, next) => {
   }
 });
 
+// PUT /api/estimates/:id/parts/reorder - Reorder parts
+router.put('/:id/parts/reorder', async (req, res, next) => {
+  try {
+    const { partIds } = req.body;
+    if (!partIds || !Array.isArray(partIds)) return res.status(400).json({ error: { message: 'partIds array required' } });
+    for (let i = 0; i < partIds.length; i++) {
+      await EstimatePart.update({ partNumber: i + 1 }, { where: { id: partIds[i], estimateId: req.params.id } });
+    }
+    const estimate = await Estimate.findByPk(req.params.id, { include: [{ model: EstimatePart, as: 'parts', include: [{ model: EstimatePartFile, as: 'files' }] }, { model: EstimateFile, as: 'files' }] });
+    res.json({ data: estimate.toJSON() });
+  } catch (error) { next(error); }
+});
+
 // PUT /api/estimates/:id/parts/:partId - Update part
 router.put('/:id/parts/:partId', async (req, res, next) => {
   try {

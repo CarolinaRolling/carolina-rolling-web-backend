@@ -2134,6 +2134,19 @@ router.post('/:id/parts', async (req, res, next) => {
   }
 });
 
+// PUT /api/workorders/:id/parts/reorder - Reorder parts
+router.put('/:id/parts/reorder', async (req, res, next) => {
+  try {
+    const { partIds } = req.body;
+    if (!partIds || !Array.isArray(partIds)) return res.status(400).json({ error: { message: 'partIds array required' } });
+    for (let i = 0; i < partIds.length; i++) {
+      await WorkOrderPart.update({ partNumber: i + 1 }, { where: { id: partIds[i], workOrderId: req.params.id } });
+    }
+    const workOrder = await WorkOrder.findByPk(req.params.id, { include: [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }, { model: WorkOrderDocument, as: 'documents' }] });
+    res.json({ data: workOrder.toJSON() });
+  } catch (error) { next(error); }
+});
+
 // PUT /api/workorders/:id/parts/:partId - Update a part
 router.put('/:id/parts/:partId', async (req, res, next) => {
   try {

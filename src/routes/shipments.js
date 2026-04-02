@@ -246,22 +246,24 @@ router.get('/qr/:qrCode', async (req, res, next) => {
   }
 });
 
-// GET /api/shipments/workorder/:workOrderId - Get shipment by work order ID
+// GET /api/shipments/workorder/:workOrderId - Get shipments by work order ID
 router.get('/workorder/:workOrderId', async (req, res, next) => {
   try {
-    const shipment = await Shipment.findOne({
+    const shipments = await Shipment.findAll({
       where: { workOrderId: req.params.workOrderId },
       include: [
         { model: ShipmentPhoto, as: 'photos' },
         { model: ShipmentDocument, as: 'documents' }
-      ]
+      ],
+      order: [['receivedAt', 'DESC']]
     });
 
-    if (!shipment) {
+    if (!shipments || shipments.length === 0) {
       return res.status(404).json({ error: { message: 'No shipment found for this work order' } });
     }
 
-    res.json({ data: transformShipment(shipment) });
+    // Return first shipment as data (backward compat) + all as array
+    res.json({ data: transformShipment(shipments[0]), all: shipments.map(s => transformShipment(s)) });
   } catch (error) {
     next(error);
   }

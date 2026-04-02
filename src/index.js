@@ -917,6 +917,12 @@ async function startServer() {
       console.log('Ensured portalVisible column on estimate_part_files');
     } catch (e) { console.log('portalVisible migration (est_files):', e.message); }
 
+    // Ensure signatureName column exists on users
+    try {
+      await sequelize.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS "signatureName" VARCHAR(255)`);
+      console.log('Ensured signatureName column on users');
+    } catch (e) { console.log('signatureName migration:', e.message); }
+
     // Comprehensive morning digest at 5:00 AM Pacific
     cron.schedule('0 5 * * *', async () => {
       console.log('Running 5:00 AM comprehensive daily digest...');

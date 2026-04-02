@@ -54,6 +54,10 @@ const User = sequelize.define('User', {
   isHeadEstimator: {
     type: DataTypes.BOOLEAN,
     defaultValue: false
+  },
+  signatureName: {
+    type: DataTypes.STRING,
+    allowNull: true
   }
 }, {
   tableName: 'users',

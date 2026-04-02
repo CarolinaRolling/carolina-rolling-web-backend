@@ -414,7 +414,8 @@ router.get('/me', authenticateToken, async (req, res) => {
       username: req.user.username,
       role: req.user.role,
       totpEnabled: req.user.totpEnabled || false,
-      isHeadEstimator: req.user.isHeadEstimator || false
+      isHeadEstimator: req.user.isHeadEstimator || false,
+      signatureName: req.user.signatureName || ''
     }
   });
 });
@@ -443,11 +444,21 @@ router.put('/change-password', authenticateToken, async (req, res, next) => {
   }
 });
 
+// PUT /api/auth/profile - Update own profile (signature name)
+router.put('/profile', authenticateToken, async (req, res, next) => {
+  try {
+    const { signatureName } = req.body;
+    if (signatureName !== undefined) req.user.signatureName = signatureName;
+    await req.user.save();
+    res.json({ data: { id: req.user.id, username: req.user.username, signatureName: req.user.signatureName }, message: 'Profile updated' });
+  } catch (error) { next(error); }
+});
+
 // GET /api/auth/users - List all users (admin only)
 router.get('/users', authenticateToken, requireAdmin, async (req, res, next) => {
   try {
     const users = await User.findAll({
-      attributes: ['id', 'username', 'role', 'isActive', 'isHeadEstimator', 'createdAt'],
+      attributes: ['id', 'username', 'role', 'isActive', 'isHeadEstimator', 'signatureName', 'createdAt'],
       order: [['createdAt', 'DESC']]
     });
 
@@ -466,12 +477,13 @@ router.put('/users/:id', authenticateToken, requireAdmin, async (req, res, next)
       return res.status(404).json({ error: { message: 'User not found' } });
     }
 
-    const { role, isActive, password, isHeadEstimator } = req.body;
+    const { role, isActive, password, isHeadEstimator, signatureName } = req.body;
 
     if (role) user.role = role;
     if (typeof isActive === 'boolean') user.isActive = isActive;
     if (typeof isHeadEstimator === 'boolean') user.isHeadEstimator = isHeadEstimator;
     if (password) user.password = password;
+    if (signatureName !== undefined) user.signatureName = signatureName;
 
     await user.save();
 
@@ -483,7 +495,8 @@ router.put('/users/:id', authenticateToken, requireAdmin, async (req, res, next)
         username: user.username,
         role: user.role,
         isActive: user.isActive,
-        isHeadEstimator: user.isHeadEstimator
+        isHeadEstimator: user.isHeadEstimator,
+        signatureName: user.signatureName
       }
     });
   } catch (error) {

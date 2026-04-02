@@ -670,19 +670,21 @@ router.post('/vendor-rfq/:estimateId', async (req, res, next) => {
     }
 
     // Build materials list with cut file references
-    const materialLines = partsToQuote.map((p, i) => {
+    const materialLines = partsToQuote.map((p) => {
       const fd = p.formData && typeof p.formData === 'object' ? p.formData : {};
       const desc = fd._materialDescription || p.materialDescription || '';
-      const qty = p.quantity || 1;
       const cutPerPrint = fd._cutPerPrint || p._cutPerPrint;
       const cutFile = p.cutFileReference ? `\n   Cut File: ${p.cutFileReference} (attached)` : '';
       const cutNote = cutPerPrint ? `\n   *** CUT PER PRINT — see attached drawing ***` : '';
       const specialInstr = p.specialInstructions ? `\n   Notes: ${p.specialInstructions}` : '';
-      return `${i + 1}. (${qty}) ${desc}${cutNote}${cutFile}${specialInstr}`;
+      return `${desc}${cutNote}${cutFile}${specialInstr}`;
     }).join('\n\n');
 
+    // Get user signature name
+    const sigName = req.user?.signatureName || req.user?.username || 'Carolina Rolling Co.';
+
     const subject = `RFQ-${estimate.estimateNumber}`;
-    const bodyText = `Hi ${vendor.contactName || ''},\n\nCould you please provide pricing and availability for the following materials:\n\n${materialLines}\n\nPlease reference RFQ-${estimate.estimateNumber} in your response.\n\nThank you,\nCarolina Rolling Co.`;
+    const bodyText = `Hi ${vendor.contactName || ''},\n\nCould you please provide pricing and availability for the following materials:\n\n${materialLines}\n\nPlease include MTRs with all shipments.\nAll finished material must have protective film.\n\nThank you,\n${sigName}\n\nCarolina Rolling Co. Inc.\n9152 Sonrisa St., Bellflower, CA 90706\nPhone: (562) 633-1044\nEmail: keepitrolling@carolinarolling.com`;
 
     // Collect DXF/STEP files from parts
     const attachments = [];

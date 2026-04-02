@@ -302,11 +302,48 @@ async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
           if (partObj.partType) pieces.push(partObj.partType.replace(/_/g, ' '));
           desc = pieces.join(' ') || 'N/A';
         }
+        partObj._poDesc = desc;
+        partObj._poQty = partObj._stockLengthsNeeded || partObj.quantity || 1;
+      });
+
+      // Merge identical materials into single PO lines
+      // Build material key from description (strip qty prefix) for mergeable part types
+      const MERGEABLE_TYPES = ['pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'angle_roll'];
+      const mergedLines = [];
+      const mergeMap = new Map();
+      
+      sortedParts.forEach(partObj => {
+        if (!MERGEABLE_TYPES.includes(partObj.partType)) {
+          mergedLines.push(partObj);
+          return;
+        }
+        // Build key from material description without qty prefix
+        const matKey = (partObj._poDesc || '').replace(/^\d+\s*[×x]\s*\d+['"]\s*length\(s\):\s*/i, '').replace(/^\d+pc:\s*/i, '').trim().toLowerCase();
+        if (!matKey) { mergedLines.push(partObj); return; }
         
-        const cutFile = partObj.cutFileReference || '';
+        if (mergeMap.has(matKey)) {
+          const existing = mergeMap.get(matKey);
+          existing._poQty += (partObj._poQty || 1);
+          existing._mergedPartNumbers.push(partObj.partNumber);
+          // Collect all cut files
+          if (partObj.cutFileReference && !existing._mergedCutFiles.includes(partObj.cutFileReference)) {
+            existing._mergedCutFiles.push(partObj.cutFileReference);
+          }
+        } else {
+          partObj._mergedPartNumbers = [partObj.partNumber];
+          partObj._mergedCutFiles = partObj.cutFileReference ? [partObj.cutFileReference] : [];
+          mergeMap.set(matKey, partObj);
+          mergedLines.push(partObj);
+        }
+      });
+
+      mergedLines.forEach((partObj, index) => {
+        const desc = partObj._poDesc || 'N/A';
+        const cleanDesc = desc.replace(/^\d+\s*[×x]\s*\d+['"]\s*length\(s\):\s*/i, '').replace(/^\d+pc:\s*/i, '');
+        const cutFile = partObj._mergedCutFiles ? partObj._mergedCutFiles.join(', ') : (partObj.cutFileReference || '');
         
         // Calculate row height based on description length
-        const descHeight = doc.heightOfString(desc, { width: colWidths.desc - 12 });
+        const descHeight = doc.heightOfString(cleanDesc, { width: colWidths.desc - 12 });
         const rowHeight = Math.max(28, descHeight + 12);
         
         // Page break check
@@ -333,12 +370,16 @@ async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
         doc.moveTo(L, rowY + rowHeight).lineTo(R, rowY + rowHeight).strokeColor('#e0e0e0').lineWidth(0.5).stroke();
         
         doc.fillColor('#000');
-        doc.fontSize(9).font('Helvetica-Bold').text(`${partObj.partNumber || index + 1}`, cols.item + 6, rowY + 6, { width: colWidths.item - 12 });
+        // Show merged part numbers or single part number
+        const itemLabel = partObj._mergedPartNumbers && partObj._mergedPartNumbers.length > 1 
+          ? partObj._mergedPartNumbers.join(',') 
+          : `${partObj.partNumber || index + 1}`;
+        doc.fontSize(partObj._mergedPartNumbers?.length > 3 ? 7 : 9).font('Helvetica-Bold').text(itemLabel, cols.item + 4, rowY + 6, { width: colWidths.item - 8 });
         
-        // Use stock lengths needed for nesting/complete ring parts, otherwise part quantity
-        const poQty = partObj._stockLengthsNeeded || partObj.quantity || 1;
-        doc.font('Helvetica').text(`${poQty}`, cols.qty + 6, rowY + 6, { width: colWidths.qty - 12 });
-        doc.fontSize(8.5).text(desc, cols.desc + 6, rowY + 6, { width: colWidths.desc - 12 });
+        // Use merged qty for combined lines
+        const poQty = partObj._poQty || partObj._stockLengthsNeeded || partObj.quantity || 1;
+        doc.fontSize(9).font('Helvetica').text(`${poQty}`, cols.qty + 6, rowY + 6, { width: colWidths.qty - 12 });
+        doc.fontSize(8.5).text(cleanDesc, cols.desc + 6, rowY + 6, { width: colWidths.desc - 12 });
         
         if (cutFile) {
           doc.fontSize(8).fillColor('#1565c0').font('Helvetica-Bold').text(cutFile, cols.cutFile + 6, rowY + 6, { width: colWidths.cutFile - 12 });

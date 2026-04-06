@@ -3001,6 +3001,14 @@ PART TYPES:
 - fab_service: Welding/fitting. Fields: fabType, parentPartIndex, description
 - shop_rate: Hourly work. Fields: description, laborHours, laborRate
 
+MEASUREMENT POINTS — CRITICAL:
+- When a document says "OD", "to the OD", or "outside diameter" → measurePoint = "outside"
+- When it says "ID", "to the ID", "inside diameter", "ISR", "inside radius" → measurePoint = "inside"
+- When it says "CLR", "CLD", "centerline" → measurePoint = "centerline"
+- ISR = inside radius, OSR = outside radius, ID = inside diameter, OD = outside diameter
+- Default to "outside" if the document specifies OD or the diameter seems to be an outer measurement
+- Default to "inside" only when explicitly stated as ID or ISR
+
 Thickness format: Use fractions like '1/2"', '3/8"'. Only decimals if no fraction match.
 
 ${generalNotes ? `GENERAL SHOP NOTES:\n${generalNotes}\n` : ''}
@@ -3020,6 +3028,8 @@ Respond ONLY with valid JSON (no markdown, no backticks):
       "radius": null,
       "arcDegrees": "360",
       "rollType": "easy_way",
+      "measurePoint": "outside",
+      "measureType": "diameter",
       "legSize": null,
       "sectionSize": null,
       "barSize": null,

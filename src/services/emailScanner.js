@@ -430,6 +430,14 @@ function buildFormData(p) {
   const fd = {};
   const type = p.partType || 'plate_roll';
 
+  // Helper: resolve measure point from AI response, with a default fallback
+  const resolveMP = (part, fallback) => {
+    if (part.measurePoint === 'inside' || part.measurePoint === 'ID') return 'inside';
+    if (part.measurePoint === 'outside' || part.measurePoint === 'OD') return 'outside';
+    if (part.measurePoint === 'centerline' || part.measurePoint === 'CL' || part.measurePoint === 'CLD') return 'centerline';
+    return fallback;
+  };
+
   // Common fields
   if (p.material) fd.material = p.material;
   if (p.quantity) fd.quantity = String(p.quantity);
@@ -445,11 +453,16 @@ function buildFormData(p) {
     // Roll value — prefer diameter
     if (p.outerDiameter || p.diameter) {
       fd._rollValue = String(p.outerDiameter || p.diameter);
+      fd._rollMeasureType = p.measureType || 'diameter';
+      fd._rollMeasurePoint = resolveMP(p, 'outside');
+    } else if (p.innerDiameter) {
+      fd._rollValue = String(p.innerDiameter);
       fd._rollMeasureType = 'diameter';
-      fd._rollMeasurePoint = 'outside';
+      fd._rollMeasurePoint = 'inside';
     } else if (p.radius) {
       fd._rollValue = String(p.radius);
       fd._rollMeasureType = 'radius';
+      fd._rollMeasurePoint = resolveMP(p, 'inside');
     }
     if (p.arcDegrees) fd.arcDegrees = String(p.arcDegrees);
     if (p.rollType) fd.rollType = p.rollType;
@@ -497,12 +510,11 @@ function buildFormData(p) {
   else if (type === 'pipe_roll') {
     if (p.outerDiameter) fd.outerDiameter = String(p.outerDiameter);
     if (p.wallThickness) fd.wallThickness = String(p.wallThickness);
-    // Look up common pipe size or set as custom
     fd._pipeSize = 'Custom';
-    if (p.outerDiameter || p.diameter) {
-      fd._rollValue = String(p.radius || p.diameter || '');
+    if (p.outerDiameter || p.diameter || p.radius) {
+      fd._rollValue = String(p.radius || p.diameter || p.outerDiameter || '');
       fd._rollMeasureType = p.radius ? 'radius' : 'diameter';
-      fd._rollMeasurePoint = 'centerline';
+      fd._rollMeasurePoint = resolveMP(p, 'centerline');
     }
     if (p.arcDegrees) fd.arcDegrees = String(p.arcDegrees);
     if (p.length) { fd._lengthOption = 'custom'; fd._customLength = String(p.length); fd.length = String(p.length); }
@@ -531,7 +543,7 @@ function buildFormData(p) {
     if (p.outerDiameter || p.diameter || p.radius) {
       fd._rollValue = String(p.radius || p.diameter || p.outerDiameter || '');
       fd._rollMeasureType = p.radius ? 'radius' : 'diameter';
-      fd._rollMeasurePoint = 'inside';
+      fd._rollMeasurePoint = resolveMP(p, 'inside');
     }
     if (p.arcDegrees) fd.arcDegrees = String(p.arcDegrees);
     if (p.rollType) fd.rollType = p.rollType;
@@ -540,14 +552,13 @@ function buildFormData(p) {
 
   else if (type === 'channel_roll') {
     const size = p.sectionSize || '';
-    // Channel sizes are full designations like "C8x11.5"
     fd._channelSize = size || 'Custom';
     if (size) fd._customChannelSize = size;
     fd.sectionSize = size;
     if (p.outerDiameter || p.diameter || p.radius) {
       fd._rollValue = String(p.radius || p.diameter || p.outerDiameter || '');
       fd._rollMeasureType = p.radius ? 'radius' : 'diameter';
-      fd._rollMeasurePoint = 'outside';
+      fd._rollMeasurePoint = resolveMP(p, 'outside');
     }
     if (p.arcDegrees) fd.arcDegrees = String(p.arcDegrees);
     if (p.rollType) fd.rollType = p.rollType;
@@ -563,7 +574,7 @@ function buildFormData(p) {
     if (p.outerDiameter || p.diameter || p.radius) {
       fd._rollValue = String(p.radius || p.diameter || p.outerDiameter || '');
       fd._rollMeasureType = p.radius ? 'radius' : 'diameter';
-      fd._rollMeasurePoint = 'outside';
+      fd._rollMeasurePoint = resolveMP(p, 'outside');
     }
     if (p.arcDegrees) fd.arcDegrees = String(p.arcDegrees);
     if (p.rollType) fd.rollType = p.rollType;
@@ -585,7 +596,7 @@ function buildFormData(p) {
     if (p.outerDiameter || p.diameter || p.radius) {
       fd._rollValue = String(p.radius || p.diameter || p.outerDiameter || '');
       fd._rollMeasureType = p.radius ? 'radius' : 'diameter';
-      fd._rollMeasurePoint = 'centerline';
+      fd._rollMeasurePoint = resolveMP(p, 'centerline');
     }
     if (p.arcDegrees) fd.arcDegrees = String(p.arcDegrees);
     if (p.rollType) fd.rollType = p.rollType;
@@ -600,7 +611,22 @@ function buildFormData(p) {
     if (p.outerDiameter || p.diameter || p.radius) {
       fd._rollValue = String(p.radius || p.diameter || p.outerDiameter || '');
       fd._rollMeasureType = p.radius ? 'radius' : 'diameter';
-      fd._rollMeasurePoint = 'outside';
+      fd._rollMeasurePoint = resolveMP(p, 'outside');
+    }
+    if (p.arcDegrees) fd.arcDegrees = String(p.arcDegrees);
+    if (p.rollType) fd.rollType = p.rollType;
+    if (p.length) { fd._lengthOption = 'custom'; fd._customLength = String(p.length); fd.length = String(p.length); }
+  }
+
+  else if (type === 'tube_roll') {
+    const size = p.sectionSize || '';
+    fd._tubeSize = size || 'Custom';
+    if (size) fd._customTubeSize = size;
+    fd.sectionSize = size;
+    if (p.outerDiameter || p.diameter || p.radius) {
+      fd._rollValue = String(p.radius || p.diameter || p.outerDiameter || '');
+      fd._rollMeasureType = p.radius ? 'radius' : 'diameter';
+      fd._rollMeasurePoint = resolveMP(p, 'centerline');
     }
     if (p.arcDegrees) fd.arcDegrees = String(p.arcDegrees);
     if (p.rollType) fd.rollType = p.rollType;

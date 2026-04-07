@@ -1213,20 +1213,6 @@ router.get('/:id', async (req, res, next) => {
       }
     } catch (e) { /* ignore client lookup failure */ }
 
-    // Attach vendor issues (from vendor portal reports)
-    try {
-      const { VendorIssue } = require('../models');
-      const issues = await VendorIssue.findAll({
-        where: { workOrderId: woJson.id },
-        include: [{ model: WorkOrderPart, as: 'workOrderPart', attributes: ['id', 'partNumber', 'clientPartNumber'] }],
-        order: [['reportedAt', 'DESC']]
-      });
-      woJson.vendorIssues = issues.map(i => i.toJSON());
-    } catch (e) {
-      console.error('[wo GET] Failed to load vendor issues:', e.message);
-      woJson.vendorIssues = [];
-    }
-
     res.json({ data: woJson });
   } catch (error) {
     next(error);
@@ -5134,88 +5120,6 @@ router.post('/:id/coc', async (req, res, next) => {
     res.setHeader('Content-Disposition', `inline; filename="COC-DR${workOrder.drNumber}.pdf"`);
     res.send(pdfBuffer);
   } catch (error) { console.error('[COC] Error:', error); next(error); }
-});
-
-// ===== VENDOR PORTAL ADMIN ENDPOINTS =====
-
-// PUT /api/workorders/:id/parts/:partId/files/:fileId/vendor-share
-// Toggle whether a file is shared with the vendor portal
-router.put('/:id/parts/:partId/files/:fileId/vendor-share', async (req, res, next) => {
-  try {
-    const { visible } = req.body;
-    const file = await WorkOrderPartFile.findOne({
-      where: { id: req.params.fileId, workOrderPartId: req.params.partId }
-    });
-    if (!file) return res.status(404).json({ error: { message: 'File not found' } });
-    await file.update({ vendorPortalVisible: !!visible });
-    res.json({
-      data: { id: file.id, vendorPortalVisible: file.vendorPortalVisible },
-      message: visible ? 'File shared with vendor portal' : 'File hidden from vendor portal'
-    });
-  } catch (error) {
-    console.error('[vendor-share] Error:', error);
-    next(error);
-  }
-});
-
-// GET /api/workorders/:id/vendor-issues
-// List all vendor-reported issues on this work order
-router.get('/:id/vendor-issues', async (req, res, next) => {
-  try {
-    const { VendorIssue } = require('../models');
-    const issues = await VendorIssue.findAll({
-      where: { workOrderId: req.params.id },
-      include: [{ model: WorkOrderPart, as: 'workOrderPart', attributes: ['id', 'partNumber', 'clientPartNumber'] }],
-      order: [['reportedAt', 'DESC']]
-    });
-    res.json({ data: issues });
-  } catch (error) {
-    console.error('[vendor-issues] List error:', error);
-    next(error);
-  }
-});
-
-// PUT /api/workorders/:id/vendor-issues/:issueId/resolve
-// Mark a vendor issue as resolved with resolution notes
-router.put('/:id/vendor-issues/:issueId/resolve', async (req, res, next) => {
-  try {
-    const { VendorIssue } = require('../models');
-    const { resolutionNotes, resolvedBy } = req.body;
-    if (!resolutionNotes || !resolutionNotes.trim()) {
-      return res.status(400).json({ error: { message: 'Resolution notes are required' } });
-    }
-    const issue = await VendorIssue.findOne({
-      where: { id: req.params.issueId, workOrderId: req.params.id }
-    });
-    if (!issue) return res.status(404).json({ error: { message: 'Issue not found' } });
-    await issue.update({
-      status: 'resolved',
-      resolvedAt: new Date(),
-      resolvedBy: resolvedBy || (req.user?.username || 'Admin'),
-      resolutionNotes: resolutionNotes.trim()
-    });
-    res.json({ data: issue, message: 'Issue marked as resolved' });
-  } catch (error) {
-    console.error('[vendor-issues] Resolve error:', error);
-    next(error);
-  }
-});
-
-// PUT /api/workorders/:id/vendor-issues/:issueId/acknowledge
-// Mark a vendor issue as acknowledged (seen but not yet resolved)
-router.put('/:id/vendor-issues/:issueId/acknowledge', async (req, res, next) => {
-  try {
-    const { VendorIssue } = require('../models');
-    const issue = await VendorIssue.findOne({
-      where: { id: req.params.issueId, workOrderId: req.params.id }
-    });
-    if (!issue) return res.status(404).json({ error: { message: 'Issue not found' } });
-    await issue.update({ status: 'acknowledged' });
-    res.json({ data: issue, message: 'Issue acknowledged' });
-  } catch (error) {
-    console.error('[vendor-issues] Acknowledge error:', error);
-    next(error);
-  }
 });
 
 module.exports = router;

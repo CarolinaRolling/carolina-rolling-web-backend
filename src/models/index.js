@@ -1027,11 +1027,6 @@ const WorkOrderPartFile = sequelize.define('WorkOrderPartFile', {
   cloudinaryId: {
     type: DataTypes.STRING,
     allowNull: true
-  },
-  vendorPortalVisible: {
-    type: DataTypes.BOOLEAN,
-    defaultValue: false,
-    allowNull: false
   }
 }, {
   tableName: 'work_order_part_files',
@@ -2502,14 +2497,6 @@ InboundOrder.belongsTo(WorkOrder, { foreignKey: 'workOrderId', as: 'workOrder' }
 Vendor.hasMany(PONumber, { foreignKey: 'vendorId', as: 'poNumbers' });
 PONumber.belongsTo(Vendor, { foreignKey: 'vendorId', as: 'vendor' });
 
-// VendorIssue Associations
-WorkOrder.hasMany(VendorIssue, { foreignKey: 'workOrderId', as: 'vendorIssues' });
-VendorIssue.belongsTo(WorkOrder, { foreignKey: 'workOrderId', as: 'workOrder' });
-WorkOrderPart.hasMany(VendorIssue, { foreignKey: 'workOrderPartId', as: 'vendorIssues' });
-VendorIssue.belongsTo(WorkOrderPart, { foreignKey: 'workOrderPartId', as: 'workOrderPart' });
-Vendor.hasMany(VendorIssue, { foreignKey: 'vendorId', as: 'vendorIssues' });
-VendorIssue.belongsTo(Vendor, { foreignKey: 'vendorId', as: 'vendor' });
-
 // Client Associations
 Client.hasMany(WorkOrder, { foreignKey: 'clientId', as: 'workOrders' });
 WorkOrder.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
@@ -2673,10 +2660,6 @@ const ApiKey = sequelize.define('ApiKey', {
     type: DataTypes.STRING,
     allowNull: true // null = full access, set = scoped to that client's data
   },
-  vendorName: {
-    type: DataTypes.STRING,
-    allowNull: true // null = not a vendor-scoped key, set = scoped to that vendor's data
-  },
   permissions: {
     type: DataTypes.STRING,
     defaultValue: 'read' // 'read', 'read_write', 'admin'
@@ -2729,77 +2712,6 @@ const ApiKey = sequelize.define('ApiKey', {
   }
 }, {
   tableName: 'api_keys',
-  timestamps: true
-});
-
-// VendorIssue Model — tracks issues reported by vendors via the vendor portal
-const VendorIssue = sequelize.define('VendorIssue', {
-  id: {
-    type: DataTypes.UUID,
-    defaultValue: DataTypes.UUIDV4,
-    primaryKey: true
-  },
-  workOrderId: {
-    type: DataTypes.UUID,
-    allowNull: false,
-    references: { model: 'work_orders', key: 'id' }
-  },
-  workOrderPartId: {
-    type: DataTypes.UUID,
-    allowNull: true, // may be null if issue is about the whole PO not a specific part
-    references: { model: 'work_order_parts', key: 'id' }
-  },
-  vendorId: {
-    type: DataTypes.UUID,
-    allowNull: true,
-    references: { model: 'vendors', key: 'id' }
-  },
-  vendorName: {
-    type: DataTypes.STRING,
-    allowNull: false // snapshot of vendor name at time of report
-  },
-  poNumber: {
-    type: DataTypes.STRING,
-    allowNull: true // the PO# that this issue references (could be OP PO, transport PO, material PO)
-  },
-  reportedBy: {
-    type: DataTypes.STRING,
-    allowNull: true // name of the person at the vendor who reported it
-  },
-  description: {
-    type: DataTypes.TEXT,
-    allowNull: false
-  },
-  photoUrl: {
-    type: DataTypes.STRING,
-    allowNull: true // uploaded photo, if any
-  },
-  photoStorageId: {
-    type: DataTypes.STRING,
-    allowNull: true // Cloudinary/S3 id for cleanup
-  },
-  status: {
-    type: DataTypes.STRING,
-    defaultValue: 'open' // 'open', 'acknowledged', 'resolved'
-  },
-  reportedAt: {
-    type: DataTypes.DATE,
-    defaultValue: DataTypes.NOW
-  },
-  resolvedAt: {
-    type: DataTypes.DATE,
-    allowNull: true
-  },
-  resolvedBy: {
-    type: DataTypes.STRING,
-    allowNull: true
-  },
-  resolutionNotes: {
-    type: DataTypes.TEXT,
-    allowNull: true
-  }
-}, {
-  tableName: 'vendor_issues',
   timestamps: true
 });
 
@@ -3264,6 +3176,5 @@ module.exports = {
   PayrollWeek,
   PayrollEntry,
   BusinessEvent,
-  WeldProcedure,
-  VendorIssue
+  WeldProcedure
 };

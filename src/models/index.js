@@ -1580,11 +1580,32 @@ const EstimatePart = sequelize.define('EstimatePart', {
     type: DataTypes.DECIMAL(5, 2),
     defaultValue: 20
   },
+  outsideProcessingExpediteCost: {
+    type: DataTypes.DECIMAL(10, 2),
+    defaultValue: 0
+  },
   outsideProcessingPONumber: {
     type: DataTypes.STRING,
     allowNull: true
   },
   outsideProcessingPOSentAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  outsideProcessingServiceType: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  outsideProcessingStatus: {
+    type: DataTypes.ENUM('not_sent', 'sent', 'returned'),
+    defaultValue: 'not_sent',
+    allowNull: true
+  },
+  outsideProcessingExpectedReturn: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  outsideProcessingReturnedAt: {
     type: DataTypes.DATE,
     allowNull: true
   },

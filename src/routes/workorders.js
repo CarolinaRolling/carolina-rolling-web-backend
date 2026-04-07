@@ -442,6 +442,183 @@ async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
   });
 }
 
+// Generate Outside Processing PO PDF
+async function generateOutsideProcessingPO(poNumber, vendor, parts, workOrder, serviceType, notes, expectedReturn, transportCost, expediteCost) {
+  const PDFDocument = require('pdfkit');
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ margin: 50, size: 'letter' });
+      const chunks = [];
+      const W = 512;
+      const L = 50;
+      const R = L + W;
+      
+      doc.on('data', chunk => chunks.push(chunk));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+
+      // Top border (orange for outside processing)
+      doc.rect(L, 40, W, 4).fill('#E65100');
+
+      // Header
+      const headerY = 52;
+      doc.fontSize(14).font('Helvetica-Bold').fillColor('#E65100').text('CAROLINA ROLLING COMPANY INC.', L, headerY);
+      doc.fontSize(8).font('Helvetica').fillColor('#444');
+      doc.text('9152 Sonrisa St, Bellflower, CA 90706', L, headerY + 18);
+      doc.text('Phone: (562) 633-1044  •  Email: keepitrolling@carolinarolling.com', L, headerY + 28);
+
+      doc.fontSize(20).font('Helvetica-Bold').fillColor('#E65100').text('OUTSIDE PROCESSING PO', L, headerY, { width: W, align: 'right' });
+      doc.fontSize(14).font('Helvetica-Bold').fillColor('#333').text(poNumber, L, headerY + 28, { width: W, align: 'right' });
+
+      doc.moveTo(L, headerY + 46).lineTo(R, headerY + 46).strokeColor('#ccc').lineWidth(1).stroke();
+
+      // Info boxes
+      const boxY = headerY + 56;
+      const boxH = 80;
+      const halfW = (W - 16) / 2;
+
+      // VENDOR box
+      doc.rect(L, boxY, halfW, boxH).lineWidth(1).strokeColor('#ddd').stroke();
+      doc.rect(L, boxY, halfW, 16).fill('#FFF3E0');
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#E65100').text('OUTSIDE VENDOR', L + 8, boxY + 4);
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#000').text(vendor.name || '', L + 8, boxY + 22, { width: halfW - 16 });
+      if (vendor.contactName) doc.fontSize(8).font('Helvetica').text(`Attn: ${vendor.contactName}`, L + 8, boxY + 38);
+      if (vendor.address) doc.fontSize(8).text(vendor.address, L + 8, boxY + 50, { width: halfW - 16 });
+
+      // SERVICE box
+      const boxX2 = L + halfW + 16;
+      doc.rect(boxX2, boxY, halfW, boxH).lineWidth(1).strokeColor('#ddd').stroke();
+      doc.rect(boxX2, boxY, halfW, 16).fill('#FFF3E0');
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#E65100').text('SERVICE REQUESTED', boxX2 + 8, boxY + 4);
+      doc.fontSize(11).font('Helvetica-Bold').fillColor('#000').text(serviceType || 'Outside Processing', boxX2 + 8, boxY + 22, { width: halfW - 16 });
+      if (expectedReturn) {
+        doc.fontSize(8).font('Helvetica').fillColor('#666').text('EXPECTED RETURN', boxX2 + 8, boxY + 50);
+        doc.fontSize(9).font('Helvetica-Bold').fillColor('#000').text(new Date(expectedReturn).toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' }), boxX2 + 8, boxY + 62);
+      }
+
+      // PO details row
+      const detY = boxY + boxH + 12;
+      const detFields = [
+        ['PO DATE', new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' })],
+        ['WORK ORDER', workOrder.drNumber ? `DR-${workOrder.drNumber}` : (workOrder.orderNumber || '-')],
+        ['CLIENT', workOrder.clientName || '-']
+      ];
+      const colW = W / detFields.length;
+      detFields.forEach(([label, value], i) => {
+        const x = L + (i * colW);
+        doc.rect(x, detY, colW, 32).lineWidth(0.5).strokeColor('#ddd').stroke();
+        doc.rect(x, detY, colW, 14).fill('#f5f5f5');
+        doc.fontSize(7).font('Helvetica-Bold').fillColor('#888').text(label, x + 6, detY + 3);
+        doc.fontSize(9).font('Helvetica-Bold').fillColor('#000').text(value, x + 6, detY + 17, { width: colW - 12 });
+      });
+
+      // Items table
+      const tableY = detY + 46;
+      const cols = { item: L, qty: L + 50, desc: L + 95, cost: L + 380 };
+      const colWidths = { item: 50, qty: 45, desc: 285, cost: W - 380 };
+
+      doc.rect(L, tableY, W, 18).fill('#E65100');
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#fff');
+      doc.text('PART #', cols.item + 6, tableY + 5);
+      doc.text('QTY', cols.qty + 6, tableY + 5);
+      doc.text('DESCRIPTION', cols.desc + 6, tableY + 5);
+      doc.text('UNIT COST', cols.cost + 6, tableY + 5);
+
+      let rowY = tableY + 18;
+      doc.font('Helvetica').fillColor('#000');
+      let totalCost = 0;
+
+      parts.forEach((p, index) => {
+        const partObj = p.toJSON ? p.toJSON() : { ...p };
+        if (partObj.formData && typeof partObj.formData === 'object') Object.assign(partObj, partObj.formData);
+        const qty = parseInt(partObj.quantity) || 1;
+        const desc = partObj._materialDescription || partObj.materialDescription || `Part #${partObj.partNumber}`;
+        const cleanDesc = desc.replace(/^\d+pc:\s*/i, '');
+        const unitCost = parseFloat(partObj.outsideProcessingCost) || 0;
+        const lineCost = unitCost * qty;
+        totalCost += lineCost;
+
+        const descHeight = doc.heightOfString(cleanDesc, { width: colWidths.desc - 12 });
+        const rowHeight = Math.max(28, descHeight + 12);
+
+        if (rowY + rowHeight > 700) {
+          doc.addPage();
+          rowY = 50;
+        }
+
+        if (index % 2 === 0) doc.rect(L, rowY, W, rowHeight).fill('#FFF8E1');
+        doc.moveTo(L, rowY + rowHeight).lineTo(R, rowY + rowHeight).strokeColor('#e0e0e0').lineWidth(0.5).stroke();
+        
+        doc.fillColor('#000');
+        doc.fontSize(9).font('Helvetica-Bold').text(`${partObj.partNumber}`, cols.item + 6, rowY + 6);
+        doc.font('Helvetica').text(`${qty}`, cols.qty + 6, rowY + 6);
+        doc.fontSize(8.5).text(cleanDesc, cols.desc + 6, rowY + 6, { width: colWidths.desc - 12 });
+        doc.fontSize(9).text(`$${unitCost.toFixed(2)}`, cols.cost + 6, rowY + 6);
+        rowY += rowHeight;
+      });
+
+      doc.moveTo(L, rowY).lineTo(R, rowY).strokeColor('#E65100').lineWidth(1.5).stroke();
+
+      // Subtotals + Total
+      rowY += 8;
+      const tc = parseFloat(transportCost) || 0;
+      const ec = parseFloat(expediteCost) || 0;
+      const grandTotal = totalCost + tc + ec;
+
+      const totalsX = L + W - 220;
+      doc.fontSize(9).font('Helvetica').fillColor('#555');
+      doc.text(`Parts Subtotal:`, totalsX, rowY, { width: 130, align: 'right' });
+      doc.text(`$${totalCost.toFixed(2)}`, totalsX + 130, rowY, { width: 80, align: 'right' });
+      rowY += 14;
+
+      if (tc > 0) {
+        doc.text(`Transport:`, totalsX, rowY, { width: 130, align: 'right' });
+        doc.text(`$${tc.toFixed(2)}`, totalsX + 130, rowY, { width: 80, align: 'right' });
+        rowY += 14;
+      }
+
+      if (ec > 0) {
+        doc.fillColor('#c62828').font('Helvetica-Bold');
+        doc.text(`🚨 EXPEDITE FEE:`, totalsX, rowY, { width: 130, align: 'right' });
+        doc.text(`$${ec.toFixed(2)}`, totalsX + 130, rowY, { width: 80, align: 'right' });
+        rowY += 14;
+        doc.fillColor('#000').font('Helvetica');
+      }
+
+      doc.rect(totalsX, rowY, 220, 24).fill('#FFF3E0');
+      doc.fontSize(11).font('Helvetica-Bold').fillColor('#E65100');
+      doc.text(`TOTAL:`, totalsX + 6, rowY + 7, { width: 124, align: 'right' });
+      doc.text(`$${grandTotal.toFixed(2)}`, totalsX + 130, rowY + 7, { width: 84, align: 'right' });
+      rowY += 32;
+
+      // Notes / instructions
+      if (rowY + 100 > 720) { doc.addPage(); rowY = 50; }
+
+      // Important box
+      doc.rect(L, rowY, W, 36).lineWidth(1.5).strokeColor('#c62828').stroke();
+      doc.rect(L, rowY, W, 14).fill('#ffebee');
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#c62828').text('⚠ IMPORTANT', L + 8, rowY + 3);
+      doc.fontSize(9).font('Helvetica-Bold').fillColor('#c62828');
+      doc.text(`Reference ${poNumber} on all packing slips and invoices.`, L + 8, rowY + 18);
+      rowY += 46;
+
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#333').text('TERMS & INSTRUCTIONS:', L, rowY);
+      doc.fontSize(8).font('Helvetica').fillColor('#444');
+      doc.text(`• Material is for: ${workOrder.drNumber ? 'DR-' + workOrder.drNumber : workOrder.orderNumber}`, L + 8, rowY + 14);
+      doc.text('• Notify us immediately of any delays.', L + 8, rowY + 26);
+      doc.text('• Return material with packing slip and signed copy of this PO.', L + 8, rowY + 38);
+      if (notes) {
+        doc.fontSize(8).font('Helvetica-Bold').fillColor('#333').text('NOTES:', L, rowY + 58);
+        doc.fontSize(8).font('Helvetica').fillColor('#444').text(notes, L + 8, rowY + 70, { width: W - 16 });
+      }
+
+      doc.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
 // Helper to log activity for daily email
 async function logActivity(type, resourceType, resourceId, resourceNumber, clientName, description, details = {}) {
   try {
@@ -3513,6 +3690,117 @@ router.post('/:id/documents/:documentId/regenerate', async (req, res, next) => {
     console.error('[regenerate-po] Error:', error);
     next(error);
   }
+});
+
+// POST /api/workorders/:id/outside-processing - Bulk create outside processing PO for selected parts
+router.post('/:id/outside-processing', async (req, res, next) => {
+  try {
+    const { partIds, vendorId, serviceType, costPerPart, totalCost, expectedReturn, notes, transportCost, expediteCost } = req.body;
+    
+    if (!partIds || !Array.isArray(partIds) || partIds.length === 0) {
+      return res.status(400).json({ error: { message: 'No parts selected' } });
+    }
+    if (!vendorId) return res.status(400).json({ error: { message: 'Vendor required' } });
+    if (!serviceType) return res.status(400).json({ error: { message: 'Service type required' } });
+
+    const workOrder = await WorkOrder.findByPk(req.params.id, {
+      include: [{ model: WorkOrderPart, as: 'parts' }]
+    });
+    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+
+    const vendor = await Vendor.findByPk(vendorId);
+    if (!vendor) return res.status(404).json({ error: { message: 'Vendor not found' } });
+
+    const selectedParts = workOrder.parts.filter(p => partIds.includes(p.id));
+    if (selectedParts.length === 0) {
+      return res.status(400).json({ error: { message: 'No matching parts found' } });
+    }
+
+    // Generate PO number
+    const poSetting = await AppSettings.findOne({ where: { key: 'next_op_po_number' } });
+    let poNum = poSetting?.value?.nextNumber || 1001;
+    const poNumber = `OP${poNum}`;
+    if (poSetting) {
+      await poSetting.update({ value: { nextNumber: poNum + 1 } });
+    } else {
+      await AppSettings.create({ key: 'next_op_po_number', value: { nextNumber: poNum + 1 } });
+    }
+
+    // Determine cost per part
+    let perPartCost = parseFloat(costPerPart) || 0;
+    if (totalCost && !perPartCost) {
+      perPartCost = parseFloat(totalCost) / selectedParts.length;
+    }
+
+    // Update each selected part with vendor, service, status, PO
+    // Expedite cost goes on the first part only (it's a one-time fee for the whole shipment)
+    for (let i = 0; i < selectedParts.length; i++) {
+      const part = selectedParts[i];
+      await part.update({
+        outsideProcessingVendorId: vendor.id,
+        outsideProcessingVendorName: vendor.name,
+        outsideProcessingServiceType: serviceType,
+        outsideProcessingDescription: serviceType,
+        outsideProcessingCost: perPartCost,
+        outsideProcessingTransportCost: i === 0 ? (parseFloat(transportCost) || 0) : 0,
+        outsideProcessingExpediteCost: i === 0 ? (parseFloat(expediteCost) || 0) : 0,
+        outsideProcessingPONumber: poNumber,
+        outsideProcessingPOSentAt: new Date(),
+        outsideProcessingStatus: 'sent',
+        outsideProcessingExpectedReturn: expectedReturn || null
+      });
+    }
+
+    // Generate PDF
+    const pdfBuffer = await generateOutsideProcessingPO(poNumber, vendor, selectedParts, workOrder, serviceType, notes, expectedReturn, parseFloat(transportCost) || 0, parseFloat(expediteCost) || 0);
+
+    // Upload as work order document
+    const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, {
+      folder: 'outside-processing-pos',
+      filename: `${poNumber}-${workOrder.drNumber}.pdf`,
+      mimeType: 'application/pdf'
+    });
+
+    await WorkOrderDocument.create({
+      workOrderId: workOrder.id,
+      originalName: `${poNumber} - ${vendor.name} (${serviceType}).pdf`,
+      mimeType: 'application/pdf',
+      size: pdfBuffer.length,
+      url: uploadResult.url,
+      cloudinaryId: uploadResult.storageId,
+      documentType: 'outside_processing_po'
+    });
+
+    console.log(`[OutsideProcessing] Created ${poNumber} for ${vendor.name} - ${selectedParts.length} parts (${serviceType})`);
+
+    res.json({
+      data: { poNumber, partsCount: selectedParts.length, vendorName: vendor.name, totalCost: perPartCost * selectedParts.reduce((s, p) => s + (p.quantity || 1), 0) },
+      message: `Outside processing PO ${poNumber} created for ${vendor.name}`
+    });
+  } catch (error) {
+    console.error('[OutsideProcessing] Error:', error);
+    next(error);
+  }
+});
+
+// PUT /api/workorders/:id/parts/:partId/outside-processing-status - Mark part returned from outside vendor
+router.put('/:id/parts/:partId/outside-processing-status', async (req, res, next) => {
+  try {
+    const { status } = req.body;
+    if (!['not_sent', 'sent', 'returned'].includes(status)) {
+      return res.status(400).json({ error: { message: 'Invalid status' } });
+    }
+    const part = await WorkOrderPart.findOne({
+      where: { id: req.params.partId, workOrderId: req.params.id }
+    });
+    if (!part) return res.status(404).json({ error: { message: 'Part not found' } });
+    
+    const updates = { outsideProcessingStatus: status };
+    if (status === 'returned') updates.outsideProcessingReturnedAt = new Date();
+    await part.update(updates);
+    
+    res.json({ data: part.toJSON(), message: `Part marked as ${status}` });
+  } catch (error) { next(error); }
 });
 
 // POST /api/workorders/:id/create-po-pdf - Create a PO PDF from scratch (for deleted/missing PO documents)

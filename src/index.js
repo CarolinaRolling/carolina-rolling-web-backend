@@ -923,6 +923,16 @@ async function startServer() {
       console.log('Ensured signatureName column on users');
     } catch (e) { console.log('signatureName migration:', e.message); }
 
+    // Outside processing service type, status, and dates
+    try {
+      await sequelize.query(`ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "outsideProcessingServiceType" VARCHAR(255)`);
+      await sequelize.query(`ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "outsideProcessingStatus" VARCHAR(50) DEFAULT 'not_sent'`);
+      await sequelize.query(`ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "outsideProcessingExpectedReturn" TIMESTAMPTZ`);
+      await sequelize.query(`ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "outsideProcessingReturnedAt" TIMESTAMPTZ`);
+      await sequelize.query(`ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "outsideProcessingExpediteCost" DECIMAL(10,2) DEFAULT 0`);
+      console.log('Ensured outside processing tracking columns on work_order_parts');
+    } catch (e) { console.log('outside processing tracking migration:', e.message); }
+
     // Comprehensive morning digest at 5:00 AM Pacific
     cron.schedule('0 5 * * *', async () => {
       console.log('Running 5:00 AM comprehensive daily digest...');

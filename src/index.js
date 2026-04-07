@@ -143,6 +143,10 @@ app.use('/api/shop-supplies', authenticate, shopSuppliesRoutes);
 const todoRoutes = require('./routes/todos');
 app.use('/api/todos', authenticate, todoRoutes);
 
+// Vendor Portal routes — vendor-scoped API key access, no JWT
+const vendorPortalRoutes = require('./routes/vendor-portal');
+app.use('/api/vendor-portal', vendorPortalRoutes);
+
 // Client Portal routes — mounted at /api/portal for portal app access
 const portalRouter = require('express').Router();
 const portalModels = require('./models');
@@ -934,6 +938,33 @@ async function startServer() {
       await sequelize.query(`ALTER TABLE estimate_parts ADD COLUMN IF NOT EXISTS "outsideProcessing" JSONB DEFAULT '[]'::jsonb`);
       await sequelize.query(`ALTER TABLE estimates ADD COLUMN IF NOT EXISTS "opTransports" JSONB DEFAULT '[]'::jsonb`);
       await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "opTransports" JSONB DEFAULT '[]'::jsonb`);
+      // Vendor portal migrations
+      await sequelize.query(`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS "vendorName" VARCHAR(255)`);
+      await sequelize.query(`ALTER TABLE work_order_part_files ADD COLUMN IF NOT EXISTS "vendorPortalVisible" BOOLEAN DEFAULT false NOT NULL`);
+      await sequelize.query(`
+        CREATE TABLE IF NOT EXISTS vendor_issues (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          "workOrderId" UUID NOT NULL REFERENCES work_orders(id) ON DELETE CASCADE,
+          "workOrderPartId" UUID REFERENCES work_order_parts(id) ON DELETE SET NULL,
+          "vendorId" UUID REFERENCES vendors(id) ON DELETE SET NULL,
+          "vendorName" VARCHAR(255) NOT NULL,
+          "poNumber" VARCHAR(255),
+          "reportedBy" VARCHAR(255),
+          description TEXT NOT NULL,
+          "photoUrl" VARCHAR(500),
+          "photoStorageId" VARCHAR(500),
+          status VARCHAR(50) DEFAULT 'open',
+          "reportedAt" TIMESTAMPTZ DEFAULT NOW(),
+          "resolvedAt" TIMESTAMPTZ,
+          "resolvedBy" VARCHAR(255),
+          "resolutionNotes" TEXT,
+          "createdAt" TIMESTAMPTZ DEFAULT NOW(),
+          "updatedAt" TIMESTAMPTZ DEFAULT NOW()
+        )
+      `);
+      await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_vendor_issues_wo ON vendor_issues("workOrderId")`);
+      await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_vendor_issues_status ON vendor_issues(status)`);
+      await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_vendor_issues_vendor ON vendor_issues("vendorId")`);
       console.log('Ensured outside processing tracking columns on work_order_parts');
     } catch (e) { console.log('outside processing tracking migration:', e.message); }
 

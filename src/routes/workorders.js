@@ -561,21 +561,14 @@ async function generateOutsideProcessingPO(poNumber, vendor, parts, workOrder, s
 
       // Subtotals + Total
       rowY += 8;
-      const tc = parseFloat(transportCost) || 0;
       const ec = parseFloat(expediteCost) || 0;
-      const grandTotal = totalCost + tc + ec;
+      const grandTotal = totalCost + ec;
 
       const totalsX = L + W - 220;
       doc.fontSize(9).font('Helvetica').fillColor('#555');
       doc.text(`Parts Subtotal:`, totalsX, rowY, { width: 130, align: 'right' });
       doc.text(`$${totalCost.toFixed(2)}`, totalsX + 130, rowY, { width: 80, align: 'right' });
       rowY += 14;
-
-      if (tc > 0) {
-        doc.text(`Transport:`, totalsX, rowY, { width: 130, align: 'right' });
-        doc.text(`$${tc.toFixed(2)}`, totalsX + 130, rowY, { width: 80, align: 'right' });
-        rowY += 14;
-      }
 
       if (ec > 0) {
         doc.fillColor('#c62828').font('Helvetica-Bold');

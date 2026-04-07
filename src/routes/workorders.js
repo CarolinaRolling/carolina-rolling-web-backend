@@ -2621,6 +2621,9 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
       }
     }
 
+    // Capture previous status BEFORE update for auto-advance comparison
+    const previousStatus = part.status;
+
     await part.update(updates);
 
     // Auto-complete linked services when a parent part is marked complete
@@ -2710,13 +2713,14 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
       }
     }
 
-    // Auto-advance work order status to "processing" if a part status changed
-    if (status !== undefined) {
+    // Auto-advance work order status to "processing" only when a part status ACTUALLY changes
+    // to something meaningful (not just resaved with same value or set to pending)
+    if (status !== undefined && status !== previousStatus && status !== 'pending') {
       try {
         const workOrder = await WorkOrder.findByPk(req.params.id);
         if (workOrder && ['received', 'quoted', 'work_order_generated'].includes(workOrder.status)) {
           await workOrder.update({ status: 'processing' });
-          console.log(`[auto-status] WO ${workOrder.drNumber || workOrder.orderNumber} → processing (part status changed)`);
+          console.log(`[auto-status] WO ${workOrder.drNumber || workOrder.orderNumber} → processing (part #${part.partNumber} status: ${previousStatus} → ${status})`);
         }
       } catch (woErr) {
         console.error('[auto-status] Failed to update WO status:', woErr.message);

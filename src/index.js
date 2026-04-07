@@ -930,6 +930,8 @@ async function startServer() {
       await sequelize.query(`ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "outsideProcessingExpectedReturn" TIMESTAMPTZ`);
       await sequelize.query(`ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "outsideProcessingReturnedAt" TIMESTAMPTZ`);
       await sequelize.query(`ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "outsideProcessingExpediteCost" DECIMAL(10,2) DEFAULT 0`);
+      await sequelize.query(`ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "outsideProcessing" JSONB DEFAULT '[]'::jsonb`);
+      await sequelize.query(`ALTER TABLE estimate_parts ADD COLUMN IF NOT EXISTS "outsideProcessing" JSONB DEFAULT '[]'::jsonb`);
       console.log('Ensured outside processing tracking columns on work_order_parts');
     } catch (e) { console.log('outside processing tracking migration:', e.message); }
 

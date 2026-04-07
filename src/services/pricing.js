@@ -209,6 +209,8 @@ const PART_SHARED_FIELDS = [
   'outsideProcessingCost', 'outsideProcessingMarkupPercent',
   'outsideProcessingTransportCost', 'outsideProcessingTransportMarkupPercent',
   'outsideProcessingPONumber', 'outsideProcessingPOSentAt',
+  // Multi-operation outside processing (JSONB array)
+  'outsideProcessing',
   // RFQ contact tracking
   'rfqContactName', 'rfqContactEmail', 'rfqSentAt',
   // Form data (the big one)

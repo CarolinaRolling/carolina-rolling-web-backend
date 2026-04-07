@@ -2331,7 +2331,8 @@ router.post('/:id/parts', async (req, res, next) => {
       materialTotal: cleanedData.materialTotal,
       setupCharge: cleanedData.setupCharge,
       otherCharges: cleanedData.otherCharges,
-      partTotal: cleanedData.partTotal
+      partTotal: cleanedData.partTotal,
+      outsideProcessing: req.body.outsideProcessing || []
     });
 
     // Reload with files
@@ -2481,6 +2482,9 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     if (cleanedData.setupCharge !== undefined) updates.setupCharge = cleanedData.setupCharge;
     if (cleanedData.otherCharges !== undefined) updates.otherCharges = cleanedData.otherCharges;
     if (cleanedData.partTotal !== undefined) updates.partTotal = cleanedData.partTotal;
+
+    // Outside processing JSONB array
+    if (req.body.outsideProcessing !== undefined) updates.outsideProcessing = req.body.outsideProcessing;
     
     if (status !== undefined) {
       updates.status = status;

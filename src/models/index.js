@@ -947,6 +947,13 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
     type: DataTypes.DATE,
     allowNull: true
   },
+  // Multiple outside processing operations per part (JSONB array)
+  // Each entry: { id, serviceType, vendorId, vendorName, costPerPart, transportCost, transportMarkup, markup, expediteCost, status, poNumber, poSentAt, expectedReturn, returnedAt, notes }
+  outsideProcessing: {
+    type: DataTypes.JSONB,
+    allowNull: true,
+    defaultValue: []
+  },
   // RFQ contact tracking
   rfqContactName: {
     type: DataTypes.STRING,
@@ -1608,6 +1615,12 @@ const EstimatePart = sequelize.define('EstimatePart', {
   outsideProcessingReturnedAt: {
     type: DataTypes.DATE,
     allowNull: true
+  },
+  // Multiple outside processing operations per part (JSONB array)
+  outsideProcessing: {
+    type: DataTypes.JSONB,
+    allowNull: true,
+    defaultValue: []
   },
   // RFQ contact tracking
   rfqContactName: {

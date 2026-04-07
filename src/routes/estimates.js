@@ -374,7 +374,7 @@ async function isClientTaxExempt(clientName) {
   } catch (e) { return false; }
 }
 
-function calculateEstimateTotals(parts, truckingCost, taxRate, taxExempt = false, discountPercent = 0, discountAmount = 0, minInfo = null) {
+function calculateEstimateTotals(parts, truckingCost, taxRate, taxExempt = false, discountPercent = 0, discountAmount = 0, minInfo = null, opTransports = []) {
   // Ensure taxExempt is boolean (SQLite may store as 0/1)
   const isExempt = taxExempt === true || taxExempt === 1 || taxExempt === '1' || taxExempt === 'true';
   let partsSubtotal = 0;
@@ -393,6 +393,15 @@ function calculateEstimateTotals(parts, truckingCost, taxRate, taxExempt = false
       partsSubtotal += parseFloat(part.partTotal) || 0;
     });
   }
+
+  // Order-level outside processing transport (billed amount, hidden in customer total)
+  let opTransportBilled = 0;
+  (opTransports || []).forEach(trip => {
+    const cost = parseFloat(trip.cost) || 0;
+    const markup = parseFloat(trip.markup) || 0;
+    opTransportBilled += cost * (1 + markup / 100);
+  });
+  partsSubtotal += opTransportBilled;
 
   // Rush service amounts
   let expediteAmount = 0, emergencyAmount = 0;
@@ -443,7 +452,7 @@ async function calculateEstimateTotalsWithMinimums(parts, estimate) {
   const taxExempt = estimate.taxExempt === true || estimate.taxExempt === 1 || estimate.taxExempt === '1' || estimate.taxExempt === 'true';
   return calculateEstimateTotals(
     parts, estimate.truckingCost, estimate.taxRate, taxExempt,
-    estimate.discountPercent, estimate.discountAmount, minInfo
+    estimate.discountPercent, estimate.discountAmount, minInfo, estimate.opTransports
   );
 }
 
@@ -780,7 +789,7 @@ router.put('/:id', async (req, res, next) => {
       'useCustomTax', 'customTaxReason', 'truckingDescription', 'truckingCost', 'status',
       'taxExempt', 'taxExemptCertNumber', 'taxExemptReason',
       'discountPercent', 'discountAmount', 'discountReason',
-      'minimumOverride', 'minimumOverrideReason'];
+      'minimumOverride', 'minimumOverrideReason', 'opTransports'];
     
     fields.forEach(field => {
       if (req.body[field] !== undefined) {

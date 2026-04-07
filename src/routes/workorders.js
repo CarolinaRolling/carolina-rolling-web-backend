@@ -629,6 +629,132 @@ async function logActivity(type, resourceType, resourceId, resourceNumber, clien
   }
 }
 
+// Generate Trucking PO PDF (for outside processing transport)
+async function generateTruckingPO(poNumber, vendor, trip, workOrder, allocatedParts) {
+  const PDFDocument = require('pdfkit');
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ margin: 50, size: 'letter' });
+      const chunks = [];
+      const W = 512;
+      const L = 50;
+      const R = L + W;
+
+      doc.on('data', chunk => chunks.push(chunk));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+
+      // Top border (blue for trucking)
+      doc.rect(L, 40, W, 4).fill('#1565C0');
+
+      // Header
+      const headerY = 52;
+      doc.fontSize(14).font('Helvetica-Bold').fillColor('#1565C0').text('CAROLINA ROLLING COMPANY INC.', L, headerY);
+      doc.fontSize(8).font('Helvetica').fillColor('#444');
+      doc.text('9152 Sonrisa St, Bellflower, CA 90706', L, headerY + 18);
+      doc.text('Phone: (562) 633-1044  •  Email: keepitrolling@carolinarolling.com', L, headerY + 28);
+
+      doc.fontSize(20).font('Helvetica-Bold').fillColor('#1565C0').text('TRUCKING PO', L, headerY, { width: W, align: 'right' });
+      doc.fontSize(14).font('Helvetica-Bold').fillColor('#333').text(poNumber, L, headerY + 28, { width: W, align: 'right' });
+
+      doc.moveTo(L, headerY + 46).lineTo(R, headerY + 46).strokeColor('#ccc').lineWidth(1).stroke();
+
+      // Info boxes
+      const boxY = headerY + 56;
+      const boxH = 80;
+      const halfW = (W - 16) / 2;
+
+      // TRUCKING VENDOR box
+      doc.rect(L, boxY, halfW, boxH).lineWidth(1).strokeColor('#ddd').stroke();
+      doc.rect(L, boxY, halfW, 16).fill('#E3F2FD');
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#1565C0').text('TRUCKING VENDOR', L + 8, boxY + 4);
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#000').text(vendor.name || '', L + 8, boxY + 22, { width: halfW - 16 });
+      if (vendor.contactName) doc.fontSize(8).font('Helvetica').text(`Attn: ${vendor.contactName}`, L + 8, boxY + 38);
+      if (vendor.address) doc.fontSize(8).text(vendor.address, L + 8, boxY + 50, { width: halfW - 16 });
+
+      // SERVICE box
+      const boxX2 = L + halfW + 16;
+      doc.rect(boxX2, boxY, halfW, boxH).lineWidth(1).strokeColor('#ddd').stroke();
+      doc.rect(boxX2, boxY, halfW, 16).fill('#E3F2FD');
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#1565C0').text('TRANSPORT TYPE', boxX2 + 8, boxY + 4);
+      doc.fontSize(11).font('Helvetica-Bold').fillColor('#000').text(`${trip.leg} Trip`, boxX2 + 8, boxY + 22);
+      doc.fontSize(8).font('Helvetica').fillColor('#666').text(
+        trip.leg === 'Outbound' ? 'From Carolina Rolling to outside processor' : 'From outside processor back to Carolina Rolling',
+        boxX2 + 8, boxY + 40, { width: halfW - 16 }
+      );
+
+      // PO details row
+      const detY = boxY + boxH + 12;
+      const detFields = [
+        ['PO DATE', new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' })],
+        ['WORK ORDER', workOrder.drNumber ? `DR-${workOrder.drNumber}` : (workOrder.orderNumber || '-')],
+        ['CLIENT', workOrder.clientName || '-']
+      ];
+      const colW = W / detFields.length;
+      detFields.forEach(([label, value], i) => {
+        const x = L + (i * colW);
+        doc.rect(x, detY, colW, 32).lineWidth(0.5).strokeColor('#ddd').stroke();
+        doc.rect(x, detY, colW, 14).fill('#f5f5f5');
+        doc.fontSize(7).font('Helvetica-Bold').fillColor('#888').text(label, x + 6, detY + 3);
+        doc.fontSize(9).font('Helvetica-Bold').fillColor('#000').text(value, x + 6, detY + 17, { width: colW - 12 });
+      });
+
+      // Materials being transported
+      let rowY = detY + 46;
+      doc.fontSize(9).font('Helvetica-Bold').fillColor('#333').text('MATERIAL BEING TRANSPORTED:', L, rowY);
+      rowY += 14;
+
+      doc.rect(L, rowY, W, 18).fill('#1565C0');
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#fff');
+      doc.text('PART #', L + 8, rowY + 5);
+      doc.text('QTY', L + 80, rowY + 5);
+      doc.text('DESCRIPTION', L + 130, rowY + 5);
+      rowY += 18;
+
+      doc.font('Helvetica').fillColor('#000');
+      (allocatedParts || []).forEach((p, idx) => {
+        if (idx % 2 === 0) doc.rect(L, rowY, W, 22).fill('#F5F5F5');
+        const partObj = p.toJSON ? p.toJSON() : { ...p };
+        if (partObj.formData && typeof partObj.formData === 'object') Object.assign(partObj, partObj.formData);
+        const desc = (partObj._materialDescription || partObj.materialDescription || `Part #${partObj.partNumber}`).replace(/^\d+pc:\s*/i, '');
+        doc.fillColor('#000').fontSize(9).font('Helvetica-Bold').text(`#${partObj.partNumber}`, L + 8, rowY + 6);
+        doc.font('Helvetica').text(`${partObj.quantity || 1}`, L + 80, rowY + 6);
+        doc.fontSize(8.5).text(desc, L + 130, rowY + 6, { width: W - 138 });
+        rowY += 22;
+      });
+
+      doc.moveTo(L, rowY).lineTo(R, rowY).strokeColor('#1565C0').lineWidth(1.5).stroke();
+
+      // Total
+      rowY += 12;
+      const cost = parseFloat(trip.cost) || 0;
+      doc.rect(L + W - 220, rowY, 220, 24).fill('#E3F2FD');
+      doc.fontSize(11).font('Helvetica-Bold').fillColor('#1565C0');
+      doc.text(`TOTAL:`, L + W - 214, rowY + 7, { width: 124, align: 'right' });
+      doc.text(`$${cost.toFixed(2)}`, L + W - 90, rowY + 7, { width: 84, align: 'right' });
+      rowY += 32;
+
+      // Important box
+      if (rowY + 80 > 720) { doc.addPage(); rowY = 50; }
+      doc.rect(L, rowY, W, 36).lineWidth(1.5).strokeColor('#c62828').stroke();
+      doc.rect(L, rowY, W, 14).fill('#ffebee');
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#c62828').text('⚠ IMPORTANT', L + 8, rowY + 3);
+      doc.fontSize(9).font('Helvetica-Bold').fillColor('#c62828');
+      doc.text(`Reference ${poNumber} on all paperwork and invoices.`, L + 8, rowY + 18);
+      rowY += 46;
+
+      if (trip.notes) {
+        doc.fontSize(8).font('Helvetica-Bold').fillColor('#333').text('NOTES:', L, rowY);
+        doc.fontSize(8).font('Helvetica').fillColor('#444').text(trip.notes, L + 8, rowY + 12, { width: W - 16 });
+      }
+
+      doc.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
 // Temp uploads directory for multer
 const uploadsDir = path.join(__dirname, '../../uploads');
 if (!fs.existsSync(uploadsDir)) {
@@ -2088,6 +2214,9 @@ router.put('/:id', async (req, res, next) => {
     if (taxExemptCertNumber !== undefined) updates.taxExemptCertNumber = taxExemptCertNumber || null;
     if (minimumOverride !== undefined) updates.minimumOverride = minimumOverride;
     if (minimumOverrideReason !== undefined) updates.minimumOverrideReason = minimumOverrideReason || null;
+
+    // Order-level OP transports
+    if (req.body.opTransports !== undefined) updates.opTransports = req.body.opTransports;
 
     // Void fields
     if (isVoided !== undefined) updates.isVoided = isVoided;
@@ -3689,7 +3818,295 @@ router.post('/:id/documents/:documentId/regenerate', async (req, res, next) => {
   }
 });
 
+// Generate Trucking PO PDF (for transport-only)
+async function generateTransportPO(poNumber, vendor, trip, workOrder, parts) {
+  const PDFDocument = require('pdfkit');
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ margin: 50, size: 'letter' });
+      const chunks = [];
+      const W = 512;
+      const L = 50;
+      const R = L + W;
+
+      doc.on('data', chunk => chunks.push(chunk));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+
+      // Top border (purple for trucking)
+      doc.rect(L, 40, W, 4).fill('#7b1fa2');
+
+      const headerY = 52;
+      doc.fontSize(14).font('Helvetica-Bold').fillColor('#7b1fa2').text('CAROLINA ROLLING COMPANY INC.', L, headerY);
+      doc.fontSize(8).font('Helvetica').fillColor('#444');
+      doc.text('9152 Sonrisa St, Bellflower, CA 90706', L, headerY + 18);
+      doc.text('Phone: (562) 633-1044  •  Email: keepitrolling@carolinarolling.com', L, headerY + 28);
+
+      doc.fontSize(20).font('Helvetica-Bold').fillColor('#7b1fa2').text('TRUCKING PO', L, headerY, { width: W, align: 'right' });
+      doc.fontSize(14).font('Helvetica-Bold').fillColor('#333').text(poNumber, L, headerY + 28, { width: W, align: 'right' });
+
+      doc.moveTo(L, headerY + 46).lineTo(R, headerY + 46).strokeColor('#ccc').lineWidth(1).stroke();
+
+      // Info boxes
+      const boxY = headerY + 56;
+      const boxH = 80;
+      const halfW = (W - 16) / 2;
+
+      // VENDOR box
+      doc.rect(L, boxY, halfW, boxH).lineWidth(1).strokeColor('#ddd').stroke();
+      doc.rect(L, boxY, halfW, 16).fill('#F3E5F5');
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#7b1fa2').text('TRUCKING VENDOR', L + 8, boxY + 4);
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#000').text(vendor.name || '', L + 8, boxY + 22, { width: halfW - 16 });
+      if (vendor.contactName) doc.fontSize(8).font('Helvetica').text(`Attn: ${vendor.contactName}`, L + 8, boxY + 38);
+      if (vendor.address) doc.fontSize(8).text(vendor.address, L + 8, boxY + 50, { width: halfW - 16 });
+
+      // SERVICE box
+      const boxX2 = L + halfW + 16;
+      doc.rect(boxX2, boxY, halfW, boxH).lineWidth(1).strokeColor('#ddd').stroke();
+      doc.rect(boxX2, boxY, halfW, 16).fill('#F3E5F5');
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#7b1fa2').text('TRANSPORT TYPE', boxX2 + 8, boxY + 4);
+      doc.fontSize(11).font('Helvetica-Bold').fillColor('#000').text(`${trip.leg} Transport`, boxX2 + 8, boxY + 22, { width: halfW - 16 });
+      doc.fontSize(8).font('Helvetica').fillColor('#666').text('REFERENCE WORK ORDER', boxX2 + 8, boxY + 50);
+      doc.fontSize(9).font('Helvetica-Bold').fillColor('#000').text(workOrder.drNumber ? `DR-${workOrder.drNumber}` : (workOrder.orderNumber || '-'), boxX2 + 8, boxY + 62);
+
+      // PO details row
+      const detY = boxY + boxH + 12;
+      const detFields = [
+        ['PO DATE', new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' })],
+        ['CLIENT', workOrder.clientName || '-'],
+        ['LOT COST', `$${parseFloat(trip.cost || 0).toFixed(2)}`]
+      ];
+      const colW = W / detFields.length;
+      detFields.forEach(([label, value], i) => {
+        const x = L + (i * colW);
+        doc.rect(x, detY, colW, 32).lineWidth(0.5).strokeColor('#ddd').stroke();
+        doc.rect(x, detY, colW, 14).fill('#f5f5f5');
+        doc.fontSize(7).font('Helvetica-Bold').fillColor('#888').text(label, x + 6, detY + 3);
+        doc.fontSize(9).font('Helvetica-Bold').fillColor('#000').text(value, x + 6, detY + 17, { width: colW - 12 });
+      });
+
+      // Items being transported
+      const tableY = detY + 46;
+      doc.rect(L, tableY, W, 18).fill('#7b1fa2');
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#fff');
+      doc.text('PART #', L + 6, tableY + 5);
+      doc.text('QTY', L + 70, tableY + 5);
+      doc.text('DESCRIPTION', L + 110, tableY + 5);
+
+      let rowY = tableY + 18;
+      doc.font('Helvetica').fillColor('#000');
+
+      parts.forEach((p, index) => {
+        const partObj = p.toJSON ? p.toJSON() : { ...p };
+        if (partObj.formData && typeof partObj.formData === 'object') Object.assign(partObj, partObj.formData);
+        const qty = parseInt(partObj.quantity) || 1;
+        const desc = partObj._materialDescription || partObj.materialDescription || `Part #${partObj.partNumber}`;
+        const cleanDesc = desc.replace(/^\d+pc:\s*/i, '');
+
+        const descHeight = doc.heightOfString(cleanDesc, { width: W - 116 });
+        const rowHeight = Math.max(28, descHeight + 12);
+
+        if (rowY + rowHeight > 700) {
+          doc.addPage();
+          rowY = 50;
+        }
+
+        if (index % 2 === 0) doc.rect(L, rowY, W, rowHeight).fill('#FCE4EC');
+        doc.moveTo(L, rowY + rowHeight).lineTo(R, rowY + rowHeight).strokeColor('#e0e0e0').lineWidth(0.5).stroke();
+
+        doc.fillColor('#000');
+        doc.fontSize(9).font('Helvetica-Bold').text(`${partObj.partNumber}`, L + 6, rowY + 6);
+        doc.font('Helvetica').text(`${qty}`, L + 70, rowY + 6);
+        doc.fontSize(8.5).text(cleanDesc, L + 110, rowY + 6, { width: W - 116 });
+        rowY += rowHeight;
+      });
+
+      doc.moveTo(L, rowY).lineTo(R, rowY).strokeColor('#7b1fa2').lineWidth(1.5).stroke();
+      rowY += 8;
+
+      // Total cost
+      const totalsX = L + W - 220;
+      doc.rect(totalsX, rowY, 220, 24).fill('#F3E5F5');
+      doc.fontSize(11).font('Helvetica-Bold').fillColor('#7b1fa2');
+      doc.text(`LOT COST:`, totalsX + 6, rowY + 7, { width: 124, align: 'right' });
+      doc.text(`$${parseFloat(trip.cost || 0).toFixed(2)}`, totalsX + 130, rowY + 7, { width: 84, align: 'right' });
+      rowY += 32;
+
+      if (rowY + 80 > 720) { doc.addPage(); rowY = 50; }
+
+      doc.rect(L, rowY, W, 36).lineWidth(1.5).strokeColor('#7b1fa2').stroke();
+      doc.rect(L, rowY, W, 14).fill('#F3E5F5');
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#7b1fa2').text('⚠ IMPORTANT', L + 8, rowY + 3);
+      doc.fontSize(9).font('Helvetica-Bold').fillColor('#7b1fa2');
+      doc.text(`Reference ${poNumber} on all paperwork.`, L + 8, rowY + 18);
+      rowY += 46;
+
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#333').text('TERMS:', L, rowY);
+      doc.fontSize(8).font('Helvetica').fillColor('#444');
+      doc.text(`• Reference Work Order: ${workOrder.drNumber ? 'DR-' + workOrder.drNumber : workOrder.orderNumber}`, L + 8, rowY + 14);
+      doc.text(`• ${trip.leg === 'Outbound' ? 'Pickup from Carolina Rolling, deliver to outside processor' : 'Pickup from outside processor, deliver to Carolina Rolling'}`, L + 8, rowY + 26);
+      if (trip.notes) {
+        doc.fontSize(8).font('Helvetica-Bold').fillColor('#333').text('NOTES:', L, rowY + 46);
+        doc.fontSize(8).font('Helvetica').fillColor('#444').text(trip.notes, L + 8, rowY + 58, { width: W - 16 });
+      }
+
+      doc.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+// POST /api/workorders/:id/transport-po - Generate a trucking PO for a transport trip
+router.post('/:id/transport-po', async (req, res, next) => {
+  try {
+    const { tripId } = req.body;
+    if (!tripId) return res.status(400).json({ error: { message: 'tripId required' } });
+
+    const workOrder = await WorkOrder.findByPk(req.params.id, {
+      include: [{ model: WorkOrderPart, as: 'parts' }]
+    });
+    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+
+    const trips = workOrder.opTransports || [];
+    const trip = trips.find(t => t.id === tripId);
+    if (!trip) return res.status(404).json({ error: { message: 'Trip not found' } });
+
+    if (!trip.truckingVendorId) {
+      return res.status(400).json({ error: { message: 'No trucking vendor on this trip' } });
+    }
+
+    const vendor = await Vendor.findByPk(trip.truckingVendorId);
+    if (!vendor) return res.status(404).json({ error: { message: 'Trucking vendor not found' } });
+
+    // Generate PO number
+    const poSetting = await AppSettings.findOne({ where: { key: 'next_op_po_number' } });
+    let poNum = poSetting?.value?.nextNumber || 1001;
+    const poNumber = `TR${poNum}`;
+    if (poSetting) {
+      await poSetting.update({ value: { nextNumber: poNum + 1 } });
+    } else {
+      await AppSettings.create({ key: 'next_op_po_number', value: { nextNumber: poNum + 1 } });
+    }
+
+    // Determine which parts this trip applies to
+    let targetParts = [];
+    if (trip.allocationMode === 'manual') {
+      const ids = trip.partIds || [];
+      targetParts = workOrder.parts.filter(p => ids.includes(p.id));
+    } else {
+      targetParts = workOrder.parts.filter(p => (p.outsideProcessing || []).length > 0);
+    }
+
+    // Generate PDF
+    const pdfBuffer = await generateTransportPO(poNumber, vendor, trip, workOrder, targetParts);
+
+    const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, {
+      folder: 'trucking-pos',
+      filename: `${poNumber}-${workOrder.drNumber}.pdf`,
+      mimeType: 'application/pdf'
+    });
+
+    await WorkOrderDocument.create({
+      workOrderId: workOrder.id,
+      originalName: `${poNumber} - ${vendor.name} (${trip.leg} Transport).pdf`,
+      mimeType: 'application/pdf',
+      size: pdfBuffer.length,
+      url: uploadResult.url,
+      cloudinaryId: uploadResult.storageId,
+      documentType: 'transport_po'
+    });
+
+    // Mark trip as having PO
+    const updatedTrips = trips.map(t => t.id === tripId ? { ...t, poNumber, poSentAt: new Date() } : t);
+    await workOrder.update({ opTransports: updatedTrips });
+
+    console.log(`[TransportPO] Created ${poNumber} for ${vendor.name} (${trip.leg})`);
+    res.json({
+      data: { poNumber, vendorName: vendor.name },
+      message: `Trucking PO ${poNumber} created for ${vendor.name}`
+    });
+  } catch (error) {
+    console.error('[TransportPO] Error:', error);
+    next(error);
+  }
+});
+
 // POST /api/workorders/:id/outside-processing - Bulk create outside processing PO for selected parts
+// POST /api/workorders/:id/transport-po/:tripId — Generate trucking PO PDF for a transport trip
+router.post('/:id/transport-po/:tripId', async (req, res, next) => {
+  try {
+    const workOrder = await WorkOrder.findByPk(req.params.id, {
+      include: [{ model: WorkOrderPart, as: 'parts' }]
+    });
+    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+
+    const trips = workOrder.opTransports || [];
+    const tripIdx = trips.findIndex(t => t.id === req.params.tripId);
+    if (tripIdx === -1) return res.status(404).json({ error: { message: 'Trip not found' } });
+
+    const trip = trips[tripIdx];
+    if (!trip.truckingVendorId) return res.status(400).json({ error: { message: 'Trip has no trucking vendor' } });
+
+    const vendor = await Vendor.findByPk(trip.truckingVendorId);
+    if (!vendor) return res.status(404).json({ error: { message: 'Trucking vendor not found' } });
+
+    // Determine which parts are being transported
+    let allocatedParts = [];
+    if (trip.allocationMode === 'manual') {
+      allocatedParts = (workOrder.parts || []).filter(p => (trip.partIds || []).includes(p.id));
+    } else {
+      // Auto modes: any part with outside processing
+      allocatedParts = (workOrder.parts || []).filter(p => (p.outsideProcessing || []).length > 0);
+    }
+
+    // Generate PO number
+    const poSetting = await AppSettings.findOne({ where: { key: 'next_op_po_number' } });
+    let poNum = poSetting?.value?.nextNumber || 1001;
+    const poNumber = `TR${poNum}`;
+    if (poSetting) {
+      await poSetting.update({ value: { nextNumber: poNum + 1 } });
+    } else {
+      await AppSettings.create({ key: 'next_op_po_number', value: { nextNumber: poNum + 1 } });
+    }
+
+    // Generate PDF
+    const pdfBuffer = await generateTruckingPO(poNumber, vendor, trip, workOrder, allocatedParts);
+
+    // Upload PDF
+    const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, {
+      folder: 'trucking-pos',
+      filename: `${poNumber}-${workOrder.drNumber}.pdf`,
+      mimeType: 'application/pdf'
+    });
+
+    await WorkOrderDocument.create({
+      workOrderId: workOrder.id,
+      originalName: `${poNumber} - ${vendor.name} (${trip.leg} Trucking).pdf`,
+      mimeType: 'application/pdf',
+      size: pdfBuffer.length,
+      url: uploadResult.url,
+      cloudinaryId: uploadResult.storageId,
+      documentType: 'trucking_po'
+    });
+
+    // Update trip with PO number
+    const updatedTrips = [...trips];
+    updatedTrips[tripIdx] = { ...trip, poNumber, poSentAt: new Date() };
+    await workOrder.update({ opTransports: updatedTrips });
+
+    console.log(`[TruckingPO] Created ${poNumber} for ${vendor.name} - ${trip.leg}`);
+
+    res.json({
+      data: { poNumber, vendorName: vendor.name },
+      message: `Trucking PO ${poNumber} created for ${vendor.name}`
+    });
+  } catch (error) {
+    console.error('[TruckingPO] Error:', error);
+    next(error);
+  }
+});
+
 router.post('/:id/outside-processing', async (req, res, next) => {
   try {
     const { partIds, vendorId, serviceType, costPerPart, totalCost, expectedReturn, notes, transportCost, expediteCost } = req.body;

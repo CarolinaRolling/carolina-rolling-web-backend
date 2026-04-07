@@ -152,6 +152,7 @@ const ORDER_FIELD_MAP = {
   // Pricing
   truckingDescription: 'truckingDescription',
   truckingCost: 'truckingCost',
+  opTransports: 'opTransports',
   taxRate: 'taxRate',
   taxExempt: 'taxExempt',
   taxExemptReason: 'taxExemptReason',

@@ -557,6 +557,13 @@ const WorkOrder = sequelize.define('WorkOrder', {
     type: DataTypes.DECIMAL(10, 2),
     allowNull: true
   },
+  // Order-level outside processing transport trips (JSONB array)
+  // Each: { id, leg, truckingVendorId, truckingVendorName, cost, markup, allocationMode, partIds, notes, poNumber, poSentAt }
+  opTransports: {
+    type: DataTypes.JSONB,
+    allowNull: true,
+    defaultValue: []
+  },
   taxRate: {
     type: DataTypes.DECIMAL(5, 2),
     allowNull: true
@@ -1170,6 +1177,12 @@ const Estimate = sequelize.define('Estimate', {
   truckingCost: {
     type: DataTypes.DECIMAL(10, 2),
     defaultValue: 0
+  },
+  // Order-level outside processing transport trips (JSONB array)
+  opTransports: {
+    type: DataTypes.JSONB,
+    allowNull: true,
+    defaultValue: []
   },
   // Totals
   partsSubtotal: {

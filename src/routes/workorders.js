@@ -605,6 +605,24 @@ async function generateOutsideProcessingPO(poNumber, vendor, parts, workOrder, s
         doc.fontSize(8).font('Helvetica').fillColor('#444').text(notes, L + 8, rowY + 70, { width: W - 16 });
       }
 
+      // Vendor-supplies-material banner — show prominently if any part has the flag set
+      const vendorSuppliesParts = (parts || []).filter(p => p.materialSource === 'op_vendor_mat_supplied');
+      if (vendorSuppliesParts.length > 0) {
+        const allParts = vendorSuppliesParts.length === (parts || []).length;
+        const bannerY = rowY + (notes ? 100 : 60);
+        doc.rect(L, bannerY, W, 50).fill('#FFF3E0').strokeColor('#E65100').lineWidth(1.5).stroke();
+        doc.fontSize(10).font('Helvetica-Bold').fillColor('#E65100').text(
+          allParts ? '⚠ MATERIAL TO BE SUPPLIED BY VENDOR' : '⚠ MATERIAL TO BE SUPPLIED BY VENDOR (SOME PARTS)',
+          L + 8, bannerY + 6
+        );
+        doc.fontSize(8).font('Helvetica').fillColor('#444').text(
+          allParts
+            ? `${vendor.name} is responsible for sourcing the material for all parts on this PO. Please include MTRs (Material Test Reports) with shipment.`
+            : `${vendor.name} is responsible for sourcing material for the following parts: ${vendorSuppliesParts.map(p => '#' + p.partNumber).join(', ')}. Please include MTRs (Material Test Reports) with shipment for these parts.`,
+          L + 8, bannerY + 22, { width: W - 16 }
+        );
+      }
+
       doc.end();
     } catch (err) {
       reject(err);
@@ -2330,6 +2348,39 @@ router.delete('/:id', async (req, res, next) => {
     await Estimate.update({ workOrderId: null, status: 'accepted' }, { where: { workOrderId: workOrder.id }, transaction });
 
     const inboundOrderIds = workOrder.parts.filter(p => p.inboundOrderId).map(p => p.inboundOrderId);
+
+    // Also collect inbound order IDs stored in the outsideProcessing JSONB arrays
+    for (const part of workOrder.parts || []) {
+      const ops = part.outsideProcessing || [];
+      for (const op of ops) {
+        if (op.inboundOrderId && !inboundOrderIds.includes(op.inboundOrderId)) {
+          inboundOrderIds.push(op.inboundOrderId);
+        }
+      }
+    }
+
+    // Also catch ANY remaining inbound orders that reference this work order by FK
+    // (covers edge cases where the JSONB didn't get the ID stamped correctly)
+    try {
+      const orphanInbounds = await InboundOrder.findAll({
+        where: { workOrderId: workOrder.id },
+        attributes: ['id'],
+        transaction
+      });
+      for (const io of orphanInbounds) {
+        if (!inboundOrderIds.includes(io.id)) inboundOrderIds.push(io.id);
+      }
+    } catch (e) {
+      console.error('[delete WO] Failed to fetch orphan inbound orders:', e.message);
+    }
+
+    // Delete any vendor issues tied to this WO (cascades from FK but be explicit)
+    try {
+      const { VendorIssue } = require('../models');
+      await VendorIssue.destroy({ where: { workOrderId: workOrder.id }, transaction });
+    } catch (e) {
+      console.error('[delete WO] Failed to delete vendor issues:', e.message);
+    }
 
     for (const part of workOrder.parts || []) {
       for (const file of part.files || []) {

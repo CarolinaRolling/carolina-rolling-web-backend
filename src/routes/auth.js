@@ -579,7 +579,7 @@ module.exports = { router, authenticateToken, requireAdmin, logActivity, initial
 // POST /api/auth/api-keys - Create new API key (admin only)
 router.post('/api-keys', authenticateToken, requireAdmin, async (req, res, next) => {
   try {
-    const { name, clientName, permissions, expiresAt, allowedIPs, operatorName, deviceName } = req.body;
+    const { name, clientName, vendorName, permissions, expiresAt, allowedIPs, operatorName, deviceName } = req.body;
     if (!name) {
       return res.status(400).json({ error: { message: 'API key name is required' } });
     }
@@ -592,6 +592,7 @@ router.post('/api-keys', authenticateToken, requireAdmin, async (req, res, next)
       name,
       key,
       clientName: clientName || null,
+      vendorName: vendorName || null,
       permissions: permissions || 'read',
       expiresAt: expiresAt || null,
       allowedIPs: allowedIPs || null,
@@ -607,6 +608,7 @@ router.post('/api-keys', authenticateToken, requireAdmin, async (req, res, next)
         name: apiKey.name,
         key: apiKey.key, // Only shown on creation
         clientName: apiKey.clientName,
+        vendorName: apiKey.vendorName,
         permissions: apiKey.permissions,
         allowedIPs: apiKey.allowedIPs,
         operatorName: apiKey.operatorName,
@@ -625,7 +627,7 @@ router.post('/api-keys', authenticateToken, requireAdmin, async (req, res, next)
 router.get('/api-keys', authenticateToken, requireAdmin, async (req, res, next) => {
   try {
     const apiKeys = await ApiKey.findAll({
-      attributes: ['id', 'name', 'clientName', 'permissions', 'isActive', 'lastUsedAt', 'lastIP', 'lastIPDate',
+      attributes: ['id', 'name', 'clientName', 'vendorName', 'permissions', 'isActive', 'lastUsedAt', 'lastIP', 'lastIPDate',
         'expiresAt', 'createdBy', 'createdAt', 'allowedIPs', 'operatorName', 'deviceName', 'revokedReason', 'revokedAt'],
       order: [['createdAt', 'DESC']]
     });
@@ -672,10 +674,11 @@ router.put('/api-keys/:id', authenticateToken, requireAdmin, async (req, res, ne
       return res.status(404).json({ error: { message: 'API key not found' } });
     }
     
-    const { name, clientName, permissions, allowedIPs, operatorName, deviceName, expiresAt, isActive } = req.body;
+    const { name, clientName, vendorName, permissions, allowedIPs, operatorName, deviceName, expiresAt, isActive } = req.body;
     const updates = {};
     if (name !== undefined) updates.name = name;
     if (clientName !== undefined) updates.clientName = clientName || null;
+    if (vendorName !== undefined) updates.vendorName = vendorName || null;
     if (permissions !== undefined) updates.permissions = permissions;
     if (allowedIPs !== undefined) updates.allowedIPs = allowedIPs || null;
     if (operatorName !== undefined) updates.operatorName = operatorName || null;

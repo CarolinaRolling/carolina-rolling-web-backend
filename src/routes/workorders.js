@@ -4050,6 +4050,164 @@ router.post('/:id/transport-po', async (req, res, next) => {
   }
 });
 
+// POST /api/workorders/:id/outside-processing/auto-bulk
+// Auto-generate outside processing POs from the part.outsideProcessing JSONB array
+// Groups by vendor + service type, creates one PO per group, mirrors material PO pattern
+router.post('/:id/outside-processing/auto-bulk', async (req, res, next) => {
+  try {
+    const workOrder = await WorkOrder.findByPk(req.params.id, {
+      include: [{ model: WorkOrderPart, as: 'parts' }]
+    });
+    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+
+    // Optional: req.body.partIds to filter to specific parts (otherwise all OP parts)
+    const filterPartIds = Array.isArray(req.body.partIds) ? req.body.partIds : null;
+
+    // Build groups: { "vendorId|serviceType": { vendorId, vendorName, serviceType, parts: [{part, op}], totalCost, totalProfit } }
+    const groups = {};
+    for (const part of (workOrder.parts || [])) {
+      if (filterPartIds && !filterPartIds.includes(part.id)) continue;
+      const ops = part.outsideProcessing || [];
+      for (const op of ops) {
+        if (!op.vendorId || !op.serviceType) continue; // skip incomplete ops
+        if (op.poNumber) continue; // skip ops that already have a PO
+        const key = `${op.vendorId}|${op.serviceType}`;
+        if (!groups[key]) {
+          groups[key] = {
+            vendorId: op.vendorId,
+            vendorName: op.vendorName || '',
+            serviceType: op.serviceType,
+            parts: [],
+            totalCost: 0,
+            totalQty: 0
+          };
+        }
+        const qty = parseInt(part.quantity) || 1;
+        const cost = parseFloat(op.costPerPart) || 0;
+        const expedite = parseFloat(op.expediteCost) || 0;
+        groups[key].parts.push({ part, op });
+        groups[key].totalCost += (cost * qty) + expedite;
+        groups[key].totalQty += qty;
+      }
+    }
+
+    const groupKeys = Object.keys(groups);
+    if (groupKeys.length === 0) {
+      return res.status(400).json({ error: { message: 'No outside processing operations available to PO. Make sure parts have a vendor and service type set, and that they don\'t already have a PO.' } });
+    }
+
+    const created = [];
+    const errors = [];
+
+    for (const key of groupKeys) {
+      const group = groups[key];
+      try {
+        // Validate vendor exists
+        const vendor = await Vendor.findByPk(group.vendorId);
+        if (!vendor) {
+          errors.push({ vendorName: group.vendorName, serviceType: group.serviceType, error: 'Vendor not found in database' });
+          continue;
+        }
+
+        // Generate PO number
+        const poSetting = await AppSettings.findOne({ where: { key: 'next_op_po_number' } });
+        let poNum = poSetting?.value?.nextNumber || 1001;
+        const poNumber = `OP${poNum}`;
+        if (poSetting) {
+          await poSetting.update({ value: { nextNumber: poNum + 1 } });
+        } else {
+          await AppSettings.create({ key: 'next_op_po_number', value: { nextNumber: poNum + 1 } });
+        }
+
+        // Use the first op's notes/expedite for the PO PDF (representative)
+        const firstOp = group.parts[0].op;
+        const repCostPerPart = parseFloat(firstOp.costPerPart) || 0;
+        const repExpedite = parseFloat(firstOp.expediteCost) || 0;
+
+        // Generate PDF (passing the actual selected parts so they appear correctly)
+        const partsForPdf = group.parts.map(gp => gp.part);
+        const pdfBuffer = await generateOutsideProcessingPO(
+          poNumber, vendor, partsForPdf, workOrder, group.serviceType,
+          firstOp.notes || '', null, 0, repExpedite
+        );
+
+        const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, {
+          folder: 'outside-processing-pos',
+          filename: `${poNumber}-${workOrder.drNumber}.pdf`,
+          mimeType: 'application/pdf'
+        });
+
+        await WorkOrderDocument.create({
+          workOrderId: workOrder.id,
+          originalName: `${poNumber} - ${vendor.name} (${group.serviceType}).pdf`,
+          mimeType: 'application/pdf',
+          size: pdfBuffer.length,
+          url: uploadResult.url,
+          cloudinaryId: uploadResult.storageId,
+          documentType: 'outside_processing_po'
+        });
+
+        // Create matching inbound order so the warehouse expects parts to come back
+        let inboundOrderId = null;
+        try {
+          const partDescriptions = group.parts
+            .map(gp => `#${gp.part.partNumber}${gp.part.clientPartNumber ? ' (' + gp.part.clientPartNumber + ')' : ''} × ${gp.part.quantity}`)
+            .join(', ');
+          const inbound = await InboundOrder.create({
+            purchaseOrderNumber: poNumber,
+            supplier: vendor.name,
+            supplierName: vendor.name,
+            vendorId: vendor.id,
+            description: `${group.serviceType}: ${partDescriptions}`,
+            clientName: workOrder.clientName,
+            workOrderId: workOrder.id,
+            status: 'pending',
+            notes: `Outside processing return — ${group.serviceType} from ${vendor.name}\nDR-${workOrder.drNumber}`
+          });
+          inboundOrderId = inbound.id;
+        } catch (e) {
+          console.error('[OP auto-bulk] Inbound order creation failed:', e.message);
+        }
+
+        // Stamp the OP entry with the PO number on each part — preserves all other ops
+        for (const gp of group.parts) {
+          const ops = (gp.part.outsideProcessing || []).map(o => {
+            if (o.id === gp.op.id) {
+              return { ...o, poNumber, poSentAt: new Date(), inboundOrderId };
+            }
+            return o;
+          });
+          await gp.part.update({ outsideProcessing: ops });
+        }
+
+        created.push({
+          poNumber,
+          vendorName: vendor.name,
+          serviceType: group.serviceType,
+          partCount: group.parts.length,
+          totalCost: group.totalCost.toFixed(2),
+          inboundOrderId
+        });
+
+        console.log(`[OP auto-bulk] Created ${poNumber} for ${vendor.name} (${group.serviceType}) — ${group.parts.length} parts`);
+      } catch (groupErr) {
+        console.error(`[OP auto-bulk] Group failed (${group.vendorName}/${group.serviceType}):`, groupErr.message);
+        errors.push({ vendorName: group.vendorName, serviceType: group.serviceType, error: groupErr.message });
+      }
+    }
+
+    res.json({
+      data: { created, errors },
+      message: created.length === 1
+        ? `Created 1 outside processing PO`
+        : `Created ${created.length} outside processing POs${errors.length ? ` (${errors.length} failed)` : ''}`
+    });
+  } catch (error) {
+    console.error('[OP auto-bulk] Error:', error);
+    next(error);
+  }
+});
+
 // POST /api/workorders/:id/outside-processing - Bulk create outside processing PO for selected parts
 // POST /api/workorders/:id/transport-po/:tripId — Generate trucking PO PDF for a transport trip
 router.post('/:id/transport-po/:tripId', async (req, res, next) => {
@@ -4121,6 +4279,302 @@ router.post('/:id/transport-po/:tripId', async (req, res, next) => {
     });
   } catch (error) {
     console.error('[TruckingPO] Error:', error);
+    next(error);
+  }
+});
+
+// PUT /api/workorders/:id/outside-processing/:poNumber
+// Edit an existing OP PO — cost per part, expedite, notes, expected return
+// Recalculates labor/partTotal on affected parts and regenerates the PDF
+router.put('/:id/outside-processing/:poNumber', async (req, res, next) => {
+  try {
+    const { poNumber } = req.params;
+    const { costPerPart, expediteCost, notes, expectedReturn } = req.body;
+
+    const workOrder = await WorkOrder.findByPk(req.params.id, {
+      include: [{ model: WorkOrderPart, as: 'parts' }]
+    });
+    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+
+    // Find all parts that have an OP entry with this PO number
+    const affectedParts = [];
+    let vendorId = null;
+    let serviceType = null;
+    for (const part of (workOrder.parts || [])) {
+      const ops = part.outsideProcessing || [];
+      const matchingOp = ops.find(op => op.poNumber === poNumber && !op.cancelled);
+      if (matchingOp) {
+        affectedParts.push({ part, op: matchingOp });
+        vendorId = matchingOp.vendorId;
+        serviceType = matchingOp.serviceType;
+      }
+    }
+
+    if (affectedParts.length === 0) {
+      return res.status(404).json({ error: { message: 'PO not found or already cancelled' } });
+    }
+
+    const vendor = await Vendor.findByPk(vendorId);
+    if (!vendor) return res.status(404).json({ error: { message: 'Vendor not found' } });
+
+    // Update each affected part's OP entry
+    const newCost = costPerPart !== undefined ? parseFloat(costPerPart) : null;
+    const newExpedite = expediteCost !== undefined ? parseFloat(expediteCost) : null;
+    for (const { part, op } of affectedParts) {
+      const newOps = (part.outsideProcessing || []).map(o => {
+        if (o.poNumber === poNumber && !o.cancelled) {
+          return {
+            ...o,
+            ...(newCost !== null ? { costPerPart: newCost } : {}),
+            ...(newExpedite !== null ? { expediteCost: newExpedite } : {}),
+            ...(notes !== undefined ? { notes } : {}),
+            ...(expectedReturn !== undefined ? { expectedReturn } : {}),
+            editedAt: new Date()
+          };
+        }
+        return o;
+      });
+
+      // Recalculate labor + partTotal if cost changed
+      const updates = { outsideProcessing: newOps };
+      if (newCost !== null) {
+        const qty = parseInt(part.quantity) || 1;
+        const matCost = parseFloat(part.materialTotal) || 0;
+        const matMarkup = parseFloat(part.materialMarkupPercent) || 0;
+        const matEachRaw = Math.round(matCost * (1 + matMarkup / 100) * 100) / 100;
+        const fd = part.formData && typeof part.formData === 'object' ? part.formData : {};
+        const rounding = part._materialRounding || fd._materialRounding || 'none';
+        const matEach = rounding === 'dollar' && matEachRaw > 0 ? Math.ceil(matEachRaw)
+          : rounding === 'five' && matEachRaw > 0 ? Math.ceil(matEachRaw / 5) * 5
+          : matEachRaw;
+        const baseLab = parseFloat(fd._baseLaborTotal) || parseFloat(part.laborTotal) || 0;
+        // Sum profit across all OP ops on this part (some may have different markups)
+        let opCostLot = 0, opProfitLot = 0;
+        for (const o of newOps) {
+          if (o.cancelled) continue;
+          const c = parseFloat(o.costPerPart) || 0;
+          const e = parseFloat(o.expediteCost) || 0;
+          const m = parseFloat(o.markup) || 0;
+          opCostLot += (c + e) * qty;
+          opProfitLot += c * (m / 100) * qty;
+        }
+        const opCostPerPart = qty > 0 ? opCostLot / qty : 0;
+        const opProfitPerPart = qty > 0 ? opProfitLot / qty : 0;
+        // OP-disables-rolling rule: when OP enabled, base labor is 0
+        const opEnabled = newOps.some(o => !o.cancelled);
+        const effBase = opEnabled ? 0 : baseLab;
+        updates.laborTotal = (effBase + opProfitPerPart).toFixed(2);
+        updates.partTotal = ((matEach + effBase + opProfitPerPart + opCostPerPart) * qty).toFixed(2);
+      }
+      await part.update(updates);
+    }
+
+    // Regenerate PDF
+    const partsForPdf = affectedParts.map(ap => ap.part);
+    const firstOp = affectedParts[0].op;
+    const useNotes = notes !== undefined ? notes : (firstOp.notes || '');
+    const useExpedite = newExpedite !== null ? newExpedite : (parseFloat(firstOp.expediteCost) || 0);
+    const useExpectedReturn = expectedReturn !== undefined ? expectedReturn : null;
+    const pdfBuffer = await generateOutsideProcessingPO(
+      poNumber, vendor, partsForPdf, workOrder, serviceType,
+      useNotes, useExpectedReturn, 0, useExpedite
+    );
+
+    const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, {
+      folder: 'outside-processing-pos',
+      filename: `${poNumber}-${workOrder.drNumber}-edit.pdf`,
+      mimeType: 'application/pdf'
+    });
+
+    // Replace old document — find existing one with same PO number
+    const oldDocs = await WorkOrderDocument.findAll({
+      where: { workOrderId: workOrder.id, documentType: 'outside_processing_po' }
+    });
+    for (const oldDoc of oldDocs) {
+      if (oldDoc.originalName && oldDoc.originalName.includes(poNumber) && !oldDoc.originalName.includes('CANCELLED')) {
+        await oldDoc.destroy();
+      }
+    }
+
+    await WorkOrderDocument.create({
+      workOrderId: workOrder.id,
+      originalName: `${poNumber} - ${vendor.name} (${serviceType}).pdf`,
+      mimeType: 'application/pdf',
+      size: pdfBuffer.length,
+      url: uploadResult.url,
+      cloudinaryId: uploadResult.storageId,
+      documentType: 'outside_processing_po'
+    });
+
+    console.log(`[OP edit] Updated ${poNumber} (${affectedParts.length} parts)`);
+    res.json({
+      data: { poNumber, partsCount: affectedParts.length },
+      message: `${poNumber} updated and PDF regenerated`
+    });
+  } catch (error) {
+    console.error('[OP edit] Error:', error);
+    next(error);
+  }
+});
+
+// POST /api/workorders/:id/outside-processing/:poNumber/regen
+// Regenerate the PDF for an existing PO without changing any data
+router.post('/:id/outside-processing/:poNumber/regen', async (req, res, next) => {
+  try {
+    const { poNumber } = req.params;
+    const workOrder = await WorkOrder.findByPk(req.params.id, {
+      include: [{ model: WorkOrderPart, as: 'parts' }]
+    });
+    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+
+    const affectedParts = [];
+    let vendorId = null;
+    let serviceType = null;
+    for (const part of (workOrder.parts || [])) {
+      const ops = part.outsideProcessing || [];
+      const matchingOp = ops.find(op => op.poNumber === poNumber && !op.cancelled);
+      if (matchingOp) {
+        affectedParts.push({ part, op: matchingOp });
+        vendorId = matchingOp.vendorId;
+        serviceType = matchingOp.serviceType;
+      }
+    }
+    if (affectedParts.length === 0) {
+      return res.status(404).json({ error: { message: 'PO not found or already cancelled' } });
+    }
+
+    const vendor = await Vendor.findByPk(vendorId);
+    if (!vendor) return res.status(404).json({ error: { message: 'Vendor not found' } });
+
+    const firstOp = affectedParts[0].op;
+    const partsForPdf = affectedParts.map(ap => ap.part);
+    const pdfBuffer = await generateOutsideProcessingPO(
+      poNumber, vendor, partsForPdf, workOrder, serviceType,
+      firstOp.notes || '', firstOp.expectedReturn || null, 0, parseFloat(firstOp.expediteCost) || 0
+    );
+
+    const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, {
+      folder: 'outside-processing-pos',
+      filename: `${poNumber}-${workOrder.drNumber}-regen.pdf`,
+      mimeType: 'application/pdf'
+    });
+
+    // Delete old PDF document
+    const oldDocs = await WorkOrderDocument.findAll({
+      where: { workOrderId: workOrder.id, documentType: 'outside_processing_po' }
+    });
+    for (const oldDoc of oldDocs) {
+      if (oldDoc.originalName && oldDoc.originalName.includes(poNumber) && !oldDoc.originalName.includes('CANCELLED')) {
+        await oldDoc.destroy();
+      }
+    }
+
+    await WorkOrderDocument.create({
+      workOrderId: workOrder.id,
+      originalName: `${poNumber} - ${vendor.name} (${serviceType}).pdf`,
+      mimeType: 'application/pdf',
+      size: pdfBuffer.length,
+      url: uploadResult.url,
+      cloudinaryId: uploadResult.storageId,
+      documentType: 'outside_processing_po'
+    });
+
+    console.log(`[OP regen] Regenerated ${poNumber}`);
+    res.json({ data: { poNumber }, message: `${poNumber} PDF regenerated` });
+  } catch (error) {
+    console.error('[OP regen] Error:', error);
+    next(error);
+  }
+});
+
+// DELETE /api/workorders/:id/outside-processing/:poNumber
+// Cancel an OP PO. Marks it cancelled, clears poNumber so the group can be re-issued,
+// renames the PDF doc, marks the matching inbound order as cancelled.
+// Body: { reason: string }
+router.delete('/:id/outside-processing/:poNumber', async (req, res, next) => {
+  try {
+    const { poNumber } = req.params;
+    const { reason } = req.body || {};
+    if (!reason || !reason.trim()) {
+      return res.status(400).json({ error: { message: 'Cancellation reason is required' } });
+    }
+
+    const workOrder = await WorkOrder.findByPk(req.params.id, {
+      include: [{ model: WorkOrderPart, as: 'parts' }]
+    });
+    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+
+    const affectedParts = [];
+    let vendorName = null;
+    for (const part of (workOrder.parts || [])) {
+      const ops = part.outsideProcessing || [];
+      const matchingOp = ops.find(op => op.poNumber === poNumber && !op.cancelled);
+      if (matchingOp) {
+        affectedParts.push({ part, op: matchingOp });
+        vendorName = matchingOp.vendorName;
+      }
+    }
+    if (affectedParts.length === 0) {
+      return res.status(404).json({ error: { message: 'PO not found or already cancelled' } });
+    }
+
+    // Mark op cancelled and clear poNumber so the group can be re-issued
+    const cancelledAt = new Date();
+    const cancelledBy = req.user?.username || req.operatorName || 'Admin';
+    for (const { part, op } of affectedParts) {
+      const newOps = (part.outsideProcessing || []).map(o => {
+        if (o.poNumber === poNumber && !o.cancelled) {
+          return {
+            ...o,
+            cancelled: true,
+            cancelledAt,
+            cancelledBy,
+            cancelledReason: reason.trim(),
+            cancelledPONumber: poNumber, // preserve historical PO number
+            poNumber: null,              // clear so user can re-generate
+            poSentAt: null,
+            inboundOrderId: null
+          };
+        }
+        return o;
+      });
+      await part.update({ outsideProcessing: newOps });
+    }
+
+    // Rename the PDF document(s) to mark cancelled
+    const oldDocs = await WorkOrderDocument.findAll({
+      where: { workOrderId: workOrder.id, documentType: 'outside_processing_po' }
+    });
+    for (const oldDoc of oldDocs) {
+      if (oldDoc.originalName && oldDoc.originalName.includes(poNumber) && !oldDoc.originalName.includes('CANCELLED')) {
+        await oldDoc.update({
+          originalName: `[CANCELLED] ${oldDoc.originalName}`
+        });
+      }
+    }
+
+    // Cancel matching inbound order(s)
+    try {
+      const inboundOrders = await InboundOrder.findAll({
+        where: { workOrderId: workOrder.id, purchaseOrderNumber: poNumber }
+      });
+      for (const io of inboundOrders) {
+        await io.update({
+          status: 'cancelled',
+          notes: (io.notes || '') + `\n\n[CANCELLED ${cancelledAt.toISOString()}] ${reason.trim()}`
+        });
+      }
+    } catch (e) {
+      console.error('[OP cancel] Inbound order cancel failed:', e.message);
+    }
+
+    console.log(`[OP cancel] Cancelled ${poNumber} (${affectedParts.length} parts) — reason: ${reason}`);
+    res.json({
+      data: { poNumber, vendorName, partsCount: affectedParts.length, reason: reason.trim() },
+      message: `${poNumber} cancelled. Parts can be re-issued with a new PO number.`
+    });
+  } catch (error) {
+    console.error('[OP cancel] Error:', error);
     next(error);
   }
 });

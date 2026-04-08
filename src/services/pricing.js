@@ -229,6 +229,10 @@ function buildWorkOrderPartFromEstimate(estimatePart) {
     if ((val === null || val === undefined || val === '' || val === 0) && fd[field] !== undefined) {
       val = fd[field];
     }
+    // Special case: if outsideProcessing is an empty array but formData has a populated one, use formData
+    if (field === 'outsideProcessing' && Array.isArray(val) && val.length === 0 && Array.isArray(fd[field]) && fd[field].length > 0) {
+      val = fd[field];
+    }
     if (val !== undefined) {
       data[field] = val;
     }

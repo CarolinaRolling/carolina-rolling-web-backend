@@ -102,81 +102,6 @@ function sanitizePartForVendor(part) {
   };
 }
 
-/**
- * Get the linked part ID for a Fab Service / Shop Rate part.
- * Fab Services link to a parent part via _linkedPartId (stored on the part itself
- * or inside formData). Returns null for non-linked parts.
- */
-function getLinkedParentId(part) {
-  if (!['fab_service', 'shop_rate'].includes(part.partType)) return null;
-  return part._linkedPartId || (part.formData && part.formData._linkedPartId) || null;
-}
-
-/**
- * Given a part and the full list of parts on a work order, compute the set of
- * "related parts" that should share vendor access:
- *   - The part itself
- *   - If the part is a Fab Service linked to a parent, the parent part
- *   - Any Fab Services that link TO this part
- * Returns an array of WorkOrderPart instances (possibly including the original).
- */
-function getRelatedParts(part, allParts) {
-  const related = [part];
-  const seen = new Set([String(part.id)]);
-
-  // If this is a Fab Service, add its parent
-  const parentId = getLinkedParentId(part);
-  if (parentId) {
-    const parent = allParts.find(p => String(p.id) === String(parentId));
-    if (parent && !seen.has(String(parent.id))) {
-      related.push(parent);
-      seen.add(String(parent.id));
-    }
-  }
-
-  // Add any Fab Services that link TO this part
-  for (const other of allParts) {
-    if (seen.has(String(other.id))) continue;
-    const otherParentId = getLinkedParentId(other);
-    if (otherParentId && String(otherParentId) === String(part.id)) {
-      related.push(other);
-      seen.add(String(other.id));
-    }
-  }
-
-  return related;
-}
-
-/**
- * Check if a vendor has access to a given part (directly or via related parts).
- * Access is granted if ANY of:
- *   - The part's vendorId equals the vendor (material supplier)
- *   - Any op in part.outsideProcessing has vendorId equals the vendor (outside processor)
- *   - Any related part (linked parent or linked children) satisfies either of the above
- * @param {WorkOrderPart} part - the part to check access for
- * @param {string} vendorId - the vendor ID to check
- * @param {WorkOrderPart[]} allParts - all parts on the work order (for walking links)
- * @returns {boolean}
- */
-function vendorHasAccessToPart(part, vendorId, allParts) {
-  if (!vendorId) return false;
-  const related = getRelatedParts(part, allParts || [part]);
-  for (const rp of related) {
-    // Material supplier check
-    if (rp.vendorId && String(rp.vendorId) === String(vendorId)) {
-      return true;
-    }
-    // Outside processor check
-    const ops = rp.outsideProcessing || [];
-    for (const op of ops) {
-      if (op.vendorId && String(op.vendorId) === String(vendorId)) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
 // =============================================================================
 // GET /api/vendor-portal/purchase-orders
 // List all active POs for this vendor across OP operations, trucking trips, etc.
@@ -191,39 +116,26 @@ router.get('/purchase-orders', authenticate, requireVendorScope, async (req, res
       return res.json({ data: [] }); // vendor name on api key but no matching record — return empty
     }
 
-    // Find all work orders that have ANY relevant vendor assignment.
-    // Include files so we can count shared files per PO.
+    // Find all work orders that have ANY OP operation or transport trip for this vendor
+    // We need to scan through all active WOs since OP ops and transports are in JSONB.
     const workOrders = await WorkOrder.findAll({
       where: {
         status: { [Op.notIn]: ['completed', 'shipped', 'cancelled', 'voided'] },
         isVoided: { [Op.not]: true }
       },
-      include: [{
-        model: WorkOrderPart,
-        as: 'parts',
-        include: [{ model: WorkOrderPartFile, as: 'files' }]
-      }],
+      include: [{ model: WorkOrderPart, as: 'parts' }],
       order: [['createdAt', 'DESC']]
     });
 
     const result = [];
     for (const wo of workOrders) {
       const pos = [];
-      const allParts = wo.parts || [];
 
       // 1. Outside processing POs — nested in part.outsideProcessing JSONB
-      //    A PO shows up here if its op is assigned to this vendor.
-      for (const part of allParts) {
+      for (const part of (wo.parts || [])) {
         const ops = part.outsideProcessing || [];
         for (const op of ops) {
           if (op.vendorId === vendor.id && op.poNumber) {
-            // Count shared files reachable from this part via related-parts walk
-            const relatedParts = getRelatedParts(part, allParts);
-            let fileCount = 0;
-            for (const rp of relatedParts) {
-              const files = rp.files || [];
-              fileCount += files.filter(f => f.vendorPortalVisible === true).length;
-            }
             pos.push({
               poNumber: op.poNumber,
               poType: 'outside_processing',
@@ -233,58 +145,13 @@ router.get('/purchase-orders', authenticate, requireVendorScope, async (req, res
               clientPartNumber: part.clientPartNumber || null,
               quantity: part.quantity,
               sentAt: op.poSentAt || null,
-              fileCount
               // No cost included
             });
           }
         }
       }
 
-      // 2. Material POs — when this vendor is the material supplier (part.vendorId)
-      //    Group by materialPurchaseOrderNumber (many parts can share one PO).
-      const materialPoMap = {}; // { poNumber: { parts: [...], firstPart: ... } }
-      for (const part of allParts) {
-        if (part.vendorId === vendor.id && part.materialPurchaseOrderNumber) {
-          const poNum = part.materialPurchaseOrderNumber;
-          if (!materialPoMap[poNum]) {
-            materialPoMap[poNum] = { poNumber: poNum, parts: [], firstPart: part };
-          }
-          materialPoMap[poNum].parts.push(part);
-        }
-      }
-      for (const poNum of Object.keys(materialPoMap)) {
-        const grp = materialPoMap[poNum];
-        // Count files on all parts in this material PO group AND their related parts
-        let fileCount = 0;
-        const countedFileIds = new Set();
-        for (const p of grp.parts) {
-          const relatedParts = getRelatedParts(p, allParts);
-          for (const rp of relatedParts) {
-            const files = rp.files || [];
-            for (const f of files) {
-              if (f.vendorPortalVisible === true && !countedFileIds.has(f.id)) {
-                countedFileIds.add(f.id);
-                fileCount++;
-              }
-            }
-          }
-        }
-        pos.push({
-          poNumber: poNum,
-          poType: 'material',
-          serviceType: null,
-          partId: grp.firstPart.id,
-          partNumber: grp.firstPart.partNumber,
-          clientPartNumber: grp.firstPart.clientPartNumber || null,
-          quantity: grp.parts.reduce((sum, p) => sum + (parseInt(p.quantity) || 0), 0),
-          sentAt: grp.firstPart.materialOrderedAt || null,
-          fileCount,
-          partCount: grp.parts.length
-          // No cost included
-        });
-      }
-
-      // 3. Trucking POs (legacy) — nested in wo.opTransports JSONB
+      // 2. Trucking POs — nested in wo.opTransports JSONB
       const trips = wo.opTransports || [];
       for (const trip of trips) {
         if (trip.truckingVendorId === vendor.id && trip.poNumber) {
@@ -293,8 +160,7 @@ router.get('/purchase-orders', authenticate, requireVendorScope, async (req, res
             poType: 'transport',
             leg: trip.leg || null,
             sentAt: trip.poSentAt || null,
-            allocationMode: trip.allocationMode || null,
-            fileCount: 0 // transport POs don't carry files
+            allocationMode: trip.allocationMode || null
             // No cost included
           });
         }
@@ -346,7 +212,7 @@ router.get('/purchase-orders/:poNumber', authenticate, requireVendorScope, async
     let matchedPartIds = []; // parts this PO covers
 
     for (const wo of workOrders) {
-      // Check OP POs (outside processing / service POs)
+      // Check OP POs
       for (const part of (wo.parts || [])) {
         const ops = part.outsideProcessing || [];
         for (const op of ops) {
@@ -364,25 +230,7 @@ router.get('/purchase-orders/:poNumber', authenticate, requireVendorScope, async
         }
       }
 
-      // Check Material POs — match parts where vendorId + materialPurchaseOrderNumber match
-      if (!matchedWo) {
-        const matchingMaterialParts = (wo.parts || []).filter(p =>
-          p.vendorId === vendor.id && p.materialPurchaseOrderNumber === poNumber
-        );
-        if (matchingMaterialParts.length > 0) {
-          matchedWo = wo;
-          poType = 'material';
-          poInfo = {
-            poNumber: poNumber,
-            poType: 'material',
-            serviceType: null,
-            sentAt: matchingMaterialParts[0].materialOrderedAt || null
-          };
-          matchedPartIds = matchingMaterialParts.map(p => p.id);
-        }
-      }
-
-      // Check Trucking POs (legacy)
+      // Check Trucking POs
       if (!matchedWo) {
         const trips = wo.opTransports || [];
         for (const trip of trips) {
@@ -417,32 +265,19 @@ router.get('/purchase-orders/:poNumber', authenticate, requireVendorScope, async
     }
 
     // Build parts list — only parts that are on this PO
-    const allParts = matchedWo.parts || [];
-    const relevantParts = allParts.filter(p => matchedPartIds.includes(p.id));
-    // Build a deduped file list per part by walking related parts
+    const relevantParts = (matchedWo.parts || []).filter(p => matchedPartIds.includes(p.id));
     const parts = relevantParts.map(p => {
       const sanitized = sanitizePartForVendor(p);
-      // Collect files from this part AND any related (linked) parts
-      const relatedParts = getRelatedParts(p, allParts);
-      const seenFileIds = new Set();
-      const files = [];
-      for (const rp of relatedParts) {
-        const rpFiles = rp.files || [];
-        for (const f of rpFiles) {
-          if (f.vendorPortalVisible !== true) continue;
-          if (seenFileIds.has(f.id)) continue;
-          seenFileIds.add(f.id);
-          files.push({
-            id: f.id,
-            originalName: f.originalName || f.filename,
-            fileType: f.fileType,
-            mimeType: f.mimeType,
-            size: f.size,
-            sourcePartNumber: rp.id === p.id ? null : rp.partNumber // indicate if file came from a linked part
-          });
-        }
-      }
-      sanitized.files = files;
+      // Attach shared files for this part
+      sanitized.files = (p.files || [])
+        .filter(f => f.vendorPortalVisible === true)
+        .map(f => ({
+          id: f.id,
+          originalName: f.originalName || f.filename,
+          fileType: f.fileType,
+          mimeType: f.mimeType,
+          size: f.size
+        }));
       return sanitized;
     });
 
@@ -486,20 +321,18 @@ router.get('/files/:fileId/download', authenticate, requireVendorScope, async (r
       return res.status(403).json({ error: { message: 'File not shared with vendor portal' } });
     }
 
-    // Verify this vendor has access to this file's part (directly or via linked parts)
+    // Verify this vendor has a PO on this part or its WO
     const part = file.part;
     const wo = part?.workOrder;
     if (!wo || wo.isVoided) {
       return res.status(403).json({ error: { message: 'Work order not accessible' } });
     }
 
-    // Load ALL parts on this WO (needed to walk linked-part relationships)
-    const allParts = await WorkOrderPart.findAll({ where: { workOrderId: wo.id } });
-
-    // Check access via: material supplier, outside processor, or any related part
-    let hasAccess = vendorHasAccessToPart(part, vendor.id, allParts);
-
-    // Legacy fallback: transport PO access (old opTransports system)
+    let hasAccess = false;
+    const ops = part.outsideProcessing || [];
+    for (const op of ops) {
+      if (op.vendorId === vendor.id) { hasAccess = true; break; }
+    }
     if (!hasAccess) {
       const trips = wo.opTransports || [];
       for (const trip of trips) {
@@ -563,19 +396,10 @@ router.post('/issues', authenticate, requireVendorScope, upload.single('photo'),
       return res.status(404).json({ error: { message: 'Work order not found' } });
     }
 
-    // Verify this vendor has access to this WO:
-    //  - Material supplier on any part
-    //  - Outside processor on any part's ops
-    //  - Legacy transport trip
+    // Verify this vendor has a PO on this WO (either via OP or transport)
     const parts = await WorkOrderPart.findAll({ where: { workOrderId: wo.id } });
     let hasAccess = false;
     for (const p of parts) {
-      // Material supplier check
-      if (p.vendorId && vendor?.id && String(p.vendorId) === String(vendor.id)) {
-        hasAccess = true;
-        break;
-      }
-      // Outside processor check
       const ops = p.outsideProcessing || [];
       if (ops.some(op => op.vendorId === vendor?.id)) { hasAccess = true; break; }
     }

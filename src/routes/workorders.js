@@ -443,7 +443,7 @@ async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
 }
 
 // Generate Outside Processing PO PDF
-async function generateOutsideProcessingPO(poNumber, vendor, parts, workOrder, serviceType, notes, expectedReturn, transportCost, expediteCost, vendorSuppliesMaterial) {
+async function generateOutsideProcessingPO(poNumber, vendor, parts, workOrder, serviceType, notes, expectedReturn, transportCost, expediteCost) {
   const PDFDocument = require('pdfkit');
   return new Promise((resolve, reject) => {
     try {
@@ -605,34 +605,23 @@ async function generateOutsideProcessingPO(poNumber, vendor, parts, workOrder, s
         doc.fontSize(8).font('Helvetica').fillColor('#444').text(notes, L + 8, rowY + 70, { width: W - 16 });
       }
 
-      // Material supply banner — always show, stating who supplies material.
-      // If vendorSuppliesMaterial is true, explicitly request MTRs. Always request protective film on finished parts.
-      const bannerY = rowY + (notes ? 100 : 60);
-      const vendorSupplies = !!vendorSuppliesMaterial;
-      const bannerBg = vendorSupplies ? '#FFF3E0' : '#E3F2FD';
-      const bannerStroke = vendorSupplies ? '#E65100' : '#1565C0';
-      const bannerTextColor = vendorSupplies ? '#E65100' : '#0D47A1';
-      const supplierName = vendorSupplies ? (vendor.name || 'Vendor') : 'Carolina Rolling';
-      const headline = vendorSupplies
-        ? `⚠ ${supplierName.toUpperCase()} TO SUPPLY MATERIAL`
-        : `MATERIAL SUPPLIED BY: ${supplierName.toUpperCase()}`;
-      const bodyLines = vendorSupplies
-        ? [
-            `${vendor.name || 'Vendor'} is responsible for sourcing the material for all parts on this PO.`,
-            `• Please include MTRs (Material Test Reports) with shipment.`,
-            `• If parts are finished, please apply protective film before return shipment.`
-          ]
-        : [
-            `Carolina Rolling will supply the material. Parts will be delivered to ${vendor.name || 'vendor'} for processing.`,
-            `• If parts are finished, please apply protective film before return shipment.`
-          ];
-      const bannerH = 18 + (bodyLines.length * 12) + 8;
-      doc.rect(L, bannerY, W, bannerH).fill(bannerBg).strokeColor(bannerStroke).lineWidth(1.5).stroke();
-      doc.fontSize(10).font('Helvetica-Bold').fillColor(bannerTextColor).text(headline, L + 8, bannerY + 6);
-      doc.fontSize(8).font('Helvetica').fillColor('#333');
-      bodyLines.forEach((line, i) => {
-        doc.text(line, L + 8, bannerY + 22 + (i * 12), { width: W - 16 });
-      });
+      // Vendor-supplies-material banner — show prominently if any part has the flag set
+      const vendorSuppliesParts = (parts || []).filter(p => p.materialSource === 'op_vendor_mat_supplied');
+      if (vendorSuppliesParts.length > 0) {
+        const allParts = vendorSuppliesParts.length === (parts || []).length;
+        const bannerY = rowY + (notes ? 100 : 60);
+        doc.rect(L, bannerY, W, 50).fill('#FFF3E0').strokeColor('#E65100').lineWidth(1.5).stroke();
+        doc.fontSize(10).font('Helvetica-Bold').fillColor('#E65100').text(
+          allParts ? '⚠ MATERIAL TO BE SUPPLIED BY VENDOR' : '⚠ MATERIAL TO BE SUPPLIED BY VENDOR (SOME PARTS)',
+          L + 8, bannerY + 6
+        );
+        doc.fontSize(8).font('Helvetica').fillColor('#444').text(
+          allParts
+            ? `${vendor.name} is responsible for sourcing the material for all parts on this PO. Please include MTRs (Material Test Reports) with shipment.`
+            : `${vendor.name} is responsible for sourcing material for the following parts: ${vendorSuppliesParts.map(p => '#' + p.partNumber).join(', ')}. Please include MTRs (Material Test Reports) with shipment for these parts.`,
+          L + 8, bannerY + 22, { width: W - 16 }
+        );
+      }
 
       doc.end();
     } catch (err) {
@@ -5496,14 +5485,12 @@ router.post('/:id/services/auto-bulk', async (req, res, next) => {
         // Use the first op's notes/expedite for the PO PDF (representative)
         const firstOp = group.parts[0].op;
         const repExpedite = parseFloat(firstOp.expediteCost) || 0;
-        // If any op in this group has vendorSuppliesMaterial set, show the vendor-supplies banner
-        const groupVendorSupplies = group.parts.some(gp => !!gp.op.vendorSuppliesMaterial);
 
         // Generate PDF using the existing OP PO template (option A from plan)
         const partsForPdf = group.parts.map(gp => gp.part);
         const pdfBuffer = await generateOutsideProcessingPO(
           poNumber, vendor, partsForPdf, workOrder, repServiceType,
-          firstOp.notes || '', null, 0, repExpedite, groupVendorSupplies
+          firstOp.notes || '', null, 0, repExpedite
         );
 
         const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, {
@@ -5665,14 +5652,12 @@ router.post('/:id/services/:documentId/regen', async (req, res, next) => {
     const repServiceType = uniqueServiceTypes.join(' + ') || 'Subcontracted';
     const firstOp = groupParts[0].op;
     const repExpedite = parseFloat(firstOp.expediteCost) || 0;
-    // If any op in this group has vendorSuppliesMaterial set, show the vendor-supplies banner
-    const groupVendorSupplies = groupParts.some(gp => !!gp.op.vendorSuppliesMaterial);
 
     // Generate the new PDF
     const partsForPdf = groupParts.map(gp => gp.part);
     const pdfBuffer = await generateOutsideProcessingPO(
       poNumber, vendor, partsForPdf, workOrder, repServiceType,
-      firstOp.notes || '', null, 0, repExpedite, groupVendorSupplies
+      firstOp.notes || '', null, 0, repExpedite
     );
 
     // Delete the old file from storage (best-effort)

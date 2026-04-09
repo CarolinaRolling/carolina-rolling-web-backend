@@ -5248,6 +5248,202 @@ router.post('/:id/order-material', async (req, res, next) => {
   }
 });
 
+// POST /api/workorders/:id/services/auto-bulk
+// Generate POs for Fab Service parts that have a vendor + cost set but no PO yet.
+// Groups by vendor (one PO per vendor regardless of service type).
+// Uses the shared PO#### counter (not the legacy OP#### counter).
+router.post('/:id/services/auto-bulk', async (req, res, next) => {
+  const transaction = await sequelize.transaction();
+  try {
+    const workOrder = await WorkOrder.findByPk(req.params.id, {
+      include: [{ model: WorkOrderPart, as: 'parts' }],
+      transaction
+    });
+    if (!workOrder) {
+      await transaction.rollback();
+      return res.status(404).json({ error: { message: 'Work order not found' } });
+    }
+
+    // Optional: req.body.vendorIds to restrict to specific vendors (otherwise all eligible)
+    const filterVendorIds = Array.isArray(req.body.vendorIds) ? req.body.vendorIds : null;
+
+    // Build groups: { vendorId: { vendorId, vendorName, parts: [{part, op}], totalCost } }
+    // Only Fab Service / Shop Rate parts. Group across all service types per vendor.
+    const groups = {};
+    for (const part of (workOrder.parts || [])) {
+      if (!['fab_service', 'shop_rate'].includes(part.partType)) continue;
+      const ops = part.outsideProcessing || [];
+      for (const op of ops) {
+        if (!op.vendorId) continue; // skip ops with no vendor
+        if (op.poNumber) continue; // skip ops that already have a PO
+        const cost = parseFloat(op.costPerPart) || 0;
+        if (cost <= 0) continue; // skip ops with no cost
+        if (filterVendorIds && !filterVendorIds.includes(op.vendorId)) continue;
+        if (!groups[op.vendorId]) {
+          groups[op.vendorId] = {
+            vendorId: op.vendorId,
+            vendorName: op.vendorName || '',
+            parts: [],
+            totalCost: 0,
+            totalQty: 0
+          };
+        }
+        const qty = parseInt(part.quantity) || 1;
+        const expedite = parseFloat(op.expediteCost) || 0;
+        groups[op.vendorId].parts.push({ part, op });
+        groups[op.vendorId].totalCost += (cost * qty) + expedite;
+        groups[op.vendorId].totalQty += qty;
+      }
+    }
+
+    const groupKeys = Object.keys(groups);
+    if (groupKeys.length === 0) {
+      await transaction.rollback();
+      return res.status(400).json({
+        error: {
+          message: 'No service operations available to PO. Make sure Fab Service parts have a vendor and cost set, and that they don\'t already have a PO.'
+        }
+      });
+    }
+
+    // Pull next PO number from the SHARED counter
+    const poSetting = await AppSettings.findOne({ where: { key: 'next_po_number' }, transaction });
+    let basePONumber = poSetting?.value?.nextNumber || 1001;
+
+    const created = [];
+    const errors = [];
+
+    for (let i = 0; i < groupKeys.length; i++) {
+      const group = groups[groupKeys[i]];
+      try {
+        // Validate vendor exists
+        const vendor = await Vendor.findByPk(group.vendorId, { transaction });
+        if (!vendor) {
+          errors.push({ vendorName: group.vendorName, error: 'Vendor not found in database' });
+          continue;
+        }
+
+        const poNumberInt = basePONumber + i;
+        const poNumber = `PO${poNumberInt}`;
+
+        // Determine a representative service description (concat of unique service types in this group)
+        const uniqueServiceTypes = [...new Set(group.parts.map(gp => gp.op.serviceType).filter(Boolean))];
+        const repServiceType = uniqueServiceTypes.join(' + ') || 'Subcontracted';
+
+        // Use the first op's notes/expedite for the PO PDF (representative)
+        const firstOp = group.parts[0].op;
+        const repExpedite = parseFloat(firstOp.expediteCost) || 0;
+
+        // Generate PDF using the existing OP PO template (option A from plan)
+        const partsForPdf = group.parts.map(gp => gp.part);
+        const pdfBuffer = await generateOutsideProcessingPO(
+          poNumber, vendor, partsForPdf, workOrder, repServiceType,
+          firstOp.notes || '', null, 0, repExpedite
+        );
+
+        const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, {
+          folder: 'service-pos',
+          filename: `${poNumber}-${workOrder.drNumber}.pdf`,
+          mimeType: 'application/pdf'
+        });
+
+        await WorkOrderDocument.create({
+          workOrderId: workOrder.id,
+          originalName: `${poNumber} - ${vendor.name}.pdf`,
+          mimeType: 'application/pdf',
+          size: pdfBuffer.length,
+          url: uploadResult.url,
+          cloudinaryId: uploadResult.storageId,
+          documentType: 'outside_processing_po'
+        }, { transaction });
+
+        // Create PONumber row in the shared tracker
+        try {
+          await PONumber.create({
+            poNumber: poNumberInt,
+            status: 'active',
+            supplier: vendor.name,
+            vendorId: vendor.id,
+            workOrderId: workOrder.id,
+            clientName: workOrder.clientName,
+            description: `Service PO: ${repServiceType} — ${group.parts.length} part(s)`
+          }, { transaction });
+        } catch (poErr) {
+          console.warn('[services auto-bulk] PONumber row create failed (may already exist):', poErr.message);
+        }
+
+        // Create matching inbound order
+        let inboundOrderId = null;
+        try {
+          const partDescriptions = group.parts
+            .map(gp => `#${gp.part.partNumber}${gp.part.clientPartNumber ? ' (' + gp.part.clientPartNumber + ')' : ''} × ${gp.part.quantity}`)
+            .join(', ');
+          const inbound = await InboundOrder.create({
+            purchaseOrderNumber: poNumber,
+            supplier: vendor.name,
+            supplierName: vendor.name,
+            vendorId: vendor.id,
+            description: `${repServiceType}: ${partDescriptions}`,
+            clientName: workOrder.clientName,
+            workOrderId: workOrder.id,
+            status: 'pending',
+            notes: `Service return — ${repServiceType} from ${vendor.name}\nDR-${workOrder.drNumber}`
+          }, { transaction });
+          inboundOrderId = inbound.id;
+        } catch (e) {
+          console.error('[services auto-bulk] Inbound order creation failed:', e.message);
+        }
+
+        // Stamp the PO number onto each op in this group, preserving other ops on the same part
+        for (const gp of group.parts) {
+          const newOps = (gp.part.outsideProcessing || []).map(o => {
+            if (o.id === gp.op.id) {
+              return { ...o, poNumber, poSentAt: new Date(), inboundOrderId };
+            }
+            return o;
+          });
+          await gp.part.update({ outsideProcessing: newOps }, { transaction });
+        }
+
+        created.push({
+          poNumber,
+          vendorName: vendor.name,
+          partCount: group.parts.length,
+          totalCost: group.totalCost.toFixed(2),
+          inboundOrderId
+        });
+
+        console.log(`[services auto-bulk] Created ${poNumber} for ${vendor.name} — ${group.parts.length} parts, $${group.totalCost.toFixed(2)}`);
+      } catch (groupErr) {
+        console.error(`[services auto-bulk] Group failed (${group.vendorName}):`, groupErr.message);
+        errors.push({ vendorName: group.vendorName, error: groupErr.message });
+      }
+    }
+
+    // Update next PO number setting
+    if (created.length > 0) {
+      const nextPO = basePONumber + groupKeys.length;
+      await AppSettings.upsert({
+        key: 'next_po_number',
+        value: { nextNumber: nextPO }
+      }, { transaction });
+    }
+
+    await transaction.commit();
+
+    res.json({
+      data: { created, errors },
+      message: created.length === 1
+        ? `Created 1 service PO`
+        : `Created ${created.length} service POs${errors.length ? ` (${errors.length} failed)` : ''}`
+    });
+  } catch (error) {
+    await transaction.rollback();
+    console.error('[services auto-bulk] Error:', error);
+    next(error);
+  }
+});
+
 // ============= ESTIMATE LINKING =============
 
 // GET /api/workorders/linkable-estimates - Search for estimates that can be linked

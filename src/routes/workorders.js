@@ -3767,16 +3767,86 @@ router.get('/:id/documents/:documentId/download', async (req, res, next) => {
 
 // DELETE /api/workorders/:id/documents/:documentId - Delete document
 router.delete('/:id/documents/:documentId', async (req, res, next) => {
+  const transaction = await sequelize.transaction();
   try {
     const document = await WorkOrderDocument.findOne({
       where: { 
         id: req.params.documentId,
         workOrderId: req.params.id
-      }
+      },
+      transaction
     });
 
     if (!document) {
+      await transaction.rollback();
       return res.status(404).json({ error: { message: 'Document not found' } });
+    }
+
+    // === SERVICE PO FULL CLEANUP ===
+    // If deleting a service PO, also clear the JSONB stamps on affected parts,
+    // delete the PONumber row, and cancel the InboundOrder (if pending)
+    if (document.documentType === 'outside_processing_po') {
+      const poMatch = document.originalName?.match(/^(PO\d+)/);
+      const poNumberStr = poMatch ? poMatch[1] : null;
+      const poNumberInt = poNumberStr ? parseInt(poNumberStr.replace(/\D/g, '')) : null;
+
+      if (poNumberStr) {
+        // 1. Find and clear JSONB stamps on all parts with ops matching this PO
+        const wo = await WorkOrder.findByPk(req.params.id, {
+          include: [{ model: WorkOrderPart, as: 'parts' }],
+          transaction
+        });
+        if (wo && wo.parts) {
+          for (const part of wo.parts) {
+            if (!['fab_service', 'shop_rate'].includes(part.partType)) continue;
+            const ops = part.outsideProcessing || [];
+            let changed = false;
+            const newOps = ops.map(op => {
+              if (op.poNumber === poNumberStr) {
+                changed = true;
+                const { poNumber, poSentAt, inboundOrderId, ...rest } = op;
+                return rest;
+              }
+              return op;
+            });
+            if (changed) {
+              await part.update({ outsideProcessing: newOps }, { transaction });
+              console.log(`[delete-service-po] Cleared PO stamp on part ${part.id}`);
+            }
+          }
+        }
+
+        // 2. Delete the InboundOrder (only if still pending — don't touch received ones)
+        try {
+          const inbound = await InboundOrder.findOne({
+            where: { purchaseOrderNumber: poNumberStr, workOrderId: req.params.id },
+            transaction
+          });
+          if (inbound) {
+            if (inbound.status === 'pending' || inbound.status === 'ordered') {
+              await inbound.destroy({ transaction });
+              console.log(`[delete-service-po] Deleted pending InboundOrder ${inbound.id}`);
+            } else {
+              console.log(`[delete-service-po] InboundOrder ${inbound.id} has status ${inbound.status} — leaving it intact`);
+            }
+          }
+        } catch (e) {
+          console.error('[delete-service-po] InboundOrder cleanup failed:', e.message);
+        }
+
+        // 3. Delete the PONumber row from the shared tracker
+        if (poNumberInt) {
+          try {
+            await PONumber.destroy({
+              where: { poNumber: poNumberInt, workOrderId: req.params.id },
+              transaction
+            });
+            console.log(`[delete-service-po] Deleted PONumber row ${poNumberInt}`);
+          } catch (e) {
+            console.error('[delete-service-po] PONumber cleanup failed:', e.message);
+          }
+        }
+      }
     }
 
     // Delete from Cloudinary
@@ -3788,10 +3858,12 @@ router.delete('/:id/documents/:documentId', async (req, res, next) => {
       }
     }
 
-    await document.destroy();
+    await document.destroy({ transaction });
+    await transaction.commit();
 
     res.json({ message: 'Document deleted successfully' });
   } catch (error) {
+    await transaction.rollback();
     next(error);
   }
 });
@@ -3818,7 +3890,7 @@ router.post('/:id/documents/:documentId/regenerate', async (req, res, next) => {
     if (!doc) {
       return res.status(404).json({ error: { message: 'Document not found' } });
     }
-    if (doc.documentType !== 'purchase_order') {
+    if (doc.documentType !== 'purchase_order' && doc.documentType !== 'outside_processing_po') {
       return res.status(400).json({ error: { message: 'Only purchase order PDFs can be regenerated' } });
     }
 
@@ -3833,6 +3905,76 @@ router.post('/:id/documents/:documentId/regenerate', async (req, res, next) => {
     const poMatch = doc.originalName?.match(/^(PO\d+)/);
     const poNumber = poMatch ? poMatch[1] : 'PO0000';
 
+    // === SERVICE PO REGEN ===
+    if (doc.documentType === 'outside_processing_po') {
+      // Find Fab Service parts whose JSONB outsideProcessing[] contains this poNumber
+      const servicePoParts = [];
+      let serviceVendor = null;
+      const serviceTypes = new Set();
+      let repNotes = '';
+      let repExpedite = 0;
+      for (const p of workOrder.parts) {
+        if (!['fab_service', 'shop_rate'].includes(p.partType)) continue;
+        const ops = p.outsideProcessing || [];
+        for (const op of ops) {
+          if (op.poNumber === poNumber) {
+            servicePoParts.push(p);
+            if (!serviceVendor && op.vendorId) {
+              serviceVendor = await Vendor.findByPk(op.vendorId);
+            }
+            if (op.serviceType) serviceTypes.add(op.serviceType);
+            if (op.notes && !repNotes) repNotes = op.notes;
+            const e = parseFloat(op.expediteCost) || 0;
+            if (e > repExpedite) repExpedite = e;
+            break; // one op per part counts — the PDF lists the part once
+          }
+        }
+      }
+
+      if (servicePoParts.length === 0) {
+        return res.status(400).json({ error: { message: 'No parts found for this service PO. It may have been cleared.' } });
+      }
+      if (!serviceVendor) {
+        return res.status(400).json({ error: { message: 'Vendor not found for this service PO' } });
+      }
+
+      const repServiceType = [...serviceTypes].join(' + ') || 'Subcontracted';
+
+      console.log(`[regenerate-po] Regenerating SERVICE ${poNumber} for ${serviceVendor.name} (${servicePoParts.length} parts)`);
+
+      const pdfBuffer = await generateOutsideProcessingPO(
+        poNumber, serviceVendor, servicePoParts, workOrder, repServiceType,
+        repNotes, null, 0, repExpedite
+      );
+
+      // Delete old Cloudinary file
+      if (doc.cloudinaryId) {
+        try {
+          await fileStorage.deleteFile(doc.cloudinaryId);
+        } catch (e) {
+          console.error('[regenerate-po] Failed to delete old file:', e.message);
+        }
+      }
+
+      const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, {
+        folder: 'service-pos',
+        filename: `${poNumber}-${workOrder.drNumber}.pdf`,
+        mimeType: 'application/pdf'
+      });
+
+      await doc.update({
+        url: uploadResult.url,
+        cloudinaryId: uploadResult.storageId,
+        size: pdfBuffer.length
+      });
+
+      return res.json({
+        message: 'Service PO PDF regenerated successfully',
+        data: { url: uploadResult.url, cloudinaryId: uploadResult.storageId }
+      });
+    }
+
+    // === MATERIAL PO REGEN (existing logic) ===
     // Find parts linked to this PO
     const poParts = workOrder.parts.filter(p => p.materialPurchaseOrderNumber === poNumber);
     
@@ -5306,9 +5448,19 @@ router.post('/:id/services/auto-bulk', async (req, res, next) => {
       });
     }
 
-    // Pull next PO number from the SHARED counter
-    const poSetting = await AppSettings.findOne({ where: { key: 'next_po_number' }, transaction });
-    let basePONumber = poSetting?.value?.nextNumber || 1001;
+    // Pull next PO number from the SHARED counter unless caller provided an override
+    let basePONumber;
+    if (req.body.startingPONumber !== undefined && req.body.startingPONumber !== null && req.body.startingPONumber !== '') {
+      const override = parseInt(req.body.startingPONumber);
+      if (isNaN(override) || override <= 0) {
+        await transaction.rollback();
+        return res.status(400).json({ error: { message: 'Invalid starting PO number' } });
+      }
+      basePONumber = override;
+    } else {
+      const poSetting = await AppSettings.findOne({ where: { key: 'next_po_number' }, transaction });
+      basePONumber = poSetting?.value?.nextNumber || 1001;
+    }
 
     const created = [];
     const errors = [];
@@ -5420,13 +5572,17 @@ router.post('/:id/services/auto-bulk', async (req, res, next) => {
       }
     }
 
-    // Update next PO number setting
+    // Update next PO number setting — only advance forward, never backward
     if (created.length > 0) {
-      const nextPO = basePONumber + groupKeys.length;
-      await AppSettings.upsert({
-        key: 'next_po_number',
-        value: { nextNumber: nextPO }
-      }, { transaction });
+      const highestUsed = basePONumber + groupKeys.length;
+      const currentSetting = await AppSettings.findOne({ where: { key: 'next_po_number' }, transaction });
+      const currentNext = currentSetting?.value?.nextNumber || 1001;
+      if (highestUsed > currentNext) {
+        await AppSettings.upsert({
+          key: 'next_po_number',
+          value: { nextNumber: highestUsed }
+        }, { transaction });
+      }
     }
 
     await transaction.commit();
@@ -5440,6 +5596,195 @@ router.post('/:id/services/auto-bulk', async (req, res, next) => {
   } catch (error) {
     await transaction.rollback();
     console.error('[services auto-bulk] Error:', error);
+    next(error);
+  }
+});
+
+// POST /api/workorders/:id/services/:documentId/regen
+// Regenerate a service PO PDF using current WO data.
+// Finds the vendor from the document name, rebuilds the PDF, replaces the file.
+router.post('/:id/services/:documentId/regen', async (req, res, next) => {
+  try {
+    const workOrder = await WorkOrder.findByPk(req.params.id, {
+      include: [{ model: WorkOrderPart, as: 'parts' }]
+    });
+    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+
+    const doc = await WorkOrderDocument.findByPk(req.params.documentId);
+    if (!doc) return res.status(404).json({ error: { message: 'Document not found' } });
+    if (doc.workOrderId !== workOrder.id) {
+      return res.status(400).json({ error: { message: 'Document does not belong to this work order' } });
+    }
+    if (doc.documentType !== 'outside_processing_po') {
+      return res.status(400).json({ error: { message: 'Not a service PO document' } });
+    }
+
+    // Extract PO number from document name (format: "PO#### - VendorName.pdf")
+    const poMatch = (doc.originalName || '').match(/^(PO\d+)/);
+    if (!poMatch) {
+      return res.status(400).json({ error: { message: 'Cannot extract PO number from document name' } });
+    }
+    const poNumber = poMatch[1];
+
+    // Find all parts/ops that reference this PO number
+    const groupParts = [];
+    let groupVendorId = null;
+    for (const part of (workOrder.parts || [])) {
+      if (!['fab_service', 'shop_rate'].includes(part.partType)) continue;
+      const ops = part.outsideProcessing || [];
+      for (const op of ops) {
+        if (op.poNumber === poNumber) {
+          groupParts.push({ part, op });
+          if (!groupVendorId) groupVendorId = op.vendorId;
+        }
+      }
+    }
+
+    if (groupParts.length === 0) {
+      return res.status(400).json({ error: { message: 'No parts found with this PO number — cannot regenerate' } });
+    }
+
+    const vendor = await Vendor.findByPk(groupVendorId);
+    if (!vendor) return res.status(400).json({ error: { message: 'Vendor no longer exists' } });
+
+    // Rebuild service type description + rep op
+    const uniqueServiceTypes = [...new Set(groupParts.map(gp => gp.op.serviceType).filter(Boolean))];
+    const repServiceType = uniqueServiceTypes.join(' + ') || 'Subcontracted';
+    const firstOp = groupParts[0].op;
+    const repExpedite = parseFloat(firstOp.expediteCost) || 0;
+
+    // Generate the new PDF
+    const partsForPdf = groupParts.map(gp => gp.part);
+    const pdfBuffer = await generateOutsideProcessingPO(
+      poNumber, vendor, partsForPdf, workOrder, repServiceType,
+      firstOp.notes || '', null, 0, repExpedite
+    );
+
+    // Delete the old file from storage (best-effort)
+    if (doc.cloudinaryId) {
+      try { await fileStorage.deleteFile(doc.cloudinaryId); } catch (e) {
+        console.warn('[services regen] Old file delete failed:', e.message);
+      }
+    }
+
+    // Upload the new file
+    const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, {
+      folder: 'service-pos',
+      filename: `${poNumber}-${workOrder.drNumber}-regen.pdf`,
+      mimeType: 'application/pdf'
+    });
+
+    // Update the document record
+    await doc.update({
+      url: uploadResult.url,
+      cloudinaryId: uploadResult.storageId,
+      size: pdfBuffer.length
+    });
+
+    res.json({
+      data: { poNumber, vendorName: vendor.name, partCount: groupParts.length },
+      message: `Regenerated ${poNumber}`
+    });
+  } catch (error) {
+    console.error('[services regen] Error:', error);
+    next(error);
+  }
+});
+
+// DELETE /api/workorders/:id/services/:documentId
+// Delete a service PO: removes document + file, clears JSONB poNumber stamps on matching ops,
+// deletes the PONumber row from the shared tracker, and deletes the InboundOrder (if still pending).
+router.delete('/:id/services/:documentId', async (req, res, next) => {
+  const transaction = await sequelize.transaction();
+  try {
+    const workOrder = await WorkOrder.findByPk(req.params.id, {
+      include: [{ model: WorkOrderPart, as: 'parts' }],
+      transaction
+    });
+    if (!workOrder) {
+      await transaction.rollback();
+      return res.status(404).json({ error: { message: 'Work order not found' } });
+    }
+
+    const doc = await WorkOrderDocument.findByPk(req.params.documentId, { transaction });
+    if (!doc) {
+      await transaction.rollback();
+      return res.status(404).json({ error: { message: 'Document not found' } });
+    }
+    if (doc.workOrderId !== workOrder.id) {
+      await transaction.rollback();
+      return res.status(400).json({ error: { message: 'Document does not belong to this work order' } });
+    }
+    if (doc.documentType !== 'outside_processing_po') {
+      await transaction.rollback();
+      return res.status(400).json({ error: { message: 'Not a service PO document — use the regular delete endpoint' } });
+    }
+
+    // Extract PO number from document name
+    const poMatch = (doc.originalName || '').match(/^(PO\d+)/);
+    if (!poMatch) {
+      await transaction.rollback();
+      return res.status(400).json({ error: { message: 'Cannot extract PO number from document name' } });
+    }
+    const poNumber = poMatch[1];
+    const poNumberInt = parseInt(poNumber.replace('PO', ''));
+
+    // Clear poNumber stamps on all matching ops in JSONB
+    let partsUpdated = 0;
+    for (const part of (workOrder.parts || [])) {
+      if (!['fab_service', 'shop_rate'].includes(part.partType)) continue;
+      const ops = part.outsideProcessing || [];
+      let modified = false;
+      const newOps = ops.map(op => {
+        if (op.poNumber === poNumber) {
+          modified = true;
+          const { poNumber: _, poSentAt: __, inboundOrderId: ___, ...rest } = op;
+          return rest;
+        }
+        return op;
+      });
+      if (modified) {
+        await part.update({ outsideProcessing: newOps }, { transaction });
+        partsUpdated++;
+      }
+    }
+
+    // Delete the PONumber row from the shared tracker
+    try {
+      await PONumber.destroy({ where: { poNumber: poNumberInt, workOrderId: workOrder.id }, transaction });
+    } catch (e) {
+      console.warn('[services delete] PONumber delete failed:', e.message);
+    }
+
+    // Delete the InboundOrder (only if still pending — don't touch received shipments)
+    try {
+      await InboundOrder.destroy({
+        where: { purchaseOrderNumber: poNumber, workOrderId: workOrder.id, status: 'pending' },
+        transaction
+      });
+    } catch (e) {
+      console.warn('[services delete] InboundOrder delete failed:', e.message);
+    }
+
+    // Delete the file from storage (best-effort)
+    if (doc.cloudinaryId) {
+      try { await fileStorage.deleteFile(doc.cloudinaryId); } catch (e) {
+        console.warn('[services delete] File delete failed:', e.message);
+      }
+    }
+
+    // Delete the document record
+    await doc.destroy({ transaction });
+
+    await transaction.commit();
+
+    res.json({
+      data: { poNumber, partsUpdated },
+      message: `Deleted ${poNumber}. ${partsUpdated} part(s) can now be re-ordered.`
+    });
+  } catch (error) {
+    await transaction.rollback();
+    console.error('[services delete] Error:', error);
     next(error);
   }
 });

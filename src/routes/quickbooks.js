@@ -1,5 +1,5 @@
 const express = require('express');
-const { WorkOrder, WorkOrderPart, Client, InvoiceNumber, AppSettings } = require('../models');
+const { WorkOrder, WorkOrderPart, Client, InvoiceNumber, AppSettings, sequelize } = require('../models');
 
 const router = express.Router();
 
@@ -621,6 +621,100 @@ router.post('/invoice-numbers/:id/void', async (req, res, next) => {
     
     res.json({ data: inv, message: `Invoice #${inv.invoiceNumber} voided` });
   } catch (error) { next(error); }
+});
+
+
+// POST /api/quickbooks/import-invoice-numbers
+// Accepts array of { drNumber, invoiceNumber } pairs parsed from a QuickBooks CSV export.
+// Matches each drNumber to a work order and stamps the invoice number on it.
+router.post('/import-invoice-numbers', async (req, res, next) => {
+  const transaction = await sequelize.transaction();
+  try {
+    const { pairs } = req.body; // [{ drNumber: '3012', invoiceNumber: '1045' }, ...]
+    if (!Array.isArray(pairs) || pairs.length === 0) {
+      await transaction.rollback();
+      return res.status(400).json({ error: { message: 'No pairs provided' } });
+    }
+
+    const results = { matched: [], notFound: [], alreadySet: [], errors: [] };
+
+    for (const { drNumber, invoiceNumber, qbName, terms } of pairs) {
+      if (!drNumber || !invoiceNumber) continue;
+      const drNum = parseInt(String(drNumber).replace(/[^0-9]/g, ''));
+      const invNum = parseInt(String(invoiceNumber).replace(/[^0-9]/g, ''));
+      if (!drNum || !invNum) continue;
+
+      try {
+        const wo = await WorkOrder.findOne({ where: { drNumber: drNum }, transaction });
+        if (!wo) {
+          results.notFound.push({ drNumber: drNum, invoiceNumber: invNum });
+          continue;
+        }
+
+        // Skip if already has the same invoice number
+        if (wo.invoiceNumber && wo.invoiceNumber === String(invNum)) {
+          results.alreadySet.push({ drNumber: drNum, invoiceNumber: invNum, clientName: wo.clientName });
+          continue;
+        }
+
+        // Create or update InvoiceNumber record
+        const existing = await InvoiceNumber.findOne({ where: { invoiceNumber: invNum }, transaction });
+        if (!existing) {
+          await InvoiceNumber.create({
+            invoiceNumber: invNum,
+            workOrderId: wo.id,
+            clientName: wo.clientName,
+            status: 'active'
+          }, { transaction });
+        } else if (!existing.workOrderId) {
+          await existing.update({ workOrderId: wo.id, clientName: wo.clientName }, { transaction });
+        }
+
+        // Stamp invoice number on the work order
+        await wo.update({
+          invoiceNumber: String(invNum),
+          invoiceDate: wo.invoiceDate || new Date()
+        }, { transaction });
+
+        // If QB name or terms were found and the client is missing them, set them now
+        let qbNameSet = null;
+        let termsSet = null;
+        if ((qbName && qbName.trim()) || (terms && terms.trim())) {
+          const client = await Client.findOne({
+            where: { name: wo.clientName },
+            transaction
+          });
+          if (client) {
+            const updates = {};
+            if (qbName && qbName.trim() && !client.quickbooksName) {
+              updates.quickbooksName = qbName.trim();
+              qbNameSet = qbName.trim();
+            }
+            if (terms && terms.trim() && !client.paymentTerms) {
+              updates.paymentTerms = terms.trim();
+              termsSet = terms.trim();
+            }
+            if (Object.keys(updates).length > 0) {
+              await client.update(updates, { transaction });
+            }
+          }
+        }
+
+        results.matched.push({ drNumber: drNum, invoiceNumber: invNum, clientName: wo.clientName, workOrderId: wo.id, qbNameSet, termsSet });
+      } catch (rowErr) {
+        results.errors.push({ drNumber: drNum, invoiceNumber: invNum, error: rowErr.message });
+      }
+    }
+
+    await transaction.commit();
+    res.json({
+      data: results,
+      message: `Imported ${results.matched.length} invoice number(s). ${results.notFound.length} DR number(s) not found. ${results.alreadySet.length} already set. ${results.matched.filter(r => r.qbNameSet || r.termsSet).length} client record(s) updated.`
+    });
+  } catch (error) {
+    await transaction.rollback();
+    next(error);
+  }
 });
 
 module.exports = router;

@@ -1053,6 +1053,8 @@ router.post('/scrap-confirm-pickup', async (req, res, next) => {
 // ==================== GENERIC SETTINGS (catch-all — MUST BE LAST) ====================
 
 // GET /api/settings/:key - Get a general setting by key
+// Returns { data: null } with status 200 if the setting doesn't exist (not set yet).
+// This matches the key-value-store semantics: "no value" is a valid state, not an error.
 router.get('/:key', async (req, res, next) => {
   try {
     const setting = await AppSettings.findOne({
@@ -1060,7 +1062,7 @@ router.get('/:key', async (req, res, next) => {
     });
 
     if (!setting) {
-      return res.status(404).json({ error: { message: 'Setting not found' } });
+      return res.json({ data: null });
     }
 
     res.json({ data: setting });

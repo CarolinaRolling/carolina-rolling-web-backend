@@ -2346,10 +2346,15 @@ router.delete('/:id', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Work order not found' } });
     }
 
-    // Suggest void instead of delete for DR-numbered orders
+    // Suggest void instead of delete for DR-numbered orders, unless override passcode supplied
     if (workOrder.drNumber) {
-      await transaction.rollback();
-      return res.status(400).json({ error: { message: `DR-${workOrder.drNumber} should be voided instead of deleted. Use DR Numbers → Void to preserve the record for accounting.` } });
+      const OVERRIDE_CODE = process.env.DELETE_OVERRIDE_CODE || 'CRC-FORCE-DELETE';
+      const suppliedCode = req.body?.overrideCode || req.query?.overrideCode;
+      if (suppliedCode !== OVERRIDE_CODE) {
+        await transaction.rollback();
+        return res.status(400).json({ error: { message: `DR-${workOrder.drNumber} should be voided instead of deleted. Use DR Numbers → Void to preserve the record for accounting.` } });
+      }
+      console.log(`[delete WO] Force-delete override used for DR-${workOrder.drNumber} by ${req.body?.deletedBy || 'unknown'}`);
     }
 
     console.log('Deleting work order:', workOrder.id);

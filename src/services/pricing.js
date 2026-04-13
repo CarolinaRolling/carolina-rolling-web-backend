@@ -251,6 +251,44 @@ function buildWorkOrderPartFromEstimate(estimatePart) {
     }
   }
 
+  // Recalculate laborTotal and partTotal from source values to ensure the WO part always
+  // has correct top-level pricing columns. The estimate part may store the base labor in
+  // formData._baseLaborTotal (set by the form components). Use that when available, then
+  // fall back to the stored laborTotal column. This mirrors what handleSavePart does on resave.
+  const EA_PRICED = ['plate_roll', 'shaped_plate', 'angle_roll', 'flat_stock', 'pipe_roll',
+    'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake',
+    'cone_roll', 'fab_service', 'shop_rate'];
+  if (EA_PRICED.includes(data.partType)) {
+    const qty = parseInt(data.quantity) || 1;
+    const matCost = parseFloat(data.materialTotal) || 0;
+    const matMarkup = parseFloat(data.materialMarkupPercent) || 0;
+    const matEachRaw = Math.round(matCost * (1 + matMarkup / 100) * 100) / 100;
+    // Apply material rounding if specified
+    const rounding = fd._materialRounding || 'none';
+    const matEach = rounding === 'dollar' && matEachRaw > 0 ? Math.ceil(matEachRaw)
+      : rounding === 'five' && matEachRaw > 0 ? Math.ceil(matEachRaw / 5) * 5
+      : matEachRaw;
+    // Use _baseLaborTotal from formData when available — it holds the pre-markup rolling cost
+    const baseLabEach = parseFloat(fd._baseLaborTotal) || parseFloat(data.laborTotal) || 0;
+    // Bundle outside processing cost into labor line (same as estimate display)
+    const ops = Array.isArray(data.outsideProcessing) ? data.outsideProcessing : [];
+    const opEnabled = ops.length > 0;
+    let opCostLot = 0, opProfitLot = 0;
+    ops.forEach(op => {
+      const cost = parseFloat(op.costPerPart) || 0;
+      const expedite = parseFloat(op.expediteCost) || 0;
+      const markup = parseFloat(op.markup) || 0;
+      opCostLot += (cost + expedite) * qty;
+      opProfitLot += cost * (markup / 100) * qty;
+    });
+    const opCostPerPart = qty > 0 ? opCostLot / qty : 0;
+    const opProfitPerPart = qty > 0 ? opProfitLot / qty : 0;
+    const effectiveBase = opEnabled ? 0 : baseLabEach;
+    const laborEach = effectiveBase + opProfitPerPart;
+    data.laborTotal = parseFloat(laborEach.toFixed(2));
+    data.partTotal = parseFloat(((matEach + laborEach + opCostPerPart) * qty).toFixed(2));
+  }
+
   // Default status
   data.status = 'pending';
 

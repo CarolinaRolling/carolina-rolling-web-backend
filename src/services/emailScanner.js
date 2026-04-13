@@ -352,7 +352,9 @@ Add a "summary" field in your response: a 1-2 sentence plain-English summary of 
     });
 
     const https = require('https');
-    const responseText = await new Promise((resolve, reject) => {
+
+    // Helper: make one attempt to the Anthropic API
+    const attemptAPICall = () => new Promise((resolve, reject) => {
       const req = https.request({
         hostname: 'api.anthropic.com',
         path: '/v1/messages',
@@ -368,7 +370,10 @@ Add a "summary" field in your response: a 1-2 sentence plain-English summary of 
         res.on('data', chunk => data += chunk);
         res.on('end', () => {
           console.log(`[EmailScanner] API response status: ${res.statusCode}`);
-          if (res.statusCode !== 200) {
+          if (res.statusCode === 529) {
+            // Overloaded — signal caller to retry
+            reject({ retryable: true, statusCode: 529, body: data });
+          } else if (res.statusCode !== 200) {
             console.error(`[EmailScanner] AI API error ${res.statusCode}: ${data.substring(0, 500)}`);
             reject(new Error(`API ${res.statusCode}: ${data.substring(0, 200)}`));
           } else {
@@ -380,6 +385,29 @@ Add a "summary" field in your response: a 1-2 sentence plain-English summary of 
       req.write(requestBody);
       req.end();
     });
+
+    // Retry up to 3 times on 529 overloaded with exponential backoff: 8s, 24s, 72s
+    const MAX_RETRIES = 3;
+    const BACKOFF_MS = [8000, 24000, 72000];
+    let responseText;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        responseText = await attemptAPICall();
+        break; // success
+      } catch (err) {
+        if (err.retryable && attempt < MAX_RETRIES) {
+          const waitMs = BACKOFF_MS[attempt];
+          console.warn(`[EmailScanner] API overloaded (529) — retrying in ${waitMs / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})`);
+          await new Promise(r => setTimeout(r, waitMs));
+        } else if (err.retryable) {
+          // Exhausted retries
+          console.error(`[EmailScanner] API still overloaded after ${MAX_RETRIES} retries — giving up`);
+          throw new Error(`API 529: Overloaded — try again later`);
+        } else {
+          throw err; // non-retryable error
+        }
+      }
+    }
 
     const data = JSON.parse(responseText);
     const text = data.content?.[0]?.text || '';

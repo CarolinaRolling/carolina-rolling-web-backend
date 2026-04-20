@@ -459,6 +459,10 @@ const WorkOrder = sequelize.define('WorkOrder', {
     type: DataTypes.STRING,
     allowNull: true
   },
+  contactExtension: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
   status: {
     type: DataTypes.STRING,
     defaultValue: 'received'

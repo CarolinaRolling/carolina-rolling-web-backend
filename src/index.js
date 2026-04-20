@@ -482,6 +482,18 @@ async function startServer() {
       console.log('PO status pre-sync conversion:', enumErr.message);
     }
     
+    // Explicitly add contactExtension to work_orders and estimates if missing
+    // (alter:true sometimes misses new columns on Heroku Postgres)
+    try {
+      await sequelize.query(`
+        ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "contactExtension" VARCHAR(255);
+        ALTER TABLE estimates ADD COLUMN IF NOT EXISTS "contactExtension" VARCHAR(255);
+      `);
+      console.log('contactExtension columns ensured');
+    } catch (e) {
+      console.log('contactExtension migration:', e.message);
+    }
+
     // Sync models - use alter to add new columns
     // This is safe for adding new nullable columns
     try {

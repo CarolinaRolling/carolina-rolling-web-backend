@@ -2080,6 +2080,10 @@ const Client = sequelize.define('Client', {
     type: DataTypes.STRING,
     allowNull: true
   },
+  contactExtension: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
   address: {
     type: DataTypes.TEXT,
     allowNull: true

@@ -1646,8 +1646,10 @@ async function _runScanInternal() {
               await scannedEmail.update({ status: 'error', errorMessage: estResult.error });
               results.errors++;
             }
-          } else {
+          } else if (parsed.emailType !== 'general') {
             // Overridden to general (e.g. "thank you" that AI mistakenly called a PO)
+            // Note: true general emails are already handled above — this only fires for
+            // unexpected emailType values to avoid creating a duplicate todo.
             const summary = parsed.summary || parsed.aiNotes || `Follow-up email: "${subject}"`;
             const headEstimator = await User.findOne({ where: { isHeadEstimator: true, isActive: true } });
             await TodoItem.create({

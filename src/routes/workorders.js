@@ -1274,6 +1274,7 @@ router.post('/', async (req, res, next) => {
       contactName,
       contactPhone,
       contactEmail,
+      contactExtension,
       projectDescription,
       notes,
       storageLocation,
@@ -1329,6 +1330,7 @@ router.post('/', async (req, res, next) => {
         contactName,
         contactPhone,
         contactEmail,
+        contactExtension: contactExtension || null,
         projectDescription,
         notes,
         storageLocation,
@@ -2669,6 +2671,8 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     }
     if (vendorEstimateNumber !== undefined) updates.vendorEstimateNumber = vendorEstimateNumber;
     if (materialDescription !== undefined) updates.materialDescription = materialDescription;
+    if (req.body.cutFileReference !== undefined) updates.cutFileReference = req.body.cutFileReference;
+    if (req.body.contactExtension !== undefined) updates.contactExtension = req.body.contactExtension;
     
     // Update formData if underscore-prefixed fields were sent
     if (formDataJson) {
@@ -2906,7 +2910,8 @@ router.post('/:id/parts/:partId/files', upload.array('files', 10), async (req, r
         let fileType = 'other';
         if (ext === '.pdf') fileType = 'pdf_print';
         else if (ext === '.stp' || ext === '.step') fileType = 'step_file';
-        else if (ext === '.dxf' || ext === '.dwg') fileType = 'drawing';
+        else if (ext === '.dxf') fileType = 'cut_file';
+        else if (ext === '.dwg') fileType = 'drawing';
         else if (['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(ext)) fileType = 'drawing';
         else if (ext === '.doc' || ext === '.docx') fileType = 'specification';
 

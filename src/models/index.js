@@ -1166,6 +1166,10 @@ const Estimate = sequelize.define('Estimate', {
     type: DataTypes.STRING,
     allowNull: true
   },
+  contactExtension: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
   projectDescription: {
     type: DataTypes.TEXT,
     allowNull: true

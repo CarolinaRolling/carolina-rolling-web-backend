@@ -784,7 +784,7 @@ router.put('/:id', async (req, res, next) => {
     }
 
     const updates = {};
-    const fields = ['clientName', 'contactName', 'contactEmail', 'contactPhone', 
+    const fields = ['clientName', 'contactName', 'contactEmail', 'contactPhone', 'contactExtension', 
       'projectDescription', 'notes', 'internalNotes', 'validUntil', 'taxRate',
       'useCustomTax', 'customTaxReason', 'truckingDescription', 'truckingCost', 'status',
       'taxExempt', 'taxExemptCertNumber', 'taxExemptReason',

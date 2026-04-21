@@ -38,7 +38,7 @@ async function getGmailClient(account) {
 async function getScanConfig() {
   const clients = await Client.findAll({
     where: { emailScanEnabled: true, isActive: true },
-    attributes: ['id', 'name', 'emailScanAddresses', 'emailScanParsingNotes']
+    attributes: ['id', 'name', 'emailScanAddresses', 'emailScanParsingNotes', 'contacts']
   });
 
   // Build a map: email address → client info
@@ -50,6 +50,7 @@ async function getScanConfig() {
         clientId: client.id,
         clientName: client.name,
         parsingNotes: client.emailScanParsingNotes || '',
+        contacts: client.contacts || [],
         type: 'client'
       };
     });
@@ -724,10 +725,28 @@ async function createEstimateFromParsed(parsed, clientInfo, scannedEmail) {
       .join('\n');
     const internalNotes = [parsed.aiNotes, missingInfo].filter(Boolean).join('\n\n') || null;
 
+    // Match sender email to a contact in the client's contacts array
+    const senderEmail = (scannedEmail.fromEmail || '').toLowerCase().trim();
+    const matchedContact = senderEmail
+      ? (clientInfo.contacts || []).find(c => c.email && c.email.toLowerCase().trim() === senderEmail)
+      : null;
+    const primaryContact = (clientInfo.contacts || []).find(c => c.isPrimary) || (clientInfo.contacts || [])[0] || null;
+    const contactToUse = matchedContact || primaryContact || null;
+
+    if (matchedContact) {
+      console.log(`[EmailScanner] Matched sender ${senderEmail} to contact "${matchedContact.name}" for ${clientInfo.clientName}`);
+    } else if (primaryContact) {
+      console.log(`[EmailScanner] No contact matched sender ${senderEmail} — using primary contact "${primaryContact.name}" for ${clientInfo.clientName}`);
+    }
+
     const estimate = await Estimate.create({
       estimateNumber: estNumber,
       clientName: clientInfo.clientName,
       clientId: clientInfo.clientId,
+      contactName: contactToUse?.name || null,
+      contactEmail: contactToUse?.email || null,
+      contactPhone: contactToUse?.phone || null,
+      contactExtension: contactToUse?.extension || null,
       status: 'draft',
       notes: parsed.notes || null,
       internalNotes: internalNotes,

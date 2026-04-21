@@ -2330,8 +2330,27 @@ router.get('/:id/pdf', async (req, res, next) => {
       let matEach = matEachRaw;
       if (rounding === 'dollar' && matEach > 0) matEach = Math.ceil(matEach);
       if (rounding === 'five' && matEach > 0) matEach = Math.ceil(matEach / 5) * 5;
-      // Show original labor per unit (no minimum adjustment on line items)
-      const labEach = parseFloat(part.laborTotal) || 0;
+      // For OP parts, laborTotal is only the profit portion — reconstruct full billed labor
+      // from outsideProcessing array so the PDF shows the correct client-facing price
+      const ops = part.outsideProcessing || part.formData?.outsideProcessing || [];
+      let labEach;
+      if (ops.length > 0) {
+        let opCostLot = 0, opProfitLot = 0;
+        ops.forEach(op => {
+          const cost = parseFloat(op.costPerPart) || 0;
+          const expedite = parseFloat(op.expediteCost) || 0;
+          const markup = parseFloat(op.markup) || 0;
+          opCostLot += (cost + expedite) * qty;
+          opProfitLot += cost * (markup / 100) * qty;
+        });
+        const opCostPerPart = qty > 0 ? opCostLot / qty : 0;
+        const opProfitPerPart = qty > 0 ? opProfitLot / qty : 0;
+        const baseLabEach = parseFloat(part._baseLaborTotal ?? part.formData?._baseLaborTotal) || 0;
+        const effectiveBase = baseLabEach; // rolling labor (0 for pure OP parts)
+        labEach = effectiveBase + opCostPerPart + opProfitPerPart;
+      } else {
+        labEach = parseFloat(part.laborTotal) || 0;
+      }
       const unitPrice = matEach + labEach;
       const lineTotal = unitPrice * qty;
 

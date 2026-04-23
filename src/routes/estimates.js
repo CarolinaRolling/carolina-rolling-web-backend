@@ -1946,7 +1946,7 @@ router.post('/:id/convert', async (req, res, next) => {
 router.post('/:id/duplicate', async (req, res, next) => {
   try {
     const original = await Estimate.findByPk(req.params.id, {
-      include: [{ model: EstimatePart, as: 'parts' }]
+      include: [{ model: EstimatePart, as: 'parts', include: [{ model: EstimatePartFile, as: 'files' }] }]
     });
 
     if (!original) {
@@ -2007,14 +2007,30 @@ router.post('/:id/duplicate', async (req, res, next) => {
         materialTotal: origPart.materialTotal,
         laborTotal: origPart.laborTotal,
         partTotal: origPart.partTotal,
-        formData: origPart.formData
+        formData: origPart.formData,
+        cutFileReference: origPart.cutFileReference
       };
 
       if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'].includes(partData.partType)) {
         const totals = calculatePartTotals(partData);
         Object.assign(partData, totals);
       }
-      await EstimatePart.create(partData);
+      const newPart = await EstimatePart.create(partData);
+      // Copy part files (prints, STEP, DXF) — point to same Cloudinary/S3 resource
+      for (const origFile of (origPart.files || [])) {
+        await EstimatePartFile.create({
+          partId: newPart.id,
+          filename: origFile.filename,
+          originalName: origFile.originalName,
+          mimeType: origFile.mimeType,
+          size: origFile.size,
+          url: origFile.url,
+          cloudinaryId: origFile.cloudinaryId,
+          fileType: origFile.fileType,
+          fileLastModified: origFile.fileLastModified,
+          portalVisible: false
+        });
+      }
     }
 
     // Recalculate totals

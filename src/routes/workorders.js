@@ -3327,7 +3327,7 @@ router.get('/archived', async (req, res, next) => {
 // POST /api/workorders/:id/duplicate-to-estimate - Create estimate from work order's original estimate (for reorders)
 router.post('/:id/duplicate-to-estimate', async (req, res, next) => {
   try {
-    const { Estimate, EstimatePart } = require('../models');
+    const { Estimate, EstimatePart, EstimatePartFile } = require('../models');
 
     const workOrder = await WorkOrder.findByPk(req.params.id, {
       include: [{ model: WorkOrderPart, as: 'parts' }]
@@ -3351,7 +3351,7 @@ router.post('/:id/duplicate-to-estimate', async (req, res, next) => {
     let sourceEstimate = null;
     if (workOrder.estimateId) {
       sourceEstimate = await Estimate.findByPk(workOrder.estimateId, {
-        include: [{ model: EstimatePart, as: 'parts' }]
+        include: [{ model: EstimatePart, as: 'parts', include: [{ model: EstimatePartFile, as: 'files' }] }]
       });
     }
 
@@ -3378,7 +3378,7 @@ router.post('/:id/duplicate-to-estimate', async (req, res, next) => {
 
       // Copy ALL parts with full pricing
       for (const origPart of (sourceEstimate.parts || [])) {
-        await EstimatePart.create({
+        const newPart = await EstimatePart.create({
           estimateId: newEstimate.id,
           partNumber: origPart.partNumber,
           partType: origPart.partType,
@@ -3409,8 +3409,24 @@ router.post('/:id/duplicate-to-estimate', async (req, res, next) => {
           materialTotal: origPart.materialTotal,
           laborTotal: origPart.laborTotal,
           partTotal: origPart.partTotal,
-          formData: origPart.formData
+          formData: origPart.formData,
+          cutFileReference: origPart.cutFileReference
         });
+        // Copy part files (prints, STEP, DXF) — point to same Cloudinary/S3 resource
+        for (const origFile of (origPart.files || [])) {
+          await EstimatePartFile.create({
+            partId: newPart.id,
+            filename: origFile.filename,
+            originalName: origFile.originalName,
+            mimeType: origFile.mimeType,
+            size: origFile.size,
+            url: origFile.url,
+            cloudinaryId: origFile.cloudinaryId,
+            fileType: origFile.fileType,
+            fileLastModified: origFile.fileLastModified,
+            portalVisible: false
+          });
+        }
       }
 
       // Reload with parts

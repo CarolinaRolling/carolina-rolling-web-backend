@@ -1,6 +1,7 @@
 const { google } = require('googleapis');
-const { GmailAccount, ScannedEmail, PendingOrder, Client, Vendor, Estimate, EstimatePart, EstimateFile, TodoItem, User, AppSettings } = require('../models');
+const { GmailAccount, ScannedEmail, PendingOrder, Client, Vendor, Estimate, EstimatePart, EstimateFile, EstimatePartFile, TodoItem, User, AppSettings } = require('../models');
 const { Op } = require('sequelize');
+const fileStorage = require('../utils/storage');
 
 // Google OAuth2 client
 function getOAuth2Client() {
@@ -705,8 +706,91 @@ function buildFormData(p) {
   return fd;
 }
 
+// Collect all PDF and image attachments from a Gmail message payload (handles nested multipart)
+function collectAttachments(payload) {
+  const results = [];
+  function walk(part) {
+    if (!part) return;
+    const mt = part.mimeType || '';
+    const isPdf = mt === 'application/pdf' || (part.filename || '').match(/\.pdf$/i);
+    const isImg = mt.startsWith('image/') || (part.filename || '').match(/\.(png|jpg|jpeg|gif|tiff|tif|bmp|webp)$/i);
+    if ((isPdf || isImg) && part.body?.attachmentId) {
+      results.push({ part, isPdf: !!isPdf, mimeType: isPdf ? 'application/pdf' : mt });
+    }
+    if (part.parts) part.parts.forEach(walk);
+  }
+  walk(payload);
+  return results;
+}
+
+// Merge parts from drawing PDFs into email-parsed parts using quantity context from email
+// Strategy: if email body gave us quantities but "all dimensions from drawing", replace with drawing-parsed parts
+function mergeAttachmentParts(emailParsed, attachmentResults) {
+  // attachmentResults: [{ filename, parts: [...], buffer }]
+  
+  // Build merged parts list
+  // Case 1: email body had no real parts (all missing fields) → use drawing parts only, respect email qty
+  // Case 2: email had 1 part per drawing → match by index, merge fields
+  // Case 3: email had named parts → try to match by clientPartNumber or index
+  
+  const emailParts = (emailParsed.parts || []).filter(p =>
+    !['fab_service', 'shop_rate'].includes(p.partType)
+  );
+  const allDrawingParts = attachmentResults.flatMap(r => r.parts || []);
+  
+  if (allDrawingParts.length === 0) return emailParsed; // no useful data from drawings
+  
+  // If email had no substantive parts (all missing dims) or just 1 generic entry for multiple drawings
+  const emailHasNoDims = emailParts.length === 0 ||
+    emailParts.every(p => (p.missingFields || []).length > 2 || (!p.thickness && !p.outerDiameter && !p.diameter && !p.radius && !p.width && !p.sectionSize));
+
+  if (emailHasNoDims || (emailParts.length <= 1 && allDrawingParts.length > 1)) {
+    // Use drawing parts as authoritative, preserve quantities from email if 1:1 match
+    const mergedParts = [];
+    for (let i = 0; i < allDrawingParts.length; i++) {
+      const dp = { ...allDrawingParts[i] };
+      // Apply email quantity if 1:1 match between email parts and drawings
+      if (emailParts[i] && emailParts[i].quantity && !dp.quantity) {
+        dp.quantity = emailParts[i].quantity;
+      } else if (emailParts.length === 1 && allDrawingParts.length > 1 && emailParts[0].quantity) {
+        // Single email line like "3 parts per attached" — spread qty evenly (1 each by default)
+        dp.quantity = dp.quantity || 1;
+      }
+      // Preserve clientPartNumber from email if drawing didn't find one
+      if (emailParts[i] && emailParts[i].clientPartNumber && !dp.clientPartNumber) {
+        dp.clientPartNumber = emailParts[i].clientPartNumber;
+      }
+      // Attach which file this part came from
+      dp._sourceFile = attachmentResults[Math.floor(i / Math.max(1, allDrawingParts.length / attachmentResults.length))]?.filename;
+      mergedParts.push(dp);
+    }
+    // Add fab_service parts from email parse back in
+    const fabParts = (emailParsed.parts || []).filter(p => ['fab_service', 'shop_rate'].includes(p.partType));
+    return { ...emailParsed, parts: [...mergedParts, ...fabParts], _parsedFromAttachments: true };
+  }
+
+  // Case: email parts match drawing count — merge drawing dims into email parts
+  if (emailParts.length === allDrawingParts.length) {
+    const mergedParts = emailParts.map((ep, i) => {
+      const dp = allDrawingParts[i];
+      // Drawing wins on dimensions; email wins on quantity and part numbers
+      const merged = { ...dp };
+      if (ep.quantity) merged.quantity = ep.quantity;
+      if (ep.clientPartNumber && !merged.clientPartNumber) merged.clientPartNumber = ep.clientPartNumber;
+      if (ep.materialSource) merged.materialSource = ep.materialSource;
+      merged._sourceFile = attachmentResults[i]?.filename;
+      return merged;
+    });
+    const fabParts = (emailParsed.parts || []).filter(p => ['fab_service', 'shop_rate'].includes(p.partType));
+    return { ...emailParsed, parts: [...mergedParts, ...fabParts], _parsedFromAttachments: true };
+  }
+
+  // Fallback: append drawing parts that have useful dimensions not in email parts
+  return emailParsed;
+}
+
 // Create an estimate from parsed email data
-async function createEstimateFromParsed(parsed, clientInfo, scannedEmail) {
+async function createEstimateFromParsed(parsed, clientInfo, scannedEmail, attachmentFiles = []) {
   try {
     // Use reference number as estimate number for clients like GNB
     const estNumber = parsed.referenceNumber || generateEstimateNumber();
@@ -783,6 +867,35 @@ async function createEstimateFromParsed(parsed, clientInfo, scannedEmail) {
         formData: formData
       });
       createdPartIds.push(part.id);
+
+      // Save the source drawing/PDF to this part if available
+      const sourceFilename = p._sourceFile;
+      const sourceFile = sourceFilename
+        ? attachmentFiles.find(f => f.filename === sourceFilename)
+        : (attachmentFiles.length === 1 ? attachmentFiles[0] : attachmentFiles[i]);
+      if (sourceFile && sourceFile.buffer) {
+        try {
+          const uploadResult = await fileStorage.uploadBuffer(sourceFile.buffer, {
+            folder: `estimates/${estimate.id}/parts`,
+            filename: sourceFile.filename,
+            mimeType: sourceFile.mimeType || 'application/pdf'
+          });
+          await EstimatePartFile.create({
+            partId: part.id,
+            filename: sourceFile.filename,
+            originalName: sourceFile.filename,
+            mimeType: sourceFile.mimeType || 'application/pdf',
+            size: sourceFile.buffer.length,
+            url: uploadResult.url,
+            cloudinaryId: uploadResult.storageId,
+            fileType: sourceFile.mimeType === 'application/pdf' ? 'pdf_print' : 'drawing',
+            portalVisible: false
+          });
+          console.log(`[EmailScanner] Saved attachment "${sourceFile.filename}" to part #${i + 1}`);
+        } catch (fileErr) {
+          console.error(`[EmailScanner] Failed to save attachment to part #${i + 1}: ${fileErr.message}`);
+        }
+      }
     }
 
     // Link fab_service/shop_rate parts to their parent parts
@@ -805,7 +918,7 @@ async function createEstimateFromParsed(parsed, clientInfo, scannedEmail) {
     const headEstimator = await User.findOne({ where: { isHeadEstimator: true, isActive: true } });
     await TodoItem.create({
       title: `Review pricing: ${estNumber} — ${clientInfo.clientName}`,
-      description: `Auto-created from email. ${(parsed.parts || []).length} part(s). Confidence: ${parsed.confidence || 'unknown'}.`,
+      description: `Auto-created from email. ${(parsed.parts || []).length} part(s). Confidence: ${parsed.confidence || 'unknown'}.${attachmentFiles && attachmentFiles.length > 0 ? ` ${attachmentFiles.length} drawing(s) parsed and attached.` : ''}`,
       type: 'estimate_review',
       priority: 'high',
       assignedTo: headEstimator?.username || null,
@@ -1570,6 +1683,47 @@ async function _runScanInternal() {
             }
           }
 
+          // ===== ATTACHMENT COLLECTION + PDF PARSING =====
+          // Download all PDF/image attachments and parse each with AI before email text parse
+          const attachmentFiles = [];
+          const attachmentParsedResults = [];
+          try {
+            const rawPayload = fullMsg.data.payload;
+            const attParts = collectAttachments(rawPayload);
+            if (attParts.length > 0) {
+              console.log(`[EmailScanner] Found ${attParts.length} attachment(s) in email from ${clientInfo.clientName}`);
+            }
+            for (const att of attParts) {
+              try {
+                const attRes = await gmail.users.messages.attachments.get({
+                  userId: 'me', messageId: msg.id, id: att.part.body.attachmentId
+                });
+                const buffer = Buffer.from(attRes.data.data, 'base64');
+                const filename = att.part.filename || `attachment-${Date.now()}.${att.isPdf ? 'pdf' : 'png'}`;
+                console.log(`[EmailScanner] Parsing attachment "${filename}" (${Math.round(buffer.length / 1024)}KB)`);
+                attachmentFiles.push({ filename, buffer, mimeType: att.mimeType });
+                // Parse the PDF/image with AI
+                try {
+                  const docParsed = await parseDocumentWithAI(buffer, att.mimeType, clientInfo.clientName, clientInfo.parsingNotes);
+                  if (docParsed && (docParsed.parts || []).length > 0) {
+                    console.log(`[EmailScanner] Attachment "${filename}" → ${docParsed.parts.length} part(s)`);
+                    attachmentParsedResults.push({ filename, parts: docParsed.parts });
+                  } else {
+                    console.log(`[EmailScanner] Attachment "${filename}" → no parts found`);
+                    attachmentParsedResults.push({ filename, parts: [] });
+                  }
+                } catch (docErr) {
+                  console.error(`[EmailScanner] Failed to parse attachment "${filename}": ${docErr.message}`);
+                  attachmentParsedResults.push({ filename, parts: [] });
+                }
+              } catch (attErr) {
+                console.error(`[EmailScanner] Failed to download attachment: ${attErr.message}`);
+              }
+            }
+          } catch (attCollectErr) {
+            console.error(`[EmailScanner] Attachment collection error: ${attCollectErr.message}`);
+          }
+
           // Parse with AI (only reaches here for genuinely new conversations)
           const parsed = await parseEmailWithAI(bodyText, subject, clientInfo.clientName, clientInfo.parsingNotes, generalNotes);
 
@@ -1655,7 +1809,14 @@ async function _runScanInternal() {
             }
           } else if (parsed.emailType === 'rfq') {
             // RFQ → create estimate
-            const estResult = await createEstimateFromParsed(parsed, clientInfo, scannedEmail);
+            // Merge drawing-parsed parts into email parse result
+            const mergedParsed = attachmentParsedResults.length > 0
+              ? mergeAttachmentParts(parsed, attachmentParsedResults)
+              : parsed;
+            if (mergedParsed._parsedFromAttachments) {
+              console.log(`[EmailScanner] Using ${attachmentParsedResults.length} drawing(s) as primary source for parts`);
+            }
+            const estResult = await createEstimateFromParsed(mergedParsed, clientInfo, scannedEmail, attachmentFiles);
             if (estResult.estimateId) {
               await scannedEmail.update({ status: 'estimate_created', estimateId: estResult.estimateId });
               results.estimates++;
@@ -1793,6 +1954,7 @@ async function clearAIWarningTodo() {
 async function processRetries() {
   const { ScannedEmail, Client } = require('../models');
   const { Op } = require('sequelize');
+const fileStorage = require('../utils/storage');
   
   const pendingRetries = await ScannedEmail.findAll({
     where: {

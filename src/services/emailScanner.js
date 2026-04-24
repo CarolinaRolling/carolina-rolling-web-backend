@@ -1069,6 +1069,9 @@ async function runScan() {
 
   try {
     return await _runScanInternal();
+  } catch (fatalErr) {
+    console.error('[EmailScanner] Fatal scan error:', fatalErr.message);
+    return { error: fatalErr.message, processed: 0, estimates: 0, pendingOrders: 0, errors: 1 };
   } finally {
     scanRunning = false;
   }
@@ -1695,6 +1698,8 @@ async function _runScanInternal() {
             if (attParts.length > 0) {
               console.log(`[EmailScanner] Found ${attParts.length} attachment(s) in email from ${clientInfo.clientName}`);
             }
+            // Download all attachments first (fast — just Gmail API calls)
+            const downloadedAtts = [];
             for (const att of attParts) {
               try {
                 const attRes = await gmail.users.messages.attachments.get({
@@ -1702,11 +1707,26 @@ async function _runScanInternal() {
                 });
                 const buffer = Buffer.from(attRes.data.data, 'base64');
                 const filename = att.part.filename || `attachment-${Date.now()}.${att.isPdf ? 'pdf' : 'png'}`;
-                console.log(`[EmailScanner] Parsing attachment "${filename}" (${Math.round(buffer.length / 1024)}KB)`);
+                console.log(`[EmailScanner] Downloaded attachment "${filename}" (${Math.round(buffer.length / 1024)}KB)`);
+                downloadedAtts.push({ att, buffer, filename });
                 attachmentFiles.push({ filename, buffer, mimeType: att.mimeType });
-                // Parse the PDF/image with AI
-                try {
-                  const docParsed = await parseDocumentWithAI(buffer, att.mimeType, clientInfo.clientName, clientInfo.parsingNotes);
+              } catch (attErr) {
+                console.error(`[EmailScanner] Failed to download attachment: ${attErr.message}`);
+              }
+            }
+            // Parse all PDFs in parallel with a 25-second timeout per call
+            const parseWithTimeout = (buffer, mimeType, name) => {
+              const timeout = new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('PDF parse timeout')), 25000)
+              );
+              return Promise.race([
+                parseDocumentWithAI(buffer, mimeType, clientInfo.clientName, clientInfo.parsingNotes),
+                timeout
+              ]);
+            };
+            const parsePromises = downloadedAtts.map(({ buffer, filename, att }) =>
+              parseWithTimeout(buffer, att.mimeType, filename)
+                .then(docParsed => {
                   if (docParsed && (docParsed.parts || []).length > 0) {
                     console.log(`[EmailScanner] Attachment "${filename}" → ${docParsed.parts.length} part(s)`);
                     attachmentParsedResults.push({ filename, parts: docParsed.parts });
@@ -1714,14 +1734,13 @@ async function _runScanInternal() {
                     console.log(`[EmailScanner] Attachment "${filename}" → no parts found`);
                     attachmentParsedResults.push({ filename, parts: [] });
                   }
-                } catch (docErr) {
+                })
+                .catch(docErr => {
                   console.error(`[EmailScanner] Failed to parse attachment "${filename}": ${docErr.message}`);
                   attachmentParsedResults.push({ filename, parts: [] });
-                }
-              } catch (attErr) {
-                console.error(`[EmailScanner] Failed to download attachment: ${attErr.message}`);
-              }
-            }
+                })
+            );
+            await Promise.all(parsePromises);
           } catch (attCollectErr) {
             console.error(`[EmailScanner] Attachment collection error: ${attCollectErr.message}`);
           }

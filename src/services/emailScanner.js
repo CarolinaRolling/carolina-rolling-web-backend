@@ -1536,8 +1536,10 @@ async function _runScanInternal() {
 
           // THREAD DEDUP: Check if this Gmail thread already created an estimate
           // If so, check if this is a PO (should create pending order) or just a follow-up (todo only)
+          // EXCEPTION: if the email has PDF/image attachments, treat as a NEW RFQ regardless of thread
+          const hasAttachments = collectAttachments(fullMsg.data.payload).length > 0;
           const thisThreadId = fullMsg.data.threadId;
-          if (thisThreadId) {
+          if (thisThreadId && !hasAttachments) {
             const prevInThread = await ScannedEmail.findOne({
               where: { 
                 gmailThreadId: thisThreadId,
@@ -1764,8 +1766,15 @@ async function _runScanInternal() {
 
           // Check if email has no parts (general inquiry, status update, etc.)
           const hasParts = (parsed.parts || []).length > 0;
+
+          // If drawings were parsed and found parts, upgrade to rfq before the general check fires
+          const attachmentHasParts = attachmentParsedResults.some(r => (r.parts || []).length > 0);
+          if (attachmentHasParts && (parsed.emailType === 'general' || !hasParts)) {
+            console.log(`[EmailScanner] Email body was general/no-parts but drawings found parts — upgrading to rfq`);
+            parsed.emailType = 'rfq';
+          }
           
-          if (parsed.emailType === 'general' || !hasParts) {
+          if (parsed.emailType === 'general' || (!hasParts && !attachmentHasParts)) {
             // No parts — create todo notification with summary
             const summary = parsed.summary || parsed.aiNotes || `General email: "${subject}"`;
             
@@ -1797,6 +1806,7 @@ async function _runScanInternal() {
               parsed.emailType = 'general';
             }
           }
+
           
           if (parsed.emailType === 'po') {
             // PO → create pending order
@@ -1815,6 +1825,11 @@ async function _runScanInternal() {
               : parsed;
             if (mergedParsed._parsedFromAttachments) {
               console.log(`[EmailScanner] Using ${attachmentParsedResults.length} drawing(s) as primary source for parts`);
+              // Drawings found parts — upgrade to rfq even if email body was vague
+              if (mergedParsed.emailType === 'general') {
+                mergedParsed.emailType = 'rfq';
+                console.log(`[EmailScanner] Upgraded to rfq — drawings provided part specs`);
+              }
             }
             const estResult = await createEstimateFromParsed(mergedParsed, clientInfo, scannedEmail, attachmentFiles);
             if (estResult.estimateId) {

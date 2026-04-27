@@ -2627,7 +2627,8 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
       supplierName,
       vendorEstimateNumber,
       materialDescription,
-      heatBreakdown
+      heatBreakdown,
+      progressCount
     } = req.body;
 
     const updates = {};
@@ -2705,6 +2706,15 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
         } else if (req.operatorName) {
           updates.completedBy = req.operatorName + (req.deviceName ? ` (${req.deviceName})` : '');
         }
+      }
+    }
+
+    // Progress milestones
+    if (progressCount !== undefined) {
+      updates.progressCount = progressCount;
+      updates.progressLastUpdatedAt = new Date();
+      if (progressCount > 0 && part.status === 'pending') {
+        updates.status = 'in_progress';
       }
     }
 

@@ -3039,6 +3039,11 @@ const Employee = sequelize.define('Employee', {
   vacationResetYear: {
     type: DataTypes.INTEGER,
     allowNull: true
+  },
+  sortOrder: {
+    type: DataTypes.INTEGER,
+    defaultValue: 999,
+    allowNull: true
   }
 }, {
   tableName: 'employees',

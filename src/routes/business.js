@@ -275,7 +275,7 @@ router.get('/employees', async (req, res, next) => {
     const { active } = req.query;
     const where = {};
     if (active !== 'all') where.isActive = true;
-    const employees = await Employee.findAll({ where, order: [['name', 'ASC']] });
+    const employees = await Employee.findAll({ where, order: [['sortOrder', 'ASC'], ['name', 'ASC']] });
     res.json({ data: employees });
   } catch (error) { next(error); }
 });
@@ -302,6 +302,18 @@ router.put('/employees/:id', async (req, res, next) => {
     if (data.hourlyRate === '') data.hourlyRate = 0;
     await employee.update(data);
     res.json({ data: employee, message: 'Updated' });
+  } catch (error) { next(error); }
+});
+
+// POST /api/business/employees/reorder - Save employee sort order
+router.post('/employees/reorder', async (req, res, next) => {
+  try {
+    const { order } = req.body; // array of { id, sortOrder }
+    if (!Array.isArray(order)) return res.status(400).json({ error: { message: 'order array required' } });
+    for (const { id, sortOrder } of order) {
+      await Employee.update({ sortOrder }, { where: { id } });
+    }
+    res.json({ data: null, message: 'Order saved' });
   } catch (error) { next(error); }
 });
 
@@ -354,7 +366,7 @@ router.post('/payroll', async (req, res, next) => {
     const payroll = await PayrollWeek.create({ weekStart, weekEnd });
 
     // Auto-populate with active employees
-    const employees = await Employee.findAll({ where: { isActive: true } });
+    const employees = await Employee.findAll({ where: { isActive: true }, order: [['sortOrder', 'ASC'], ['name', 'ASC']] });
     for (const emp of employees) {
       await PayrollEntry.create({
         payrollWeekId: payroll.id,

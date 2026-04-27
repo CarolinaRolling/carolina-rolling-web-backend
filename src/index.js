@@ -488,10 +488,13 @@ async function startServer() {
       await sequelize.query(`
         ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "contactExtension" VARCHAR(255);
         ALTER TABLE estimates ADD COLUMN IF NOT EXISTS "contactExtension" VARCHAR(255);
+        ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "progressCount" INTEGER;
+        ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "progressLastUpdatedAt" TIMESTAMP WITH TIME ZONE;
+        ALTER TABLE employees ADD COLUMN IF NOT EXISTS "sortOrder" INTEGER DEFAULT 999;
       `);
-      console.log('contactExtension columns ensured');
+      console.log('column migrations ensured');
     } catch (e) {
-      console.log('contactExtension migration:', e.message);
+      console.log('column migration error:', e.message);
     }
 
     // Sync models - use alter to add new columns

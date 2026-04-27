@@ -378,7 +378,8 @@ router.post('/payroll', async (req, res, next) => {
         vacationHours: 0,
         bonus: 0,
         overtimeDetails: [],
-        grossPay: 0
+        grossPay: 0,
+        sortOrder: emp.sortOrder ?? 999
       });
     }
 
@@ -723,6 +724,102 @@ router.get('/vendor-history/:vendorId', async (req, res, next) => {
       }
     });
   } catch (error) { next(error); }
+});
+
+// POST /api/business/payroll/:id/send-email - Send payroll sheet via connected Gmail account
+router.post('/payroll/:id/send-email', async (req, res, next) => {
+  try {
+    const { gmailAccountId, toEmail, subject, body } = req.body;
+    if (!gmailAccountId || !toEmail) {
+      return res.status(400).json({ error: { message: 'gmailAccountId and toEmail are required' } });
+    }
+
+    // Load payroll with entries
+    const payroll = await PayrollWeek.findByPk(req.params.id, {
+      include: [{ model: PayrollEntry, as: 'entries' }]
+    });
+    if (!payroll) return res.status(404).json({ error: { message: 'Payroll not found' } });
+
+    // Load Gmail account
+    const { GmailAccount, Employee } = require('../models');
+    const account = await GmailAccount.findByPk(gmailAccountId);
+    if (!account) return res.status(404).json({ error: { message: 'Gmail account not found' } });
+
+    // Load employees for sortOrder, controlNumber, deductions, description
+    const employees = await Employee.findAll({ order: [['sortOrder', 'ASC'], ['name', 'ASC']] });
+
+    // Build sorted entries
+    const sortedEntries = (payroll.entries || [])
+      .slice()
+      .sort((a, b) => ((a.sortOrder ?? 999) - (b.sortOrder ?? 999)) || a.employeeName.localeCompare(b.employeeName));
+    const enriched = sortedEntries.map(en => {
+      const emp = employees.find(e => e.id === en.employeeId) || {};
+      return { ...en.toJSON(), controlNumber: emp.controlNumber || '', deductions: emp.deductions || '', description: emp.description || '' };
+    });
+
+    const sd = new Date(payroll.weekStart + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+    const ed = new Date(payroll.weekEnd + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+
+    // Build payroll HTML attachment
+    const css = `* { box-sizing: border-box; } body { font-family: Arial, Helvetica, sans-serif; margin: 0; padding: 20px 30px; font-size: 11px; color: #222; } .header { padding-bottom: 12px; border-bottom: 3px solid #1a1a1a; margin-bottom: 16px; } .company-name { font-size: 18px; font-weight: 800; } .doc-title { font-size: 13px; color: #555; } .date-range { padding: 8px 14px; background: #f5f5f5; border: 1px solid #ddd; font-size: 14px; font-weight: 700; text-align: center; margin-bottom: 12px; } table { width: 100%; border-collapse: collapse; } th { background: #1a1a1a; color: white; padding: 7px 8px; text-align: left; font-size: 10px; font-weight: 700; text-transform: uppercase; } td { border: 1px solid #bbb; padding: 6px 8px; font-size: 11px; } td.c { text-align: center; } tr:nth-child(even) { background: #f9f9f9; } .foot { margin-top: 20px; padding-top: 10px; border-top: 2px solid #1a1a1a; font-size: 10px; color: #888; display: flex; justify-content: space-between; }`;
+    const rows = enriched.map(en => {
+      const op = [];
+      if (parseFloat(en.vacationHours) > 0) op.push('Vac: ' + en.vacationHours + 'h');
+      if (parseFloat(en.bonus) > 0) op.push('Bonus: $' + parseFloat(en.bonus).toFixed(2));
+      return '<tr><td>' + (en.controlNumber || '') + '</td><td style="font-weight:600">' + en.employeeName + '</td><td>' + (en.deductions || '') + '</td><td>' + (en.description || '') + '</td><td class="c">$' + parseFloat(en.hourlyRate).toFixed(2) + '</td><td class="c">' + en.regularHours + '</td><td class="c" style="color:' + (parseFloat(en.overtimeHours) > 0 ? '#c62828' : '#888') + '">' + en.overtimeHours + '</td><td>' + op.join(', ') + '</td></tr>';
+    }).join('');
+    const htmlContent = '<html><head><style>' + css + '</style></head><body><div class="header"><div class="company-name">Carolina Rolling Co., Inc.</div><div class="doc-title">Weekly Payroll Report</div></div><div class="date-range">Pay Period: ' + sd + ' — ' + ed + '</div><table><thead><tr><th>Control #</th><th>Employee</th><th>Deductions</th><th>Description</th><th>Rate</th><th>Reg Hrs</th><th>OT</th><th>Other</th></tr></thead><tbody>' + rows + '</tbody></table><div class="foot"><span>Generated: ' + new Date().toLocaleDateString() + '</span><span>Carolina Rolling Co., Inc. — CONFIDENTIAL</span></div></body></html>';
+
+    const filename = `Carolina_Rolling_Payroll_${payroll.weekStart}_to_${payroll.weekEnd}.html`;
+    const attachmentBase64 = Buffer.from(htmlContent).toString('base64url');
+
+    // Build RFC 2822 MIME message with attachment
+    const boundary = 'payroll_boundary_' + Date.now();
+    const emailSubject = subject || `Carolina Rolling Payroll ${sd} — ${ed}`;
+    const emailBody = body || `Please find the attached payroll for the pay period ${sd} — ${ed}.
+
+Total Gross: $${parseFloat(payroll.totalGross).toFixed(2)}
+
+Please process at your earliest convenience.
+
+Thank you,
+CRAdmin
+Carolina Rolling Co., Inc.`;
+
+    const mime = [
+      'From: ' + account.email,
+      'To: ' + toEmail,
+      'Subject: ' + emailSubject,
+      'MIME-Version: 1.0',
+      'Content-Type: multipart/mixed; boundary="' + boundary + '"',
+      '',
+      '--' + boundary,
+      'Content-Type: text/plain; charset=UTF-8',
+      '',
+      emailBody,
+      '',
+      '--' + boundary,
+      'Content-Type: text/html; name="' + filename + '"',
+      'Content-Disposition: attachment; filename="' + filename + '"',
+      'Content-Transfer-Encoding: base64',
+      '',
+      attachmentBase64,
+      '',
+      '--' + boundary + '--'
+    ].join('\r\n');
+
+    const raw = Buffer.from(mime).toString('base64url');
+
+    // Send via Gmail API
+    const { getGmailClient } = require('../services/emailScanner');
+    const gmail = await getGmailClient(account);
+    await gmail.users.messages.send({ userId: 'me', requestBody: { raw } });
+
+    res.json({ data: null, message: 'Payroll email sent successfully' });
+  } catch (error) {
+    console.error('[Payroll Email] Send failed:', error.message);
+    next(error);
+  }
 });
 
 module.exports = router;

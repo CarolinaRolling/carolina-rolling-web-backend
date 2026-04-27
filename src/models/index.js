@@ -3146,6 +3146,11 @@ const PayrollEntry = sequelize.define('PayrollEntry', {
   grossPay: {
     type: DataTypes.DECIMAL(10, 2),
     defaultValue: 0
+  },
+  sortOrder: {
+    type: DataTypes.INTEGER,
+    defaultValue: 999,
+    allowNull: true
   }
 }, {
   tableName: 'payroll_entries',

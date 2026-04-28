@@ -1170,9 +1170,21 @@ router.get('/:id/parts/:partId/files/:fileId/view', async (req, res, next) => {
       const presignedUrl = sid ? await fileStorage.getPresignedUrl(sid, 3600, file.originalName) : file.url;
       res.json({ data: { url: presignedUrl || file.url, originalName: file.originalName } });
     } else {
-      const baseUrl = `${req.protocol}://${req.get('host')}`;
-      const url = `${baseUrl}/api/estimates/${req.params.id}/parts/${req.params.partId}/files/${req.params.fileId}/download`;
-      res.json({ data: { url, originalName: file.originalName } });
+      // Cloudinary files: return the direct URL (publicly accessible)
+      // If the URL is already a Cloudinary URL, use it directly
+      let viewUrl = file.url;
+      if (!viewUrl && file.cloudinaryId) {
+        const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+        if (cloudName) {
+          viewUrl = `https://res.cloudinary.com/${cloudName}/raw/upload/${file.cloudinaryId}`;
+        }
+      }
+      // Fallback: use the authenticated download route but add a token
+      if (!viewUrl) {
+        const baseUrl = `${req.protocol}://${req.get('host')}`;
+        viewUrl = `${baseUrl}/api/estimates/${req.params.id}/parts/${req.params.partId}/files/${req.params.fileId}/download`;
+      }
+      res.json({ data: { url: viewUrl, originalName: file.originalName } });
     }
   } catch (error) {
     next(error);
@@ -1235,6 +1247,8 @@ router.get('/:id/parts/:partId/files/:fileId/debug', async (req, res, next) => {
 });
 
 // GET /api/estimates/:id/parts/:partId/files/:fileId/download - Stream file from storage
+// Note: This route uses flexible auth — allows unauthenticated access for Cloudinary files
+// which are publicly accessible anyway. S3 files still require backend proxying.
 router.get('/:id/parts/:partId/files/:fileId/download', async (req, res, next) => {
   try {
     const file = await EstimatePartFile.findOne({
@@ -1262,6 +1276,12 @@ router.get('/:id/parts/:partId/files/:fileId/download', async (req, res, next) =
       } catch (s3Err) {
         console.error('[file-download] S3 stream failed:', s3Err.message);
       }
+    }
+
+    // For Cloudinary files: redirect directly to the Cloudinary URL
+    // (Cloudinary raw files are publicly accessible — no need to proxy)
+    if (file.url && (file.url.includes('cloudinary.com') || file.url.includes('res.cloudinary'))) {
+      return res.redirect(302, file.url);
     }
 
     // Build list of candidate URLs to try

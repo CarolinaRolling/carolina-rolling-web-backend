@@ -2986,13 +2986,14 @@ router.get('/:id/parts/:partId/files/:fileId/signed-url', async (req, res, next)
       return res.json({ data: { url: file.url, expiresIn: null, originalName: file.originalName || file.filename } });
     }
 
-    // Return the download proxy URL - it handles resource_type resolution
+    // Cloudinary files: return direct URL (publicly accessible)
+    if (file.url && file.url.includes('cloudinary.com')) {
+      return res.json({ data: { url: file.url, expiresIn: null, originalName: file.originalName || file.filename } });
+    }
+    // Fallback to download proxy for other cases
     const baseUrl = `${req.protocol}://${req.get('host')}`;
     const url = `${baseUrl}/api/workorders/${req.params.id}/parts/${req.params.partId}/files/${req.params.fileId}/download`;
-    
-    res.json({
-      data: { url, expiresIn: null, originalName: file.originalName || file.filename }
-    });
+    res.json({ data: { url, expiresIn: null, originalName: file.originalName || file.filename } });
   } catch (error) {
     next(error);
   }
@@ -3088,6 +3089,11 @@ router.get('/:id/parts/:partId/files/:fileId/download', async (req, res, next) =
     }
     if (file.url && file.url.includes('.s3.') && file.url.includes('amazonaws.com')) {
       return res.redirect(file.url);
+    }
+
+    // Cloudinary files: redirect directly (publicly accessible)
+    if (file.url && file.url.includes('cloudinary.com')) {
+      return res.redirect(302, file.url);
     }
 
     // Build list of candidate URLs to try

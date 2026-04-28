@@ -2194,10 +2194,11 @@ router.get('/:id/pdf', async (req, res, next) => {
 
     // Part type labels
     const PART_LABELS = {
-      plate_roll: 'Plate Roll', angle_roll: 'Angle Roll', pipe_roll: 'Pipes/Tubes/Round',
-      tube_roll: 'Sq/Rect Tube Roll', channel_roll: 'Channel Roll', beam_roll: 'Beam Roll',
+      plate_roll: 'Plate Roll', angle_roll: 'Angle Roll', pipe_roll: 'Pipes / Tubes / Round',
+      tube_roll: 'Square & Rect Tube Roll', channel_roll: 'Channel Roll', beam_roll: 'Beam Roll',
       flat_bar: 'Flat Bar Roll', flat_stock: 'Flat Stock', cone_roll: 'Cone Roll',
-      tee_bar: 'Tee Bar Roll', press_brake: 'Press Brake', fab_service: 'Fabrication Service', shop_rate: 'Shop Rate', other: 'Other'
+      tee_bar: 'Tee Bar Roll', press_brake: 'Press Brake', fab_service: 'Fabrication Service',
+      shop_rate: 'Shop Rate', shaped_plate: 'Shaped Plate', rush_service: 'Rush / Emergency Service', other: 'Other'
     };
 
     // Spec abbreviation helper
@@ -2338,6 +2339,45 @@ router.get('/:id/pdf', async (req, res, next) => {
         partLabel = 'Square Bar Roll';
       }
       const qty = parseInt(part.quantity) || 1;
+
+      // rush_service: calculate amounts from formData — not laborTotal
+      if (part.partType === 'rush_service') {
+        const rfd = (part.formData && typeof part.formData === 'object') ? part.formData : part;
+        const emergOpts = { 'Saturday': 600, 'Saturday Night': 800, 'Sunday': 600, 'Sunday Night': 800 };
+        let rushExpediteAmt = 0, rushEmergencyAmt = 0;
+        if (rfd._expediteEnabled) {
+          if (rfd._expediteType === 'custom_amt') {
+            rushExpediteAmt = parseFloat(rfd._expediteCustomAmt) || 0;
+          } else {
+            let pct = parseFloat(rfd._expediteType) || 0;
+            if (rfd._expediteType === 'custom_pct') pct = parseFloat(rfd._expediteCustomPct) || 0;
+            rushExpediteAmt = partsSubtotal * (pct / 100);
+          }
+        }
+        if (rfd._emergencyEnabled) rushEmergencyAmt = emergOpts[rfd._emergencyDay] || 0;
+
+        const rushTotal = rushExpediteAmt + rushEmergencyAmt;
+        const rushLines = [];
+        if (rushExpediteAmt > 0) rushLines.push(`Expedite: ${formatCurrency(rushExpediteAmt)}`);
+        if (rushEmergencyAmt > 0) rushLines.push(`Emergency Off-Hours (${rfd._emergencyDay || ''}): ${formatCurrency(rushEmergencyAmt)}`);
+        const rushDesc = rushLines.join('
+');
+        const rushDescHeight = doc.fontSize(8).heightOfString(rushDesc || 'Rush Service', { width: 300 });
+        const rushRowHeight = Math.max(rushDescHeight, 12) + 8;
+        if (yPos + rushRowHeight > 700) { doc.addPage(); yPos = 50; }
+        doc.fontSize(9).fillColor(primaryColor).font('Helvetica-Bold').text(`#${part.partNumber}`, 50, yPos, { lineBreak: false });
+        doc.fontSize(8).fillColor(darkColor).font('Helvetica-Bold').text(PART_LABELS['rush_service'], 85, yPos, { lineBreak: false });
+        doc.font('Helvetica').fillColor(grayColor).text(rushDesc, 85, yPos + 11, { width: 300 });
+        doc.fillColor(darkColor).text('1', 400, yPos, { width: 30, align: 'center', lineBreak: false });
+        doc.text(formatCurrency(rushTotal), 440, yPos, { width: 50, align: 'right', lineBreak: false });
+        doc.font('Helvetica-Bold').text(formatCurrency(rushTotal), 500, yPos, { width: 62, align: 'right', lineBreak: false });
+        doc.font('Helvetica');
+        yPos += rushRowHeight + 4;
+        doc.strokeColor('#eee').lineWidth(0.5).moveTo(85, yPos).lineTo(562, yPos).stroke();
+        yPos += 6;
+        continue;
+      }
+
       const matCost = parseFloat(part.materialTotal) || 0;
       const matMarkup = parseFloat(part.materialMarkupPercent) || 0;
       const matEachRaw = matCost * (1 + matMarkup / 100);

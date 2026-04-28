@@ -155,6 +155,13 @@ async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
   
   return new Promise((resolve, reject) => {
     try {
+      const PART_LABELS = {
+        plate_roll: 'Plate Roll', angle_roll: 'Angle Roll', pipe_roll: 'Pipes / Tubes / Round',
+        tube_roll: 'Square & Rect Tube Roll', channel_roll: 'Channel Roll', beam_roll: 'Beam Roll',
+        flat_bar: 'Flat Bar Roll', flat_stock: 'Flat Stock', cone_roll: 'Cone Roll',
+        tee_bar: 'Tee Bar Roll', press_brake: 'Press Brake', fab_service: 'Fabrication Service',
+        shop_rate: 'Shop Rate', shaped_plate: 'Shaped Plate', rush_service: 'Rush / Emergency Service', other: 'Other'
+      };
       const doc = new PDFDocument({ margin: 50, size: 'letter' });
       const chunks = [];
       const W = 512; // usable width (612 - 100 margins)
@@ -299,7 +306,7 @@ async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
           if (partObj.wallThickness && partObj.wallThickness !== 'SOLID') pieces.push(`x ${partObj.wallThickness} wall`);
           if (partObj.wallThickness === 'SOLID') pieces.push('Solid');
           if (partObj.material) pieces.push(partObj.material);
-          if (partObj.partType) pieces.push(partObj.partType.replace(/_/g, ' '));
+          if (partObj.partType) pieces.push(PART_LABELS[partObj.partType] || partObj.partType.replace(/_/g, ' '));
           desc = pieces.join(' ') || 'N/A';
         }
         partObj._poDesc = desc;

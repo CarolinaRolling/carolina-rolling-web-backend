@@ -2360,8 +2360,7 @@ router.get('/:id/pdf', async (req, res, next) => {
         const rushLines = [];
         if (rushExpediteAmt > 0) rushLines.push(`Expedite: ${formatCurrency(rushExpediteAmt)}`);
         if (rushEmergencyAmt > 0) rushLines.push(`Emergency Off-Hours (${rfd._emergencyDay || ''}): ${formatCurrency(rushEmergencyAmt)}`);
-        const rushDesc = rushLines.join('
-');
+        const rushDesc = rushLines.join('\n');
         const rushDescHeight = doc.fontSize(8).heightOfString(rushDesc || 'Rush Service', { width: 300 });
         const rushRowHeight = Math.max(rushDescHeight, 12) + 8;
         if (yPos + rushRowHeight > 700) { doc.addPage(); yPos = 50; }

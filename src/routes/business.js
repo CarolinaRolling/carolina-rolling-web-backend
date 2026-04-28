@@ -760,18 +760,95 @@ router.post('/payroll/:id/send-email', async (req, res, next) => {
     const sd = new Date(payroll.weekStart + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
     const ed = new Date(payroll.weekEnd + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
 
-    // Build payroll HTML attachment
-    const css = `* { box-sizing: border-box; } body { font-family: Arial, Helvetica, sans-serif; margin: 0; padding: 20px 30px; font-size: 11px; color: #222; } .header { padding-bottom: 12px; border-bottom: 3px solid #1a1a1a; margin-bottom: 16px; } .company-name { font-size: 18px; font-weight: 800; } .doc-title { font-size: 13px; color: #555; } .date-range { padding: 8px 14px; background: #f5f5f5; border: 1px solid #ddd; font-size: 14px; font-weight: 700; text-align: center; margin-bottom: 12px; } table { width: 100%; border-collapse: collapse; } th { background: #1a1a1a; color: white; padding: 7px 8px; text-align: left; font-size: 10px; font-weight: 700; text-transform: uppercase; } td { border: 1px solid #bbb; padding: 6px 8px; font-size: 11px; } td.c { text-align: center; } tr:nth-child(even) { background: #f9f9f9; } .foot { margin-top: 20px; padding-top: 10px; border-top: 2px solid #1a1a1a; font-size: 10px; color: #888; display: flex; justify-content: space-between; }`;
-    const rows = enriched.map(en => {
-      const op = [];
-      if (parseFloat(en.vacationHours) > 0) op.push('Vac: ' + en.vacationHours + 'h');
-      if (parseFloat(en.bonus) > 0) op.push('Bonus: $' + parseFloat(en.bonus).toFixed(2));
-      return '<tr><td>' + (en.controlNumber || '') + '</td><td style="font-weight:600">' + en.employeeName + '</td><td>' + (en.deductions || '') + '</td><td>' + (en.description || '') + '</td><td class="c">$' + parseFloat(en.hourlyRate).toFixed(2) + '</td><td class="c">' + en.regularHours + '</td><td class="c" style="color:' + (parseFloat(en.overtimeHours) > 0 ? '#c62828' : '#888') + '">' + en.overtimeHours + '</td><td>' + op.join(', ') + '</td></tr>';
-    }).join('');
-    const htmlContent = '<html><head><style>' + css + '</style></head><body><div class="header"><div class="company-name">Carolina Rolling Co., Inc.</div><div class="doc-title">Weekly Payroll Report</div></div><div class="date-range">Pay Period: ' + sd + ' — ' + ed + '</div><table><thead><tr><th>Control #</th><th>Employee</th><th>Deductions</th><th>Description</th><th>Rate</th><th>Reg Hrs</th><th>OT</th><th>Other</th></tr></thead><tbody>' + rows + '</tbody></table><div class="foot"><span>Generated: ' + new Date().toLocaleDateString() + '</span><span>Carolina Rolling Co., Inc. — CONFIDENTIAL</span></div></body></html>';
+    // Build payroll PDF using PDFKit
+    const PDFDocument = require('pdfkit');
+    const pdfBuffer = await new Promise((resolve, reject) => {
+      const doc = new PDFDocument({ margin: 40, size: 'letter' });
+      const chunks = [];
+      doc.on('data', c => chunks.push(c));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
 
-    const filename = `Carolina_Rolling_Payroll_${payroll.weekStart}_to_${payroll.weekEnd}.html`;
-    const attachmentBase64 = Buffer.from(htmlContent).toString('base64url');
+      const L = 40, W = 532;
+
+      // Header
+      doc.fontSize(16).font('Helvetica-Bold').fillColor('#1a1a1a').text('Carolina Rolling Co., Inc.', L, 40);
+      doc.fontSize(10).font('Helvetica').fillColor('#555').text('Weekly Payroll Report — CONFIDENTIAL', L, 60);
+      doc.moveTo(L, 76).lineTo(L + W, 76).lineWidth(2).strokeColor('#1a1a1a').stroke();
+
+      // Date range
+      doc.fontSize(12).font('Helvetica-Bold').fillColor('#1a1a1a')
+        .text(`Pay Period: ${sd} — ${ed}`, L, 84, { align: 'center', width: W });
+
+      // Table header
+      let y = 108;
+      const cols = [
+        { label: 'Ctrl #',    x: L,       w: 48  },
+        { label: 'Employee',  x: L+48,    w: 110 },
+        { label: 'Deductions',x: L+158,   w: 95  },
+        { label: 'Description',x: L+253,  w: 95  },
+        { label: 'Rate',      x: L+348,   w: 44, align: 'right' },
+        { label: 'Reg',       x: L+392,   w: 34, align: 'right' },
+        { label: 'OT',        x: L+426,   w: 30, align: 'right' },
+        { label: 'Other',     x: L+456,   w: 76  },
+      ];
+
+      // Header row background
+      doc.rect(L, y, W, 16).fill('#1a1a1a');
+      cols.forEach(c => {
+        doc.fontSize(7.5).font('Helvetica-Bold').fillColor('white')
+          .text(c.label, c.x + 2, y + 4, { width: c.w - 4, align: c.align || 'left' });
+      });
+      y += 16;
+
+      // Rows
+      enriched.forEach((en, idx) => {
+        const rowH = 18;
+        if (y + rowH > 720) { doc.addPage(); y = 40; }
+
+        if (idx % 2 === 1) doc.rect(L, y, W, rowH).fill('#f7f7f7');
+        doc.rect(L, y, W, rowH).lineWidth(0.3).strokeColor('#cccccc').stroke();
+
+        const op = [];
+        if (parseFloat(en.vacationHours) > 0) op.push('Vac:' + en.vacationHours + 'h');
+        if (parseFloat(en.bonus) > 0) op.push('Bonus:$' + parseFloat(en.bonus).toFixed(2));
+
+        const rowData = [
+          { val: en.controlNumber || '', col: cols[0] },
+          { val: en.employeeName,        col: cols[1], bold: true },
+          { val: en.deductions || '',    col: cols[2] },
+          { val: en.description || '',   col: cols[3] },
+          { val: '$' + parseFloat(en.hourlyRate).toFixed(2), col: cols[4] },
+          { val: String(en.regularHours || 0), col: cols[5] },
+          { val: String(en.overtimeHours || 0), col: cols[6], color: parseFloat(en.overtimeHours) > 0 ? '#c62828' : '#888' },
+          { val: op.join(' '),            col: cols[7] },
+        ];
+        rowData.forEach(({ val, col, bold, color }) => {
+          doc.fontSize(8).font(bold ? 'Helvetica-Bold' : 'Helvetica')
+            .fillColor(color || '#1a1a1a')
+            .text(val, col.x + 2, y + 5, { width: col.w - 4, align: col.align || 'left', lineBreak: false });
+        });
+        y += rowH;
+      });
+
+      // Total gross
+      y += 6;
+      doc.moveTo(L, y).lineTo(L + W, y).lineWidth(1).strokeColor('#1a1a1a').stroke();
+      y += 4;
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#1a1a1a')
+        .text(`Total Gross: $${parseFloat(payroll.totalGross || 0).toFixed(2)}`, L, y, { align: 'right', width: W });
+
+      // Footer
+      y += 20;
+      doc.fontSize(8).font('Helvetica').fillColor('#888')
+        .text(`Generated: ${new Date().toLocaleDateString()}`, L, y, { lineBreak: false })
+        .text('Carolina Rolling Co., Inc.', L, y, { align: 'right', width: W });
+
+      doc.end();
+    });
+
+    const filename = `Carolina_Rolling_Payroll_${payroll.weekStart}_to_${payroll.weekEnd}.pdf`;
+    const attachmentBase64 = pdfBuffer.toString('base64');
 
     // Build RFC 2822 MIME message with attachment
     const boundary = 'payroll_boundary_' + Date.now();
@@ -799,7 +876,7 @@ Carolina Rolling Co., Inc.`;
       emailBody,
       '',
       '--' + boundary,
-      'Content-Type: text/html; name="' + filename + '"',
+      'Content-Type: application/pdf; name="' + filename + '"',
       'Content-Disposition: attachment; filename="' + filename + '"',
       'Content-Transfer-Encoding: base64',
       '',

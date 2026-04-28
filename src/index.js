@@ -491,6 +491,7 @@ async function startServer() {
         ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "progressCount" INTEGER;
         ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "progressLastUpdatedAt" TIMESTAMP WITH TIME ZONE;
         ALTER TABLE employees ADD COLUMN IF NOT EXISTS "sortOrder" INTEGER DEFAULT 999;
+        ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "progressLog" JSONB DEFAULT '[]';
         ALTER TABLE payroll_entries ADD COLUMN IF NOT EXISTS "sortOrder" INTEGER DEFAULT 999;
       `);
       console.log('column migrations ensured');
@@ -1108,6 +1109,56 @@ async function startServer() {
     console.log('Auto-backup configured for every Saturday at 11 PM Pacific');
 
     // Auto-archive old estimates daily at 1:00 AM Pacific
+    // Check every 15 minutes for WOs where all parts are done but order not completed
+    cron.schedule('*/15 * * * *', async () => {
+      try {
+        const { WorkOrder, WorkOrderPart, TodoItem, User } = require('./models');
+        const { Op } = require('sequelize');
+        const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+        // Find active WOs not yet completed/shipped
+        const activeWOs = await WorkOrder.findAll({
+          where: { status: { [Op.in]: ['processing', 'in_progress', 'received', 'work_order_generated'] } },
+          attributes: ['id', 'drNumber', 'orderNumber', 'clientName', 'status']
+        });
+        for (const wo of activeWOs) {
+          const parts = await WorkOrderPart.findAll({
+            where: { workOrderId: wo.id },
+            attributes: ['id', 'status', 'completedAt', 'partType']
+          });
+          const relevant = parts.filter(p => !['rush_service'].includes(p.partType));
+          if (relevant.length === 0) continue;
+          const allDone = relevant.every(p => p.status === 'completed');
+          if (!allDone) continue;
+          // Find latest completedAt
+          const latestDone = relevant.reduce((latest, p) => {
+            if (!p.completedAt) return latest;
+            return !latest || new Date(p.completedAt) > new Date(latest) ? p.completedAt : latest;
+          }, null);
+          if (!latestDone || new Date(latestDone) > oneHourAgo) continue;
+          // Check if todo already exists for this WO
+          const label = wo.drNumber || wo.orderNumber;
+          const existing = await TodoItem.findOne({
+            where: { title: { [Op.like]: `%${label}%` }, type: 'general', createdBy: 'Auto-Complete Check', isDone: false }
+          });
+          if (existing) continue;
+          const headUser = await User.findOne({ where: { isHeadEstimator: true, isActive: true } });
+          await TodoItem.create({
+            title: `✅ All parts complete — confirm with operator: ${label} (${wo.clientName || ''})`,
+            description: `All parts on ${label} were marked complete over 1 hour ago but the work order has not been marked complete.
+
+Please confirm with the operator and mark the order complete if ready.`,
+            type: 'general',
+            priority: 'high',
+            assignedTo: headUser?.username || null,
+            createdBy: 'Auto-Complete Check'
+          });
+          console.log('[CRON] All-parts-done reminder created for ' + label);
+        }
+      } catch (e) {
+        console.error('[CRON] All-parts-done check error:', e.message);
+      }
+    });
+
     cron.schedule('0 1 * * *', async () => {
       try {
         const { Op } = require('sequelize');

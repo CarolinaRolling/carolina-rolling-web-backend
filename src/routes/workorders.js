@@ -2723,6 +2723,16 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
       if (progressCount > 0 && part.status === 'pending') {
         updates.status = 'in_progress';
       }
+      // Log who hit this milestone with timestamp
+      const operatorLabel = req.operatorName
+        ? req.operatorName + (req.deviceName ? ' (' + req.deviceName + ')' : '')
+        : (req.user?.username ? req.user.username + ' (web)' : 'Unknown');
+      const existingLog = Array.isArray(part.progressLog) ? part.progressLog : [];
+      updates.progressLog = [...existingLog, {
+        count: progressCount,
+        timestamp: new Date().toISOString(),
+        operator: operatorLabel
+      }];
     }
 
     // Capture previous status BEFORE update for auto-advance comparison

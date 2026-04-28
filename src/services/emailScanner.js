@@ -171,7 +171,9 @@ PART TYPES AND THEIR FORM FIELDS:
 
 plate_roll — Flat plate rolled into a cylinder (shell, ring, segment):
   Fields: material, thickness, width (= shell height), length (flat arc length), outerDiameter OR diameter, arcDegrees (360 for full cylinder), rollType (easy_way or hard_way)
-  Note: "Shell Height" = the width of the plate. "Shell Length" = the flat arc length. If they say "R/T to 144 OD" that means outerDiameter=144.
+  IMPORTANT: if the drawing says "56 ID" or "roll to 56 ID", set outerDiameter=56 AND measurePoint="ID". If it says "56 OD", set outerDiameter=56 AND measurePoint="OD".
+  unitPrice: if the document shows a price per piece (e.g. "100.00/PC", "$100 each"), set unitPrice to that number (labor/rolling cost only, not material).
+  Note: "Shell Height" = the width of the plate. "Shell Length" = the flat arc length. If they say "R/T to 144 OD" that means outerDiameter=144, measurePoint="OD". If they say "R/T to 56 ID", set outerDiameter=56, measurePoint="ID".
   If they give both width and OD you can calculate length: length = π × OD × (arcDegrees/360). But if they provide length, use it.
 
 shaped_plate — Round plates, donuts (rings), and custom-shaped plates (NOT rolled — flat or formed):
@@ -475,24 +477,35 @@ function buildFormData(p) {
   if (p.clientPartNumber) fd.clientPartNumber = p.clientPartNumber;
   if (p.description) fd._materialDescription = p.description;
   fd.materialSource = p.materialSource || 'customer_supplied';
+  // Pricing from PO or quote document
+  if (p.unitPrice && parseFloat(p.unitPrice) > 0) {
+    fd.laborTotal = String(parseFloat(p.unitPrice).toFixed(2));
+    fd._baseLaborTotal = String(parseFloat(p.unitPrice).toFixed(2));
+  }
 
   if (type === 'plate_roll') {
     if (p.thickness) fd.thickness = p.thickness;
     if (p.width) fd.width = p.width;
     if (p.length) fd.length = p.length;
-    // Roll value — prefer diameter
-    if (p.outerDiameter || p.diameter) {
-      fd._rollValue = String(p.outerDiameter || p.diameter);
-      fd._rollMeasureType = p.measureType || 'diameter';
-      fd._rollMeasurePoint = resolveMP(p, 'outside');
-    } else if (p.innerDiameter) {
-      fd._rollValue = String(p.innerDiameter);
-      fd._rollMeasureType = 'diameter';
-      fd._rollMeasurePoint = 'inside';
-    } else if (p.radius) {
-      fd._rollValue = String(p.radius);
-      fd._rollMeasureType = 'radius';
-      fd._rollMeasurePoint = resolveMP(p, 'inside');
+    // Roll value — resolve measurePoint first, then pick the right diameter field
+    const mp = resolveMP(p, null); // null = not specified
+    if (p.outerDiameter || p.diameter || p.innerDiameter || p.radius) {
+      if (p.innerDiameter && (!p.outerDiameter || mp === 'inside')) {
+        // Explicit innerDiameter field or measurePoint says inside
+        fd._rollValue = String(p.innerDiameter);
+        fd._rollMeasureType = 'diameter';
+        fd._rollMeasurePoint = 'inside';
+      } else if (p.radius) {
+        fd._rollValue = String(p.radius);
+        fd._rollMeasureType = 'radius';
+        fd._rollMeasurePoint = mp || 'inside';
+      } else {
+        // outerDiameter or diameter field — but respect measurePoint if AI specified it
+        fd._rollValue = String(p.outerDiameter || p.diameter);
+        fd._rollMeasureType = p.measureType || 'diameter';
+        // If AI explicitly said ID/inside, honour it even if it put value in outerDiameter
+        fd._rollMeasurePoint = mp || 'outside';
+      }
     }
     if (p.arcDegrees) fd.arcDegrees = String(p.arcDegrees);
     if (p.rollType) fd.rollType = p.rollType;
@@ -2193,6 +2206,8 @@ PART TYPES AND THEIR FORM FIELDS:
 
 plate_roll — Flat plate rolled into a cylinder (shell, ring, segment):
   Fields: material, thickness, width (= shell height), length (flat arc length), outerDiameter OR diameter, arcDegrees (360 for full cylinder), rollType (easy_way or hard_way)
+  IMPORTANT: if the drawing says "56 ID" or "roll to 56 ID", set outerDiameter=56 AND measurePoint="ID". If it says "56 OD", set outerDiameter=56 AND measurePoint="OD".
+  unitPrice: if the document shows a price per piece (e.g. "100.00/PC", "$100 each"), set unitPrice to that number (labor/rolling cost only, not material).
 
 shaped_plate — Round plates, donuts (rings), and custom-shaped plates (NOT rolled — flat or formed):
   Fields: material, thickness, outerDiameter (OD), innerDiameter (ID — donuts only), width/length (custom shapes only), donutPurpose
@@ -2205,6 +2220,7 @@ pipe_roll — Pipe or tube bending:
 
 angle_roll — Angle iron rolling:
   Fields: material, legSize (e.g. "3x3"), thickness, radius OR diameter, arcDegrees, rollType, length
+  unitPrice: if a price per piece is shown, set unitPrice.
 
 flat_bar — Flat bar and square bar bending:
   Fields: material, barSize (e.g. "4x1/2"), radius OR diameter, arcDegrees, rollType, length
@@ -2258,6 +2274,8 @@ Respond ONLY with valid JSON (no markdown, no backticks). Format:
       "specialInstructions": "notes about this part",
       "clientPartNumber": "if visible on drawing",
       "description": "auto-generated material description",
+      "measurePoint": "ID or OD or CL — how the diameter was specified on the drawing",
+      "unitPrice": 100.00,
       "missingFields": ["thickness"],
       "missingFieldNotes": "No thickness specified on drawing"
     }

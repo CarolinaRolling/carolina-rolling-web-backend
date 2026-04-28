@@ -261,7 +261,9 @@ function buildWorkOrderPartFromEstimate(estimatePart) {
   if (EA_PRICED.includes(data.partType)) {
     const qty = parseInt(data.quantity) || 1;
     const matCost = parseFloat(data.materialTotal) || 0;
-    const matMarkup = parseFloat(data.materialMarkupPercent) || 0;
+    // Default markup to 20% if not set — matches frontend display behavior
+    const matMarkupRaw = parseFloat(data.materialMarkupPercent);
+    const matMarkup = isNaN(matMarkupRaw) ? 20 : matMarkupRaw;
     const matEachRaw = Math.round(matCost * (1 + matMarkup / 100) * 100) / 100;
     // Apply material rounding if specified
     const rounding = fd._materialRounding || 'none';

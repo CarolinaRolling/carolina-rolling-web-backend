@@ -3595,7 +3595,8 @@ router.post('/:id/documents', documentUpload.array('documents', 10), async (req,
           size: file.size,
           url: result.url,
           cloudinaryId: result.storageId,
-          documentType: req.body.documentType || null
+          documentType: req.body.documentType || null,
+          portalVisible: req.body.portalVisible === 'true' || req.body.portalVisible === true || false
         });
 
         documents.push(document);

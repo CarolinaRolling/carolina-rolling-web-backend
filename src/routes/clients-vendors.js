@@ -205,6 +205,7 @@ router.put('/clients/:id', async (req, res, next) => {
       isActive: isActive !== undefined ? isActive : client.isActive,
       noTag: noTag !== undefined ? noTag : client.noTag,
       requiresPartLabels: requiresPartLabels !== undefined ? requiresPartLabels : client.requiresPartLabels,
+      requiresCoc: req.body.requiresCoc !== undefined ? !!req.body.requiresCoc : client.requiresCoc,
       paymentTerms: paymentTerms !== undefined ? (paymentTerms || null) : client.paymentTerms,
       contacts: req.body.contacts !== undefined ? req.body.contacts : client.contacts,
       quickbooksName: req.body.quickbooksName !== undefined ? (req.body.quickbooksName || null) : client.quickbooksName,

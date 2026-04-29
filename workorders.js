@@ -1,0 +1,970 @@
+const express = require('express');
+const cloudinary = require('cloudinary').v2;
+const zlib = require('zlib');
+const { promisify } = require('util');
+const gzip = promisify(zlib.gzip);
+const gunzip = promisify(zlib.gunzip);
+
+// Ensure cloudinary is configured
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
+
+const { 
+  sequelize, 
+  Shipment, ShipmentPhoto, ShipmentDocument,
+  InboundOrder,
+  WorkOrder, WorkOrderPart, WorkOrderPartFile, WorkOrderDocument,
+  Estimate, EstimatePart, EstimatePartFile, EstimateFile,
+  DRNumber, PONumber, InvoiceNumber,
+  Client, Vendor,
+  AppSettings, User, ApiKey, EmailLog,
+  TodoItem, GmailAccount, ScannedEmail, PendingOrder,
+  ShopSupply, ShopSupplyLog, VendorIssue, WeldProcedure,
+  ActivityLog, DailyActivity
+} = require('../models');
+
+const router = express.Router();
+
+// ============= HELPER: Build full backup object =============
+async function buildBackup(includeFiles = false) {
+  const backup = {
+    version: '3.0',
+    createdAt: new Date().toISOString(),
+    data: {},
+    counts: {},
+    files: {}
+  };
+
+  // Clients & Vendors
+  backup.data.clients = (await Client.findAll()).map(c => c.toJSON());
+  backup.data.vendors = (await Vendor.findAll()).map(v => v.toJSON());
+
+  // DR Numbers & PO Numbers
+  backup.data.drNumbers = (await DRNumber.findAll()).map(d => d.toJSON());
+  backup.data.poNumbers = (await PONumber.findAll()).map(p => p.toJSON());
+
+  // Shipments (with photos & documents)
+  backup.data.shipments = (await Shipment.findAll({
+    include: [
+      { model: ShipmentPhoto, as: 'photos' },
+      { model: ShipmentDocument, as: 'documents' }
+    ]
+  })).map(s => s.toJSON());
+
+  // Inbound Orders
+  backup.data.inboundOrders = (await InboundOrder.findAll()).map(o => o.toJSON());
+
+  // Work Orders (with parts, part files, and documents)
+  backup.data.workOrders = (await WorkOrder.findAll({
+    include: [
+      { model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] },
+      { model: WorkOrderDocument, as: 'documents' }
+    ]
+  })).map(w => w.toJSON());
+
+  // Estimates (with parts, part files, and estimate-level files)
+  backup.data.estimates = (await Estimate.findAll({
+    include: [
+      { model: EstimatePart, as: 'parts', include: [{ model: EstimatePartFile, as: 'files' }] },
+      { model: EstimateFile, as: 'files' }
+    ]
+  })).map(e => e.toJSON());
+
+  // Settings
+  backup.data.settings = (await AppSettings.findAll()).map(s => s.toJSON());
+
+  // Users (including password hashes for restore)
+  backup.data.users = (await User.findAll()).map(u => u.toJSON());
+
+  // API Keys (full data for restore)
+  backup.data.apiKeys = (await ApiKey.findAll()).map(k => k.toJSON());
+
+  // Email logs (last 500)
+  backup.data.emailLogs = (await EmailLog.findAll({ order: [['createdAt', 'DESC']], limit: 500 })).map(e => e.toJSON());
+
+  // Business data
+  const { Liability, Employee, PayrollWeek, PayrollEntry } = require('../models');
+  backup.data.liabilities = (await Liability.findAll()).map(l => l.toJSON());
+  backup.data.employees = (await Employee.findAll({ order: [['sortOrder', 'ASC'], ['name', 'ASC']] })).map(e => e.toJSON());
+  backup.data.payrollWeeks = (await PayrollWeek.findAll({ include: [{ model: PayrollEntry, as: 'entries' }] })).map(p => p.toJSON());
+  backup.data.businessEvents = (await BusinessEvent.findAll()).map(e => e.toJSON());
+
+  // Invoice Numbers
+  backup.data.invoiceNumbers = (await InvoiceNumber.findAll({ order: [['createdAt', 'DESC']] })).map(i => i.toJSON());
+
+  // Todos
+  backup.data.todos = (await TodoItem.findAll({ order: [['createdAt', 'DESC']] })).map(t => t.toJSON());
+
+  // Email Scanner
+  backup.data.gmailAccounts = (await GmailAccount.findAll()).map(g => g.toJSON());
+  backup.data.scannedEmails = (await ScannedEmail.findAll({ order: [['createdAt', 'DESC']], limit: 1000 })).map(s => s.toJSON());
+  backup.data.pendingOrders = (await PendingOrder.findAll({ order: [['createdAt', 'DESC']] })).map(p => p.toJSON());
+
+  // Shop Supplies
+  backup.data.shopSupplies = (await ShopSupply.findAll()).map(s => s.toJSON());
+  backup.data.shopSupplyLogs = (await ShopSupplyLog.findAll({ order: [['createdAt', 'DESC']], limit: 500 })).map(s => s.toJSON());
+
+  // Vendor Issues
+  backup.data.vendorIssues = (await VendorIssue.findAll({ order: [['createdAt', 'DESC']] })).map(v => v.toJSON());
+
+  // Weld Procedures
+  backup.data.weldProcedures = (await WeldProcedure.findAll()).map(w => w.toJSON());
+
+  // Activity & Daily Logs (last 30 days)
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  backup.data.activityLogs = (await ActivityLog.findAll({ where: { createdAt: { [require('sequelize').Op.gte]: thirtyDaysAgo } }, order: [['createdAt', 'DESC']] })).map(a => a.toJSON());
+  backup.data.dailyActivity = (await DailyActivity.findAll({ order: [['createdAt', 'DESC']], limit: 365 })).map(d => d.toJSON());
+
+  // Counts
+  backup.counts = {};
+  for (const [key, val] of Object.entries(backup.data)) {
+    backup.counts[key] = val.length;
+  }
+
+  // Download PDF/STEP files from Cloudinary if requested
+  if (includeFiles) {
+    const https = require('https');
+    const http = require('http');
+    
+    const downloadFile = (url, maxRedirects = 5) => new Promise((resolve, reject) => {
+      if (maxRedirects <= 0) return reject(new Error('Too many redirects'));
+      const client = url.startsWith('https') ? https : http;
+      const req = client.get(url, { timeout: 60000 }, (response) => {
+        // Follow redirects
+        if ([301, 302, 303, 307, 308].includes(response.statusCode) && response.headers.location) {
+          let redirectUrl = response.headers.location;
+          if (redirectUrl.startsWith('/')) {
+            const parsed = new URL(url);
+            redirectUrl = `${parsed.protocol}//${parsed.host}${redirectUrl}`;
+          }
+          return downloadFile(redirectUrl, maxRedirects - 1).then(resolve).catch(reject);
+        }
+        if (response.statusCode !== 200) {
+          response.resume(); // drain
+          return reject(new Error(`HTTP ${response.statusCode}`));
+        }
+        const chunks = [];
+        response.on('data', chunk => chunks.push(chunk));
+        response.on('end', () => {
+          const buf = Buffer.concat(chunks);
+          if (buf.length === 0) return reject(new Error('Empty response'));
+          resolve(buf);
+        });
+        response.on('error', reject);
+      });
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('Request timeout (60s)')); });
+    });
+
+    // Try to download — files are uploaded as 'private' so need signed URLs
+    const downloadFileEntry = async (entry) => {
+      if (entry.cloudinaryId) {
+        // For private files: use Cloudinary API download endpoint with authentication
+        const timestamp = Math.floor(Date.now() / 1000);
+        const publicId = entry.cloudinaryId;
+        
+        // Method 1: Construct authenticated API download URL
+        try {
+          const apiKey = process.env.CLOUDINARY_API_KEY;
+          const apiSecret = process.env.CLOUDINARY_API_SECRET;
+          const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+          
+          // Generate signature: "public_id={id}&timestamp={ts}{api_secret}"
+          const crypto = require('crypto');
+          const toSign = `public_id=${publicId}&timestamp=${timestamp}`;
+          const signature = crypto.createHash('sha1').update(toSign + apiSecret).digest('hex');
+          
+          const apiUrl = `https://api.cloudinary.com/v1_1/${cloudName}/raw/download?public_id=${encodeURIComponent(publicId)}&timestamp=${timestamp}&api_key=${apiKey}&signature=${signature}`;
+          return await downloadFile(apiUrl);
+        } catch (e) {
+          // Method 2: Try signed delivery URL
+          try {
+            const signedUrl = cloudinary.url(publicId, {
+              resource_type: 'raw', type: 'private', secure: true, sign_url: true
+            });
+            return await downloadFile(signedUrl);
+          } catch (e2) {
+            // Fall through
+          }
+        }
+      }
+      // Last resort: stored URL
+      return await downloadFile(entry.url);
+    };
+
+    // Collect all file URLs from document/file tables (these are all PDFs, drawings, specs — not images)
+    const fileEntries = [];
+
+    // WO part files (all are prints/drawings)
+    for (const wo of backup.data.workOrders) {
+      for (const part of (wo.parts || [])) {
+        for (const f of (part.files || [])) {
+          if (f.url) {
+            fileEntries.push({ id: f.id, url: f.url, cloudinaryId: f.cloudinaryId, name: f.originalName || f.filename, source: 'wo_part_file' });
+          }
+        }
+      }
+      for (const d of (wo.documents || [])) {
+        if (d.url) {
+          fileEntries.push({ id: d.id, url: d.url, cloudinaryId: d.cloudinaryId, name: d.originalName, source: 'wo_document' });
+        }
+      }
+    }
+
+    // Estimate part files + estimate-level files
+    for (const est of backup.data.estimates) {
+      for (const part of (est.parts || [])) {
+        for (const f of (part.files || [])) {
+          if (f.url) {
+            fileEntries.push({ id: f.id, url: f.url, cloudinaryId: f.cloudinaryId, name: f.originalName || f.filename, source: 'est_part_file' });
+          }
+        }
+      }
+      for (const f of (est.files || [])) {
+        if (f.url) {
+          fileEntries.push({ id: f.id, url: f.url, cloudinaryId: f.cloudinaryId, name: f.originalName || f.filename, source: 'est_file' });
+        }
+      }
+    }
+
+    // Shipment documents (MTRs, POs, etc. — skip photos)
+    for (const ship of backup.data.shipments) {
+      for (const d of (ship.documents || [])) {
+        if (d.url) {
+          fileEntries.push({ id: d.id, url: d.url, cloudinaryId: d.cloudinaryId, name: d.originalName, source: 'shipment_document' });
+        }
+      }
+    }
+
+    // Deduplicate by URL
+    const seen = new Set();
+    const uniqueFiles = fileEntries.filter(f => {
+      if (seen.has(f.url)) return false;
+      seen.add(f.url);
+      return true;
+    });
+
+    // Only attempt to download files from Cloudinary (skip NAS, localhost, etc.)
+    const downloadableFiles = uniqueFiles.filter(f => f.cloudinaryId || (f.url && f.url.includes('cloudinary.com')));
+    const skippedCount = uniqueFiles.length - downloadableFiles.length;
+    if (skippedCount > 0) {
+      console.log(`[backup] Skipping ${skippedCount} non-Cloudinary files (NAS/localhost/other)`);
+    }
+
+    const withCloudId = downloadableFiles.filter(f => !!f.cloudinaryId).length;
+    console.log(`[backup] Downloading ${downloadableFiles.length} files (${withCloudId} have cloudinaryId, ${downloadableFiles.length - withCloudId} missing)...`);
+    if (downloadableFiles.length > 0) {
+      const s = downloadableFiles[0];
+      console.log(`[backup] Sample: name=${s.name}, cloudinaryId=${s.cloudinaryId || 'NULL'}, url=${(s.url || '').substring(0, 100)}`);
+    }
+    let downloaded = 0;
+    let failed = 0;
+    const failedFiles = [];
+
+    // Download in batches of 3 with delay (Cloudinary Admin API rate limited to 500/hr)
+    for (let i = 0; i < downloadableFiles.length; i += 3) {
+      const batch = downloadableFiles.slice(i, i + 3);
+      const results = await Promise.allSettled(batch.map(async (entry) => {
+        const buffer = await downloadFileEntry(entry);
+        return { entry, buffer };
+      }));
+      
+      for (let j = 0; j < results.length; j++) {
+        const result = results[j];
+        if (result.status === 'fulfilled') {
+          const { entry, buffer } = result.value;
+          backup.files[entry.url] = {
+            name: entry.name,
+            source: entry.source,
+            size: buffer.length,
+            data: buffer.toString('base64')
+          };
+          downloaded++;
+        } else {
+          const entry = batch[j];
+          const errMsg = result.reason?.message || 'Unknown error';
+          if (failed < 3) {
+            console.warn(`[backup] DETAILED FAIL #${failed + 1}: ${entry.name}`);
+            console.warn(`[backup]   cloudinaryId: ${entry.cloudinaryId || 'NONE'}`);
+            console.warn(`[backup]   url: ${entry.url}`);
+            console.warn(`[backup]   error: ${errMsg}`);
+          }
+          failedFiles.push({ name: entry.name, error: errMsg, cloudinaryId: entry.cloudinaryId });
+          failed++;
+        }
+      }
+      
+      if (i + 3 < downloadableFiles.length) {
+        console.log(`[backup] Progress: ${downloaded + failed}/${downloadableFiles.length} (${downloaded} ok, ${failed} failed)`);
+        // Longer delay — Admin API calls per file, respect rate limits
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }
+
+    backup.counts._files = { total: uniqueFiles.length, cloudinary: downloadableFiles.length, skipped: skippedCount, downloaded, failed, failedFiles: failedFiles.slice(0, 20) };
+    console.log(`[backup] Files: ${downloaded} downloaded, ${failed} failed`);
+  }
+
+  return backup;
+}
+
+// ============= HELPER: Upload backup to Cloudinary =============
+async function uploadBackupToCloudinary(backup) {
+  const jsonStr = JSON.stringify(backup);
+  const compressed = await gzip(Buffer.from(jsonStr, 'utf-8'));
+  const base64 = compressed.toString('base64');
+  
+  const dateStr = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const publicId = `shipment-tracker-backups/backup-${dateStr}`;
+
+  const result = await cloudinary.uploader.upload(
+    `data:application/gzip;base64,${base64}`,
+    { public_id: publicId, resource_type: 'raw', overwrite: true, tags: ['auto-backup', 'database-backup'] }
+  );
+
+  return {
+    url: result.secure_url,
+    publicId: result.public_id,
+    size: compressed.length,
+    uncompressedSize: jsonStr.length,
+    createdAt: new Date().toISOString()
+  };
+}
+
+// ============= AUTO BACKUP (called by cron or run-now) =============
+async function runAutoBackup(includeFiles = false) {
+  const startTime = Date.now();
+  console.log(`[auto-backup] Starting backup${includeFiles ? ' (with files — local only, not uploaded to Cloudinary)' : ''}...`);
+  
+  try {
+    // Always build database-only for Cloudinary upload
+    const dbBackup = await buildBackup(false);
+    const uploadResult = await uploadBackupToCloudinary(dbBackup);
+    
+    const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`[auto-backup] Database backup uploaded: ${(uploadResult.size / 1024).toFixed(0)}KB compressed in ${duration}s`);
+    console.log(`[auto-backup] Counts:`, JSON.stringify(dbBackup.counts));
+
+    // Save to backup history (keep last 10 entries)
+    let history = [];
+    try {
+      const histSetting = await AppSettings.findOne({ where: { key: 'backup_history' } });
+      if (histSetting && histSetting.value) {
+        history = typeof histSetting.value === 'string' ? JSON.parse(histSetting.value) : histSetting.value;
+        if (!Array.isArray(history)) history = [];
+      }
+    } catch {}
+    history.unshift({
+      ...uploadResult,
+      counts: dbBackup.counts,
+      duration: `${duration}s`,
+      createdAt: new Date().toISOString()
+    });
+    history = history.slice(0, 10); // keep last 10
+    await AppSettings.upsert({ key: 'backup_history', value: JSON.stringify(history) });
+
+    // Also save last backup info (legacy)
+    await AppSettings.upsert({
+      key: 'last_auto_backup',
+      value: JSON.stringify({
+        ...uploadResult,
+        counts: dbBackup.counts,
+        duration: `${duration}s`
+      })
+    });
+
+    // Clean up old backups (keep last 10)
+    try {
+      const searchResult = await cloudinary.search
+        .expression('folder:shipment-tracker-backups AND resource_type:raw')
+        .sort_by('created_at', 'desc')
+        .max_results(50)
+        .execute();
+      
+      if (searchResult.resources && searchResult.resources.length > 8) {
+        const toDelete = searchResult.resources.slice(8);
+        for (const old of toDelete) {
+          await cloudinary.uploader.destroy(old.public_id, { resource_type: 'raw' });
+          console.log(`[auto-backup] Deleted old backup: ${old.public_id}`);
+        }
+      }
+    } catch (cleanErr) {
+      console.error('[auto-backup] Cleanup error (non-fatal):', cleanErr.message);
+    }
+
+    return { success: true, ...uploadResult, counts: dbBackup.counts, duration };
+  } catch (error) {
+    console.error('[auto-backup] FAILED:', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+// ============= ROUTES =============
+
+// GET /api/backup - Download full backup as JSON
+router.get('/', async (req, res, next) => {
+  try {
+    const includeFiles = req.query.includeFiles === 'true';
+    const backup = await buildBackup(includeFiles);
+    const filename = `backup-${new Date().toISOString().split('T')[0]}${includeFiles ? '-with-files' : ''}.json`;
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.json(backup);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/backup/info - Get backup stats and last auto-backup info
+router.get('/info', async (req, res, next) => {
+  try {
+    const [clientCount, vendorCount, drCount, poCount, shipmentCount, inboundCount, workOrderCount, estimateCount, settingsCount, userCount] = await Promise.all([
+      Client.count(), Vendor.count(), DRNumber.count(), PONumber.count(),
+      Shipment.count(), InboundOrder.count(), WorkOrder.count(), Estimate.count(),
+      AppSettings.count(), User.count()
+    ]);
+
+    let lastAutoBackup = null;
+    try {
+      const setting = await AppSettings.findOne({ where: { key: 'last_auto_backup' } });
+      if (setting && setting.value) {
+        lastAutoBackup = typeof setting.value === 'string' ? JSON.parse(setting.value) : setting.value;
+      }
+    } catch (e) { /* ignore */ }
+
+    let backupHistory = [];
+    try {
+      const histSetting = await AppSettings.findOne({ where: { key: 'backup_history' } });
+      if (histSetting && histSetting.value) {
+        backupHistory = typeof histSetting.value === 'string' ? JSON.parse(histSetting.value) : histSetting.value;
+        if (!Array.isArray(backupHistory)) backupHistory = [];
+      }
+    } catch {}
+
+    let cloudBackups = [];
+    try {
+      const searchResult = await cloudinary.search
+        .expression('folder:shipment-tracker-backups AND resource_type:raw')
+        .sort_by('created_at', 'desc')
+        .max_results(10)
+        .execute();
+      cloudBackups = (searchResult.resources || []).map(r => ({
+        publicId: r.public_id,
+        url: r.secure_url,
+        size: r.bytes,
+        createdAt: r.created_at
+      }));
+    } catch (e) { /* cloudinary may not be configured */ }
+
+    const { getProvider } = require('../utils/storage');
+    
+    res.json({
+      data: {
+        counts: { clients: clientCount, vendors: vendorCount, drNumbers: drCount, poNumbers: poCount,
+          shipments: shipmentCount, inboundOrders: inboundCount, workOrders: workOrderCount,
+          estimates: estimateCount, settings: settingsCount, users: userCount },
+        storageProvider: getProvider(),
+        lastAutoBackup,
+        backupHistory,
+        cloudBackups
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/backup/run-now - Trigger immediate cloud backup
+router.post('/run-now', async (req, res, next) => {
+  try {
+    const includeFiles = req.body.includeFiles === true;
+    const result = await runAutoBackup(includeFiles);
+    if (result.success) {
+      res.json({ message: `Backup completed successfully${includeFiles ? ' (with files)' : ''}`, data: result });
+    } else {
+      res.status(500).json({ error: { message: `Backup failed: ${result.error}` } });
+    }
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/backup/run-background - Start backup in background, email when done
+router.post('/run-background', async (req, res, next) => {
+  try {
+    const includeFiles = req.body.includeFiles !== false; // default true
+    const email = req.body.email;
+    
+    if (!email) {
+      return res.status(400).json({ error: { message: 'Email address is required' } });
+    }
+
+    // Respond immediately
+    res.json({ message: `Backup started in background${includeFiles ? ' (with files)' : ''}. You'll receive an email at ${email} when it's done.` });
+
+    // Run backup in background (after response is sent)
+    setImmediate(async () => {
+      const startTime = Date.now();
+      let result;
+      try {
+        result = await runAutoBackup(includeFiles);
+      } catch (err) {
+        result = { success: false, error: err.message };
+      }
+
+      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+
+      // Send email notification
+      const nodemailer = require('nodemailer');
+      try {
+        let subject, body;
+        if (result.success) {
+          const sizeKB = ((result.size || 0) / 1024).toFixed(0);
+          const fileCounts = result.counts || {};
+          subject = `✅ Carolina Rolling Backup Complete — ${sizeKB}KB`;
+          body = [
+            `Backup completed successfully in ${duration}s.`,
+            ``,
+            `Size: ${sizeKB}KB compressed`,
+            `URL: ${result.url || 'N/A'}`,
+            ``,
+            `Records:`,
+            `  Clients: ${fileCounts.clients || 0}`,
+            `  Work Orders: ${fileCounts.workOrders || 0}`,
+            `  Estimates: ${fileCounts.estimates || 0}`,
+            `  Shipments: ${fileCounts.shipments || 0}`,
+            `  Inbound: ${fileCounts.inboundOrders || 0}`,
+            fileCounts._files ? `\nFiles: ${fileCounts._files.downloaded || 0} downloaded, ${fileCounts._files.skipped || 0} skipped (non-Cloudinary), ${fileCounts._files.failed || 0} failed` : '',
+            ``,
+            `— Carolina Rolling Admin`
+          ].join('\n');
+        } else {
+          subject = `❌ Carolina Rolling Backup Failed`;
+          body = [
+            `Backup failed after ${duration}s.`,
+            ``,
+            `Error: ${result.error || 'Unknown error'}`,
+            ``,
+            `Please check the Heroku logs for more details.`,
+            ``,
+            `— Carolina Rolling Admin`
+          ].join('\n');
+        }
+
+        if (process.env.SMTP_HOST) {
+          const transporter = nodemailer.createTransport({
+            host: process.env.SMTP_HOST,
+            port: process.env.SMTP_PORT || 587,
+            secure: process.env.SMTP_SECURE === 'true',
+            auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+          });
+          await transporter.sendMail({
+            from: process.env.SMTP_FROM || 'noreply@carolinarolling.com',
+            to: email,
+            subject,
+            text: body
+          });
+          console.log(`[backup] Email notification sent to ${email}`);
+        } else {
+          console.log(`[backup] SMTP not configured — would have emailed ${email}:`);
+          console.log(`[backup] Subject: ${subject}`);
+        }
+      } catch (emailErr) {
+        console.error(`[backup] Failed to send email notification: ${emailErr.message}`);
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/backup/test - Full round-trip test: build → compress → upload → download → verify → cleanup
+router.post('/test', async (req, res, next) => {
+  const results = { steps: [], success: false };
+  const startTime = Date.now();
+  
+  try {
+    // Step 1: Build backup
+    results.steps.push({ step: 'Build backup', status: 'running' });
+    const backup = await buildBackup();
+    const totalRecords = Object.values(backup.counts).reduce((a, b) => a + b, 0);
+    results.steps[0] = { step: 'Build backup', status: 'ok', detail: `${totalRecords} records across ${Object.keys(backup.counts).length} tables` };
+
+    // Step 2: Compress
+    const jsonStr = JSON.stringify(backup);
+    const compressed = await gzip(Buffer.from(jsonStr, 'utf-8'));
+    const ratio = ((1 - compressed.length / jsonStr.length) * 100).toFixed(0);
+    results.steps.push({ step: 'Compress', status: 'ok', detail: `${(jsonStr.length / 1024).toFixed(0)}KB -> ${(compressed.length / 1024).toFixed(0)}KB (${ratio}% smaller)` });
+
+    // Step 3: Upload to Cloudinary
+    const base64 = compressed.toString('base64');
+    const testPublicId = `shipment-tracker-backups/test-${Date.now()}`;
+    const uploadResult = await cloudinary.uploader.upload(
+      `data:application/gzip;base64,${base64}`,
+      { public_id: testPublicId, resource_type: 'raw', tags: ['test-backup'] }
+    );
+    results.steps.push({ step: 'Upload to Cloudinary', status: 'ok', detail: uploadResult.secure_url });
+
+    // Step 4: Download and verify
+    const https = require('https');
+    const downloadedData = await new Promise((resolve, reject) => {
+      https.get(uploadResult.secure_url, (response) => {
+        const chunks = [];
+        response.on('data', chunk => chunks.push(chunk));
+        response.on('end', () => resolve(Buffer.concat(chunks)));
+        response.on('error', reject);
+      }).on('error', reject);
+    });
+    const decompressed = await gunzip(downloadedData);
+    const restored = JSON.parse(decompressed.toString('utf-8'));
+    const countsMatch = JSON.stringify(backup.counts) === JSON.stringify(restored.counts);
+    results.steps.push({
+      step: 'Download and verify', status: countsMatch ? 'ok' : 'warning',
+      detail: countsMatch ? `All ${totalRecords} records verified` : 'Record counts mismatch!'
+    });
+
+    // Step 5: Clean up test file
+    await cloudinary.uploader.destroy(testPublicId, { resource_type: 'raw' });
+    results.steps.push({ step: 'Clean up test file', status: 'ok' });
+
+    results.success = countsMatch;
+    results.duration = `${((Date.now() - startTime) / 1000).toFixed(1)}s`;
+    results.counts = backup.counts;
+
+    res.json({ message: results.success ? 'Backup system verified - all tests passed' : 'Warning: verification issue', data: results });
+  } catch (error) {
+    results.steps.push({ step: 'ERROR', status: 'failed', detail: error.message });
+    results.success = false;
+    res.status(500).json({ message: 'Backup test failed', data: results, error: error.message });
+  }
+});
+
+// POST /api/backup/restore - Restore from backup JSON
+router.post('/restore', async (req, res, next) => {
+  try {
+    const { backup, options = {} } = req.body;
+    if (!backup || !backup.data) {
+      return res.status(400).json({ error: { message: 'Invalid backup file' } });
+    }
+
+    const { clearExisting = false } = options;
+    const results = {};
+
+    // FK columns that reference other tables — null these on first pass, set in second pass
+    const FK_COLS = {
+      dr_numbers: ['workOrderId'],
+      po_numbers: ['workOrderId', 'inboundOrderId'],
+      inbound_orders: ['workOrderId'],
+      shipments: ['workOrderId'],
+      work_orders: ['estimateId', 'clientId'],
+      estimates: ['workOrderId']
+    };
+
+    // Deferred FK updates: { tableName: [{ id, col, value }, ...] }
+    const deferredUpdates = {};
+
+    // Strip columns that don't exist on the model and fix JSONB values
+    const cleanRecord = (model, record) => {
+      const validCols = Object.keys(model.rawAttributes);
+      const cleaned = {};
+      for (const [k, v] of Object.entries(record)) {
+        if (!validCols.includes(k)) continue;
+        const colDef = model.rawAttributes[k];
+        if (colDef && (colDef.type.key === 'JSONB' || colDef.type.key === 'JSON')) {
+          if (v === null || v === undefined || v === '') {
+            cleaned[k] = null;
+          } else if (typeof v === 'string') {
+            try { cleaned[k] = JSON.parse(v); } catch { cleaned[k] = null; }
+          } else {
+            cleaned[k] = v;
+          }
+        } else {
+          cleaned[k] = v;
+        }
+      }
+      return cleaned;
+    };
+
+    // Raw upsert — nulls out FK cols and defers them for second pass
+    const rawUpsert = async (model, record, nullFKs = true) => {
+      const clean = cleanRecord(model, record);
+      const tableName = model.getTableName();
+      const fkCols = nullFKs ? (FK_COLS[tableName] || []) : [];
+
+      // Save FK values for deferred update, then null them
+      for (const fk of fkCols) {
+        if (clean[fk] !== null && clean[fk] !== undefined) {
+          if (!deferredUpdates[tableName]) deferredUpdates[tableName] = [];
+          deferredUpdates[tableName].push({ id: clean.id, col: fk, value: clean[fk] });
+          clean[fk] = null;
+        }
+      }
+
+      const cols = Object.keys(clean);
+      if (cols.length === 0) return;
+      const vals = cols.map(c => {
+        const v = clean[c];
+        if (v === null || v === undefined) return null;
+        // Check if this is a Postgres ARRAY column — keep as JS array, don't stringify
+        const colDef = model.rawAttributes[c];
+        if (colDef && colDef.type && colDef.type.key === 'ARRAY') {
+          // Ensure it's an actual array
+          if (Array.isArray(v)) return v;
+          if (typeof v === 'string') { try { return JSON.parse(v); } catch { return null; } }
+          return null;
+        }
+        // JSONB/JSON — stringify objects
+        if (typeof v === 'object' && !(v instanceof Date)) return JSON.stringify(v);
+        return v;
+      });
+      const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
+      const updates = cols.filter(c => c !== 'id').map(c => `"${c}" = EXCLUDED."${c}"`).join(', ');
+      const colNames = cols.map(c => `"${c}"`).join(', ');
+      await sequelize.query(
+        `INSERT INTO "${tableName}" (${colNames}) VALUES (${placeholders}) ON CONFLICT ("id") DO UPDATE SET ${updates}`,
+        { bind: vals, type: sequelize.QueryTypes.INSERT }
+      );
+    };
+
+    // Upsert helper for simple models
+    const restoreSimple = async (model, data, label) => {
+      if (!data || !data.length) return;
+      results[label] = { restored: 0, skipped: 0, errors: [] };
+      if (clearExisting) {
+        try { await model.destroy({ where: {}, force: true }); } catch (e) {
+          console.warn(`[restore] Clear ${label} failed: ${e.message}`);
+        }
+      }
+      for (const record of data) {
+        try {
+          await rawUpsert(model, record);
+          results[label].restored++;
+        } catch (e) {
+          results[label].skipped++;
+          if (results[label].errors.length < 10) results[label].errors.push(`${record.id?.substring?.(0,8) || '?'}: ${e.message.substring(0, 150)}`);
+        }
+      }
+      console.log(`[restore] ${label}: ${results[label].restored} restored, ${results[label].skipped} skipped`);
+      if (results[label].errors.length > 0) console.log(`[restore] ${label} errors:`, results[label].errors);
+    };
+
+    try {
+
+    // Users & API keys first
+    const { User, ApiKey } = require('../models');
+    await restoreSimple(User, backup.data.users, 'users');
+    await restoreSimple(ApiKey, backup.data.apiKeys, 'apiKeys');
+
+    // Clients & Vendors first (referenced by other tables)
+    await restoreSimple(Client, backup.data.clients, 'clients');
+    await restoreSimple(Vendor, backup.data.vendors, 'vendors');
+    await restoreSimple(DRNumber, backup.data.drNumbers, 'drNumbers');
+    await restoreSimple(PONumber, backup.data.poNumbers, 'poNumbers');
+    await restoreSimple(InboundOrder, backup.data.inboundOrders, 'inboundOrders');
+
+    // Shipments with children
+    if (backup.data.shipments) {
+      results.shipments = { restored: 0, skipped: 0, errors: [] };
+      if (clearExisting) {
+        try { await ShipmentDocument.destroy({ where: {}, force: true }); await ShipmentPhoto.destroy({ where: {}, force: true }); await Shipment.destroy({ where: {}, force: true }); } catch {}
+      }
+      for (const sd of backup.data.shipments) {
+        try {
+          const { photos, documents, ...shipment } = sd;
+          await rawUpsert(Shipment, shipment);
+          if (photos) for (const p of photos) { try { await rawUpsert(ShipmentPhoto, { ...p, shipmentId: shipment.id }); } catch {} }
+          if (documents) for (const d of documents) { try { await rawUpsert(ShipmentDocument, { ...d, shipmentId: shipment.id }); } catch {} }
+          results.shipments.restored++;
+        } catch (e) {
+          results.shipments.skipped++;
+          if (results.shipments.errors.length < 10) results.shipments.errors.push(e.message.substring(0, 150));
+        }
+      }
+      console.log(`[restore] shipments: ${results.shipments.restored} restored, ${results.shipments.skipped} skipped`);
+      if (results.shipments.errors.length > 0) console.log(`[restore] shipments errors:`, results.shipments.errors);
+    }
+
+    // Work Orders with parts, files, documents
+    if (backup.data.workOrders) {
+      results.workOrders = { restored: 0, skipped: 0, errors: [] };
+      if (clearExisting) {
+        try { await WorkOrderPartFile.destroy({ where: {}, force: true }); await WorkOrderPart.destroy({ where: {}, force: true }); await WorkOrderDocument.destroy({ where: {}, force: true }); await WorkOrder.destroy({ where: {}, force: true }); } catch {}
+      }
+      for (const od of backup.data.workOrders) {
+        try {
+          const { parts, documents, ...order } = od;
+          await rawUpsert(WorkOrder, order);
+          if (parts) for (const pd of parts) {
+            try {
+              const { files, ...part } = pd;
+              await rawUpsert(WorkOrderPart, { ...part, workOrderId: order.id });
+              if (files) for (const f of files) { try { await rawUpsert(WorkOrderPartFile, { ...f, workOrderPartId: part.id }); } catch {} }
+            } catch {}
+          }
+          if (documents) for (const d of documents) { try { await rawUpsert(WorkOrderDocument, { ...d, workOrderId: order.id }); } catch {} }
+          results.workOrders.restored++;
+        } catch (e) {
+          results.workOrders.skipped++;
+          if (results.workOrders.errors.length < 10) results.workOrders.errors.push(e.message.substring(0, 150));
+        }
+      }
+      console.log(`[restore] workOrders: ${results.workOrders.restored} restored, ${results.workOrders.skipped} skipped`);
+      if (results.workOrders.errors.length > 0) console.log(`[restore] workOrders errors:`, results.workOrders.errors);
+    }
+
+    // Estimates with parts, part files, estimate files
+    if (backup.data.estimates) {
+      results.estimates = { restored: 0, skipped: 0, errors: [] };
+      if (clearExisting) {
+        try { await EstimatePartFile.destroy({ where: {}, force: true }); await EstimatePart.destroy({ where: {}, force: true }); await EstimateFile.destroy({ where: {}, force: true }); await Estimate.destroy({ where: {}, force: true }); } catch {}
+      }
+      for (const ed of backup.data.estimates) {
+        try {
+          const { parts, files, ...estimate } = ed;
+          await rawUpsert(Estimate, estimate);
+          if (parts) for (const pd of parts) {
+            try {
+              const { files: pf, ...part } = pd;
+              await rawUpsert(EstimatePart, { ...part, estimateId: estimate.id });
+              if (pf) for (const f of pf) { try { await rawUpsert(EstimatePartFile, { ...f, partId: part.id }); } catch {} }
+            } catch {}
+          }
+          if (files) for (const f of files) { try { await rawUpsert(EstimateFile, { ...f, estimateId: estimate.id }); } catch {} }
+          results.estimates.restored++;
+        } catch (e) {
+          results.estimates.skipped++;
+          if (results.estimates.errors.length < 10) results.estimates.errors.push(e.message.substring(0, 150));
+        }
+      }
+      console.log(`[restore] estimates: ${results.estimates.restored} restored, ${results.estimates.skipped} skipped`);
+      if (results.estimates.errors.length > 0) console.log(`[restore] estimates errors:`, results.estimates.errors);
+    }
+
+    // Settings
+    if (backup.data.settings) {
+      results.settings = { restored: 0, skipped: 0 };
+      for (const sd of backup.data.settings) {
+        try {
+          const [s, created] = await AppSettings.findOrCreate({ where: { key: sd.key }, defaults: sd });
+          if (!created && clearExisting) await s.update({ value: sd.value });
+          results.settings.restored++;
+        } catch (e) { results.settings.skipped++; }
+      }
+    }
+
+    // Business data
+    const { Liability, Employee, PayrollWeek, PayrollEntry } = require('../models');
+    await restoreSimple(Liability, backup.data.liabilities, 'liabilities');
+    await restoreSimple(Employee, backup.data.employees, 'employees');
+    await restoreSimple(require('../models').BusinessEvent, backup.data.businessEvents, 'businessEvents');
+    if (backup.data.payrollWeeks) {
+      results.payrollWeeks = { restored: 0, skipped: 0, errors: [] };
+      for (const pw of backup.data.payrollWeeks) {
+        try {
+          const { entries, ...week } = pw;
+          await rawUpsert(PayrollWeek, week);
+          if (entries) for (const e of entries) { try { await rawUpsert(PayrollEntry, { ...e, payrollWeekId: week.id }); } catch {} }
+          results.payrollWeeks.restored++;
+        } catch (e) {
+          results.payrollWeeks.skipped++;
+        }
+      }
+      console.log(`[restore] payrollWeeks: ${results.payrollWeeks.restored} restored, ${results.payrollWeeks.skipped} skipped`);
+    }
+
+    // ===== SECOND PASS: Apply deferred FK updates =====
+    // Now that all records exist, set the FK columns that were nulled during insert
+    let fkUpdated = 0, fkFailed = 0;
+    for (const [tableName, updates] of Object.entries(deferredUpdates)) {
+      for (const { id, col, value } of updates) {
+        try {
+          await sequelize.query(
+            `UPDATE "${tableName}" SET "${col}" = $1 WHERE "id" = $2`,
+            { bind: [value, id], type: sequelize.QueryTypes.UPDATE }
+          );
+          fkUpdated++;
+        } catch (e) {
+          fkFailed++;
+          // FK target may not exist (deleted record) — that's OK
+        }
+      }
+    }
+    console.log(`[restore] FK second pass: ${fkUpdated} updated, ${fkFailed} failed (target missing)`);
+    results.fkUpdates = { updated: fkUpdated, failed: fkFailed };
+
+    // After restore: re-upload any files from backup that are missing on Cloudinary
+    let fileResults = { checked: 0, reuploaded: 0, alreadyExist: 0, failed: 0 };
+    if (backup.files && Object.keys(backup.files).length > 0) {
+      const https = require('https');
+      const http = require('http');
+
+      const checkUrl = (url) => new Promise((resolve) => {
+        const client = url.startsWith('https') ? https : http;
+        const req = client.request(url, { method: 'HEAD', timeout: 5000 }, (res) => {
+          resolve(res.statusCode >= 200 && res.statusCode < 400);
+        });
+        req.on('error', () => resolve(false));
+        req.on('timeout', () => { req.destroy(); resolve(false); });
+        req.end();
+      });
+
+      const allFileRecords = [];
+      const woPartFiles = await WorkOrderPartFile.findAll();
+      woPartFiles.forEach(f => allFileRecords.push({ model: WorkOrderPartFile, record: f }));
+      const woDocs = await WorkOrderDocument.findAll();
+      woDocs.forEach(f => allFileRecords.push({ model: WorkOrderDocument, record: f }));
+      const estPartFiles = await EstimatePartFile.findAll();
+      estPartFiles.forEach(f => allFileRecords.push({ model: EstimatePartFile, record: f }));
+      const estFiles = await EstimateFile.findAll();
+      estFiles.forEach(f => allFileRecords.push({ model: EstimateFile, record: f }));
+      const shipDocs = await ShipmentDocument.findAll();
+      shipDocs.forEach(f => allFileRecords.push({ model: ShipmentDocument, record: f }));
+
+      for (const { model, record } of allFileRecords) {
+        const url = record.url;
+        const backupFile = backup.files[url];
+        if (!backupFile || !backupFile.data) continue;
+
+        fileResults.checked++;
+        try {
+          const exists = await checkUrl(url);
+          if (exists) {
+            fileResults.alreadyExist++;
+            continue;
+          }
+
+          const buffer = Buffer.from(backupFile.data, 'base64');
+          const base64Data = buffer.toString('base64');
+          const mimeType = record.mimeType || 'application/octet-stream';
+          const folder = record.cloudinaryId ? record.cloudinaryId.split('/').slice(0, -1).join('/') : 'restored-files';
+          
+          const uploadResult = await cloudinary.uploader.upload(
+            `data:${mimeType};base64,${base64Data}`,
+            { resource_type: 'raw', folder, use_filename: true, unique_filename: true }
+          );
+
+          await record.update({ url: uploadResult.secure_url, cloudinaryId: uploadResult.public_id });
+          fileResults.reuploaded++;
+          console.log(`[restore] Re-uploaded: ${backupFile.name}`);
+        } catch (e) {
+          console.warn(`[restore] Failed to re-upload ${backupFile.name}: ${e.message}`);
+          fileResults.failed++;
+        }
+      }
+    }
+
+    res.json({ message: 'Backup restored successfully', results, fileResults });
+    } catch (innerErr) {
+      throw innerErr;
+    }
+  } catch (error) {
+    console.error('[restore] Error:', error.message);
+    next(error);
+  }
+});
+
+module.exports = router;
+module.exports.runAutoBackup = runAutoBackup;

@@ -1,0 +1,447 @@
+const express = require('express');
+const router = express.Router();
+const { Client, Vendor, WorkOrder, Estimate } = require('../models');
+const { Op } = require('sequelize');
+
+// ============= CLIENTS =============
+
+// GET /api/clients - Get all clients
+router.get('/clients', async (req, res, next) => {
+  try {
+    const { search, active } = req.query;
+    
+    const where = {};
+    if (active !== undefined) {
+      where.isActive = active === 'true';
+    }
+    if (search) {
+      where.name = { [Op.iLike]: `%${search}%` };
+    }
+    
+    const clients = await Client.findAll({
+      where,
+      order: [['name', 'ASC']]
+    });
+    
+    res.json({ data: clients });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/clients/search - Search clients for autofill (Clients table only)
+router.get('/clients/search', async (req, res, next) => {
+  try {
+    const { q } = req.query;
+    
+    const whereClause = { isActive: true };
+    if (q && q.length >= 1) {
+      whereClause.name = { [Op.iLike]: `%${q}%` };
+    }
+
+    const clients = await Client.findAll({
+      where: whereClause,
+      limit: 20,
+      order: [['name', 'ASC']]
+    });
+
+    res.json({ data: clients });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/clients/check-notag?name=ClientName - Check if client has no-tag flag
+router.get('/clients/check-notag', async (req, res, next) => {
+  try {
+    const { name } = req.query;
+    if (!name) return res.json({ data: { noTag: false } });
+
+    const client = await Client.findOne({
+      where: { name: { [Op.iLike]: name.trim() }, isActive: true }
+    });
+
+    res.json({ data: { noTag: client?.noTag === true, requiresPartLabels: client?.requiresPartLabels === true } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/clients/:id - Get single client
+router.get('/clients/:id', async (req, res, next) => {
+  try {
+    const client = await Client.findByPk(req.params.id);
+    
+    if (!client) {
+      return res.status(404).json({ error: { message: 'Client not found' } });
+    }
+    
+    res.json({ data: client });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/clients - Create client
+router.post('/clients', async (req, res, next) => {
+  try {
+    const {
+      name,
+      contactName,
+      contactPhone,
+      contactEmail,
+      address,
+      taxStatus,
+      resaleCertificate,
+      customTaxRate,
+      notes,
+      noTag,
+      paymentTerms, requiresPartLabels
+    } = req.body;
+    
+    if (!name) {
+      return res.status(400).json({ error: { message: 'Client name is required' } });
+    }
+    
+    // Check for duplicate (active)
+    const existing = await Client.findOne({ where: { name: { [Op.iLike]: name.trim() } } });
+    if (existing) {
+      if (!existing.isActive) {
+        // Reactivate the inactive client instead of blocking
+        await existing.update({
+          isActive: true,
+          contactName: contactName || existing.contactName,
+          contactPhone: contactPhone || existing.contactPhone,
+          contactEmail: contactEmail || existing.contactEmail,
+          address: address || existing.address,
+          taxStatus: taxStatus || existing.taxStatus,
+          resaleCertificate: resaleCertificate || existing.resaleCertificate,
+          customTaxRate: (customTaxRate && customTaxRate !== '' && !isNaN(parseFloat(customTaxRate))) ? parseFloat(customTaxRate) : existing.customTaxRate,
+          notes: notes || existing.notes,
+          noTag: noTag !== undefined ? noTag : existing.noTag,
+          requiresPartLabels: requiresPartLabels !== undefined ? requiresPartLabels : existing.requiresPartLabels,
+          paymentTerms: paymentTerms || existing.paymentTerms
+        });
+        return res.status(201).json({ data: existing, message: `Client "${existing.name}" reactivated` });
+      }
+      return res.status(400).json({ error: { message: `A client named "${existing.name}" already exists` } });
+    }
+    
+    const client = await Client.create({
+      name: name.trim(),
+      contactName: contactName || null,
+      contactPhone: contactPhone || null,
+      contactEmail: contactEmail || null,
+      address: address || null,
+      taxStatus: taxStatus || 'taxable',
+      resaleCertificate: resaleCertificate || null,
+      customTaxRate: (customTaxRate && customTaxRate !== '' && !isNaN(parseFloat(customTaxRate))) ? parseFloat(customTaxRate) : null,
+      notes: notes || null,
+      noTag: noTag || false,
+      requiresPartLabels: requiresPartLabels || false,
+      paymentTerms: paymentTerms || null,
+      apEmail: req.body.apEmail || null,
+      quickbooksName: req.body.quickbooksName || null,
+      contacts: req.body.contacts || []
+    });
+    
+    res.status(201).json({ data: client, message: 'Client created successfully' });
+  } catch (error) {
+    console.error('Client creation error:', error.message, error.errors?.map(e => e.message));
+    next(error);
+  }
+});
+
+// PUT /api/clients/:id - Update client
+router.put('/clients/:id', async (req, res, next) => {
+  try {
+    const client = await Client.findByPk(req.params.id);
+    
+    if (!client) {
+      return res.status(404).json({ error: { message: 'Client not found' } });
+    }
+    
+    const {
+      name,
+      contactName,
+      contactPhone,
+      contactEmail,
+      address,
+      taxStatus,
+      resaleCertificate,
+      customTaxRate,
+      notes,
+      isActive,
+      noTag,
+      paymentTerms,
+      requiresPartLabels
+    } = req.body;
+    
+    // Check for duplicate name (excluding current)
+    if (name && name !== client.name) {
+      const existing = await Client.findOne({ 
+        where: { 
+          name: { [Op.iLike]: name },
+          id: { [Op.ne]: client.id }
+        } 
+      });
+      if (existing) {
+        return res.status(400).json({ error: { message: 'A client with this name already exists' } });
+      }
+    }
+    
+    const oldName = client.name;
+    
+    await client.update({
+      name: name !== undefined ? name : client.name,
+      contactName: contactName !== undefined ? contactName : client.contactName,
+      contactPhone: contactPhone !== undefined ? contactPhone : client.contactPhone,
+      contactEmail: contactEmail !== undefined ? contactEmail : client.contactEmail,
+      address: address !== undefined ? address : client.address,
+      taxStatus: taxStatus !== undefined ? taxStatus : client.taxStatus,
+      resaleCertificate: resaleCertificate !== undefined ? resaleCertificate : client.resaleCertificate,
+      customTaxRate: customTaxRate !== undefined ? ((customTaxRate && customTaxRate !== '' && !isNaN(parseFloat(customTaxRate))) ? parseFloat(customTaxRate) : null) : client.customTaxRate,
+      notes: notes !== undefined ? (notes || null) : client.notes,
+      isActive: isActive !== undefined ? isActive : client.isActive,
+      noTag: noTag !== undefined ? noTag : client.noTag,
+      requiresPartLabels: requiresPartLabels !== undefined ? requiresPartLabels : client.requiresPartLabels,
+      paymentTerms: paymentTerms !== undefined ? (paymentTerms || null) : client.paymentTerms,
+      contacts: req.body.contacts !== undefined ? req.body.contacts : client.contacts,
+      quickbooksName: req.body.quickbooksName !== undefined ? (req.body.quickbooksName || null) : client.quickbooksName,
+      emailScanEnabled: req.body.emailScanEnabled !== undefined ? req.body.emailScanEnabled : client.emailScanEnabled,
+      emailScanAddresses: req.body.emailScanAddresses !== undefined ? req.body.emailScanAddresses : client.emailScanAddresses,
+      emailScanParsingNotes: req.body.emailScanParsingNotes !== undefined ? (req.body.emailScanParsingNotes || null) : client.emailScanParsingNotes,
+      accountingContactName: req.body.accountingContactName !== undefined ? (req.body.accountingContactName || null) : client.accountingContactName,
+      accountingContactEmail: req.body.accountingContactEmail !== undefined ? (req.body.accountingContactEmail || null) : client.accountingContactEmail,
+      accountingContactPhone: req.body.accountingContactPhone !== undefined ? (req.body.accountingContactPhone || null) : client.accountingContactPhone,
+      apEmail: req.body.apEmail !== undefined ? (req.body.apEmail || null) : client.apEmail
+    });
+    
+    // Propagate name change to all work orders and estimates
+    if (name && name !== oldName) {
+      try {
+        const [woCount] = await WorkOrder.update(
+          { clientName: name },
+          { where: { clientId: client.id } }
+        );
+        // Also update WOs matched by old name (in case clientId wasn't set)
+        const [woNameCount] = await WorkOrder.update(
+          { clientName: name },
+          { where: { clientName: oldName, clientId: null } }
+        );
+        const [estCount] = await Estimate.update(
+          { clientName: name },
+          { where: { clientId: client.id } }
+        );
+        const [estNameCount] = await Estimate.update(
+          { clientName: name },
+          { where: { clientName: oldName, clientId: null } }
+        );
+        const total = woCount + woNameCount + estCount + estNameCount;
+        console.log(`[Client] Name changed: "${oldName}" → "${name}" — updated ${woCount + woNameCount} WOs, ${estCount + estNameCount} estimates`);
+      } catch (propErr) {
+        console.error('[Client] Name propagation error:', propErr.message);
+        // Don't fail the request — client was already updated
+      }
+    }
+    
+    res.json({ data: client, message: name && name !== oldName ? `Client updated — name changed across all work orders and estimates` : 'Client updated successfully' });
+  } catch (error) {
+    console.error('Client update error:', error.message, error.errors?.map(e => e.message));
+    next(error);
+  }
+});
+
+// DELETE /api/clients/:id - Delete client (soft delete - set inactive)
+router.delete('/clients/:id', async (req, res, next) => {
+  try {
+    const client = await Client.findByPk(req.params.id);
+    
+    if (!client) {
+      return res.status(404).json({ error: { message: 'Client not found' } });
+    }
+    
+    await client.update({ isActive: false });
+    
+    res.json({ message: 'Client deactivated successfully' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ============= VENDORS =============
+
+// GET /api/vendors - Get all vendors
+router.get('/vendors', async (req, res, next) => {
+  try {
+    const { search, active } = req.query;
+    
+    const where = {};
+    if (active !== undefined) {
+      where.isActive = active === 'true';
+    }
+    if (search) {
+      where.name = { [Op.iLike]: `%${search}%` };
+    }
+    
+    const vendors = await Vendor.findAll({
+      where,
+      order: [['name', 'ASC']]
+    });
+    
+    res.json({ data: vendors });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/vendors/search - Search vendors for autofill
+router.get('/vendors/search', async (req, res, next) => {
+  try {
+    const { q } = req.query;
+    
+    const where = { isActive: true };
+    if (q && q.length >= 1) {
+      where.name = { [Op.iLike]: `%${q}%` };
+    }
+    
+    const vendors = await Vendor.findAll({
+      where,
+      limit: 20,
+      order: [['name', 'ASC']]
+    });
+    
+    res.json({ data: vendors });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/vendors/:id - Get single vendor
+router.get('/vendors/:id', async (req, res, next) => {
+  try {
+    const vendor = await Vendor.findByPk(req.params.id);
+    
+    if (!vendor) {
+      return res.status(404).json({ error: { message: 'Vendor not found' } });
+    }
+    
+    res.json({ data: vendor });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/vendors - Create vendor
+router.post('/vendors', async (req, res, next) => {
+  try {
+    const {
+      name,
+      contactName,
+      contactPhone,
+      contactEmail,
+      address,
+      accountNumber,
+      notes
+    } = req.body;
+    
+    if (!name) {
+      return res.status(400).json({ error: { message: 'Vendor name is required' } });
+    }
+    
+    // Check for duplicate
+    const existing = await Vendor.findOne({ where: { name: { [Op.iLike]: name } } });
+    if (existing) {
+      return res.status(400).json({ error: { message: 'A vendor with this name already exists' } });
+    }
+    
+    const vendor = await Vendor.create({
+      name,
+      contactName,
+      contactPhone,
+      contactEmail,
+      address,
+      accountNumber,
+      notes
+    });
+    
+    res.status(201).json({ data: vendor, message: 'Vendor created successfully' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// PUT /api/vendors/:id - Update vendor
+router.put('/vendors/:id', async (req, res, next) => {
+  try {
+    const vendor = await Vendor.findByPk(req.params.id);
+    
+    if (!vendor) {
+      return res.status(404).json({ error: { message: 'Vendor not found' } });
+    }
+    
+    const {
+      name,
+      contactName,
+      contactPhone,
+      contactEmail,
+      address,
+      accountNumber,
+      notes,
+      isActive
+    } = req.body;
+    
+    // Check for duplicate name (excluding current)
+    if (name && name !== vendor.name) {
+      const existing = await Vendor.findOne({ 
+        where: { 
+          name: { [Op.iLike]: name },
+          id: { [Op.ne]: vendor.id }
+        } 
+      });
+      if (existing) {
+        return res.status(400).json({ error: { message: 'A vendor with this name already exists' } });
+      }
+    }
+    
+    await vendor.update({
+      name: name !== undefined ? name : vendor.name,
+      contactName: contactName !== undefined ? contactName : vendor.contactName,
+      contactPhone: contactPhone !== undefined ? contactPhone : vendor.contactPhone,
+      contactEmail: contactEmail !== undefined ? contactEmail : vendor.contactEmail,
+      address: address !== undefined ? address : vendor.address,
+      accountNumber: accountNumber !== undefined ? accountNumber : vendor.accountNumber,
+      notes: notes !== undefined ? notes : vendor.notes,
+      isActive: isActive !== undefined ? isActive : vendor.isActive,
+      contacts: req.body.contacts !== undefined ? req.body.contacts : vendor.contacts,
+      accountingContactName: req.body.accountingContactName !== undefined ? (req.body.accountingContactName || null) : vendor.accountingContactName,
+      accountingContactEmail: req.body.accountingContactEmail !== undefined ? (req.body.accountingContactEmail || null) : vendor.accountingContactEmail,
+      accountingContactPhone: req.body.accountingContactPhone !== undefined ? (req.body.accountingContactPhone || null) : vendor.accountingContactPhone,
+      emailScanEnabled: req.body.emailScanEnabled !== undefined ? req.body.emailScanEnabled : vendor.emailScanEnabled,
+      emailScanAddresses: req.body.emailScanAddresses !== undefined ? req.body.emailScanAddresses : vendor.emailScanAddresses
+    });
+    
+    res.json({ data: vendor, message: 'Vendor updated successfully' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// DELETE /api/vendors/:id - Delete vendor (soft delete - set inactive)
+router.delete('/vendors/:id', async (req, res, next) => {
+  try {
+    const vendor = await Vendor.findByPk(req.params.id);
+    
+    if (!vendor) {
+      return res.status(404).json({ error: { message: 'Vendor not found' } });
+    }
+    
+    await vendor.update({ isActive: false });
+    
+    res.json({ message: 'Vendor deactivated successfully' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+module.exports = router;

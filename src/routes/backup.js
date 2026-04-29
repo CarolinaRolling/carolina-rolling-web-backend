@@ -18,9 +18,12 @@ const {
   InboundOrder,
   WorkOrder, WorkOrderPart, WorkOrderPartFile, WorkOrderDocument,
   Estimate, EstimatePart, EstimatePartFile, EstimateFile,
-  DRNumber, PONumber,
+  DRNumber, PONumber, InvoiceNumber,
   Client, Vendor,
-  AppSettings, User, ApiKey, EmailLog
+  AppSettings, User, ApiKey, EmailLog,
+  TodoItem, GmailAccount, ScannedEmail, PendingOrder,
+  ShopSupply, ShopSupplyLog, VendorIssue, WeldProcedure,
+  ActivityLog, DailyActivity
 } = require('../models');
 
 const router = express.Router();
@@ -28,7 +31,7 @@ const router = express.Router();
 // ============= HELPER: Build full backup object =============
 async function buildBackup(includeFiles = false) {
   const backup = {
-    version: '2.1',
+    version: '3.0',
     createdAt: new Date().toISOString(),
     data: {},
     counts: {},
@@ -85,9 +88,35 @@ async function buildBackup(includeFiles = false) {
   // Business data
   const { Liability, Employee, PayrollWeek, PayrollEntry } = require('../models');
   backup.data.liabilities = (await Liability.findAll()).map(l => l.toJSON());
-  backup.data.employees = (await Employee.findAll()).map(e => e.toJSON());
+  backup.data.employees = (await Employee.findAll({ order: [['sortOrder', 'ASC'], ['name', 'ASC']] })).map(e => e.toJSON());
   backup.data.payrollWeeks = (await PayrollWeek.findAll({ include: [{ model: PayrollEntry, as: 'entries' }] })).map(p => p.toJSON());
-  backup.data.businessEvents = (await require('../models').BusinessEvent.findAll()).map(e => e.toJSON());
+  backup.data.businessEvents = (await BusinessEvent.findAll()).map(e => e.toJSON());
+
+  // Invoice Numbers
+  backup.data.invoiceNumbers = (await InvoiceNumber.findAll({ order: [['createdAt', 'DESC']] })).map(i => i.toJSON());
+
+  // Todos
+  backup.data.todos = (await TodoItem.findAll({ order: [['createdAt', 'DESC']] })).map(t => t.toJSON());
+
+  // Email Scanner
+  backup.data.gmailAccounts = (await GmailAccount.findAll()).map(g => g.toJSON());
+  backup.data.scannedEmails = (await ScannedEmail.findAll({ order: [['createdAt', 'DESC']], limit: 1000 })).map(s => s.toJSON());
+  backup.data.pendingOrders = (await PendingOrder.findAll({ order: [['createdAt', 'DESC']] })).map(p => p.toJSON());
+
+  // Shop Supplies
+  backup.data.shopSupplies = (await ShopSupply.findAll()).map(s => s.toJSON());
+  backup.data.shopSupplyLogs = (await ShopSupplyLog.findAll({ order: [['createdAt', 'DESC']], limit: 500 })).map(s => s.toJSON());
+
+  // Vendor Issues
+  backup.data.vendorIssues = (await VendorIssue.findAll({ order: [['createdAt', 'DESC']] })).map(v => v.toJSON());
+
+  // Weld Procedures
+  backup.data.weldProcedures = (await WeldProcedure.findAll()).map(w => w.toJSON());
+
+  // Activity & Daily Logs (last 30 days)
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  backup.data.activityLogs = (await ActivityLog.findAll({ where: { createdAt: { [require('sequelize').Op.gte]: thirtyDaysAgo } }, order: [['createdAt', 'DESC']] })).map(a => a.toJSON());
+  backup.data.dailyActivity = (await DailyActivity.findAll({ order: [['createdAt', 'DESC']], limit: 365 })).map(d => d.toJSON());
 
   // Counts
   backup.counts = {};

@@ -491,6 +491,7 @@ async function startServer() {
         ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "progressCount" INTEGER;
         ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "progressLastUpdatedAt" TIMESTAMP WITH TIME ZONE;
         ALTER TABLE employees ADD COLUMN IF NOT EXISTS "sortOrder" INTEGER DEFAULT 999;
+        ALTER TABLE clients ADD COLUMN IF NOT EXISTS "requiresCoc" BOOLEAN DEFAULT false;
         ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "progressLog" JSONB DEFAULT '[]';
         ALTER TABLE payroll_entries ADD COLUMN IF NOT EXISTS "sortOrder" INTEGER DEFAULT 999;
       `);

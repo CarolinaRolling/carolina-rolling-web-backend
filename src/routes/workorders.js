@@ -2788,6 +2788,106 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
             await rush.update({ status: 'completed', completedAt: new Date() });
             console.log(`[auto-complete] Rush service #${rush.partNumber} auto-completed (all regular parts done)`);
           }
+
+          // Auto-generate COC if client requires it and no COC exists yet
+          setImmediate(async () => {
+            try {
+              const wo = await WorkOrder.findByPk(req.params.id, {
+                include: [{ model: WorkOrderPart, as: 'parts' }]
+              });
+              if (!wo) return;
+              // Check if COC already exists
+              const existingCoc = await WorkOrderDocument.findOne({
+                where: { workOrderId: wo.id, documentType: 'coc' }
+              });
+              if (existingCoc) return;
+              // Check client requires COC
+              const { Client } = require('../models');
+              const client = wo.clientName ? await Client.findOne({ where: { name: wo.clientName } }) : null;
+              if (!client || !client.requiresCoc) return;
+              // Generate COC
+              console.log(`[auto-coc] Generating COC for ${wo.drNumber ? 'DR-' + wo.drNumber : wo.orderNumber} (client: ${wo.clientName})`);
+              const PDFDocument = require('pdfkit');
+              const fileStorage = require('../utils/storage');
+              const { WeldProcedure } = require('../models');
+              const doc = new PDFDocument({ margin: 50, size: 'letter' });
+              const chunks = [];
+              doc.on('data', c => chunks.push(c));
+              await new Promise((resolve, reject) => {
+                doc.on('end', resolve);
+                doc.on('error', reject);
+                const dateStr = new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: '2-digit', day: '2-digit', year: 'numeric' });
+                const drLabel = wo.drNumber ? 'DR-' + wo.drNumber : (wo.orderNumber || 'N/A');
+                // Header
+                doc.fontSize(18).font('Helvetica-Bold').fillColor('#1976d2').text('CERTIFICATE OF CONFORMANCE', 50, 50, { align: 'center', width: 512 });
+                doc.fontSize(10).font('Helvetica').fillColor('#333').text('Carolina Rolling Co. Inc.', 50, 78, { align: 'center', width: 512 });
+                doc.moveTo(50, 95).lineTo(562, 95).lineWidth(1).strokeColor('#1976d2').stroke();
+                doc.fontSize(11).font('Helvetica-Bold').fillColor('#333');
+                doc.text('Work Order: ' + drLabel, 50, 110);
+                doc.text('Client: ' + (wo.clientName || ''), 50, 128);
+                doc.text('Date: ' + dateStr, 50, 146);
+                if (wo.clientPurchaseOrderNumber) doc.text('PO#: ' + wo.clientPurchaseOrderNumber, 50, 164);
+                doc.moveTo(50, 185).lineTo(562, 185).lineWidth(0.5).strokeColor('#ccc').stroke();
+                // Parts table
+                let y = 200;
+                doc.fontSize(9).font('Helvetica-Bold').fillColor('white');
+                doc.rect(50, y, 512, 16).fill('#1976d2');
+                doc.text('#', 55, y + 4, { width: 25, lineBreak: false });
+                doc.text('Description', 80, y + 4, { width: 260, lineBreak: false });
+                doc.text('Qty', 340, y + 4, { width: 40, lineBreak: false });
+                doc.text('Material', 380, y + 4, { width: 90, lineBreak: false });
+                doc.text('Status', 470, y + 4, { width: 80 });
+                y += 16;
+                const parts = (wo.parts || []).filter(p => !['rush_service'].includes(p.partType));
+                parts.forEach((p, idx) => {
+                  const merged = p.toJSON ? p.toJSON() : { ...p };
+                  if (merged.formData) Object.assign(merged, merged.formData);
+                  const desc = merged._materialDescription || merged.materialDescription || merged.partType || '';
+                  if (y > 700) { doc.addPage(); y = 50; }
+                  if (idx % 2 === 1) doc.rect(50, y, 512, 18).fill('#f5f5f5');
+                  doc.fontSize(8).font('Helvetica').fillColor('#333');
+                  doc.text(String(p.partNumber), 55, y + 4, { width: 25, lineBreak: false });
+                  doc.text(desc.substring(0, 55), 80, y + 4, { width: 260, lineBreak: false });
+                  doc.text(String(p.quantity || ''), 340, y + 4, { width: 40, lineBreak: false });
+                  doc.text((merged.material || '').substring(0, 15), 380, y + 4, { width: 90, lineBreak: false });
+                  doc.fillColor('#2e7d32').text('Conforms', 470, y + 4, { width: 80 });
+                  y += 18;
+                });
+                // Certification statement
+                y += 16;
+                doc.moveTo(50, y).lineTo(562, y).lineWidth(0.5).strokeColor('#ccc').stroke();
+                y += 12;
+                doc.fontSize(9).font('Helvetica').fillColor('#333')
+                  .text('Carolina Rolling Co. Inc. certifies that the above described material and/or parts conform to all applicable requirements specified and were produced in accordance with applicable quality standards.', 50, y, { width: 512 });
+                y += 40;
+                doc.text('Certified By: Jason Thornton', 50, y);
+                doc.text('Date: ' + dateStr, 300, y);
+                y += 20;
+                doc.moveTo(50, y).lineTo(250, y).lineWidth(0.5).strokeColor('#555').stroke();
+                doc.text('Authorized Signature', 50, y + 4, { fontSize: 8 });
+                doc.fontSize(7).fillColor('#888').text('Carolina Rolling Co. Inc. | (562) 633-1044 | keepitrolling@carolinarolling.com', 50, 750, { width: 512, align: 'center' });
+                doc.end();
+              });
+              const pdfBuffer = Buffer.concat(chunks);
+              const cocFilename = 'COC-' + drLabel + '.pdf';
+              const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, {
+                folder: 'coc', filename: cocFilename, mimeType: 'application/pdf'
+              });
+              await WorkOrderDocument.create({
+                workOrderId: wo.id,
+                originalName: cocFilename,
+                mimeType: 'application/pdf',
+                size: pdfBuffer.length,
+                url: uploadResult.url,
+                cloudinaryId: uploadResult.storageId,
+                documentType: 'coc',
+                portalVisible: true
+              });
+              console.log(`[auto-coc] COC generated and saved for ${drLabel}`);
+            } catch (cocErr) {
+              console.error('[auto-coc] Failed to auto-generate COC:', cocErr.message);
+            }
+          });
         }
         }
       } catch (autoErr) {

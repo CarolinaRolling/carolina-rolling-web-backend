@@ -2196,6 +2196,11 @@ const Client = sequelize.define('Client', {
     type: DataTypes.TEXT,
     allowNull: true
     // Free text hints for AI parsing e.g. "OR numbers are their reference numbers"
+  },
+  requiresCoc: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false,
+    allowNull: false
   }
 }, {
   tableName: 'clients',

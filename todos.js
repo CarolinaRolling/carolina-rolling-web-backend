@@ -1,0 +1,364 @@
+const express = require('express');
+const { Op } = require('sequelize');
+const { DRNumber, WorkOrder, WorkOrderPart, Estimate, EstimatePart, InboundOrder, DailyActivity, AppSettings, sequelize } = require('../models');
+
+const router = express.Router();
+
+// Helper to log activity for daily email
+async function logActivity(type, resourceType, resourceId, resourceNumber, clientName, description, details = {}) {
+  try {
+    await DailyActivity.create({
+      activityType: type,
+      resourceType,
+      resourceId,
+      resourceNumber,
+      clientName,
+      description,
+      details
+    });
+  } catch (error) {
+    console.error('Failed to log activity:', error);
+  }
+}
+
+// GET /api/dr-numbers - Get all DR numbers
+router.get('/', async (req, res, next) => {
+  try {
+    const { status, limit = 50, offset = 0 } = req.query;
+    
+    const where = {};
+    if (status) where.status = status;
+
+    const drNumbers = await DRNumber.findAndCountAll({
+      where,
+      order: [['drNumber', 'DESC']],
+      limit: parseInt(limit),
+      offset: parseInt(offset)
+    });
+
+    // Enrich with work order clientName (authoritative source)
+    const enriched = await Promise.all(drNumbers.rows.map(async (dr) => {
+      const data = dr.toJSON();
+      if (data.workOrderId) {
+        try {
+          const wo = await WorkOrder.findByPk(data.workOrderId, { attributes: ['clientName'] });
+          if (wo && wo.clientName) {
+            data.clientName = wo.clientName;
+          }
+        } catch (_) {}
+      }
+      return data;
+    }));
+
+    res.json({
+      data: enriched,
+      total: drNumbers.count
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/dr-numbers/next - Get next available DR number
+router.get('/next', async (req, res, next) => {
+  try {
+    // Check settings for custom next number
+    const setting = await AppSettings.findOne({ where: { key: 'next_dr_number' } });
+    
+    if (setting?.value?.nextNumber) {
+      return res.json({ data: { nextNumber: setting.value.nextNumber } });
+    }
+
+    // Find the highest DR number used
+    const lastDR = await DRNumber.findOne({
+      order: [['drNumber', 'DESC']]
+    });
+
+    const nextNumber = lastDR ? lastDR.drNumber + 1 : 1;
+    res.json({ data: { nextNumber } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// PUT /api/dr-numbers/next - Set next DR number
+router.put('/next', async (req, res, next) => {
+  try {
+    const { nextNumber } = req.body;
+
+    if (!nextNumber || nextNumber < 1) {
+      return res.status(400).json({ error: { message: 'Valid next number is required' } });
+    }
+
+    // Check if number already exists
+    const existing = await DRNumber.findOne({ where: { drNumber: nextNumber } });
+    if (existing) {
+      return res.status(400).json({ error: { message: `DR-${nextNumber} already exists` } });
+    }
+
+    // Save to settings
+    await AppSettings.upsert({
+      key: 'next_dr_number',
+      value: { nextNumber }
+    });
+
+    res.json({ data: { nextNumber }, message: 'Next DR number updated' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/dr-numbers/assign - Assign next DR number (creates entry)
+router.post('/assign', async (req, res, next) => {
+  const transaction = await sequelize.transaction();
+  
+  try {
+    const { estimateId, workOrderId, clientName, customNumber } = req.body;
+
+    let drNumber;
+
+    if (customNumber) {
+      // Check if custom number is available
+      const existing = await DRNumber.findOne({ where: { drNumber: customNumber }, transaction });
+      if (existing) {
+        await transaction.rollback();
+        return res.status(400).json({ error: { message: `DR-${customNumber} already exists` } });
+      }
+      drNumber = customNumber;
+    } else {
+      // Get next available number
+      const setting = await AppSettings.findOne({ where: { key: 'next_dr_number' }, transaction });
+      
+      if (setting?.value?.nextNumber) {
+        drNumber = setting.value.nextNumber;
+        // Increment for next time
+        await setting.update({ value: { nextNumber: drNumber + 1 } }, { transaction });
+      } else {
+        const lastDR = await DRNumber.findOne({
+          order: [['drNumber', 'DESC']],
+          transaction
+        });
+        drNumber = lastDR ? lastDR.drNumber + 1 : 1;
+      }
+    }
+
+    // Create DR number entry
+    const drEntry = await DRNumber.create({
+      drNumber,
+      status: 'active',
+      estimateId,
+      workOrderId,
+      clientName
+    }, { transaction });
+
+    await transaction.commit();
+
+    res.status(201).json({
+      data: drEntry,
+      message: `DR-${drNumber} assigned`
+    });
+  } catch (error) {
+    await transaction.rollback();
+    next(error);
+  }
+});
+
+// DELETE /api/dr-numbers/:drNumber/release - Release a DR number (delete entry so it can be reused)
+router.delete('/:drNumber/release', async (req, res, next) => {
+  try {
+    const drNumber = parseInt(req.params.drNumber);
+    const drEntry = await DRNumber.findOne({ where: { drNumber } });
+    
+    if (!drEntry) {
+      return res.status(404).json({ error: { message: `DR-${drNumber} not found` } });
+    }
+
+    // If it has a linked work order, just clear the reference (don't delete the WO)
+    if (drEntry.workOrderId) {
+      const wo = await WorkOrder.findByPk(drEntry.workOrderId);
+      if (wo) {
+        await wo.update({ drNumber: null });
+      }
+    }
+
+    // If it has a linked estimate, clear the reference
+    if (drEntry.estimateId) {
+      await Estimate.update({ workOrderId: null }, { where: { id: drEntry.estimateId } });
+    }
+
+    // Delete the DR entry entirely
+    await drEntry.destroy();
+
+    await logActivity(
+      'deleted',
+      'dr_number',
+      drEntry.id,
+      `DR-${drNumber}`,
+      drEntry.clientName,
+      `DR-${drNumber} released/deleted`
+    );
+
+    res.json({ message: `DR-${drNumber} has been released and can be reused` });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/dr-numbers/:drNumber/void - Void a DR number
+router.post('/:drNumber/void', async (req, res, next) => {
+  const transaction = await sequelize.transaction();
+  
+  try {
+    const drNumber = parseInt(req.params.drNumber);
+    const { reason, voidedBy } = req.body;
+
+    if (!reason) {
+      return res.status(400).json({ error: { message: 'Void reason is required' } });
+    }
+
+    // Find DR number entry
+    const drEntry = await DRNumber.findOne({ where: { drNumber }, transaction });
+    
+    if (!drEntry) {
+      await transaction.rollback();
+      return res.status(404).json({ error: { message: `DR-${drNumber} not found` } });
+    }
+
+    if (drEntry.status === 'void') {
+      await transaction.rollback();
+      return res.status(400).json({ error: { message: `DR-${drNumber} is already voided` } });
+    }
+
+    // Mark associated work order as voided — keep the record intact for expense tracking
+    if (drEntry.workOrderId) {
+      const workOrder = await WorkOrder.findByPk(drEntry.workOrderId, { transaction });
+      if (workOrder) {
+        await workOrder.update({
+          isVoided: true,
+          voidedAt: new Date(),
+          voidedBy: voidedBy || 'admin',
+          voidReason: reason,
+          notes: (workOrder.notes || '') + `\n\n⛔ VOIDED: ${reason} (by ${voidedBy || 'admin'} on ${new Date().toLocaleDateString()})`
+        }, { transaction });
+      }
+    }
+
+    // Update DR entry to void — keep workOrderId for reference
+    await drEntry.update({
+      status: 'void',
+      voidedAt: new Date(),
+      voidedBy: voidedBy || 'admin',
+      voidReason: reason
+    }, { transaction });
+
+    // Log activity
+    await logActivity(
+      'void',
+      'dr_number',
+      drEntry.id,
+      `DR-${drNumber}`,
+      drEntry.clientName,
+      `DR-${drNumber} voided: ${reason}`
+    );
+
+    await transaction.commit();
+
+    res.json({
+      data: drEntry,
+      message: `DR-${drNumber} has been voided`
+    });
+  } catch (error) {
+    await transaction.rollback();
+    next(error);
+  }
+});
+
+// POST /api/dr-numbers/:drNumber/unvoid - Restore a voided DR number
+router.post('/:drNumber/unvoid', async (req, res, next) => {
+  const transaction = await sequelize.transaction();
+  try {
+    const drNumber = parseInt(req.params.drNumber);
+    const drEntry = await DRNumber.findOne({ where: { drNumber }, transaction });
+    
+    if (!drEntry) {
+      await transaction.rollback();
+      return res.status(404).json({ error: { message: `DR-${drNumber} not found` } });
+    }
+    if (drEntry.status !== 'void') {
+      await transaction.rollback();
+      return res.status(400).json({ error: { message: `DR-${drNumber} is not voided` } });
+    }
+
+    // Restore work order
+    if (drEntry.workOrderId) {
+      const workOrder = await WorkOrder.findByPk(drEntry.workOrderId, { transaction });
+      if (workOrder) {
+        await workOrder.update({
+          isVoided: false,
+          voidedAt: null,
+          voidedBy: null,
+          voidReason: null,
+          notes: (workOrder.notes || '').replace(/\n\n⛔ VOIDED:.*$/s, '')
+        }, { transaction });
+      }
+    }
+
+    await drEntry.update({
+      status: 'active',
+      voidedAt: null,
+      voidedBy: null,
+      voidReason: null
+    }, { transaction });
+
+    await logActivity('restored', 'dr_number', drEntry.id, `DR-${drNumber}`, drEntry.clientName, `DR-${drNumber} restored from void`);
+    await transaction.commit();
+
+    res.json({ data: drEntry, message: `DR-${drNumber} has been restored` });
+  } catch (error) {
+    await transaction.rollback();
+    next(error);
+  }
+});
+
+// GET /api/dr-numbers/stats - Get DR number statistics
+router.get('/stats', async (req, res, next) => {
+  try {
+    const lastUsed = await DRNumber.findOne({
+      where: { status: 'active' },
+      order: [['drNumber', 'DESC']]
+    });
+
+    const setting = await AppSettings.findOne({ where: { key: 'next_dr_number' } });
+    const nextNumber = setting?.value?.nextNumber || (lastUsed ? lastUsed.drNumber + 1 : 1);
+
+    const voidedCount = await DRNumber.count({ where: { status: 'void' } });
+    const activeCount = await DRNumber.count({ where: { status: 'active' } });
+
+    res.json({
+      data: {
+        lastUsed: lastUsed?.drNumber || 0,
+        nextNumber,
+        voidedCount,
+        activeCount
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/dr-numbers/voided - Get all voided DR numbers
+router.get('/voided', async (req, res, next) => {
+  try {
+    const voided = await DRNumber.findAll({
+      where: { status: 'void' },
+      order: [['voidedAt', 'DESC']]
+    });
+
+    res.json({ data: voided });
+  } catch (error) {
+    next(error);
+  }
+});
+
+module.exports = router;

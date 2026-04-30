@@ -1926,7 +1926,7 @@ router.get('/:id/pickup/:index/receipt', async (req, res, next) => {
     const entry = history[idx];
     const pickupNum = idx + 1;
     const pickupDate = new Date(entry.date);
-    const totalItems = (entry.items || []).reduce((s, i) => s + (i.quantity || 0), 0);
+    const totalItems = (entry.items || []).filter(i => !['fab_service','shop_rate'].includes(i.partType)).reduce((s, i) => s + (i.quantity || 0), 0);
 
     const doc = new PDFDocument({ margin: 50, size: 'letter' });
     const chunks = [];
@@ -1979,23 +1979,84 @@ router.get('/:id/pickup/:index/receipt', async (req, res, next) => {
     ry += 12;
     doc.moveTo(50, ry).lineTo(562, ry).lineWidth(0.3).strokeColor('#ddd').stroke(); ry += 7;
 
-    (entry.items || []).forEach((item, i) => {
+    // Group fab_service/shop_rate items under their parent part
+    const SERVICE_PART_TYPES = ['fab_service', 'shop_rate'];
+    // Build a map from partId → WO part for looking up linked parents
+    const woPartsMap = {};
+    (workOrder.parts || []).forEach(p => {
+      woPartsMap[p.id] = p;
+      woPartsMap[p.partNumber] = p;
+    });
+    // Separate regular items and service items
+    const regularItems = (entry.items || []).filter(it => !SERVICE_PART_TYPES.includes(it.partType));
+    const serviceItems = (entry.items || []).filter(it => SERVICE_PART_TYPES.includes(it.partType));
+    // Map service items to their parent: use _linkedPartId from the WO parts lookup
+    const serviceByParent = {}; // parentPartNumber → [serviceItem, ...]
+    serviceItems.forEach(svc => {
+      const woPart = woPartsMap[svc.partId] || woPartsMap[svc.partNumber];
+      const fd = woPart?.formData && typeof woPart.formData === 'object' ? woPart.formData : {};
+      const linkedId = fd._linkedPartId || woPart?._linkedPartId;
+      const parentWoPart = linkedId ? woPartsMap[linkedId] : null;
+      const parentPartNumber = parentWoPart?.partNumber ?? null;
+      if (parentPartNumber !== null) {
+        if (!serviceByParent[parentPartNumber]) serviceByParent[parentPartNumber] = [];
+        serviceByParent[parentPartNumber].push(svc);
+      }
+    });
+
+    const displayItems = regularItems;
+    const totalDisplayItems = displayItems.length;
+
+    displayItems.forEach((item, i) => {
+      if (ry > 680) { doc.addPage(); ry = 50; }
       doc.font('Helvetica-Bold').fontSize(10).fillColor('#333');
       doc.text(String(item.quantity || 0), 50, ry, { width: 35 });
       doc.font('Helvetica').fontSize(9).fillColor('#333');
-      doc.text(item.clientPartNumber || item.partNumber || '', 90, ry, { width: 105 });
-      let desc = (item.description || '').replace(/^\d+pc:\s*/i, '');
+      doc.text(item.clientPartNumber || String(item.partNumber || ''), 90, ry, { width: 105 });
+      let desc = (item.description || '').replace(/^\d+pc:\s*/i, '').replace(/^\d+\s*[×x]\s*[\d.']+\s*(?:ft|foot|feet|'|length[s]?)[:\s]*/i, '').trim();
       doc.text(desc, 200, ry, { width: 360 });
       ry += doc.heightOfString(desc, { width: 360 }) + 1;
       if (item.rollingDescription) {
-        doc.font('Helvetica').fontSize(8.5).fillColor('#666');
+        doc.font('Helvetica').fontSize(8.5).fillColor('#555');
         doc.text(item.rollingDescription, 200, ry, { width: 360 });
         ry += doc.heightOfString(item.rollingDescription, { width: 360 }) + 1;
       }
+      // Attach service notes under this part
+      const svcs = serviceByParent[item.partNumber] || [];
+      svcs.forEach(svc => {
+        const woPart = woPartsMap[svc.partId] || woPartsMap[svc.partNumber];
+        const fd = woPart?.formData && typeof woPart.formData === 'object' ? woPart.formData : {};
+        const svcDesc = fd._materialDescription || fd.description || svc.description || (svc.partType === 'fab_service' ? 'Fabrication Service' : 'Shop Service');
+        const cleanSvcDesc = svcDesc.replace(/^\d+pc:\s*/i, '');
+        ry += 2;
+        doc.font('Helvetica').fontSize(8).fillColor('#1565c0')
+          .text('  ↳ ' + cleanSvcDesc, 200, ry, { width: 360 });
+        ry += doc.heightOfString('  ↳ ' + cleanSvcDesc, { width: 360 }) + 1;
+      });
       ry += 5;
-      if (i < entry.items.length - 1) {
+      if (i < totalDisplayItems - 1) {
         doc.moveTo(90, ry).lineTo(562, ry).lineWidth(0.3).strokeColor('#eee').stroke(); ry += 4;
       }
+    });
+    // Any unlinked service items (no parent found) — show them at the end
+    const linkedParentNums = new Set(Object.keys(serviceByParent).map(Number));
+    serviceItems.filter(svc => {
+      const woPart = woPartsMap[svc.partId] || woPartsMap[svc.partNumber];
+      const fd = woPart?.formData && typeof woPart.formData === 'object' ? woPart.formData : {};
+      const linkedId = fd._linkedPartId || woPart?._linkedPartId;
+      const parentWoPart = linkedId ? woPartsMap[linkedId] : null;
+      return !parentWoPart;
+    }).forEach((item, i) => {
+      if (ry > 680) { doc.addPage(); ry = 50; }
+      doc.font('Helvetica-Bold').fontSize(10).fillColor('#333');
+      doc.text(String(item.quantity || 0), 50, ry, { width: 35 });
+      doc.font('Helvetica').fontSize(9).fillColor('#333');
+      doc.text(String(item.partNumber || ''), 90, ry, { width: 105 });
+      const woPart = woPartsMap[item.partId] || woPartsMap[item.partNumber];
+      const fd = woPart?.formData && typeof woPart.formData === 'object' ? woPart.formData : {};
+      let desc = (fd._materialDescription || item.description || 'Fabrication Service').replace(/^\d+pc:\s*/i, '');
+      doc.text(desc, 200, ry, { width: 360 });
+      ry += doc.heightOfString(desc, { width: 360 }) + 6;
     });
 
     // Total

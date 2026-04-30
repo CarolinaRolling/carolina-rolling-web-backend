@@ -2004,7 +2004,7 @@ router.get('/:id/pickup/:index/receipt', async (req, res, next) => {
       }
     });
 
-    const displayItems = regularItems;
+    const displayItems = [...regularItems].sort((a, b) => (a.partNumber || 0) - (b.partNumber || 0));
     const totalDisplayItems = displayItems.length;
 
     displayItems.forEach((item, i) => {
@@ -2013,7 +2013,11 @@ router.get('/:id/pickup/:index/receipt', async (req, res, next) => {
       doc.text(String(item.quantity || 0), 50, ry, { width: 35 });
       doc.font('Helvetica').fontSize(9).fillColor('#333');
       doc.text(item.clientPartNumber || String(item.partNumber || ''), 90, ry, { width: 105 });
-      let desc = (item.description || '').replace(/^\d+pc:\s*/i, '').replace(/^\d+\s*[×x]\s*[\d.']+\s*(?:ft|foot|feet|'|length[s]?)[:\s]*/i, '').trim();
+      let desc = (item.description || '')
+        .replace(/^\d+pc:\s*/i, '')
+        .replace(/^\d+\s*[×x]\s*[\d.']+\s*(?:ft|foot|feet|'|length(?:s)?)[:\s)]*/i, '')
+        .replace(/^\(s\):\s*/i, '')
+        .trim();
       doc.text(desc, 200, ry, { width: 360 });
       ry += doc.heightOfString(desc, { width: 360 }) + 1;
       if (item.rollingDescription) {
@@ -2023,15 +2027,24 @@ router.get('/:id/pickup/:index/receipt', async (req, res, next) => {
       }
       // Attach service notes under this part
       const svcs = serviceByParent[item.partNumber] || [];
+      // Deduplicate service descriptions
+      const svcLabels = new Set();
       svcs.forEach(svc => {
         const woPart = woPartsMap[svc.partId] || woPartsMap[svc.partNumber];
         const fd = woPart?.formData && typeof woPart.formData === 'object' ? woPart.formData : {};
-        const svcDesc = fd._materialDescription || fd.description || svc.description || (svc.partType === 'fab_service' ? 'Fabrication Service' : 'Shop Service');
-        const cleanSvcDesc = svcDesc.replace(/^\d+pc:\s*/i, '');
+        let svcDesc = fd._materialDescription || fd.description || svc.description || '';
+        svcDesc = svcDesc.replace(/^\d+pc:\s*/i, '').trim();
+        // If still empty or is raw type name, use friendly label
+        if (!svcDesc || svcDesc === 'fab_service' || svcDesc === 'shop_rate') {
+          svcDesc = svc.partType === 'shop_rate' ? 'Shop Rate Service' : 'Fabrication Service';
+        }
+        svcLabels.add(svcDesc);
+      });
+      svcLabels.forEach(label => {
         ry += 2;
         doc.font('Helvetica').fontSize(8).fillColor('#1565c0')
-          .text('  ↳ ' + cleanSvcDesc, 200, ry, { width: 360 });
-        ry += doc.heightOfString('  ↳ ' + cleanSvcDesc, { width: 360 }) + 1;
+          .text('  ↳ ' + label, 200, ry, { width: 360 });
+        ry += doc.heightOfString('  ↳ ' + label, { width: 360 }) + 1;
       });
       ry += 5;
       if (i < totalDisplayItems - 1) {

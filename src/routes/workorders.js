@@ -2032,19 +2032,18 @@ router.get('/:id/pickup/:index/receipt', async (req, res, next) => {
       svcs.forEach(svc => {
         const woPart = woPartsMap[svc.partId] || woPartsMap[svc.partNumber];
         const fd = woPart?.formData && typeof woPart.formData === 'object' ? woPart.formData : {};
-        let svcDesc = fd._materialDescription || fd.description || svc.description || '';
-        svcDesc = svcDesc.replace(/^\d+pc:\s*/i, '').trim();
-        // If still empty or is raw type name, use friendly label
-        if (!svcDesc || svcDesc === 'fab_service' || svcDesc === 'shop_rate') {
-          svcDesc = svc.partType === 'shop_rate' ? 'Shop Rate Service' : 'Fabrication Service';
+        // Build a meaningful label: type name + instructions if available
+        const instructions = woPart?.specialInstructions || fd.specialInstructions || '';
+        if (instructions.trim()) {
+          const typeLabel = svc.partType === 'shop_rate' ? 'Shop Rate Service' : 'Fabrication Service';
+          svcLabels.add(typeLabel + ': ' + instructions.trim());
         }
-        svcLabels.add(svcDesc);
       });
       svcLabels.forEach(label => {
         ry += 2;
         doc.font('Helvetica').fontSize(8).fillColor('#1565c0')
-          .text('  ↳ ' + label, 200, ry, { width: 360 });
-        ry += doc.heightOfString('  ↳ ' + label, { width: 360 }) + 1;
+          .text('  + ' + label, 200, ry, { width: 360 });
+        ry += doc.heightOfString('  + ' + label, { width: 360 }) + 1;
       });
       ry += 5;
       if (i < totalDisplayItems - 1) {

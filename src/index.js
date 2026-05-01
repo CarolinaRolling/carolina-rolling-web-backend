@@ -198,7 +198,39 @@ app.patch('/api/com-center/emails/:id/category', authenticate, async (req, res) 
 });
 
 app.get('/api/com-center/logs', authenticate, (req, res) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
   res.json({ data: commScanLog, status: commScanStatus });
+});
+
+// Diagnostic: test Gmail connectivity without full scan
+app.get('/api/com-center/test-connection', authenticate, async (req, res) => {
+  try {
+    const { GmailAccount } = require('./models');
+    const { getGmailClient } = require('./services/emailScanner');
+    const accounts = await GmailAccount.findAll({ where: { isActive: true } });
+    if (!accounts.length) return res.json({ ok: false, message: 'No active Gmail accounts found' });
+    const results = [];
+    for (const account of accounts) {
+      try {
+        const gmail = await Promise.race([
+          getGmailClient(account),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('getGmailClient timeout after 10s')), 10000))
+        ]);
+        const profile = await Promise.race([
+          gmail.users.getProfile({ userId: 'me' }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('getProfile timeout after 10s')), 10000))
+        ]);
+        results.push({ account: account.email || account.id, ok: true, email: profile.data.emailAddress, messagesTotal: profile.data.messagesTotal });
+      } catch (e) {
+        results.push({ account: account.email || account.id, ok: false, error: e.message });
+      }
+    }
+    res.json({ results });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post('/api/com-center/scan-now', authenticate, async (req, res) => {

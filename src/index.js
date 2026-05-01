@@ -301,7 +301,17 @@ app.post('/api/com-center/scan-now', authenticate, async (req, res) => {
         for (const account of accounts) {
           try {
             logComm('info', 'Scanning account: ' + (account.email || account.id));
-            const gmail = await getGmailClient(account);
+            let gmail;
+            try {
+              gmail = await Promise.race([
+                getGmailClient(account),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('getGmailClient timeout — token may be expired')), 15000))
+              ]);
+              logComm('info', 'Gmail client ready for ' + (account.email || account.id));
+            } catch (clientErr) {
+              logComm('error', 'Failed to get Gmail client for ' + (account.email || account.id), clientErr.message);
+              continue;
+            }
             const res2 = await gmailWithTimeout(() => gmail.users.messages.list({ userId: 'me', q: '-label:cr-processed -label:cr-comm-scanned newer_than:2d', maxResults: 50 }));
             const messages = res2.data.messages || [];
             logComm('info', 'Found ' + messages.length + ' new message(s) on ' + (account.email || account.id));

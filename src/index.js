@@ -235,14 +235,13 @@ app.post('/api/com-center/scan-now', authenticate, async (req, res) => {
           (c.contacts || []).forEach(ct => { if (ct.email) clientAddrs[ct.email.toLowerCase().trim()] = c.name; });
         });
 
+        const { getGmailClient } = require('./services/emailScanner');
         const accounts = await GmailAccount.findAll({ where: { isActive: true } });
         logComm('info', 'Found ' + accounts.length + ' Gmail account(s) to scan');
         for (const account of accounts) {
           try {
             logComm('info', 'Scanning account: ' + (account.email || account.id));
-            const oauth2 = new google.auth.OAuth2(process.env.GMAIL_CLIENT_ID, process.env.GMAIL_CLIENT_SECRET);
-            oauth2.setCredentials({ access_token: account.accessToken, refresh_token: account.refreshToken, expiry_date: account.tokenExpiry });
-            const gmail = google.gmail({ version: 'v1', auth: oauth2 });
+            const gmail = await getGmailClient(account);
             const res2 = await gmailWithTimeout(() => gmail.users.messages.list({ userId: 'me', q: '-label:cr-processed -label:cr-comm-scanned newer_than:2d', maxResults: 50 }));
             const messages = res2.data.messages || [];
             logComm('info', 'Found ' + messages.length + ' new message(s) on ' + (account.email || account.id));

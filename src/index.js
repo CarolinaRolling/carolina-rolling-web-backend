@@ -385,8 +385,12 @@ app.post('/api/com-center/scan-now', authenticate, async (req, res) => {
             }
           } catch (accErr) { console.error('[CommScanner] account error:', accErr.message); }
         }
-        console.log('[CommScanner] Manual scan complete');
-      } catch (e) { console.error('[CommScanner] scan-now error:', e.message); }
+        commScanStatus = { running: false, startedAt: commScanStatus.startedAt, completedAt: new Date().toISOString(), error: null, cancelled: false };
+        logComm('info', 'Manual scan complete');
+      } catch (e) {
+        commScanStatus = { running: false, startedAt: commScanStatus.startedAt, completedAt: new Date().toISOString(), error: e.message, cancelled: false };
+        logComm('error', 'Scan failed: ' + e.message, e.stack ? e.stack.split('\n').slice(0,3).join('\n') : null);
+      }
     });
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });

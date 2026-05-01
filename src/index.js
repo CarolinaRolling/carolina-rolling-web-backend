@@ -204,6 +204,34 @@ app.get('/api/com-center/logs', authenticate, (req, res) => {
   res.json({ data: commScanLog, status: commScanStatus });
 });
 
+app.get('/api/com-center/test-connection', authenticate, async (req, res) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+  try {
+    const { GmailAccount } = require('./models');
+    const { getGmailClient } = require('./services/emailScanner');
+    const accounts = await GmailAccount.findAll({ where: { isActive: true } });
+    const results = [];
+    for (const account of accounts) {
+      try {
+        const gmail = await getGmailClient(account);
+        const profile = await Promise.race([
+          gmail.users.getProfile({ userId: 'me' }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout after 10s')), 10000))
+        ]);
+        const messagesTotal = profile.data.messagesTotal || 0;
+        results.push({ account: account.email || account.id, ok: true, messagesTotal });
+        logComm('info', 'Test connection OK: ' + (account.email || account.id) + ' (' + messagesTotal + ' messages)');
+      } catch (e) {
+        results.push({ account: account.email || account.id, ok: false, error: e.message });
+        logComm('error', 'Test connection FAILED: ' + (account.email || account.id), e.message);
+      }
+    }
+    res.json({ data: { results } });
+  } catch (e) {
+    res.status(500).json({ error: { message: e.message } });
+  }
+});
+
 // Diagnostic: test Gmail connectivity without full scan
 app.get('/api/com-center/test-connection', authenticate, async (req, res) => {
   try {

@@ -140,14 +140,24 @@ app.use('/api/email', authenticate, emailRoutes);
 
 
 
-// Communication Center scan log (in-memory, last 50 entries)
+// Communication Center scan log (in-memory, last 100 entries)
 const commScanLog = [];
+let commScanStatus = { running: false, startedAt: null, completedAt: null, error: null };
+
 function logComm(level, message, detail = null) {
   const entry = { ts: new Date().toISOString(), level, message, detail };
   commScanLog.unshift(entry);
-  if (commScanLog.length > 50) commScanLog.pop();
+  if (commScanLog.length > 100) commScanLog.pop();
   if (level === 'error') console.error('[CommScanner]', message, detail || '');
   else console.log('[CommScanner]', message);
+}
+
+// Helper: Gmail call with timeout
+async function gmailWithTimeout(fn, timeoutMs = 20000) {
+  return Promise.race([
+    fn(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Gmail API timeout after ' + timeoutMs + 'ms')), timeoutMs))
+  ]);
 }
 
 // Communication Center API
@@ -188,7 +198,7 @@ app.patch('/api/com-center/emails/:id/category', authenticate, async (req, res) 
 });
 
 app.get('/api/com-center/logs', authenticate, (req, res) => {
-  res.json({ data: commScanLog });
+  res.json({ data: commScanLog, status: commScanStatus });
 });
 
 app.post('/api/com-center/scan-now', authenticate, async (req, res) => {
@@ -196,6 +206,8 @@ app.post('/api/com-center/scan-now', authenticate, async (req, res) => {
     // Run the comm scanner immediately in background
     res.json({ message: 'Scan started' });
     setImmediate(async () => {
+      if (commScanStatus.running) { logComm('warn', 'Scan already in progress — skipping'); return; }
+      commScanStatus = { running: true, startedAt: new Date().toISOString(), completedAt: null, error: null };
       logComm('info', 'Manual scan started');
       try {
         const { GmailAccount, ScannedEmail, Client, Vendor } = require('./models');
@@ -231,11 +243,11 @@ app.post('/api/com-center/scan-now', authenticate, async (req, res) => {
             const oauth2 = new google.auth.OAuth2(process.env.GMAIL_CLIENT_ID, process.env.GMAIL_CLIENT_SECRET);
             oauth2.setCredentials({ access_token: account.accessToken, refresh_token: account.refreshToken, expiry_date: account.tokenExpiry });
             const gmail = google.gmail({ version: 'v1', auth: oauth2 });
-            const res2 = await gmail.users.messages.list({ userId: 'me', q: '-label:cr-processed -label:cr-comm-scanned newer_than:2d', maxResults: 50 });
+            const res2 = await gmailWithTimeout(() => gmail.users.messages.list({ userId: 'me', q: '-label:cr-processed -label:cr-comm-scanned newer_than:2d', maxResults: 50 }));
             const messages = res2.data.messages || [];
             logComm('info', 'Found ' + messages.length + ' new message(s) on ' + (account.email || account.id));
             if (!messages.length) continue;
-            const labelsRes = await gmail.users.labels.list({ userId: 'me' });
+            const labelsRes = await gmailWithTimeout(() => gmail.users.labels.list({ userId: 'me' }));
             let commLabelId;
             const existingLabel = (labelsRes.data.labels || []).find(l => l.name === 'cr-comm-scanned');
             if (existingLabel) { commLabelId = existingLabel.id; }
@@ -245,7 +257,8 @@ app.post('/api/com-center/scan-now', authenticate, async (req, res) => {
               try {
                 const existing = await ScannedEmail.findOne({ where: { gmailMessageId: msg.id, commProcessed: true } });
                 if (existing) continue;
-                const detail = await gmail.users.messages.get({ userId: 'me', id: msg.id, format: 'metadata', metadataHeaders: ['From', 'Subject', 'Date'] });
+                logComm('info', 'Processing message ' + msg.id.substring(0, 8) + '...');
+                const detail = await gmailWithTimeout(() => gmail.users.messages.get({ userId: 'me', id: msg.id, format: 'metadata', metadataHeaders: ['From', 'Subject', 'Date'] }));
                 const headers = detail.data.payload?.headers || [];
                 const fromHeader = headers.find(h => h.name === 'From')?.value || '';
                 const subject = headers.find(h => h.name === 'Subject')?.value || '(no subject)';

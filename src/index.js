@@ -238,6 +238,43 @@ portalRouter.get('/estimate/:estimateNumber/files/:fileId/download', async (req,
 
 app.use('/api/portal', authenticate, portalRouter);
 
+// Communication Center API
+app.get('/api/com-center/emails', authenticate, async (req, res) => {
+  try {
+    const { ScannedEmail } = require('./models');
+    const { Op } = require('sequelize');
+    const { category, archived, limit = 100, offset = 0 } = req.query;
+    const where = { commProcessed: true, emailType: 'comm_center' };
+    if (category && category !== 'all') where.commCategory = category;
+    where.commArchived = archived === 'true';
+    const emails = await ScannedEmail.findAll({
+      where, order: [['receivedAt', 'DESC']], limit: parseInt(limit), offset: parseInt(offset)
+    });
+    const total = await ScannedEmail.count({ where });
+    res.json({ data: emails, total });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+app.patch('/api/com-center/emails/:id/archive', authenticate, async (req, res) => {
+  try {
+    const { ScannedEmail } = require('./models');
+    const email = await ScannedEmail.findByPk(req.params.id);
+    if (!email) return res.status(404).json({ error: { message: 'Not found' } });
+    await email.update({ commArchived: !email.commArchived });
+    res.json({ data: email });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+app.patch('/api/com-center/emails/:id/category', authenticate, async (req, res) => {
+  try {
+    const { ScannedEmail } = require('./models');
+    const email = await ScannedEmail.findByPk(req.params.id);
+    if (!email) return res.status(404).json({ error: { message: 'Not found' } });
+    await email.update({ commCategory: req.body.category });
+    res.json({ data: email });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
 // Email Scanner (authenticated routes only - callback handled above)
 const emailScannerRoutes = require('./routes/email-scanner');
 app.use('/api/email-scanner', authenticate, emailScannerRoutes);
@@ -492,6 +529,10 @@ async function startServer() {
         ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "progressLastUpdatedAt" TIMESTAMP WITH TIME ZONE;
         ALTER TABLE employees ADD COLUMN IF NOT EXISTS "sortOrder" INTEGER DEFAULT 999;
         ALTER TABLE clients ADD COLUMN IF NOT EXISTS "requiresCoc" BOOLEAN DEFAULT false;
+        ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commCategory" VARCHAR(50);
+        ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commProcessed" BOOLEAN DEFAULT false;
+        ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commSnippet" TEXT;
+        ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commArchived" BOOLEAN DEFAULT false;
         ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "progressLog" JSONB DEFAULT '[]';
         ALTER TABLE payroll_entries ADD COLUMN IF NOT EXISTS "sortOrder" INTEGER DEFAULT 999;
       `);
@@ -1157,6 +1198,144 @@ Please confirm with the operator and mark the order complete if ready.`,
         }
       } catch (e) {
         console.error('[CRON] All-parts-done check error:', e.message);
+      }
+    });
+
+    // Communication Center scanner — every 30 minutes
+    cron.schedule('*/30 * * * *', async () => {
+      try {
+        const { GmailAccount, ScannedEmail, Client, Vendor } = require('./models');
+        const { google } = require('googleapis');
+        const Anthropic = require('@anthropic-ai/sdk');
+        const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+        // Build set of monitored addresses (handled by estimate scanner — skip these)
+        const monitoredClients = await Client.findAll({ where: { emailScanEnabled: true, isActive: true }, attributes: ['emailScanAddresses'] });
+        const monitoredAddrs = new Set();
+        monitoredClients.forEach(c => (c.emailScanAddresses || []).forEach(a => monitoredAddrs.add(a.toLowerCase().trim())));
+
+        // Build vendor address map
+        const allVendors = await Vendor.findAll({ where: { isActive: true }, attributes: ['name', 'emailScanAddresses', 'contactEmail'] });
+        const vendorAddrs = {};
+        allVendors.forEach(v => {
+          const addrs = [...(v.emailScanAddresses || [])];
+          if (v.contactEmail) addrs.push(v.contactEmail);
+          addrs.forEach(a => { vendorAddrs[a.toLowerCase().trim()] = v.name; });
+        });
+
+        // Build unmonitored known client address map
+        const allClients = await Client.findAll({ where: { isActive: true }, attributes: ['name', 'emailScanAddresses', 'contacts'] });
+        const clientAddrs = {};
+        allClients.filter(c => !c.emailScanEnabled).forEach(c => {
+          (c.emailScanAddresses || []).forEach(a => { clientAddrs[a.toLowerCase().trim()] = c.name; });
+          (c.contacts || []).forEach(ct => { if (ct.email) clientAddrs[ct.email.toLowerCase().trim()] = c.name; });
+        });
+
+        const accounts = await GmailAccount.findAll({ where: { isActive: true } });
+        for (const account of accounts) {
+          try {
+            const oauth2 = new google.auth.OAuth2(process.env.GMAIL_CLIENT_ID, process.env.GMAIL_CLIENT_SECRET);
+            oauth2.setCredentials({ access_token: account.accessToken, refresh_token: account.refreshToken, expiry_date: account.tokenExpiry });
+            const gmail = google.gmail({ version: 'v1', auth: oauth2 });
+
+            // Fetch emails NOT labeled cr-processed AND NOT labeled cr-comm-scanned, last 2 days
+            const res = await gmail.users.messages.list({
+              userId: 'me',
+              q: '-label:cr-processed -label:cr-comm-scanned newer_than:2d',
+              maxResults: 50
+            });
+            const messages = res.data.messages || [];
+            if (!messages.length) continue;
+
+            // Get or create cr-comm-scanned label
+            const labelsRes = await gmail.users.labels.list({ userId: 'me' });
+            let commLabelId;
+            const existingLabel = (labelsRes.data.labels || []).find(l => l.name === 'cr-comm-scanned');
+            if (existingLabel) { commLabelId = existingLabel.id; }
+            else {
+              const created = await gmail.users.labels.create({ userId: 'me', requestBody: { name: 'cr-comm-scanned', labelListVisibility: 'labelShow', messageListVisibility: 'show' } });
+              commLabelId = created.data.id;
+            }
+
+            for (const msg of messages) {
+              try {
+                // Skip if already processed by comm scanner
+                const existing = await ScannedEmail.findOne({ where: { gmailMessageId: msg.id, commProcessed: true } });
+                if (existing) continue;
+
+                const detail = await gmail.users.messages.get({ userId: 'me', id: msg.id, format: 'metadata', metadataHeaders: ['From', 'Subject', 'Date'] });
+                const headers = detail.data.payload?.headers || [];
+                const fromHeader = headers.find(h => h.name === 'From')?.value || '';
+                const subject = headers.find(h => h.name === 'Subject')?.value || '(no subject)';
+                const dateHeader = headers.find(h => h.name === 'Date')?.value;
+                const snippet = detail.data.snippet || '';
+
+                // Extract from email
+                const fromMatch = fromHeader.match(/<(.+?)>/) || [null, fromHeader];
+                const fromEmail = (fromMatch[1] || fromHeader).toLowerCase().trim();
+                const fromName = fromHeader.replace(/<.*>/, '').replace(/"/g, '').trim();
+
+                // Skip monitored addresses — estimate scanner handles these
+                if (monitoredAddrs.has(fromEmail)) {
+                  await gmail.users.messages.modify({ userId: 'me', id: msg.id, requestBody: { addLabelIds: [commLabelId] } });
+                  continue;
+                }
+
+                // Skip no-reply / automated senders
+                if (fromEmail.includes('noreply') || fromEmail.includes('no-reply') || fromEmail.includes('donotreply') || fromEmail.includes('mailer-daemon')) {
+                  await gmail.users.messages.modify({ userId: 'me', id: msg.id, requestBody: { addLabelIds: [commLabelId] } });
+                  continue;
+                }
+
+                // Determine category
+                let category = 'general';
+                if (vendorAddrs[fromEmail]) {
+                  category = 'vendor';
+                } else if (clientAddrs[fromEmail]) {
+                  category = 'client_inquiry';
+                } else {
+                  // AI classification
+                  const classifyRes = await anthropic.messages.create({
+                    model: 'claude-haiku-4-5-20251001',
+                    max_tokens: 50,
+                    messages: [{ role: 'user', content: 'Classify this email into one category. Reply with ONLY the category word. Categories: client_inquiry, vendor, bill, marketing, spam, general. From: ' + fromHeader + ' Subject: ' + subject + ' Snippet: ' + snippet.substring(0, 200) }]
+                  });
+                  const raw = classifyRes.content[0]?.text?.trim().toLowerCase() || 'general';
+                  const validCats = ['client_inquiry', 'vendor', 'bill', 'marketing', 'spam', 'general'];
+                  category = validCats.includes(raw) ? raw : 'general';
+                }
+
+                // Save to ScannedEmail
+                const gmailLink = 'https://mail.google.com/mail/u/0/#inbox/' + msg.id;
+                await ScannedEmail.upsert({
+                  gmailMessageId: msg.id,
+                  gmailAccountId: account.id,
+                  gmailThreadId: detail.data.threadId,
+                  fromEmail,
+                  fromName: fromName || fromEmail,
+                  subject,
+                  receivedAt: dateHeader ? new Date(dateHeader) : new Date(),
+                  commCategory: category,
+                  commProcessed: true,
+                  commSnippet: snippet.substring(0, 500),
+                  commArchived: false,
+                  gmailLink,
+                  status: 'processed',
+                  emailType: 'comm_center'
+                }, { conflictFields: ['gmailMessageId'] });
+
+                // Apply label
+                await gmail.users.messages.modify({ userId: 'me', id: msg.id, requestBody: { addLabelIds: [commLabelId] } });
+              } catch (msgErr) {
+                console.error('[CommScanner] Error processing message:', msgErr.message);
+              }
+            }
+          } catch (accErr) {
+            console.error('[CommScanner] Error on account ' + account.email + ':', accErr.message);
+          }
+        }
+      } catch (e) {
+        console.error('[CommScanner] Fatal error:', e.message);
       }
     });
 

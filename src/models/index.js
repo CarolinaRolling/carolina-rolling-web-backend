@@ -2336,6 +2336,23 @@ const ScannedEmail = sequelize.define('ScannedEmail', {
   nextRetryAt: {
     type: DataTypes.DATE,
     allowNull: true
+  },
+  commCategory: {
+    type: DataTypes.STRING,
+    allowNull: true
+    // 'client_inquiry' | 'vendor' | 'bill' | 'marketing' | 'spam' | 'general'
+  },
+  commProcessed: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  commSnippet: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  commArchived: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
   }
 }, {
   tableName: 'scanned_emails',

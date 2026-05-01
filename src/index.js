@@ -375,7 +375,11 @@ app.post('/api/com-center/scan-now', authenticate, async (req, res) => {
                   }
                 }
                 const gmailLink = 'https://mail.google.com/mail/u/0/#inbox/' + msg.id;
-                await ScannedEmail.upsert({ gmailMessageId: msg.id, gmailAccountId: account.id, gmailThreadId: detail.data.threadId, fromEmail, fromName: fromName || fromEmail, subject, receivedAt: dateHeader ? new Date(dateHeader) : new Date(), commCategory: category, commProcessed: true, commSnippet: snippet.substring(0, 500), commArchived: false, gmailLink, status: 'processed', emailType: 'comm_center' }, { conflictFields: ['gmailMessageId'] });
+                const [emailRecord, created] = await ScannedEmail.findOrCreate({
+                  where: { gmailMessageId: msg.id },
+                  defaults: { gmailAccountId: account.id, gmailThreadId: detail.data.threadId, fromEmail, fromName: fromName || fromEmail, subject, receivedAt: dateHeader ? new Date(dateHeader) : new Date(), commCategory: category, commProcessed: true, commSnippet: snippet.substring(0, 500), commArchived: false, gmailLink, status: 'processed', emailType: 'comm_center' }
+                });
+                if (!created) await emailRecord.update({ commCategory: category, commProcessed: true, commSnippet: snippet.substring(0, 500), gmailLink });
                 await gmail.users.messages.modify({ userId: 'me', id: msg.id, requestBody: { addLabelIds: [commLabelId] } });
               } catch (msgErr) { console.error('[CommScanner] msg error:', msgErr.message); }
             }
@@ -1532,22 +1536,11 @@ Please confirm with the operator and mark the order complete if ready.`,
 
                 // Save to ScannedEmail
                 const gmailLink = 'https://mail.google.com/mail/u/0/#inbox/' + msg.id;
-                await ScannedEmail.upsert({
-                  gmailMessageId: msg.id,
-                  gmailAccountId: account.id,
-                  gmailThreadId: detail.data.threadId,
-                  fromEmail,
-                  fromName: fromName || fromEmail,
-                  subject,
-                  receivedAt: dateHeader ? new Date(dateHeader) : new Date(),
-                  commCategory: category,
-                  commProcessed: true,
-                  commSnippet: snippet.substring(0, 500),
-                  commArchived: false,
-                  gmailLink,
-                  status: 'processed',
-                  emailType: 'comm_center'
-                }, { conflictFields: ['gmailMessageId'] });
+                const [emailRec2, created2] = await ScannedEmail.findOrCreate({
+                  where: { gmailMessageId: msg.id },
+                  defaults: { gmailAccountId: account.id, gmailThreadId: detail.data.threadId, fromEmail, fromName: fromName || fromEmail, subject, receivedAt: dateHeader ? new Date(dateHeader) : new Date(), commCategory: category, commProcessed: true, commSnippet: snippet.substring(0, 500), commArchived: false, gmailLink, status: 'processed', emailType: 'comm_center' }
+                });
+                if (!created2) await emailRec2.update({ commCategory: category, commProcessed: true, commSnippet: snippet.substring(0, 500), gmailLink });
 
                 // Apply label
                 await gmail.users.messages.modify({ userId: 'me', id: msg.id, requestBody: { addLabelIds: [commLabelId] } });

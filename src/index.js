@@ -136,6 +136,151 @@ app.use('/api/business', authenticate, businessRoutes);
 app.use('/api/dr-numbers', authenticate, drNumbersRoutes);
 app.use('/api/po-numbers', authenticate, poNumbersRoutes);
 app.use('/api/email', authenticate, emailRoutes);
+
+
+
+
+// Communication Center scan log (in-memory, last 50 entries)
+const commScanLog = [];
+function logComm(level, message, detail = null) {
+  const entry = { ts: new Date().toISOString(), level, message, detail };
+  commScanLog.unshift(entry);
+  if (commScanLog.length > 50) commScanLog.pop();
+  if (level === 'error') console.error('[CommScanner]', message, detail || '');
+  else console.log('[CommScanner]', message);
+}
+
+// Communication Center API
+app.get('/api/com-center/emails', authenticate, async (req, res) => {
+  try {
+    const { ScannedEmail } = require('./models');
+    const { Op } = require('sequelize');
+    const { category, archived, limit = 100, offset = 0 } = req.query;
+    const where = { commProcessed: true, emailType: 'comm_center' };
+    if (category && category !== 'all') where.commCategory = category;
+    where.commArchived = archived === 'true';
+    const emails = await ScannedEmail.findAll({
+      where, order: [['receivedAt', 'DESC']], limit: parseInt(limit), offset: parseInt(offset)
+    });
+    const total = await ScannedEmail.count({ where });
+    res.json({ data: emails, total });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+app.patch('/api/com-center/emails/:id/archive', authenticate, async (req, res) => {
+  try {
+    const { ScannedEmail } = require('./models');
+    const email = await ScannedEmail.findByPk(req.params.id);
+    if (!email) return res.status(404).json({ error: { message: 'Not found' } });
+    await email.update({ commArchived: !email.commArchived });
+    res.json({ data: email });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+app.patch('/api/com-center/emails/:id/category', authenticate, async (req, res) => {
+  try {
+    const { ScannedEmail } = require('./models');
+    const email = await ScannedEmail.findByPk(req.params.id);
+    if (!email) return res.status(404).json({ error: { message: 'Not found' } });
+    await email.update({ commCategory: req.body.category });
+    res.json({ data: email });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+app.get('/api/com-center/logs', authenticate, (req, res) => {
+  res.json({ data: commScanLog });
+});
+
+app.post('/api/com-center/scan-now', authenticate, async (req, res) => {
+  try {
+    // Run the comm scanner immediately in background
+    res.json({ message: 'Scan started' });
+    setImmediate(async () => {
+      logComm('info', 'Manual scan started');
+      try {
+        const { GmailAccount, ScannedEmail, Client, Vendor } = require('./models');
+        const { google } = require('googleapis');
+        const Anthropic = require('@anthropic-ai/sdk');
+        const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+        const { Op } = require('sequelize');
+
+        const monitoredClients = await Client.findAll({ where: { emailScanEnabled: true, isActive: true }, attributes: ['emailScanAddresses'] });
+        const monitoredAddrs = new Set();
+        monitoredClients.forEach(c => (c.emailScanAddresses || []).forEach(a => monitoredAddrs.add(a.toLowerCase().trim())));
+
+        const allVendors = await Vendor.findAll({ where: { isActive: true }, attributes: ['name', 'emailScanAddresses', 'contactEmail'] });
+        const vendorAddrs = {};
+        allVendors.forEach(v => {
+          const addrs = [...(v.emailScanAddresses || [])];
+          if (v.contactEmail) addrs.push(v.contactEmail);
+          addrs.forEach(a => { vendorAddrs[a.toLowerCase().trim()] = v.name; });
+        });
+
+        const allClients = await Client.findAll({ where: { isActive: true }, attributes: ['name', 'emailScanAddresses', 'contacts', 'emailScanEnabled'] });
+        const clientAddrs = {};
+        allClients.filter(c => !c.emailScanEnabled).forEach(c => {
+          (c.emailScanAddresses || []).forEach(a => { clientAddrs[a.toLowerCase().trim()] = c.name; });
+          (c.contacts || []).forEach(ct => { if (ct.email) clientAddrs[ct.email.toLowerCase().trim()] = c.name; });
+        });
+
+        const accounts = await GmailAccount.findAll({ where: { isActive: true } });
+        logComm('info', 'Found ' + accounts.length + ' Gmail account(s) to scan');
+        for (const account of accounts) {
+          try {
+            logComm('info', 'Scanning account: ' + (account.email || account.id));
+            const oauth2 = new google.auth.OAuth2(process.env.GMAIL_CLIENT_ID, process.env.GMAIL_CLIENT_SECRET);
+            oauth2.setCredentials({ access_token: account.accessToken, refresh_token: account.refreshToken, expiry_date: account.tokenExpiry });
+            const gmail = google.gmail({ version: 'v1', auth: oauth2 });
+            const res2 = await gmail.users.messages.list({ userId: 'me', q: '-label:cr-processed -label:cr-comm-scanned newer_than:2d', maxResults: 50 });
+            const messages = res2.data.messages || [];
+            logComm('info', 'Found ' + messages.length + ' new message(s) on ' + (account.email || account.id));
+            if (!messages.length) continue;
+            const labelsRes = await gmail.users.labels.list({ userId: 'me' });
+            let commLabelId;
+            const existingLabel = (labelsRes.data.labels || []).find(l => l.name === 'cr-comm-scanned');
+            if (existingLabel) { commLabelId = existingLabel.id; }
+            else { const created = await gmail.users.labels.create({ userId: 'me', requestBody: { name: 'cr-comm-scanned', labelListVisibility: 'labelShow', messageListVisibility: 'show' } }); commLabelId = created.data.id; }
+
+            for (const msg of messages) {
+              try {
+                const existing = await ScannedEmail.findOne({ where: { gmailMessageId: msg.id, commProcessed: true } });
+                if (existing) continue;
+                const detail = await gmail.users.messages.get({ userId: 'me', id: msg.id, format: 'metadata', metadataHeaders: ['From', 'Subject', 'Date'] });
+                const headers = detail.data.payload?.headers || [];
+                const fromHeader = headers.find(h => h.name === 'From')?.value || '';
+                const subject = headers.find(h => h.name === 'Subject')?.value || '(no subject)';
+                const dateHeader = headers.find(h => h.name === 'Date')?.value;
+                const snippet = detail.data.snippet || '';
+                const fromMatch = fromHeader.match(/<(.+?)>/) || [null, fromHeader];
+                const fromEmail = (fromMatch[1] || fromHeader).toLowerCase().trim();
+                const fromName = fromHeader.replace(/<.*>/, '').replace(/"/g, '').trim();
+                if (monitoredAddrs.has(fromEmail) || fromEmail.includes('noreply') || fromEmail.includes('no-reply') || fromEmail.includes('donotreply') || fromEmail.includes('mailer-daemon')) {
+                  await gmail.users.messages.modify({ userId: 'me', id: msg.id, requestBody: { addLabelIds: [commLabelId] } });
+                  continue;
+                }
+                let category = 'general';
+                if (vendorAddrs[fromEmail]) { category = 'vendor'; }
+                else if (clientAddrs[fromEmail]) { category = 'client_inquiry'; }
+                else {
+                  const classifyRes = await anthropic.messages.create({ model: 'claude-haiku-4-5-20251001', max_tokens: 50, messages: [{ role: 'user', content: 'Classify this email into one category. Reply with ONLY the category word. Categories: client_inquiry, vendor, bill, marketing, spam, general. From: ' + fromHeader + ' Subject: ' + subject + ' Snippet: ' + snippet.substring(0, 200) }] });
+                  const raw = classifyRes.content[0]?.text?.trim().toLowerCase() || 'general';
+                  const validCats = ['client_inquiry', 'vendor', 'bill', 'marketing', 'spam', 'general'];
+                  category = validCats.includes(raw) ? raw : 'general';
+                }
+                const gmailLink = 'https://mail.google.com/mail/u/0/#inbox/' + msg.id;
+                await ScannedEmail.upsert({ gmailMessageId: msg.id, gmailAccountId: account.id, gmailThreadId: detail.data.threadId, fromEmail, fromName: fromName || fromEmail, subject, receivedAt: dateHeader ? new Date(dateHeader) : new Date(), commCategory: category, commProcessed: true, commSnippet: snippet.substring(0, 500), commArchived: false, gmailLink, status: 'processed', emailType: 'comm_center' }, { conflictFields: ['gmailMessageId'] });
+                await gmail.users.messages.modify({ userId: 'me', id: msg.id, requestBody: { addLabelIds: [commLabelId] } });
+              } catch (msgErr) { console.error('[CommScanner] msg error:', msgErr.message); }
+            }
+          } catch (accErr) { console.error('[CommScanner] account error:', accErr.message); }
+        }
+        console.log('[CommScanner] Manual scan complete');
+      } catch (e) { console.error('[CommScanner] scan-now error:', e.message); }
+    });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+
 app.use('/api', authenticate, clientsVendorsRoutes);
 app.use('/api', authenticate, permitVerificationRoutes);
 app.use('/api/quickbooks', authenticate, quickbooksRoutes);
@@ -238,42 +383,6 @@ portalRouter.get('/estimate/:estimateNumber/files/:fileId/download', async (req,
 
 app.use('/api/portal', authenticate, portalRouter);
 
-// Communication Center API
-app.get('/api/com-center/emails', authenticate, async (req, res) => {
-  try {
-    const { ScannedEmail } = require('./models');
-    const { Op } = require('sequelize');
-    const { category, archived, limit = 100, offset = 0 } = req.query;
-    const where = { commProcessed: true, emailType: 'comm_center' };
-    if (category && category !== 'all') where.commCategory = category;
-    where.commArchived = archived === 'true';
-    const emails = await ScannedEmail.findAll({
-      where, order: [['receivedAt', 'DESC']], limit: parseInt(limit), offset: parseInt(offset)
-    });
-    const total = await ScannedEmail.count({ where });
-    res.json({ data: emails, total });
-  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
-});
-
-app.patch('/api/com-center/emails/:id/archive', authenticate, async (req, res) => {
-  try {
-    const { ScannedEmail } = require('./models');
-    const email = await ScannedEmail.findByPk(req.params.id);
-    if (!email) return res.status(404).json({ error: { message: 'Not found' } });
-    await email.update({ commArchived: !email.commArchived });
-    res.json({ data: email });
-  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
-});
-
-app.patch('/api/com-center/emails/:id/category', authenticate, async (req, res) => {
-  try {
-    const { ScannedEmail } = require('./models');
-    const email = await ScannedEmail.findByPk(req.params.id);
-    if (!email) return res.status(404).json({ error: { message: 'Not found' } });
-    await email.update({ commCategory: req.body.category });
-    res.json({ data: email });
-  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
-});
 
 // Email Scanner (authenticated routes only - callback handled above)
 const emailScannerRoutes = require('./routes/email-scanner');
@@ -1327,11 +1436,11 @@ Please confirm with the operator and mark the order complete if ready.`,
                 // Apply label
                 await gmail.users.messages.modify({ userId: 'me', id: msg.id, requestBody: { addLabelIds: [commLabelId] } });
               } catch (msgErr) {
-                console.error('[CommScanner] Error processing message:', msgErr.message);
+                logComm('error', 'Message error (cron)', msgErr.message);
               }
             }
           } catch (accErr) {
-            console.error('[CommScanner] Error on account ' + account.email + ':', accErr.message);
+            logComm('error', 'Account error (cron): ' + (account.email || account.id), accErr.message);
           }
         }
       } catch (e) {

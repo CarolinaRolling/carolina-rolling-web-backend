@@ -282,8 +282,6 @@ app.post('/api/com-center/scan-now', authenticate, async (req, res) => {
       try {
         const { GmailAccount, ScannedEmail, Client, Vendor } = require('./models');
         const { google } = require('googleapis');
-        const Anthropic = require('@anthropic-ai/sdk');
-        const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
         const { Op } = require('sequelize');
 
         const monitoredClients = await Client.findAll({ where: { emailScanEnabled: true, isActive: true }, attributes: ['emailScanAddresses'] });
@@ -355,10 +353,26 @@ app.post('/api/com-center/scan-now', authenticate, async (req, res) => {
                 if (vendorAddrs[fromEmail]) { category = 'vendor'; }
                 else if (clientAddrs[fromEmail]) { category = 'client_inquiry'; }
                 else {
-                  const classifyRes = await anthropic.messages.create({ model: 'claude-haiku-4-5-20251001', max_tokens: 50, messages: [{ role: 'user', content: 'Classify this email into one category. Reply with ONLY the category word. Categories: client_inquiry, vendor, bill, marketing, spam, general. From: ' + fromHeader + ' Subject: ' + subject + ' Snippet: ' + snippet.substring(0, 200) }] });
-                  const raw = classifyRes.content[0]?.text?.trim().toLowerCase() || 'general';
-                  const validCats = ['client_inquiry', 'vendor', 'bill', 'marketing', 'spam', 'general'];
-                  category = validCats.includes(raw) ? raw : 'general';
+                  // Classify using raw https (no SDK needed)
+                  try {
+                    const https = require('https');
+                    const classifyBody = JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 20, messages: [{ role: 'user', content: 'Classify this email into one category. Reply with ONLY the category word. Categories: client_inquiry, vendor, bill, marketing, spam, general. From: ' + fromHeader + ' Subject: ' + subject }] });
+                    const classifyResult = await new Promise((resolve, reject) => {
+                      const req = https.request({ hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(classifyBody) } }, (res) => {
+                        let data = ''; res.on('data', c => data += c); res.on('end', () => resolve(data));
+                      });
+                      req.on('error', reject);
+                      setTimeout(() => reject(new Error('AI classify timeout')), 10000);
+                      req.write(classifyBody); req.end();
+                    });
+                    const parsed = JSON.parse(classifyResult);
+                    const raw = (parsed.content?.[0]?.text || '').trim().toLowerCase();
+                    const validCats = ['client_inquiry', 'vendor', 'bill', 'marketing', 'spam', 'general'];
+                    category = validCats.includes(raw) ? raw : 'general';
+                  } catch (aiErr) {
+                    logComm('warn', 'AI classify failed, defaulting to general: ' + aiErr.message);
+                    category = 'general';
+                  }
                 }
                 const gmailLink = 'https://mail.google.com/mail/u/0/#inbox/' + msg.id;
                 await ScannedEmail.upsert({ gmailMessageId: msg.id, gmailAccountId: account.id, gmailThreadId: detail.data.threadId, fromEmail, fromName: fromName || fromEmail, subject, receivedAt: dateHeader ? new Date(dateHeader) : new Date(), commCategory: category, commProcessed: true, commSnippet: snippet.substring(0, 500), commArchived: false, gmailLink, status: 'processed', emailType: 'comm_center' }, { conflictFields: ['gmailMessageId'] });
@@ -1408,9 +1422,6 @@ Please confirm with the operator and mark the order complete if ready.`,
       try {
         const { GmailAccount, ScannedEmail, Client, Vendor } = require('./models');
         const { google } = require('googleapis');
-        const Anthropic = require('@anthropic-ai/sdk');
-        const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
         // Build set of monitored addresses (handled by estimate scanner — skip these)
         const monitoredClients = await Client.findAll({ where: { emailScanEnabled: true, isActive: true }, attributes: ['emailScanAddresses'] });
         const monitoredAddrs = new Set();
@@ -1497,14 +1508,26 @@ Please confirm with the operator and mark the order complete if ready.`,
                   category = 'client_inquiry';
                 } else {
                   // AI classification
-                  const classifyRes = await anthropic.messages.create({
-                    model: 'claude-haiku-4-5-20251001',
-                    max_tokens: 50,
-                    messages: [{ role: 'user', content: 'Classify this email into one category. Reply with ONLY the category word. Categories: client_inquiry, vendor, bill, marketing, spam, general. From: ' + fromHeader + ' Subject: ' + subject + ' Snippet: ' + snippet.substring(0, 200) }]
-                  });
-                  const raw = classifyRes.content[0]?.text?.trim().toLowerCase() || 'general';
-                  const validCats = ['client_inquiry', 'vendor', 'bill', 'marketing', 'spam', 'general'];
-                  category = validCats.includes(raw) ? raw : 'general';
+                  // Classify using raw https (no SDK needed)
+                  try {
+                    const https = require('https');
+                    const classifyBody = JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 20, messages: [{ role: 'user', content: 'Classify this email into one category. Reply with ONLY the category word. Categories: client_inquiry, vendor, bill, marketing, spam, general. From: ' + fromHeader + ' Subject: ' + subject }] });
+                    const classifyResult = await new Promise((resolve, reject) => {
+                      const req = https.request({ hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(classifyBody) } }, (res) => {
+                        let data = ''; res.on('data', c => data += c); res.on('end', () => resolve(data));
+                      });
+                      req.on('error', reject);
+                      setTimeout(() => reject(new Error('AI classify timeout')), 10000);
+                      req.write(classifyBody); req.end();
+                    });
+                    const parsed = JSON.parse(classifyResult);
+                    const raw = (parsed.content?.[0]?.text || '').trim().toLowerCase();
+                    const validCats = ['client_inquiry', 'vendor', 'bill', 'marketing', 'spam', 'general'];
+                    category = validCats.includes(raw) ? raw : 'general';
+                  } catch (aiErr) {
+                    console.warn('[CommScanner] AI classify failed, defaulting to general: ' + aiErr.message);
+                    category = 'general';
+                  }
                 }
 
                 // Save to ScannedEmail

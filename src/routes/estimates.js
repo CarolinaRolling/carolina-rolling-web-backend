@@ -2186,7 +2186,11 @@ router.get('/:id/pdf', async (req, res, next) => {
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="Estimate-${estimate.estimateNumber}.pdf"`);
 
-    // Pipe to response
+    // Pipe to response — must add error handler BEFORE piping
+    doc.on('error', (err) => {
+      console.error('PDF stream error:', err.message);
+      // Don't crash the process — just log it
+    });
     doc.pipe(res);
 
     // Helper functions

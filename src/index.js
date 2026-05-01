@@ -142,7 +142,7 @@ app.use('/api/email', authenticate, emailRoutes);
 
 // Communication Center scan log (in-memory, last 100 entries)
 const commScanLog = [];
-let commScanStatus = { running: false, startedAt: null, completedAt: null, error: null };
+let commScanStatus = { running: false, startedAt: null, completedAt: null, error: null, cancelled: false };
 
 function logComm(level, message, detail = null) {
   const entry = { ts: new Date().toISOString(), level, message, detail };
@@ -261,13 +261,23 @@ app.get('/api/com-center/test-connection', authenticate, async (req, res) => {
   }
 });
 
+app.post('/api/com-center/cancel-scan', authenticate, (req, res) => {
+  if (commScanStatus.running) {
+    commScanStatus.cancelled = true;
+    logComm('warn', 'Scan cancel requested by user');
+    res.json({ message: 'Cancel requested' });
+  } else {
+    res.json({ message: 'No scan running' });
+  }
+});
+
 app.post('/api/com-center/scan-now', authenticate, async (req, res) => {
   try {
     // Run the comm scanner immediately in background
     res.json({ message: 'Scan started' });
     setImmediate(async () => {
       if (commScanStatus.running) { logComm('warn', 'Scan already in progress — skipping'); return; }
-      commScanStatus = { running: true, startedAt: new Date().toISOString(), completedAt: null, error: null };
+      commScanStatus = { running: true, startedAt: new Date().toISOString(), completedAt: null, error: null, cancelled: false };
       logComm('info', 'Manual scan started');
       try {
         const { GmailAccount, ScannedEmail, Client, Vendor } = require('./models');
@@ -299,6 +309,7 @@ app.post('/api/com-center/scan-now', authenticate, async (req, res) => {
         const accounts = await GmailAccount.findAll({ where: { isActive: true } });
         logComm('info', 'Found ' + accounts.length + ' Gmail account(s) to scan');
         for (const account of accounts) {
+          if (commScanStatus.cancelled) { logComm('warn', 'Scan cancelled by user'); break; }
           try {
             logComm('info', 'Scanning account: ' + (account.email || account.id));
             let gmail;

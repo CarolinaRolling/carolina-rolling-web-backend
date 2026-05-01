@@ -2371,7 +2371,7 @@ router.get('/:id/pdf', async (req, res, next) => {
           } else {
             let pct = parseFloat(rfd._expediteType) || 0;
             if (rfd._expediteType === 'custom_pct') pct = parseFloat(rfd._expediteCustomPct) || 0;
-            rushExpediteAmt = partsSubtotal * (pct / 100);
+            rushExpediteAmt = (estimate.partsSubtotal || 0) * (pct / 100);
           }
         }
         if (rfd._emergencyEnabled) rushEmergencyAmt = emergOpts[rfd._emergencyDay] || 0;

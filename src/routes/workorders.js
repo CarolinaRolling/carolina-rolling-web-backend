@@ -13,6 +13,101 @@ const { WorkOrder, WorkOrderPart, WorkOrderPartFile, WorkOrderDocument, DailyAct
 
 const router = express.Router();
 
+// ─── Helper: generate pickup receipt PDF buffer ───────────────────────────────
+async function generatePickupReceiptBuffer(workOrder, entry, idx) {
+  const PDFDocument = require('pdfkit');
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ margin: 50, size: 'letter' });
+    const chunks = [];
+    doc.on('data', c => chunks.push(c));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+    const drLabel = workOrder.drNumber ? 'DR-' + workOrder.drNumber : (workOrder.orderNumber || 'WO');
+    const entryDate = entry.date ? new Date(entry.date) : new Date();
+    const dateStr = entryDate.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: '2-digit', day: '2-digit', year: 'numeric' });
+    const timeStr = entryDate.toLocaleTimeString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', minute: '2-digit', hour12: true }) + ' PT';
+    const isFullShipment = entry.type === 'full';
+    const primaryColor = '#E65100';
+    const darkColor = '#1a1a1a';
+    const logoFile = [path.join(__dirname, '../assets/logo.png'), path.join(__dirname, '../assets/logo.jpg')].find(p => fs.existsSync(p));
+    if (logoFile) try { doc.image(logoFile, 50, 20, { width: 55 }); } catch {}
+    doc.fontSize(9).font('Helvetica').fillColor('#555').text('Carolina Rolling Co. Inc.', 115, 22);
+    doc.fontSize(7.5).fillColor('#888').text('9152 Sonrisa St., Bellflower, CA 90706', 115, 34);
+    doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 115, 44);
+    doc.fontSize(13).font('Helvetica-Bold').fillColor(primaryColor)
+      .text('PICKUP RECEIPT — ' + (isFullShipment ? 'FULL SHIPMENT' : 'PARTIAL SHIPMENT (#' + (idx + 1) + ')'), 50, 62);
+    doc.fontSize(10).font('Helvetica').fillColor(darkColor).text(drLabel, 450, 62, { align: 'right', width: 112 });
+    doc.fontSize(7.5).fillColor('#888').text(dateStr + '  ' + timeStr, 450, 76, { align: 'right', width: 112 });
+    doc.moveTo(50, 88).lineTo(562, 88).lineWidth(1).strokeColor(primaryColor).stroke();
+    let ry = 98;
+    doc.fontSize(9).font('Helvetica').fillColor('#555').text('Customer', 50, ry);
+    doc.fontSize(11).font('Helvetica-Bold').fillColor(darkColor).text(workOrder.clientName || '', 50, ry + 12); ry += 28;
+    if (workOrder.clientPurchaseOrderNumber) { doc.fontSize(8.5).font('Helvetica').fillColor('#555').text('P.O: ' + workOrder.clientPurchaseOrderNumber, 50, ry); ry += 14; }
+    doc.fontSize(8.5).font('Helvetica').fillColor('#555').text('Picked Up By: ' + (entry.pickedUpBy || 'unknown'), 50, ry); ry += 14;
+    doc.fontSize(8.5).font('Helvetica-Bold').fillColor(darkColor).text('Date & Time: ' + entryDate.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'America/Los_Angeles' }) + ' at ' + timeStr, 50, ry); ry += 18;
+    doc.moveTo(50, ry).lineTo(562, ry).lineWidth(0.5).strokeColor('#ddd').stroke(); ry += 10;
+    doc.rect(50, ry, 512, 16).fill('#1a1a1a');
+    doc.fontSize(7.5).font('Helvetica-Bold').fillColor('white');
+    doc.text('QTY', 55, ry + 4, { width: 35 }); doc.text('PART #', 90, ry + 4, { width: 110 }); doc.text('DESCRIPTION', 205, ry + 4, { width: 360 }); ry += 16;
+    const partsMap = {};
+    (workOrder.parts || []).forEach(p => { partsMap[p.id] = p; partsMap[p.partNumber] = p; });
+    const SERVICE_TYPES = ['fab_service', 'shop_rate'];
+    const regularItems = [...(entry.items || []).filter(it => !SERVICE_TYPES.includes(it.partType))].sort((a, b) => (a.partNumber || 0) - (b.partNumber || 0));
+    const serviceItems = (entry.items || []).filter(it => SERVICE_TYPES.includes(it.partType));
+    const serviceByParent = {};
+    serviceItems.forEach(svc => {
+      const woPart = partsMap[svc.partId] || partsMap[svc.partNumber];
+      const fd = woPart?.formData && typeof woPart.formData === 'object' ? woPart.formData : {};
+      const parentWoPart = (fd._linkedPartId || woPart?._linkedPartId) ? partsMap[fd._linkedPartId || woPart._linkedPartId] : null;
+      if (parentWoPart) { if (!serviceByParent[parentWoPart.partNumber]) serviceByParent[parentWoPart.partNumber] = []; serviceByParent[parentWoPart.partNumber].push({ woPart, fd, svc }); }
+    });
+    regularItems.forEach((item, i) => {
+      if (ry + 20 > 700) { doc.addPage(); ry = 50; }
+      let desc = (item.description || '').replace(/^\d+pc:\s*/i, '').replace(/^\d+\s*[x]\s*[\d.']+\s*(?:length(?:s)?)[:\s)]*/i, '').replace(/^\(s\):\s*/i, '').trim();
+      const svcsHere = serviceByParent[item.partNumber] || [];
+      const svcLabels = new Set();
+      svcsHere.forEach(({ svc, woPart, fd }) => { const instr = woPart?.specialInstructions || fd.specialInstructions || ''; if (instr.trim()) svcLabels.add((svc.partType === 'shop_rate' ? 'Shop Rate Service' : 'Fabrication Service') + ': ' + instr.trim()); });
+      const descH = Math.max(doc.fontSize(8).heightOfString(desc || ' ', { width: 355 }), 12);
+      const svcH = [...svcLabels].reduce((h, l) => h + doc.fontSize(8).heightOfString('  + ' + l, { width: 355 }) + 1, 0);
+      const rowH = descH + svcH + 10;
+      if (i % 2 === 1) { doc.rect(50, ry, 512, rowH).fill('#f9f9f9'); }
+      doc.moveTo(50, ry).lineTo(562, ry).lineWidth(0.3).strokeColor('#eee').stroke();
+      doc.fontSize(10).font('Helvetica-Bold').fillColor(darkColor).text(String(item.quantity || 0), 55, ry + 4, { width: 35 });
+      doc.fontSize(8).font('Helvetica').fillColor(darkColor).text(item.clientPartNumber || String(item.partNumber || ''), 90, ry + 4, { width: 110 });
+      doc.text(desc, 205, ry + 4, { width: 355 });
+      let sry = ry + 4 + descH + 1;
+      svcLabels.forEach(label => { doc.fontSize(8).font('Helvetica').fillColor('#1565c0').text('  + ' + label, 205, sry, { width: 355 }); sry += doc.heightOfString('  + ' + label, { width: 355 }) + 1; });
+      ry += rowH + 2;
+    });
+    const totalItems = regularItems.reduce((s, i) => s + (i.quantity || 0), 0);
+    ry += 8;
+    doc.moveTo(50, ry).lineTo(562, ry).lineWidth(0.5).strokeColor('#ccc').stroke(); ry += 8;
+    doc.fontSize(9).font('Helvetica-Bold').fillColor(darkColor).text('Total items shipped: ' + totalItems, 50, ry); ry += 30;
+    doc.moveTo(50, ry).lineTo(250, ry).lineWidth(0.5).strokeColor('#666').stroke();
+    doc.moveTo(310, ry).lineTo(510, ry).lineWidth(0.5).strokeColor('#666').stroke();
+    doc.fontSize(7.5).font('Helvetica').fillColor('#888').text('Signature', 50, ry + 4); doc.text('Date', 310, ry + 4);
+    doc.fontSize(7).fillColor('#aaa').text('Carolina Rolling Co. Inc.  |  (562) 633-1044  |  keepitrolling@carolinarolling.com', 50, 755, { width: 512, align: 'center' });
+    doc.end();
+  });
+}
+
+async function saveShipmentDocument(workOrder, entry, idx) {
+  try {
+    const fileStorage = require('../utils/storage');
+    const drLabel = workOrder.drNumber ? 'DR-' + workOrder.drNumber : (workOrder.orderNumber || workOrder.id);
+    const filename = 'Shipment-' + (idx + 1) + '-' + drLabel + '.pdf';
+    const existing = await WorkOrderDocument.findOne({ where: { workOrderId: workOrder.id, originalName: filename } });
+    if (existing) {
+      if (existing.cloudinaryId) try { await fileStorage.deleteFile(existing.cloudinaryId); } catch {}
+      await existing.destroy();
+    }
+    const pdfBuffer = await generatePickupReceiptBuffer(workOrder, entry, idx);
+    const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, { folder: 'work-orders/' + workOrder.id + '/documents', filename, mimeType: 'application/pdf' });
+    await WorkOrderDocument.create({ workOrderId: workOrder.id, originalName: filename, mimeType: 'application/pdf', size: pdfBuffer.length, url: uploadResult.url, cloudinaryId: uploadResult.storageId, documentType: 'shipping_doc', portalVisible: true });
+    console.log('[ShipmentDoc] Saved ' + filename);
+  } catch (e) { console.error('[ShipmentDoc] Failed:', e.message); }
+}
+
 // Fetch a URL following redirects (up to 5 hops), returns response stream or null
 function fetchWithRedirects(url, maxRedirects = 5, timeoutMs = 15000) {
   return new Promise((resolve) => {
@@ -1907,6 +2002,117 @@ router.post('/:id/pickup', async (req, res, next) => {
     }
     
     res.json({ data: workOrder.toJSON(), message: type === 'full' ? 'Full pickup recorded' : 'Partial pickup recorded' });
+    // Generate and save shipment doc in background
+    setImmediate(async () => {
+      try {
+        const freshWO = await WorkOrder.findByPk(workOrder.id, { include: [{ model: WorkOrderPart, as: 'parts' }] });
+        const history = freshWO.pickupHistory || [];
+        const newIdx = history.length - 1;
+        if (newIdx >= 0) await saveShipmentDocument(freshWO, history[newIdx], newIdx);
+      } catch (e) { console.error('[ShipmentDoc] record hook error:', e.message); }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /blank-shipper - Generate a blank shipper form PDF
+router.get('/blank-shipper', async (req, res, next) => {
+  try {
+    const PDFDocument = require('pdfkit');
+    const doc = new PDFDocument({ margin: 50, size: 'letter' });
+    const chunks = [];
+    doc.on('data', c => chunks.push(c));
+
+    const logoFile = [path.join(__dirname, '../assets/logo.png'), path.join(__dirname, '../assets/logo.jpg')].find(p => fs.existsSync(p));
+    const yellowcakePath = path.join(__dirname, '../assets/fonts/Yellowcake-Regular.ttf');
+    let hasYellowcake = false;
+    try { if (fs.existsSync(yellowcakePath)) { doc.registerFont('Yellowcake', yellowcakePath); hasYellowcake = true; } } catch {}
+
+    // Header — same style as pickup receipt
+    if (logoFile) try { doc.image(logoFile, 50, 20, { width: 60 }); } catch {}
+    if (hasYellowcake) doc.font('Yellowcake').fontSize(14).fillColor('#333').text('Carolina Rolling Co. Inc.', 125, 28);
+    else doc.font('Helvetica-Bold').fontSize(14).fillColor('#333').text('CAROLINA ROLLING CO. INC.', 125, 28);
+    doc.font('Helvetica').fontSize(8).fillColor('#666');
+    doc.text('9152 Sonrisa St., Bellflower, CA 90706', 125, 46);
+    doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 125, 57);
+    doc.moveTo(50, 92).lineTo(562, 92).lineWidth(1).strokeColor('#e0e0e0').stroke();
+
+    // Title + Shipper # box (top right)
+    doc.font('Helvetica-Bold').fontSize(11).fillColor('#e65100').text('SHIPPER', 50, 102);
+    // Shipper # box
+    doc.font('Helvetica').fontSize(8).fillColor('#666').text('Shipper #:', 390, 98);
+    doc.rect(430, 94, 130, 18).lineWidth(0.8).strokeColor('#999').stroke();
+    doc.moveTo(50, 128).lineTo(562, 128).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
+
+    // Info row — blank fields matching receipt style
+    let y = 138;
+    const fieldLine = (label, x, yy, w) => {
+      doc.font('Helvetica').fontSize(8).fillColor('#666').text(label, x, yy);
+      doc.moveTo(x + doc.widthOfString(label) + 4, yy + 9).lineTo(x + w, yy + 9).lineWidth(0.5).strokeColor('#bbb').stroke();
+    };
+
+    doc.font('Helvetica').fontSize(8).fillColor('#666').text('Customer', 50, y); y += 12;
+    doc.moveTo(50, y + 9).lineTo(300, y + 9).lineWidth(0.5).strokeColor('#bbb').stroke(); y += 20;
+    fieldLine('P.O:', 50, y, 200); 
+    fieldLine('Date:', 310, y, 200); y += 20;
+    fieldLine('Picked Up By:', 50, y, 300); y += 20;
+    fieldLine('Driver / Carrier:', 50, y, 300); 
+    fieldLine('Vehicle:', 310, y, 200); y += 28;
+
+    doc.moveTo(50, y).lineTo(562, y).lineWidth(0.5).strokeColor('#e0e0e0').stroke(); y += 12;
+
+    // Items table header
+    doc.rect(50, y, 512, 16).fill('#1a1a1a');
+    doc.font('Helvetica-Bold').fontSize(8).fillColor('white');
+    doc.text('QTY', 55, y + 4, { width: 50, lineBreak: false });
+    doc.text('PART #', 110, y + 4, { width: 80, lineBreak: false });
+    doc.text('DESCRIPTION', 195, y + 4, { width: 370 });
+    y += 16;
+
+    // Blank lines for writing
+    const lineHeight = 24;
+    const numLines = 14;
+    for (let i = 0; i < numLines; i++) {
+      if (i % 2 === 1) doc.rect(50, y, 512, lineHeight).fill('#f9f9f9');
+      doc.rect(50, y, 512, lineHeight).lineWidth(0.3).strokeColor('#ddd').stroke();
+      // Subtle column dividers
+      doc.moveTo(105, y).lineTo(105, y + lineHeight).lineWidth(0.3).strokeColor('#ddd').stroke();
+      doc.moveTo(190, y).lineTo(190, y + lineHeight).lineWidth(0.3).strokeColor('#ddd').stroke();
+      y += lineHeight;
+    }
+
+    y += 8;
+    doc.moveTo(50, y).lineTo(562, y).lineWidth(0.5).strokeColor('#e0e0e0').stroke(); y += 12;
+
+    // Total row
+    doc.font('Helvetica-Bold').fontSize(9).fillColor('#333').text('Total Items:', 55, y, { lineBreak: false });
+    doc.moveTo(120, y + 10).lineTo(200, y + 10).lineWidth(0.5).strokeColor('#bbb').stroke();
+    y += 28;
+
+    // Notes field
+    doc.font('Helvetica').fontSize(8).fillColor('#666').text('Notes / Special Instructions:', 55, y); y += 14;
+    doc.rect(50, y, 512, 48).lineWidth(0.5).strokeColor('#bbb').stroke(); y += 60;
+
+    // Signature block
+    doc.moveTo(50, y).lineTo(562, y).lineWidth(0.5).strokeColor('#e0e0e0').stroke(); y += 16;
+    doc.font('Helvetica').fontSize(8).fillColor('#666');
+    doc.moveTo(50, y + 18).lineTo(250, y + 18).lineWidth(0.5).strokeColor('#555').stroke();
+    doc.text('Received By / Signature', 50, y + 22);
+    doc.moveTo(310, y + 18).lineTo(510, y + 18).lineWidth(0.5).strokeColor('#555').stroke();
+    doc.text('Date', 310, y + 22);
+
+    // Footer
+    doc.fontSize(7).fillColor('#aaa').text('Carolina Rolling Co. Inc.  |  (562) 633-1044  |  keepitrolling@carolinarolling.com', 50, 755, { width: 512, align: 'center' });
+
+    doc.end();
+
+    await new Promise(resolve => doc.on('end', resolve));
+    const pdfBuffer = Buffer.concat(chunks);
+
+    res.set('Content-Type', 'application/pdf');
+    res.set('Content-Disposition', 'inline; filename="CR-Blank-Shipper.pdf"');
+    res.send(pdfBuffer);
   } catch (error) {
     next(error);
   }
@@ -2186,6 +2392,13 @@ router.put('/:id/pickup/:index', async (req, res, next) => {
     await workOrder.save();
     await workOrder.reload({ include: [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }] });
     res.json({ data: workOrder.toJSON(), message: 'Pickup entry updated' });
+    // Regenerate shipment doc in background
+    setImmediate(async () => {
+      try {
+        const freshWO = await WorkOrder.findByPk(workOrder.id, { include: [{ model: WorkOrderPart, as: 'parts' }] });
+        if (freshWO) await saveShipmentDocument(freshWO, freshWO.pickupHistory[idx], idx);
+      } catch (e) { console.error('[ShipmentDoc] update hook error:', e.message); }
+    });
   } catch (error) { next(error); }
 });
 

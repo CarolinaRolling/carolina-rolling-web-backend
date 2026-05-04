@@ -305,6 +305,7 @@ app.post('/api/com-center/scan-now', authenticate, async (req, res) => {
 
         const { getGmailClient } = require('./services/emailScanner');
         const accounts = await GmailAccount.findAll({ where: { isActive: true } });
+        const ownEmails = new Set(accounts.map(a => (a.email || '').toLowerCase().trim()).filter(Boolean));
         logComm('info', 'Found ' + accounts.length + ' Gmail account(s) to scan');
         for (const account of accounts) {
           if (commScanStatus.cancelled) { logComm('warn', 'Scan cancelled by user'); break; }
@@ -345,7 +346,7 @@ app.post('/api/com-center/scan-now', authenticate, async (req, res) => {
                 const fromMatch = fromHeader.match(/<(.+?)>/) || [null, fromHeader];
                 const fromEmail = (fromMatch[1] || fromHeader).toLowerCase().trim();
                 const fromName = fromHeader.replace(/<.*>/, '').replace(/"/g, '').trim();
-                if (monitoredAddrs.has(fromEmail) || fromEmail.includes('noreply') || fromEmail.includes('no-reply') || fromEmail.includes('donotreply') || fromEmail.includes('mailer-daemon')) {
+                if (ownEmails.has(fromEmail) || monitoredAddrs.has(fromEmail) || fromEmail.includes('noreply') || fromEmail.includes('no-reply') || fromEmail.includes('donotreply') || fromEmail.includes('mailer-daemon')) {
                   await gmail.users.messages.modify({ userId: 'me', id: msg.id, requestBody: { addLabelIds: [commLabelId] } });
                   continue;
                 }
@@ -374,7 +375,7 @@ app.post('/api/com-center/scan-now', authenticate, async (req, res) => {
                     category = 'general';
                   }
                 }
-                const gmailLink = 'https://mail.google.com/mail/u/0/#inbox/' + msg.id;
+                const gmailLink = 'https://mail.google.com/mail/u/0/#all/' + msg.id;
                 const [emailRecord, created] = await ScannedEmail.findOrCreate({
                   where: { gmailMessageId: msg.id },
                   defaults: { gmailAccountId: account.id, gmailThreadId: detail.data.threadId, fromEmail, fromName: fromName || fromEmail, subject, receivedAt: dateHeader ? new Date(dateHeader) : new Date(), commCategory: category, commProcessed: true, commSnippet: snippet.substring(0, 500), commArchived: false, gmailLink, status: 'processed', emailType: 'comm_center' }
@@ -1496,6 +1497,12 @@ Please confirm with the operator and mark the order complete if ready.`,
                 const fromEmail = (fromMatch[1] || fromHeader).toLowerCase().trim();
                 const fromName = fromHeader.replace(/<.*>/, '').replace(/"/g, '').trim();
 
+                // Skip our own sent emails
+                if (ownEmailsCron.has(fromEmail)) {
+                  await gmail.users.messages.modify({ userId: 'me', id: msg.id, requestBody: { addLabelIds: [commLabelId] } });
+                  continue;
+                }
+
                 // Skip monitored addresses — estimate scanner handles these
                 if (monitoredAddrs.has(fromEmail)) {
                   await gmail.users.messages.modify({ userId: 'me', id: msg.id, requestBody: { addLabelIds: [commLabelId] } });
@@ -1539,7 +1546,7 @@ Please confirm with the operator and mark the order complete if ready.`,
                 }
 
                 // Save to ScannedEmail
-                const gmailLink = 'https://mail.google.com/mail/u/0/#inbox/' + msg.id;
+                const gmailLink = 'https://mail.google.com/mail/u/0/#all/' + msg.id;
                 const [emailRec2, created2] = await ScannedEmail.findOrCreate({
                   where: { gmailMessageId: msg.id },
                   defaults: { gmailAccountId: account.id, gmailThreadId: detail.data.threadId, fromEmail, fromName: fromName || fromEmail, subject, receivedAt: dateHeader ? new Date(dateHeader) : new Date(), commCategory: category, commProcessed: true, commSnippet: snippet.substring(0, 500), commArchived: false, gmailLink, status: 'processed', emailType: 'comm_center' }

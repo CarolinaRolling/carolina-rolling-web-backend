@@ -17,7 +17,7 @@ const router = express.Router();
 async function generatePickupReceiptBuffer(workOrder, entry, idx) {
   const PDFDocument = require('pdfkit');
   return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ margin: 50, size: 'letter' });
+    const doc = new PDFDocument({ margin: 40, size: 'letter' });
     const chunks = [];
     doc.on('data', c => chunks.push(c));
     doc.on('end', () => resolve(Buffer.concat(chunks)));
@@ -29,26 +29,51 @@ async function generatePickupReceiptBuffer(workOrder, entry, idx) {
     const isFullShipment = entry.type === 'full';
     const primaryColor = '#E65100';
     const darkColor = '#1a1a1a';
+    const L = 40, W = 532;
+
+    // ── Header (compact) ──
     const logoFile = [path.join(__dirname, '../assets/logo.png'), path.join(__dirname, '../assets/logo.jpg')].find(p => fs.existsSync(p));
-    if (logoFile) try { doc.image(logoFile, 50, 20, { width: 55 }); } catch {}
-    doc.fontSize(9).font('Helvetica').fillColor('#555').text('Carolina Rolling Co. Inc.', 115, 22);
-    doc.fontSize(7.5).fillColor('#888').text('9152 Sonrisa St., Bellflower, CA 90706', 115, 34);
-    doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 115, 44);
-    doc.fontSize(13).font('Helvetica-Bold').fillColor(primaryColor)
-      .text('PICKUP RECEIPT — ' + (isFullShipment ? 'FULL SHIPMENT' : 'PARTIAL SHIPMENT (#' + (idx + 1) + ')'), 50, 62);
-    doc.fontSize(10).font('Helvetica').fillColor(darkColor).text(drLabel, 450, 62, { align: 'right', width: 112 });
-    doc.fontSize(7.5).fillColor('#888').text(dateStr + '  ' + timeStr, 450, 76, { align: 'right', width: 112 });
-    doc.moveTo(50, 88).lineTo(562, 88).lineWidth(1).strokeColor(primaryColor).stroke();
-    let ry = 98;
-    doc.fontSize(9).font('Helvetica').fillColor('#555').text('Customer', 50, ry);
-    doc.fontSize(11).font('Helvetica-Bold').fillColor(darkColor).text(workOrder.clientName || '', 50, ry + 12); ry += 28;
-    if (workOrder.clientPurchaseOrderNumber) { doc.fontSize(8.5).font('Helvetica').fillColor('#555').text('P.O: ' + workOrder.clientPurchaseOrderNumber, 50, ry); ry += 14; }
-    doc.fontSize(8.5).font('Helvetica').fillColor('#555').text('Picked Up By: ' + (entry.pickedUpBy || 'unknown'), 50, ry); ry += 14;
-    doc.fontSize(8.5).font('Helvetica-Bold').fillColor(darkColor).text('Date & Time: ' + entryDate.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'America/Los_Angeles' }) + ' at ' + timeStr, 50, ry); ry += 18;
-    doc.moveTo(50, ry).lineTo(562, ry).lineWidth(0.5).strokeColor('#ddd').stroke(); ry += 10;
-    doc.rect(50, ry, 512, 16).fill('#1a1a1a');
+    if (logoFile) try { doc.image(logoFile, L, 14, { width: 50 }); } catch {}
+    const yellowcakePath = path.join(__dirname, '../assets/fonts/Yellowcake-Regular.ttf');
+    let hasYellowcake = false;
+    try { if (fs.existsSync(yellowcakePath)) { doc.registerFont('Yellowcake', yellowcakePath); hasYellowcake = true; } } catch {}
+    if (hasYellowcake) doc.font('Yellowcake').fontSize(13).fillColor('#333').text('Carolina Rolling Co. Inc.', 100, 18);
+    else doc.font('Helvetica-Bold').fontSize(8.5).fillColor('#333').text('Carolina Rolling Co. Inc.', 100, 18);
+    doc.fontSize(7).font('Helvetica').fillColor('#888')
+      .text('9152 Sonrisa St., Bellflower, CA 90706', 100, 33)
+      .text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 100, 43);
+    doc.moveTo(L, 56).lineTo(L + W, 56).lineWidth(0.8).strokeColor(primaryColor).stroke();
+
+    // ── Title row (below header, no overlap) ──
+    doc.fontSize(11).font('Helvetica-Bold').fillColor(primaryColor)
+      .text('PICKUP RECEIPT — ' + (isFullShipment ? 'FULL SHIPMENT' : 'PARTIAL SHIPMENT #' + (idx + 1)), L, 63);
+    doc.fontSize(9).font('Helvetica-Bold').fillColor(darkColor).text(drLabel, L + W - 80, 63, { align: 'right', width: 80 });
+    doc.fontSize(7).font('Helvetica').fillColor('#888').text(dateStr + '  ' + timeStr, L + W - 100, 76, { align: 'right', width: 100 });
+    doc.moveTo(L, 84).lineTo(L + W, 84).lineWidth(0.4).strokeColor('#ddd').stroke();
+
+    // ── Customer info (tight) ──
+    let ry = 91;
+    doc.fontSize(7.5).font('Helvetica').fillColor('#888').text('Customer', L, ry);
+    doc.fontSize(10).font('Helvetica-Bold').fillColor(darkColor).text(workOrder.clientName || '', L, ry + 10); ry += 22;
+    const infoLine = [
+      workOrder.clientPurchaseOrderNumber ? 'P.O: ' + workOrder.clientPurchaseOrderNumber : null,
+      'Picked Up By: ' + (entry.pickedUpBy || 'unknown')
+    ].filter(Boolean).join('   |   ');
+    doc.fontSize(8).font('Helvetica').fillColor('#555').text(infoLine, L, ry); ry += 11;
+    doc.fontSize(8).font('Helvetica-Bold').fillColor(darkColor)
+      .text('Date & Time: ' + entryDate.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'America/Los_Angeles' }) + ' at ' + timeStr, L, ry);
+    ry += 14;
+    doc.moveTo(L, ry).lineTo(L + W, ry).lineWidth(0.4).strokeColor('#ddd').stroke(); ry += 6;
+
+    // ── Table header ──
+    doc.rect(L, ry, W, 15).fill('#1a1a1a');
     doc.fontSize(7.5).font('Helvetica-Bold').fillColor('white');
-    doc.text('QTY', 55, ry + 4, { width: 35 }); doc.text('PART #', 90, ry + 4, { width: 110 }); doc.text('DESCRIPTION', 205, ry + 4, { width: 360 }); ry += 16;
+    doc.text('QTY', L + 4, ry + 4, { width: 34, lineBreak: false });
+    doc.text('PART #', L + 42, ry + 4, { width: 110, lineBreak: false });
+    doc.text('DESCRIPTION', L + 156, ry + 4, { width: 376 });
+    ry += 15;
+
+    // ── Parts ──
     const partsMap = {};
     (workOrder.parts || []).forEach(p => { partsMap[p.id] = p; partsMap[p.partNumber] = p; });
     const SERVICE_TYPES = ['fab_service', 'shop_rate'];
@@ -61,32 +86,37 @@ async function generatePickupReceiptBuffer(workOrder, entry, idx) {
       const parentWoPart = (fd._linkedPartId || woPart?._linkedPartId) ? partsMap[fd._linkedPartId || woPart._linkedPartId] : null;
       if (parentWoPart) { if (!serviceByParent[parentWoPart.partNumber]) serviceByParent[parentWoPart.partNumber] = []; serviceByParent[parentWoPart.partNumber].push({ woPart, fd, svc }); }
     });
+
     regularItems.forEach((item, i) => {
-      if (ry + 20 > 700) { doc.addPage(); ry = 50; }
+      if (ry + 18 > 710) { doc.addPage(); ry = 40; }
       let desc = (item.description || '').replace(/^\d+pc:\s*/i, '').replace(/^\d+\s*[x]\s*[\d.']+\s*(?:length(?:s)?)[:\s)]*/i, '').replace(/^\(s\):\s*/i, '').trim();
       const svcsHere = serviceByParent[item.partNumber] || [];
       const svcLabels = new Set();
-      svcsHere.forEach(({ svc, woPart, fd }) => { const instr = woPart?.specialInstructions || fd.specialInstructions || ''; if (instr.trim()) svcLabels.add((svc.partType === 'shop_rate' ? 'Shop Rate Service' : 'Fabrication Service') + ': ' + instr.trim()); });
-      const descH = Math.max(doc.fontSize(8).heightOfString(desc || ' ', { width: 355 }), 12);
-      const svcH = [...svcLabels].reduce((h, l) => h + doc.fontSize(8).heightOfString('  + ' + l, { width: 355 }) + 1, 0);
-      const rowH = descH + svcH + 10;
-      if (i % 2 === 1) { doc.rect(50, ry, 512, rowH).fill('#f9f9f9'); }
-      doc.moveTo(50, ry).lineTo(562, ry).lineWidth(0.3).strokeColor('#eee').stroke();
-      doc.fontSize(10).font('Helvetica-Bold').fillColor(darkColor).text(String(item.quantity || 0), 55, ry + 4, { width: 35 });
-      doc.fontSize(8).font('Helvetica').fillColor(darkColor).text(item.clientPartNumber || String(item.partNumber || ''), 90, ry + 4, { width: 110 });
-      doc.text(desc, 205, ry + 4, { width: 355 });
-      let sry = ry + 4 + descH + 1;
-      svcLabels.forEach(label => { doc.fontSize(8).font('Helvetica').fillColor('#1565c0').text('  + ' + label, 205, sry, { width: 355 }); sry += doc.heightOfString('  + ' + label, { width: 355 }) + 1; });
-      ry += rowH + 2;
+      svcsHere.forEach(({ svc, woPart, fd }) => { const instr = woPart?.specialInstructions || fd.specialInstructions || ''; if (instr.trim()) svcLabels.add((svc.partType === 'shop_rate' ? 'Shop Rate' : 'Fabrication') + ': ' + instr.trim()); });
+      const descH = Math.max(doc.fontSize(8).heightOfString(desc || ' ', { width: 372 }), 11);
+      const svcH = [...svcLabels].reduce((h, l) => h + doc.fontSize(7.5).heightOfString('  + ' + l, { width: 372 }) + 1, 0);
+      const rowH = descH + svcH + 7;
+      if (i % 2 === 1) doc.rect(L, ry, W, rowH).fill('#f7f7f7');
+      doc.moveTo(L, ry).lineTo(L + W, ry).lineWidth(0.25).strokeColor('#e8e8e8').stroke();
+      doc.fontSize(9).font('Helvetica-Bold').fillColor(darkColor).text(String(item.quantity || 0), L + 4, ry + 3, { width: 34, lineBreak: false });
+      doc.fontSize(8).font('Helvetica').fillColor(darkColor).text(item.clientPartNumber || String(item.partNumber || ''), L + 42, ry + 3, { width: 110 });
+      doc.text(desc, L + 156, ry + 3, { width: 372 });
+      let sry = ry + 3 + descH + 1;
+      svcLabels.forEach(label => { doc.fontSize(7.5).font('Helvetica').fillColor('#1565c0').text('  + ' + label, L + 156, sry, { width: 372 }); sry += doc.heightOfString('  + ' + label, { width: 372 }) + 1; });
+      ry += rowH;
     });
+
+    // ── Totals + signature ──
+    ry += 6;
+    doc.moveTo(L, ry).lineTo(L + W, ry).lineWidth(0.5).strokeColor('#ccc').stroke(); ry += 6;
     const totalItems = regularItems.reduce((s, i) => s + (i.quantity || 0), 0);
-    ry += 8;
-    doc.moveTo(50, ry).lineTo(562, ry).lineWidth(0.5).strokeColor('#ccc').stroke(); ry += 8;
-    doc.fontSize(9).font('Helvetica-Bold').fillColor(darkColor).text('Total items shipped: ' + totalItems, 50, ry); ry += 30;
-    doc.moveTo(50, ry).lineTo(250, ry).lineWidth(0.5).strokeColor('#666').stroke();
-    doc.moveTo(310, ry).lineTo(510, ry).lineWidth(0.5).strokeColor('#666').stroke();
-    doc.fontSize(7.5).font('Helvetica').fillColor('#888').text('Signature', 50, ry + 4); doc.text('Date', 310, ry + 4);
-    doc.fontSize(7).fillColor('#aaa').text('Carolina Rolling Co. Inc.  |  (562) 633-1044  |  keepitrolling@carolinarolling.com', 50, 755, { width: 512, align: 'center' });
+    doc.fontSize(8.5).font('Helvetica-Bold').fillColor(darkColor).text('Total items shipped: ' + totalItems, L, ry); ry += 22;
+    doc.moveTo(L, ry).lineTo(L + 200, ry).lineWidth(0.5).strokeColor('#666').stroke();
+    doc.moveTo(L + 260, ry).lineTo(L + 460, ry).lineWidth(0.5).strokeColor('#666').stroke();
+    doc.fontSize(7.5).font('Helvetica').fillColor('#888').text('Signature', L, ry + 3).text('Date', L + 260, ry + 3);
+
+    // ── Footer ──
+    doc.fontSize(6.5).fillColor('#bbb').text('Carolina Rolling Co. Inc.  |  (562) 633-1044  |  keepitrolling@carolinarolling.com', L, 748, { width: W, align: 'center' });
     doc.end();
   });
 }

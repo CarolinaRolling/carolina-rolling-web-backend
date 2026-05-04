@@ -17,7 +17,7 @@ const router = express.Router();
 async function generatePickupReceiptBuffer(workOrder, entry, idx) {
   const PDFDocument = require('pdfkit');
   return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ margin: 40, size: 'letter' });
+    const doc = new PDFDocument({ margin: 0, size: 'letter' });
     const chunks = [];
     doc.on('data', c => chunks.push(c));
     doc.on('end', () => resolve(Buffer.concat(chunks)));
@@ -115,8 +115,9 @@ async function generatePickupReceiptBuffer(workOrder, entry, idx) {
     doc.moveTo(L + 260, ry).lineTo(L + 460, ry).lineWidth(0.5).strokeColor('#666').stroke();
     doc.fontSize(7.5).font('Helvetica').fillColor('#888').text('Signature', L, ry + 3).text('Date', L + 260, ry + 3);
 
-    // ── Footer ──
-    doc.fontSize(6.5).fillColor('#bbb').text('Carolina Rolling Co. Inc.  |  (562) 633-1044  |  keepitrolling@carolinarolling.com', L, 748, { width: W, align: 'center' });
+    // ── Footer anchored to bottom of page ──
+    doc.fontSize(6.5).font('Helvetica').fillColor('#bbb')
+      .text('Carolina Rolling Co. Inc.  |  (562) 633-1044  |  keepitrolling@carolinarolling.com', L, doc.page.height - 28, { width: W, align: 'center', lineBreak: false });
     doc.end();
   });
 }

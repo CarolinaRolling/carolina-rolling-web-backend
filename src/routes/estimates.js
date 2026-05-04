@@ -2250,13 +2250,16 @@ router.get('/:id/pdf', async (req, res, next) => {
     const lightGray = '#e0e0e0';
 
     // ========== HEADER WITH LOGO ==========
-    const logoPath = path.join(__dirname, '../assets/logo.jpg');
+    const logoPath = [path.join(__dirname, '../assets/logo.png'), path.join(__dirname, '../assets/logo.jpg')].find(p => fs.existsSync(p)) || path.join(__dirname, '../assets/logo.png');
     try {
       if (fs.existsSync(logoPath)) {
         doc.image(logoPath, 50, 22, { width: 65 });
+        console.log('[PDF] Logo loaded from:', logoPath);
+      } else {
+        console.log('[PDF] Logo file not found at:', logoPath);
       }
     } catch (e) {
-      console.log('Logo not found, using text header');
+      console.error('[PDF] Logo error:', e.message);
     }
 
     // Company name using custom Yellowcake font

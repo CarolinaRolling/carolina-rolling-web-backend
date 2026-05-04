@@ -32,27 +32,32 @@ async function generatePickupReceiptBuffer(workOrder, entry, idx) {
     const L = 40, W = 532;
 
     // ── Header (compact) ──
+    // ── Header — matches estimate PDF layout exactly ──
     const logoFile = [path.join(__dirname, '../assets/logo.png'), path.join(__dirname, '../assets/logo.jpg')].find(p => fs.existsSync(p));
-    if (logoFile) try { doc.image(logoFile, L, 14, { width: 50 }); } catch {}
+    if (logoFile) try { doc.image(logoFile, 50, 22, { width: 65 }); } catch {}
     const yellowcakePath = path.join(__dirname, '../assets/fonts/Yellowcake-Regular.ttf');
     let hasYellowcake = false;
     try { if (fs.existsSync(yellowcakePath)) { doc.registerFont('Yellowcake', yellowcakePath); hasYellowcake = true; } } catch {}
-    if (hasYellowcake) doc.font('Yellowcake').fontSize(13).fillColor('#333').text('Carolina Rolling Co. Inc.', 100, 18);
-    else doc.font('Helvetica-Bold').fontSize(8.5).fillColor('#333').text('Carolina Rolling Co. Inc.', 100, 18);
-    doc.fontSize(7).font('Helvetica').fillColor('#888')
-      .text('9152 Sonrisa St., Bellflower, CA 90706', 100, 33)
-      .text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 100, 43);
-    doc.moveTo(L, 56).lineTo(L + W, 56).lineWidth(0.8).strokeColor(primaryColor).stroke();
-
-    // ── Title row (below header, no overlap) ──
-    doc.fontSize(11).font('Helvetica-Bold').fillColor(primaryColor)
-      .text('PICKUP RECEIPT — ' + (isFullShipment ? 'FULL SHIPMENT' : 'PARTIAL SHIPMENT #' + (idx + 1)), L, 63);
-    doc.fontSize(9).font('Helvetica-Bold').fillColor(darkColor).text(drLabel, L + W - 80, 63, { align: 'right', width: 80 });
-    doc.fontSize(7).font('Helvetica').fillColor('#888').text(dateStr + '  ' + timeStr, L + W - 100, 76, { align: 'right', width: 100 });
+    if (hasYellowcake) doc.font('Yellowcake').fontSize(15).fillColor(darkColor).text('Carolina Rolling Co. Inc.', 130, 32, { lineBreak: false });
+    else doc.font('Helvetica-Bold').fontSize(15).fillColor(darkColor).text('CAROLINA ROLLING CO. INC.', 130, 32, { lineBreak: false });
+    doc.font('Helvetica').fontSize(8.5).fillColor('#777');
+    doc.text('9152 Sonrisa St., Bellflower, CA 90706', 130, 52, { lineBreak: false });
+    doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 130, 63, { lineBreak: false });
+    // Title + DR number top right — same position as ESTIMATE/number on estimate PDF
+    doc.fontSize(15).fillColor(primaryColor).font('Helvetica-Bold')
+      .text('PICKUP RECEIPT', 350, 32, { width: 212, align: 'right', lineBreak: false });
+    doc.fontSize(9).font('Helvetica-Bold').fillColor(darkColor)
+      .text(isFullShipment ? 'FULL SHIPMENT' : 'PARTIAL SHIPMENT #' + (idx + 1), 350, 52, { width: 212, align: 'right', lineBreak: false });
+    doc.fontSize(9).font('Helvetica-Bold').fillColor(darkColor)
+      .text(drLabel, 350, 65, { width: 212, align: 'right', lineBreak: false });
+    doc.fontSize(7.5).font('Helvetica').fillColor('#777')
+      .text(dateStr + '  ' + timeStr, 350, 78, { width: 212, align: 'right', lineBreak: false });
+    // Divider — same as estimate
+    doc.strokeColor('#e0e0e0').lineWidth(1).moveTo(50, 90).lineTo(562, 90).stroke();
     doc.moveTo(L, 84).lineTo(L + W, 84).lineWidth(0.4).strokeColor('#ddd').stroke();
 
-    // ── Customer info (tight) ──
-    let ry = 91;
+    // ── Customer info ──
+    let ry = 102;
     doc.fontSize(7.5).font('Helvetica').fillColor('#888').text('Customer', L, ry);
     doc.fontSize(10).font('Helvetica-Bold').fillColor(darkColor).text(workOrder.clientName || '', L, ry + 10); ry += 22;
     const infoLine = [

@@ -17,112 +17,129 @@ const router = express.Router();
 async function generatePickupReceiptBuffer(workOrder, entry, idx) {
   const PDFDocument = require('pdfkit');
   return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ margin: 0, size: 'letter' });
+    const doc = new PDFDocument({ margin: 50, size: 'letter' });
     const chunks = [];
     doc.on('data', c => chunks.push(c));
     doc.on('end', () => resolve(Buffer.concat(chunks)));
     doc.on('error', reject);
-    const drLabel = workOrder.drNumber ? 'DR-' + workOrder.drNumber : (workOrder.orderNumber || 'WO');
-    const entryDate = entry.date ? new Date(entry.date) : new Date();
-    const dateStr = entryDate.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: '2-digit', day: '2-digit', year: 'numeric' });
-    const timeStr = entryDate.toLocaleTimeString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', minute: '2-digit', hour12: true }) + ' PT';
-    const isFullShipment = entry.type === 'full';
-    const primaryColor = '#E65100';
-    const darkColor = '#1a1a1a';
-    const L = 40, W = 532;
 
-    // ── Header (compact) ──
-    // ── Header — matches estimate PDF layout exactly ──
+    const pickupNum = idx + 1;
+    const pickupDate = entry.date ? new Date(entry.date) : new Date();
+    const totalItems = (entry.items || []).filter(i => !['fab_service','shop_rate'].includes(i.partType)).reduce((s, i) => s + (i.quantity || 0), 0);
+
     const logoFile = [path.join(__dirname, '../assets/logo.png'), path.join(__dirname, '../assets/logo.jpg')].find(p => fs.existsSync(p));
-    if (logoFile) try { doc.image(logoFile, 50, 22, { width: 65 }); } catch {}
     const yellowcakePath = path.join(__dirname, '../assets/fonts/Yellowcake-Regular.ttf');
     let hasYellowcake = false;
     try { if (fs.existsSync(yellowcakePath)) { doc.registerFont('Yellowcake', yellowcakePath); hasYellowcake = true; } } catch {}
-    if (hasYellowcake) doc.font('Yellowcake').fontSize(15).fillColor(darkColor).text('Carolina Rolling Co. Inc.', 130, 32, { lineBreak: false });
-    else doc.font('Helvetica-Bold').fontSize(15).fillColor(darkColor).text('CAROLINA ROLLING CO. INC.', 130, 32, { lineBreak: false });
-    doc.font('Helvetica').fontSize(8.5).fillColor('#777');
-    doc.text('9152 Sonrisa St., Bellflower, CA 90706', 130, 52, { lineBreak: false });
-    doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 130, 63, { lineBreak: false });
-    // Title + DR number top right — same position as ESTIMATE/number on estimate PDF
-    doc.fontSize(15).fillColor(primaryColor).font('Helvetica-Bold')
-      .text('PICKUP RECEIPT', 350, 32, { width: 212, align: 'right', lineBreak: false });
-    doc.fontSize(9).font('Helvetica-Bold').fillColor(darkColor)
-      .text(isFullShipment ? 'FULL SHIPMENT' : 'PARTIAL SHIPMENT #' + (idx + 1), 350, 52, { width: 212, align: 'right', lineBreak: false });
-    doc.fontSize(9).font('Helvetica-Bold').fillColor(darkColor)
-      .text(drLabel, 350, 65, { width: 212, align: 'right', lineBreak: false });
-    doc.fontSize(7.5).font('Helvetica').fillColor('#777')
-      .text(dateStr + '  ' + timeStr, 350, 78, { width: 212, align: 'right', lineBreak: false });
-    // Divider — same as estimate
-    doc.strokeColor('#e0e0e0').lineWidth(1).moveTo(50, 90).lineTo(562, 90).stroke();
-    doc.moveTo(L, 84).lineTo(L + W, 84).lineWidth(0.4).strokeColor('#ddd').stroke();
 
-    // ── Customer info ──
-    let ry = 102;
-    doc.fontSize(7.5).font('Helvetica').fillColor('#888').text('Customer', L, ry);
-    doc.fontSize(10).font('Helvetica-Bold').fillColor(darkColor).text(workOrder.clientName || '', L, ry + 10); ry += 22;
-    const infoLine = [
-      workOrder.clientPurchaseOrderNumber ? 'P.O: ' + workOrder.clientPurchaseOrderNumber : null,
-      'Picked Up By: ' + (entry.pickedUpBy || 'unknown')
-    ].filter(Boolean).join('   |   ');
-    doc.fontSize(8).font('Helvetica').fillColor('#555').text(infoLine, L, ry); ry += 11;
-    doc.fontSize(8).font('Helvetica-Bold').fillColor(darkColor)
-      .text('Date & Time: ' + entryDate.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'America/Los_Angeles' }) + ' at ' + timeStr, L, ry);
-    ry += 14;
-    doc.moveTo(L, ry).lineTo(L + W, ry).lineWidth(0.4).strokeColor('#ddd').stroke(); ry += 6;
+    // Header
+    if (logoFile) try { doc.image(logoFile, 50, 20, { width: 60 }); } catch {}
+    if (hasYellowcake) doc.font('Yellowcake').fontSize(14).fillColor('#333').text('Carolina Rolling Co. Inc.', 125, 28);
+    else doc.font('Helvetica-Bold').fontSize(14).fillColor('#333').text('CAROLINA ROLLING CO. INC.', 125, 28);
+    doc.font('Helvetica').fontSize(8).fillColor('#666');
+    doc.text('9152 Sonrisa St., Bellflower, CA 90706', 125, 46);
+    doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 125, 57);
+    doc.moveTo(50, 92).lineTo(562, 92).lineWidth(1).strokeColor('#e0e0e0').stroke();
 
-    // ── Table header ──
-    doc.rect(L, ry, W, 15).fill('#1a1a1a');
-    doc.fontSize(7.5).font('Helvetica-Bold').fillColor('white');
-    doc.text('QTY', L + 4, ry + 4, { width: 34, lineBreak: false });
-    doc.text('PART #', L + 42, ry + 4, { width: 110, lineBreak: false });
-    doc.text('DESCRIPTION', L + 156, ry + 4, { width: 376 });
-    ry += 15;
+    const fmtDatePT = (d) => d.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: '2-digit', day: '2-digit', year: 'numeric' });
+    const fmtTimePT = (d) => d.toLocaleTimeString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', minute: '2-digit' });
+    const fmtDateLongPT = (d) => d.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+    const fmtTimeFullPT = (d) => d.toLocaleTimeString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', minute: '2-digit', second: '2-digit' });
 
-    // ── Parts ──
-    const partsMap = {};
-    (workOrder.parts || []).forEach(p => { partsMap[p.id] = p; partsMap[p.partNumber] = p; });
-    const SERVICE_TYPES = ['fab_service', 'shop_rate'];
-    const regularItems = [...(entry.items || []).filter(it => !SERVICE_TYPES.includes(it.partType))].sort((a, b) => (a.partNumber || 0) - (b.partNumber || 0));
-    const serviceItems = (entry.items || []).filter(it => SERVICE_TYPES.includes(it.partType));
+    // Title
+    const titleLabel = entry.type === 'full' ? 'PICKUP RECEIPT — FULL SHIPMENT' : `PICKUP RECEIPT — PARTIAL SHIPMENT #${pickupNum}`;
+    doc.font('Helvetica-Bold').fontSize(11).fillColor('#e65100').text(titleLabel, 50, 102);
+    doc.font('Helvetica-Bold').fontSize(10).fillColor('#333').text('DR-' + String(workOrder.drNumber || ''), 400, 102, { width: 162, align: 'right' });
+    doc.font('Helvetica').fontSize(8).fillColor('#666');
+    doc.text(fmtDatePT(pickupDate) + '  ' + fmtTimePT(pickupDate) + ' PT', 400, 116, { width: 162, align: 'right' });
+    doc.moveTo(50, 128).lineTo(562, 128).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
+
+    // Customer info
+    let ry = 138;
+    doc.font('Helvetica').fontSize(8).fillColor('#666').text('Customer', 50, ry); ry += 12;
+    doc.font('Helvetica').fontSize(10).fillColor('#333').text(workOrder.clientName || '', 50, ry); ry += 14;
+    doc.font('Helvetica').fontSize(9).fillColor('#666');
+    doc.text('P.O: ' + (workOrder.clientPurchaseOrderNumber || '—'), 50, ry); ry += 12;
+    doc.text('Picked Up By: ' + (entry.pickedUpBy || '—'), 50, ry); ry += 12;
+    doc.font('Helvetica-Bold').fontSize(9).fillColor('#333');
+    doc.text('Date & Time: ' + fmtDateLongPT(pickupDate) + ' at ' + fmtTimeFullPT(pickupDate) + ' PT', 50, ry); ry += 20;
+
+    // Items table
+    doc.moveTo(50, ry).lineTo(562, ry).lineWidth(0.5).strokeColor('#e0e0e0').stroke(); ry += 8;
+    doc.font('Helvetica-Bold').fontSize(8).fillColor('#666');
+    doc.text('QTY', 50, ry, { width: 35 });
+    doc.text('PART #', 90, ry);
+    doc.text('DESCRIPTION', 200, ry);
+    ry += 12;
+    doc.moveTo(50, ry).lineTo(562, ry).lineWidth(0.3).strokeColor('#ddd').stroke(); ry += 7;
+
+    const woPartsMap = {};
+    (workOrder.parts || []).forEach(p => { woPartsMap[p.id] = p; woPartsMap[p.partNumber] = p; });
+    const SERVICE_PART_TYPES = ['fab_service', 'shop_rate'];
+    const regularItems = [...(entry.items || []).filter(it => !SERVICE_PART_TYPES.includes(it.partType))].sort((a, b) => (a.partNumber || 0) - (b.partNumber || 0));
+    const serviceItems = (entry.items || []).filter(it => SERVICE_PART_TYPES.includes(it.partType));
     const serviceByParent = {};
     serviceItems.forEach(svc => {
-      const woPart = partsMap[svc.partId] || partsMap[svc.partNumber];
+      const woPart = woPartsMap[svc.partId] || woPartsMap[svc.partNumber];
       const fd = woPart?.formData && typeof woPart.formData === 'object' ? woPart.formData : {};
-      const parentWoPart = (fd._linkedPartId || woPart?._linkedPartId) ? partsMap[fd._linkedPartId || woPart._linkedPartId] : null;
-      if (parentWoPart) { if (!serviceByParent[parentWoPart.partNumber]) serviceByParent[parentWoPart.partNumber] = []; serviceByParent[parentWoPart.partNumber].push({ woPart, fd, svc }); }
+      const linkedId = fd._linkedPartId || woPart?._linkedPartId;
+      const parentWoPart = linkedId ? woPartsMap[linkedId] : null;
+      const parentPartNumber = parentWoPart?.partNumber ?? null;
+      if (parentPartNumber !== null) {
+        if (!serviceByParent[parentPartNumber]) serviceByParent[parentPartNumber] = [];
+        serviceByParent[parentPartNumber].push(svc);
+      }
     });
 
+    const totalDisplayItems = regularItems.length;
     regularItems.forEach((item, i) => {
-      if (ry + 18 > 710) { doc.addPage(); ry = 40; }
-      let desc = (item.description || '').replace(/^\d+pc:\s*/i, '').replace(/^\d+\s*[x]\s*[\d.']+\s*(?:length(?:s)?)[:\s)]*/i, '').replace(/^\(s\):\s*/i, '').trim();
-      const svcsHere = serviceByParent[item.partNumber] || [];
+      if (ry > 680) { doc.addPage(); ry = 50; }
+      doc.font('Helvetica-Bold').fontSize(10).fillColor('#333');
+      doc.text(String(item.quantity || 0), 50, ry, { width: 35 });
+      doc.font('Helvetica').fontSize(9).fillColor('#333');
+      doc.text(item.clientPartNumber || String(item.partNumber || ''), 90, ry, { width: 105 });
+      let desc = (item.description || '')
+        .replace(/^\d+pc:\s*/i, '')
+        .replace(/^\d+\s*[×x]\s*[\d.']+\s*(?:ft|foot|feet|'|length(?:s)?)[:\s)]*/i, '')
+        .replace(/^\(s\):\s*/i, '')
+        .trim();
+      doc.text(desc, 200, ry, { width: 360 });
+      ry += doc.heightOfString(desc, { width: 360 }) + 1;
+      if (item.rollingDescription) {
+        doc.font('Helvetica').fontSize(8.5).fillColor('#555');
+        doc.text(item.rollingDescription, 200, ry, { width: 360 });
+        ry += doc.heightOfString(item.rollingDescription, { width: 360 }) + 1;
+      }
+      const svcs = serviceByParent[item.partNumber] || [];
       const svcLabels = new Set();
-      svcsHere.forEach(({ svc, woPart, fd }) => { const instr = woPart?.specialInstructions || fd.specialInstructions || ''; if (instr.trim()) svcLabels.add((svc.partType === 'shop_rate' ? 'Shop Rate' : 'Fabrication') + ': ' + instr.trim()); });
-      const descH = Math.max(doc.fontSize(8).heightOfString(desc || ' ', { width: 372 }), 11);
-      const svcH = [...svcLabels].reduce((h, l) => h + doc.fontSize(7.5).heightOfString('  + ' + l, { width: 372 }) + 1, 0);
-      const rowH = descH + svcH + 7;
-      if (i % 2 === 1) doc.rect(L, ry, W, rowH).fill('#f7f7f7');
-      doc.moveTo(L, ry).lineTo(L + W, ry).lineWidth(0.25).strokeColor('#e8e8e8').stroke();
-      doc.fontSize(9).font('Helvetica-Bold').fillColor(darkColor).text(String(item.quantity || 0), L + 4, ry + 3, { width: 34, lineBreak: false });
-      doc.fontSize(8).font('Helvetica').fillColor(darkColor).text(item.clientPartNumber || String(item.partNumber || ''), L + 42, ry + 3, { width: 110 });
-      doc.text(desc, L + 156, ry + 3, { width: 372 });
-      let sry = ry + 3 + descH + 1;
-      svcLabels.forEach(label => { doc.fontSize(7.5).font('Helvetica').fillColor('#1565c0').text('  + ' + label, L + 156, sry, { width: 372 }); sry += doc.heightOfString('  + ' + label, { width: 372 }) + 1; });
-      ry += rowH;
+      svcs.forEach(svc => {
+        const woPart = woPartsMap[svc.partId] || woPartsMap[svc.partNumber];
+        const fd = woPart?.formData && typeof woPart.formData === 'object' ? woPart.formData : {};
+        const instructions = woPart?.specialInstructions || fd.specialInstructions || '';
+        if (instructions.trim()) svcLabels.add((svc.partType === 'shop_rate' ? 'Shop Rate Service' : 'Fabrication Service') + ': ' + instructions.trim());
+      });
+      svcLabels.forEach(label => {
+        ry += 2;
+        doc.font('Helvetica').fontSize(8).fillColor('#1565c0').text('  + ' + label, 200, ry, { width: 360 });
+        ry += doc.heightOfString('  + ' + label, { width: 360 }) + 1;
+      });
+      ry += 5;
+      if (i < totalDisplayItems - 1) {
+        doc.moveTo(90, ry).lineTo(562, ry).lineWidth(0.3).strokeColor('#eee').stroke(); ry += 4;
+      }
     });
 
-    // ── Totals + signature ──
-    ry += 6;
-    doc.moveTo(L, ry).lineTo(L + W, ry).lineWidth(0.5).strokeColor('#ccc').stroke(); ry += 6;
-    const totalItems = regularItems.reduce((s, i) => s + (i.quantity || 0), 0);
-    doc.fontSize(8.5).font('Helvetica-Bold').fillColor(darkColor).text('Total items shipped: ' + totalItems, L, ry); ry += 22;
-    doc.moveTo(L, ry).lineTo(L + 200, ry).lineWidth(0.5).strokeColor('#666').stroke();
-    doc.moveTo(L + 260, ry).lineTo(L + 460, ry).lineWidth(0.5).strokeColor('#666').stroke();
-    doc.fontSize(7.5).font('Helvetica').fillColor('#888').text('Signature', L, ry + 3).text('Date', L + 260, ry + 3);
-
-    // ── Footer anchored to bottom of page ──
-    doc.fontSize(6.5).font('Helvetica').fillColor('#bbb')
-      .text('Carolina Rolling Co. Inc.  |  (562) 633-1044  |  keepitrolling@carolinarolling.com', L, doc.page.height - 28, { width: W, align: 'center', lineBreak: false });
+    ry += 10;
+    doc.moveTo(50, ry).lineTo(562, ry).lineWidth(0.5).strokeColor('#e0e0e0').stroke(); ry += 10;
+    doc.font('Helvetica-Bold').fontSize(10).fillColor('#333').text('Total items shipped: ' + totalItems, 50, ry);
+    ry += 40;
+    doc.moveTo(50, ry).lineTo(250, ry).lineWidth(0.5).strokeColor('#999').stroke();
+    doc.font('Helvetica').fontSize(8).fillColor('#666').text('Signature', 50, ry + 4);
+    doc.moveTo(300, ry).lineTo(500, ry).lineWidth(0.5).strokeColor('#999').stroke();
+    doc.text('Date', 300, ry + 4);
+    doc.page.margins.bottom = 0;
+    doc.font('Helvetica').fontSize(7).fillColor('#666');
+    doc.text('Carolina Rolling Co. Inc. | (562) 633-1044 | keepitrolling@carolinarolling.com', 50, 755, { width: 512, align: 'center', lineBreak: false });
     doc.end();
   });
 }
@@ -6568,7 +6585,11 @@ router.post('/:id/coc', async (req, res, next) => {
     doc.moveTo(50, y).lineTo(562, y).lineWidth(0.3).strokeColor('#ddd').stroke();
     y += 7;
 
-    const parts = (workOrder.parts || []).filter(p => !['fab_service', 'shop_rate', 'rush_service'].includes(p.partType));
+    const { selectedPartIds } = req.body;
+    const allParts = (workOrder.parts || []).filter(p => !['fab_service', 'shop_rate', 'rush_service'].includes(p.partType));
+    const parts = selectedPartIds && selectedPartIds.length > 0
+      ? allParts.filter(p => selectedPartIds.includes(p.id))
+      : allParts;
     for (let i = 0; i < parts.length; i++) {
       // Page break — no header on continuation pages, just start from top margin
       if (y > 690) { newPage(); y = 50; }
@@ -6667,12 +6688,21 @@ router.post('/:id/coc', async (req, res, next) => {
     await new Promise(resolve => doc.on('end', resolve));
     const pdfBuffer = Buffer.concat(chunks);
 
-    // Auto-save to WO documents
+    // Auto-save to WO documents — never overwrite, use numbered filenames
     try {
-      const cocFilename = `COC-${workOrder.drNumber}${wps ? '-WPS-' + wps.wpsNumber : ''}.pdf`;
+      const { Op } = require('sequelize');
+      const baseFilename = `COC-${workOrder.drNumber}${wps ? '-WPS-' + wps.wpsNumber : ''}`;
+      const existingCocs = await WorkOrderDocument.findAll({
+        where: { workOrderId: workOrder.id, documentType: 'coc' }
+      });
+      // Find next available number
+      let cocFilename;
+      if (existingCocs.length === 0) {
+        cocFilename = baseFilename + '.pdf';
+      } else {
+        cocFilename = baseFilename + '-' + (existingCocs.length + 1) + '.pdf';
+      }
       const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, { folder: `work-orders/${workOrder.id}/documents`, filename: cocFilename, mimeType: 'application/pdf' });
-      const prevCoc = await WorkOrderDocument.findOne({ where: { workOrderId: workOrder.id, documentType: 'coc' } });
-      if (prevCoc) await prevCoc.destroy();
       await WorkOrderDocument.create({ workOrderId: workOrder.id, originalName: cocFilename, mimeType: 'application/pdf', size: pdfBuffer.length, url: uploadResult.url, cloudinaryId: uploadResult.storageId, documentType: 'coc', portalVisible: true });
     } catch (saveErr) { console.error('[COC] Save error:', saveErr.message); }
 

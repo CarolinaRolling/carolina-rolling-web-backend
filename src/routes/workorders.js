@@ -97,7 +97,7 @@ async function generatePickupReceiptBuffer(workOrder, entry, idx) {
       doc.font('Helvetica-Bold').fontSize(10).fillColor('#333');
       doc.text(String(item.quantity || 0), 50, ry, { width: 35 });
       doc.font('Helvetica').fontSize(9).fillColor('#333');
-      doc.text(item.clientPartNumber || String(item.partNumber || ''), 90, ry, { width: 105 });
+      doc.text(item.clientPartNumber || (workOrder.drNumber ? String(workOrder.drNumber) + '-' + String(item.partNumber || '') : String(item.partNumber || '')), 90, ry, { width: 105 });
       let desc = (item.description || '')
         .replace(/^\d+pc:\s*/i, '')
         .replace(/^\d+\s*[×x]\s*[\d.']+\s*(?:ft|foot|feet|'|length(?:s)?)[:\s)]*/i, '')
@@ -2271,7 +2271,7 @@ router.get('/:id/pickup/:index/receipt', async (req, res, next) => {
       doc.font('Helvetica-Bold').fontSize(10).fillColor('#333');
       doc.text(String(item.quantity || 0), 50, ry, { width: 35 });
       doc.font('Helvetica').fontSize(9).fillColor('#333');
-      doc.text(item.clientPartNumber || String(item.partNumber || ''), 90, ry, { width: 105 });
+      doc.text(item.clientPartNumber || (workOrder.drNumber ? String(workOrder.drNumber) + '-' + String(item.partNumber || '') : String(item.partNumber || '')), 90, ry, { width: 105 });
       let desc = (item.description || '')
         .replace(/^\d+pc:\s*/i, '')
         .replace(/^\d+\s*[×x]\s*[\d.']+\s*(?:ft|foot|feet|'|length(?:s)?)[:\s)]*/i, '')

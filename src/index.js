@@ -746,25 +746,24 @@ async function startServer() {
     
     // Explicitly add contactExtension to work_orders and estimates if missing
     // (alter:true sometimes misses new columns on Heroku Postgres)
-    try {
-      await sequelize.query(`
-        ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "contactExtension" VARCHAR(255);
-        ALTER TABLE estimates ADD COLUMN IF NOT EXISTS "contactExtension" VARCHAR(255);
-        ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "progressCount" INTEGER;
-        ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "progressLastUpdatedAt" TIMESTAMP WITH TIME ZONE;
-        ALTER TABLE employees ADD COLUMN IF NOT EXISTS "sortOrder" INTEGER DEFAULT 999;
-        ALTER TABLE clients ADD COLUMN IF NOT EXISTS "requiresCoc" BOOLEAN DEFAULT false;
-        ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commCategory" VARCHAR(50);
-        ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commProcessed" BOOLEAN DEFAULT false;
-        ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commSnippet" TEXT;
-        ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commArchived" BOOLEAN DEFAULT false;
-        ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "progressLog" JSONB DEFAULT '[]';
-        ALTER TABLE payroll_entries ADD COLUMN IF NOT EXISTS "sortOrder" INTEGER DEFAULT 999;
-      `);
-      console.log('column migrations ensured');
-    } catch (e) {
-      console.log('column migration error:', e.message);
+    const migrations = [
+        `ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "contactExtension" VARCHAR(255)`,
+        `ALTER TABLE estimates ADD COLUMN IF NOT EXISTS "contactExtension" VARCHAR(255)`,
+        `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "progressCount" INTEGER DEFAULT 0`,
+        `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "progressLastUpdatedAt" TIMESTAMP WITH TIME ZONE`,
+        `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "progressLog" JSONB DEFAULT '[]'`,
+        `ALTER TABLE employees ADD COLUMN IF NOT EXISTS "sortOrder" INTEGER DEFAULT 999`,
+        `ALTER TABLE clients ADD COLUMN IF NOT EXISTS "requiresCoc" BOOLEAN DEFAULT false`,
+        `ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commCategory" VARCHAR(50)`,
+        `ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commProcessed" BOOLEAN DEFAULT false`,
+        `ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commSnippet" TEXT`,
+        `ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commArchived" BOOLEAN DEFAULT false`,
+        `ALTER TABLE payroll_entries ADD COLUMN IF NOT EXISTS "sortOrder" INTEGER DEFAULT 999`,
+    ];
+    for (const sql of migrations) {
+      try { await sequelize.query(sql); } catch (e) { console.log('migration skip:', e.message.split('\n')[0]); }
     }
+    console.log('column migrations ensured');
 
     // Sync models - use alter to add new columns
     // This is safe for adding new nullable columns

@@ -1054,7 +1054,7 @@ router.get('/', async (req, res, next) => {
 
     // For list views, skip file includes to speed up query significantly
     const partInclude = view === 'list' 
-      ? [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'quantity', 'status', 'materialSource', 'materialOrdered', 'supplierName', 'vendorEstimateNumber', 'clientPartNumber', 'heatNumber', 'heatBreakdown', 'materialDescription', 'formData', 'progressCount', 'progressLastUpdatedAt'] }]
+      ? [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'quantity', 'status', 'materialSource', 'materialOrdered', 'supplierName', 'vendorEstimateNumber', 'clientPartNumber', 'heatNumber', 'heatBreakdown', 'materialDescription', 'formData'] }]
       : [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }];
 
     const workOrders = await WorkOrder.findAndCountAll({

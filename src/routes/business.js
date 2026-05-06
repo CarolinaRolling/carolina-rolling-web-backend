@@ -778,7 +778,7 @@ router.get('/payroll/:id/preview-pdf', async (req, res, next) => {
       cols.forEach(c => { doc.fontSize(7.5).font('Helvetica-Bold').fillColor('white').text(c.label, c.x + 2, y + 4, { width: c.w - 4, align: c.align || 'left', lineBreak: false }); });
       y += 16;
       enriched.forEach((en, idx) => {
-        const rowH = 18;
+        const rowH = 26;
         if (y + rowH > 720) { doc.addPage(); y = 50; }
         if (idx % 2 === 1) doc.rect(L, y, W, rowH).fill('#f7f7f7');
         doc.rect(L, y, W, rowH).lineWidth(0.3).strokeColor('#cccccc').stroke();
@@ -793,7 +793,7 @@ router.get('/payroll/:id/preview-pdf', async (req, res, next) => {
           { val: String(en.overtimeHours || 0), col: cols[6], bold: true, color: parseFloat(en.overtimeHours) > 0 ? '#c62828' : '#888' },
           { val: otherParts.join(' '), col: cols[7] }, { val: en.notes || '', col: cols[8] },
         ];
-        rowData.forEach(({ val, col, bold, color }) => { doc.fontSize(8).font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(color || '#1a1a1a').text(val, col.x + 2, y + 5, { width: col.w - 4, align: col.align || 'left', lineBreak: false }); });
+        rowData.forEach(({ val, col, bold, color }) => { doc.fontSize(8).font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(color || '#1a1a1a').text(val, col.x + 2, y + 9, { width: col.w - 4, align: col.align || 'left', lineBreak: false }); });
         y += rowH;
       });
       y += 8;
@@ -905,7 +905,7 @@ router.post('/payroll/:id/send-email', async (req, res, next) => {
 
       // Employee rows
       enriched.forEach((en, idx) => {
-        const rowH = 18;
+        const rowH = 26;
         if (y + rowH > 720) { doc.addPage(); y = 50; }
         if (idx % 2 === 1) doc.rect(L, y, W, rowH).fill('#f7f7f7');
         doc.rect(L, y, W, rowH).lineWidth(0.3).strokeColor('#cccccc').stroke();
@@ -932,7 +932,7 @@ router.post('/payroll/:id/send-email', async (req, res, next) => {
         rowData.forEach(({ val, col, bold, color }) => {
           doc.fontSize(8).font(bold ? 'Helvetica-Bold' : 'Helvetica')
             .fillColor(color || '#1a1a1a')
-            .text(val, col.x + 2, y + 5, { width: col.w - 4, align: col.align || 'left', lineBreak: false });
+            .text(val, col.x + 2, y + 9, { width: col.w - 4, align: col.align || 'left', lineBreak: false });
         });
         y += rowH;
       });
@@ -960,7 +960,7 @@ router.post('/payroll/:id/send-email', async (req, res, next) => {
 
     // Build RFC 2822 MIME message with attachment
     const boundary = 'payroll_boundary_' + Date.now();
-    const emailSubject = subject || `Carolina Rolling Payroll ${sd} — ${ed}`;
+    const emailSubject = subject || `Carolina Rolling Payroll ${sd} - ${ed}`;
     const emailBody = body || `Please find the attached payroll for the pay period ${sd} — ${ed}.
 
 Total Gross: $${parseFloat(payroll.totalGross).toFixed(2)}

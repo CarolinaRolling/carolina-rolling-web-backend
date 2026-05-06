@@ -3,6 +3,7 @@ const router = express.Router();
 const { Op } = require('sequelize');
 const multer = require('multer');
 const path = require('path');
+const fs = require('fs');
 const { Liability, Employee, PayrollWeek, PayrollEntry, WorkOrder, WorkOrderPart, Vendor, PONumber, InboundOrder, sequelize } = require('../models');
 const fileStorage = require('../utils/storage');
 
@@ -729,7 +730,7 @@ router.get('/vendor-history/:vendorId', async (req, res, next) => {
 // GET /api/business/payroll/:id/preview-pdf - Preview payroll PDF
 router.get('/payroll/:id/preview-pdf', async (req, res, next) => {
   try {
-    const payroll = await Payroll.findByPk(req.params.id, { include: [{ model: PayrollEntry, as: 'entries' }] });
+    const payroll = await PayrollWeek.findByPk(req.params.id, { include: [{ model: PayrollEntry, as: 'entries' }] });
     if (!payroll) return res.status(404).json({ error: { message: 'Not found' } });
     const employees = await Employee.findAll({ where: { isActive: true } });
     const sortedEntries = (payroll.entries || []).slice().sort((a, b) => ((a.sortOrder ?? 999) - (b.sortOrder ?? 999)) || a.employeeName.localeCompare(b.employeeName));
@@ -740,8 +741,6 @@ router.get('/payroll/:id/preview-pdf', async (req, res, next) => {
     const sd = new Date(payroll.weekStart + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
     const ed = new Date(payroll.weekEnd + 'T12:00:00').toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
 
-    const path = require('path');
-    const fs = require('fs');
     const logoFile = [path.join(__dirname, '../assets/logo.png'), path.join(__dirname, '../assets/logo.jpg')].find(p => fs.existsSync(p));
     const yellowcakePath = path.join(__dirname, '../assets/fonts/Yellowcake-Regular.ttf');
     const PDFDocument = require('pdfkit');

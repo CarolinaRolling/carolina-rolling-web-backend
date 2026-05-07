@@ -1071,7 +1071,7 @@ router.get('/', async (req, res, next) => {
 
     // For list views, skip file includes to speed up query significantly
     const partInclude = view === 'list' 
-      ? [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'quantity', 'status', 'materialSource', 'materialOrdered', 'supplierName', 'vendorEstimateNumber', 'clientPartNumber', 'heatNumber', 'heatBreakdown', 'materialDescription', 'formData'] }]
+      ? [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'quantity', 'status', 'materialSource', 'materialOrdered', 'supplierName', 'vendorEstimateNumber', 'clientPartNumber', 'heatNumber', 'heatBreakdown', 'materialDescription', 'formData', 'progressCount', 'progressLastUpdatedAt', 'specialInstructions', 'internalNotes'] }]
       : [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }];
 
     const workOrders = await WorkOrder.findAndCountAll({
@@ -1372,7 +1372,8 @@ router.get('/:id', async (req, res, next) => {
         }
         // Merge formData then refresh derived text fields from raw columns
         if (part.formData && typeof part.formData === 'object') {
-          Object.assign(part, part.formData);
+          const { progressCount: _pc, progressLastUpdatedAt: _pla, progressLog: _pl, status: _st, ...safeFormData } = part.formData;
+          Object.assign(part, safeFormData);
         }
         refreshDerivedFields(part);
       }
@@ -3055,8 +3056,8 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
       }
     }
 
-    // Progress milestones
-    if (progressCount !== undefined) {
+    // Progress milestones — only update if explicitly sent as a real number (guards against old clients sending null)
+    if (progressCount !== undefined && progressCount !== null && !isNaN(parseInt(progressCount))) {
       updates.progressCount = progressCount;
       updates.progressLastUpdatedAt = new Date();
       if (progressCount > 0 && part.status === 'pending') {

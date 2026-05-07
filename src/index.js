@@ -5,7 +5,7 @@ const compression = require('compression');
 const path = require('path');
 const cloudinary = require('cloudinary').v2;
 const cron = require('node-cron');
-const { sequelize, Shipment, ShipmentPhoto, ShipmentDocument, User, AppSettings, WorkOrder, Client, DailyActivity, Estimate } = require('./models');
+const { sequelize, Shipment, ShipmentPhoto, ShipmentDocument, User, AppSettings, WorkOrder, Client, DailyActivity, Estimate, TodoItem } = require('./models');
 const shipmentRoutes = require('./routes/shipments');
 const settingsRoutes = require('./routes/settings');
 const { sendScheduleEmail } = require('./routes/settings');
@@ -128,6 +128,17 @@ const { authenticate } = require('./routes/auth');
 app.use('/api/shipments', authenticate, shipmentRoutes);
 app.use('/api/settings', authenticate, settingsRoutes);
 app.use('/api/inbound', authenticate, inboundRoutes);
+// Middleware to block portal/vendor API keys from accessing internal routes
+const blockPortalKeys = (req, res, next) => {
+  if (req.apiKey && req.apiKey.clientName && !req.apiKey.deviceName) {
+    return res.status(403).json({ error: { message: 'Portal API keys cannot access this endpoint. Use /api/portal/* routes.' } });
+  }
+  if (req.apiKey && req.apiKey.vendorName && !req.apiKey.deviceName) {
+    return res.status(403).json({ error: { message: 'Vendor API keys cannot access this endpoint. Use /api/vendor-portal/* routes.' } });
+  }
+  next();
+};
+
 app.use('/api/workorders', authenticate, blockPortalKeys, workordersRoutes);
 app.use('/api/estimates', authenticate, blockPortalKeys, estimatesRoutes);
 app.use('/api/backup', authenticate, backupRoutes);

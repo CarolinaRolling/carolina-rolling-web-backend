@@ -822,6 +822,15 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
     type: DataTypes.STRING,
     allowNull: true
   },
+  progressCount: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    defaultValue: 0
+  },
+  progressLastUpdatedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
   progressLog: {
     type: DataTypes.JSONB,
     allowNull: true,

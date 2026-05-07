@@ -128,11 +128,11 @@ const { authenticate } = require('./routes/auth');
 app.use('/api/shipments', authenticate, shipmentRoutes);
 app.use('/api/settings', authenticate, settingsRoutes);
 app.use('/api/inbound', authenticate, inboundRoutes);
-app.use('/api/workorders', authenticate, workordersRoutes);
-app.use('/api/estimates', authenticate, estimatesRoutes);
+app.use('/api/workorders', authenticate, blockPortalKeys, workordersRoutes);
+app.use('/api/estimates', authenticate, blockPortalKeys, estimatesRoutes);
 app.use('/api/backup', authenticate, backupRoutes);
 const businessRoutes = require('./routes/business');
-app.use('/api/business', authenticate, businessRoutes);
+app.use('/api/business', authenticate, blockPortalKeys, businessRoutes);
 app.use('/api/dr-numbers', authenticate, drNumbersRoutes);
 app.use('/api/po-numbers', authenticate, poNumbersRoutes);
 app.use('/api/email', authenticate, emailRoutes);
@@ -752,6 +752,14 @@ async function startServer() {
         `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "progressCount" INTEGER DEFAULT 0`,
         `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "progressLastUpdatedAt" TIMESTAMP WITH TIME ZONE`,
         `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "progressLog" JSONB DEFAULT '[]'`,
+        `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "internalNotes" TEXT`,
+        `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "serviceFitting" BOOLEAN DEFAULT false`,
+        `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "serviceFittingCost" DECIMAL(10,2)`,
+        `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "serviceFittingVendor" VARCHAR(255)`,
+        `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "serviceWelding" BOOLEAN DEFAULT false`,
+        `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "serviceWeldingCost" DECIMAL(10,2)`,
+        `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "serviceWeldingVendor" VARCHAR(255)`,
+        `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "serviceWeldingPercent" INTEGER DEFAULT 100`,
         `ALTER TABLE employees ADD COLUMN IF NOT EXISTS "sortOrder" INTEGER DEFAULT 999`,
         `ALTER TABLE clients ADD COLUMN IF NOT EXISTS "requiresCoc" BOOLEAN DEFAULT false`,
         `ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commCategory" VARCHAR(50)`,
@@ -1363,15 +1371,86 @@ async function startServer() {
         const result = await runAutoBackup(false);
         if (result.success) {
           console.log(`[CRON] Auto-backup successful: ${(result.size / 1024).toFixed(0)}KB`);
+          // Log success to DailyActivity
+          try {
+            await DailyActivity.create({
+              activityType: 'system',
+              resourceType: 'backup',
+              description: `✅ Auto-backup completed — ${(result.size / 1024).toFixed(0)}KB saved to Cloudinary`
+            });
+          } catch {}
+          // Store last backup status in AppSettings
+          try {
+            await AppSettings.upsert({ key: 'last_backup_status', value: { status: 'success', timestamp: new Date().toISOString(), size: result.size } });
+          } catch {}
         } else {
           console.error('[CRON] Auto-backup failed:', result.error);
+          await notifyBackupFailure(result.error || 'Unknown error');
         }
       } catch (err) {
         console.error('[CRON] Auto-backup error:', err.message);
+        await notifyBackupFailure(err.message);
       }
     }, {
       timezone: 'America/Los_Angeles'
     });
+
+    // Helper: notify admin of backup failure via todo + email
+    async function notifyBackupFailure(errorMessage) {
+      const timestamp = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' });
+      // 1. Create urgent todo visible in dashboard
+      try {
+        await TodoItem.create({
+          title: '🚨 Auto-Backup Failed',
+          description: `The scheduled Saturday backup failed at ${timestamp}.\n\nError: ${errorMessage}\n\nPlease run a manual backup from the Admin → Backup page and check the error.`,
+          priority: 'urgent',
+          status: 'pending',
+          category: 'system',
+          dueDate: new Date()
+        });
+        console.log('[BACKUP] Failure todo created');
+      } catch (e) {
+        console.error('[BACKUP] Failed to create failure todo:', e.message);
+      }
+      // Store failure status in AppSettings for dashboard display
+      try {
+        await AppSettings.upsert({ key: 'last_backup_status', value: { status: 'failed', timestamp: new Date().toISOString(), error: errorMessage } });
+      } catch {}
+      // 2. Send email alert via SMTP if configured
+      try {
+        if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+          const nodemailer = require('nodemailer');
+          const transporter = nodemailer.createTransport({
+            host: process.env.SMTP_HOST,
+            port: parseInt(process.env.SMTP_PORT || '587'),
+            secure: process.env.SMTP_PORT === '465',
+            auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+          });
+          const adminEmail = process.env.ADMIN_EMAIL || process.env.SMTP_USER;
+          await transporter.sendMail({
+            from: `"CR Admin System" <${process.env.SMTP_USER}>`,
+            to: adminEmail,
+            subject: `🚨 CR Admin Auto-Backup Failed - ${timestamp}`,
+            html: `
+              <div style="font-family:sans-serif;max-width:500px">
+                <h2 style="color:#c62828">⚠️ Backup Failed</h2>
+                <p>The scheduled Saturday night backup for <strong>CR Admin</strong> failed at ${timestamp}.</p>
+                <div style="background:#fff3f3;border:1px solid #ffcdd2;border-radius:6px;padding:12px;margin:12px 0">
+                  <strong>Error:</strong><br><code>${errorMessage}</code>
+                </div>
+                <p><strong>Action needed:</strong> Please log into CR Admin and run a manual backup from <em>Admin → Backup</em>.</p>
+                <p style="color:#888;font-size:12px">This is an automated alert from CR Admin.</p>
+              </div>
+            `
+          });
+          console.log('[BACKUP] Failure email sent to', adminEmail);
+        } else {
+          console.log('[BACKUP] SMTP not configured — skipping failure email');
+        }
+      } catch (e) {
+        console.error('[BACKUP] Failed to send failure email:', e.message);
+      }
+    }
     console.log('Auto-backup configured for every Saturday at 11 PM Pacific');
 
     // Auto-archive old estimates daily at 1:00 AM Pacific

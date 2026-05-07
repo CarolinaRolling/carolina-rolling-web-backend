@@ -23,7 +23,8 @@ const {
   AppSettings, User, ApiKey, EmailLog,
   TodoItem, GmailAccount, ScannedEmail, PendingOrder,
   ShopSupply, ShopSupplyLog, VendorIssue, WeldProcedure,
-  ActivityLog, DailyActivity
+  ActivityLog, DailyActivity,
+  Liability, Employee, PayrollWeek, PayrollEntry, BusinessEvent
 } = require('../models');
 
 const router = express.Router();
@@ -86,7 +87,6 @@ async function buildBackup(includeFiles = false) {
   backup.data.emailLogs = (await EmailLog.findAll({ order: [['createdAt', 'DESC']], limit: 500 })).map(e => e.toJSON());
 
   // Business data
-  const { Liability, Employee, PayrollWeek, PayrollEntry } = require('../models');
   backup.data.liabilities = (await Liability.findAll()).map(l => l.toJSON());
   backup.data.employees = (await Employee.findAll({ order: [['sortOrder', 'ASC'], ['name', 'ASC']] })).map(e => e.toJSON());
   backup.data.payrollWeeks = (await PayrollWeek.findAll({ include: [{ model: PayrollEntry, as: 'entries' }] })).map(p => p.toJSON());
@@ -435,6 +435,14 @@ router.get('/info', async (req, res, next) => {
       }
     } catch (e) { /* ignore */ }
 
+    let lastBackupStatus = null;
+    try {
+      const statusSetting = await AppSettings.findOne({ where: { key: 'last_backup_status' } });
+      if (statusSetting?.value) {
+        lastBackupStatus = statusSetting.value;
+      }
+    } catch {}
+
     let backupHistory = [];
     try {
       const histSetting = await AppSettings.findOne({ where: { key: 'backup_history' } });
@@ -468,6 +476,7 @@ router.get('/info', async (req, res, next) => {
           estimates: estimateCount, settings: settingsCount, users: userCount },
         storageProvider: getProvider(),
         lastAutoBackup,
+        lastBackupStatus,
         backupHistory,
         cloudBackups
       }
@@ -856,7 +865,6 @@ router.post('/restore', async (req, res, next) => {
     }
 
     // Business data
-    const { Liability, Employee, PayrollWeek, PayrollEntry } = require('../models');
     await restoreSimple(Liability, backup.data.liabilities, 'liabilities');
     await restoreSimple(Employee, backup.data.employees, 'employees');
     await restoreSimple(require('../models').BusinessEvent, backup.data.businessEvents, 'businessEvents');

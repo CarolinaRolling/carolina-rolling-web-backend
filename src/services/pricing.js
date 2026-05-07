@@ -215,7 +215,12 @@ const PART_SHARED_FIELDS = [
   // RFQ contact tracking
   'rfqContactName', 'rfqContactEmail', 'rfqSentAt',
   // Form data (the big one)
-  'formData'
+  'formData',
+  // Internal notes
+  'internalNotes',
+  // Service fields
+  'serviceFitting', 'serviceFittingCost', 'serviceFittingVendor',
+  'serviceWelding', 'serviceWeldingCost', 'serviceWeldingVendor', 'serviceWeldingPercent'
 ];
 
 // Build WO part from estimate part

@@ -988,7 +988,19 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
     type: DataTypes.JSONB,
     allowNull: true,
     defaultValue: null
-  }
+  },
+  internalNotes: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  // Service fields (matching EstimatePart)
+  serviceFitting: { type: DataTypes.BOOLEAN, defaultValue: false },
+  serviceFittingCost: { type: DataTypes.DECIMAL(10,2), allowNull: true },
+  serviceFittingVendor: { type: DataTypes.STRING, allowNull: true },
+  serviceWelding: { type: DataTypes.BOOLEAN, defaultValue: false },
+  serviceWeldingCost: { type: DataTypes.DECIMAL(10,2), allowNull: true },
+  serviceWeldingVendor: { type: DataTypes.STRING, allowNull: true },
+  serviceWeldingPercent: { type: DataTypes.INTEGER, defaultValue: 100 }
 }, {
   tableName: 'work_order_parts',
   timestamps: true

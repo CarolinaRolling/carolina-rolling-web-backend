@@ -129,12 +129,17 @@ app.use('/api/shipments', authenticate, shipmentRoutes);
 app.use('/api/settings', authenticate, settingsRoutes);
 app.use('/api/inbound', authenticate, inboundRoutes);
 // Middleware to block portal/vendor API keys from accessing internal routes
+// Middleware to block portal/vendor API keys from write operations on internal routes
+// Client portal keys (clientName set) may still do GET reads on workorders
 const blockPortalKeys = (req, res, next) => {
-  if (req.apiKey && req.apiKey.clientName && !req.apiKey.deviceName) {
-    return res.status(403).json({ error: { message: 'Portal API keys cannot access this endpoint. Use /api/portal/* routes.' } });
-  }
   if (req.apiKey && req.apiKey.vendorName && !req.apiKey.deviceName) {
     return res.status(403).json({ error: { message: 'Vendor API keys cannot access this endpoint. Use /api/vendor-portal/* routes.' } });
+  }
+  // Client portal keys — allow GET reads, block writes
+  if (req.apiKey && req.apiKey.clientName && !req.apiKey.deviceName) {
+    if (req.method !== 'GET') {
+      return res.status(403).json({ error: { message: 'Client portal API keys are read-only. Use /api/portal/* for portal actions.' } });
+    }
   }
   next();
 };

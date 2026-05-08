@@ -756,15 +756,15 @@ router.get('/payroll/:id/preview-pdf', async (req, res, next) => {
       try { if (fs.existsSync(yellowcakePath)) { doc.registerFont('Yellowcake', yellowcakePath); hasYellowcake = true; } } catch {}
       if (hasYellowcake) doc.font('Yellowcake').fontSize(15).fillColor('#1a1a1a').text('Carolina Rolling Co. Inc.', 130, 32, { lineBreak: false });
       else doc.font('Helvetica-Bold').fontSize(15).fillColor('#1a1a1a').text('CAROLINA ROLLING CO. INC.', 130, 32, { lineBreak: false });
-      doc.font('Helvetica').fontSize(8.5).fillColor('#777');
+      doc.font('Helvetica').fontSize(10.5).fillColor('#777');
       doc.text('9152 Sonrisa St., Bellflower, CA 90706', 130, 52, { lineBreak: false });
       doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 130, 63, { lineBreak: false });
       doc.moveTo(L, 90).lineTo(L + W, 90).lineWidth(1).strokeColor('#e0e0e0').stroke();
       doc.fontSize(13).font('Helvetica-Bold').fillColor('#e65100').text('PAYROLL SUMMARY', L, 100);
-      doc.fontSize(9).font('Helvetica').fillColor('#555').text('Payroll Period: ' + sd + ' — ' + ed, L, 116);
+      doc.fontSize(11).font('Helvetica').fillColor('#555').text('Payroll Period: ' + sd + ' — ' + ed, L, 116);
       const genDate = new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: '2-digit', day: '2-digit', year: 'numeric' });
       const genTime = new Date().toLocaleTimeString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', minute: '2-digit' }) + ' PT';
-      doc.fontSize(8).fillColor('#888').text(genDate + '  ' + genTime, L + W - 100, 100, { width: 100, align: 'right', lineBreak: false });
+      doc.fontSize(10).fillColor('#888').text(genDate + '  ' + genTime, L + W - 100, 100, { width: 100, align: 'right', lineBreak: false });
       doc.moveTo(L, 130).lineTo(L + W, 130).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
       let y = 140;
       const cols = [
@@ -775,7 +775,7 @@ router.get('/payroll/:id/preview-pdf', async (req, res, next) => {
         { label: 'Notes', x: L+484, w: 78, align: 'right' },
       ];
       doc.rect(L, y, W, 16).fill('#1a1a1a');
-      cols.forEach(c => { doc.fontSize(7.5).font('Helvetica-Bold').fillColor('white').text(c.label, c.x + 2, y + 4, { width: c.w - 4, align: c.align || 'left', lineBreak: false }); });
+      cols.forEach(c => { doc.fontSize(9.5).font('Helvetica-Bold').fillColor('white').text(c.label, c.x + 2, y + 4, { width: c.w - 4, align: c.align || 'left', lineBreak: false }); });
       y += 16;
       enriched.forEach((en, idx) => {
         const rowH = 26;
@@ -793,16 +793,16 @@ router.get('/payroll/:id/preview-pdf', async (req, res, next) => {
           { val: String(en.overtimeHours || 0), col: cols[6], bold: true, color: parseFloat(en.overtimeHours) > 0 ? '#c62828' : '#888' },
           { val: otherParts.join(' '), col: cols[7] }, { val: en.notes || '', col: cols[8] },
         ];
-        rowData.forEach(({ val, col, bold, color }) => { doc.fontSize(8).font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(color || '#1a1a1a').text(val, col.x + 2, y + 9, { width: col.w - 4, align: col.align || 'left', lineBreak: false }); });
+        rowData.forEach(({ val, col, bold, color }) => { doc.fontSize(10).font(bold ? 'Helvetica-Bold' : 'Helvetica').fillColor(color || '#1a1a1a').text(val, col.x + 2, y + 9, { width: col.w - 4, align: col.align || 'left', lineBreak: false }); });
         y += rowH;
       });
       y += 8;
       doc.moveTo(L, y).lineTo(L + W, y).lineWidth(0.5).strokeColor('#cccccc').stroke(); y += 8;
       const totalReg = enriched.reduce((s, e) => s + (parseFloat(e.regularHours) || 0), 0);
       const totalOT = enriched.reduce((s, e) => s + (parseFloat(e.overtimeHours) || 0), 0);
-      doc.fontSize(9).font('Helvetica').fillColor('#888').text(enriched.length + ' employees  ·  ' + totalReg + ' reg hrs  ·  ' + totalOT + ' OT hrs', L, y);
+      doc.fontSize(11).font('Helvetica').fillColor('#888').text(enriched.length + ' employees  ·  ' + totalReg + ' reg hrs  ·  ' + totalOT + ' OT hrs', L, y);
       doc.fontSize(11).font('Helvetica-Bold').fillColor('#1a1a1a').text('Total: $' + parseFloat(payroll.totalGross || 0).toFixed(2), L, y, { align: 'right', width: W });
-      doc.fontSize(7).font('Helvetica').fillColor('#aaa').text('Carolina Rolling Co. Inc.  |  (562) 633-1044  |  keepitrolling@carolinarolling.com', L, 748, { width: W, align: 'center', lineBreak: false });
+      doc.fontSize(10.5).font('Helvetica').fillColor('#aaa').text('Carolina Rolling Co. Inc.  |  (562) 633-1044  |  keepitrolling@carolinarolling.com', L, 748, { width: W, align: 'center', lineBreak: false });
       doc.end();
     });
     res.set('Content-Type', 'application/pdf');
@@ -865,7 +865,7 @@ router.post('/payroll/:id/send-email', async (req, res, next) => {
       try { if (fs.existsSync(yellowcakePath)) { doc.registerFont('Yellowcake', yellowcakePath); hasYellowcake = true; } } catch {}
       if (hasYellowcake) doc.font('Yellowcake').fontSize(15).fillColor('#1a1a1a').text('Carolina Rolling Co. Inc.', 130, 32, { lineBreak: false });
       else doc.font('Helvetica-Bold').fontSize(15).fillColor('#1a1a1a').text('CAROLINA ROLLING CO. INC.', 130, 32, { lineBreak: false });
-      doc.font('Helvetica').fontSize(8.5).fillColor('#777');
+      doc.font('Helvetica').fontSize(10.5).fillColor('#777');
       doc.text('9152 Sonrisa St., Bellflower, CA 90706', 130, 52, { lineBreak: false });
       doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 130, 63, { lineBreak: false });
 
@@ -874,11 +874,11 @@ router.post('/payroll/:id/send-email', async (req, res, next) => {
 
       // ── Title row ──
       doc.fontSize(13).font('Helvetica-Bold').fillColor('#e65100').text('PAYROLL SUMMARY', L, 100);
-      doc.fontSize(9).font('Helvetica').fillColor('#555')
+      doc.fontSize(11).font('Helvetica').fillColor('#555')
         .text('Payroll Period: ' + sd + ' — ' + ed, L, 116);
       const genDate = new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: '2-digit', day: '2-digit', year: 'numeric' });
       const genTime = new Date().toLocaleTimeString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', minute: '2-digit' }) + ' PT';
-      doc.fontSize(8).fillColor('#888').text(genDate + '  ' + genTime, L + W - 100, 100, { width: 100, align: 'right', lineBreak: false });
+      doc.fontSize(10).fillColor('#888').text(genDate + '  ' + genTime, L + W - 100, 100, { width: 100, align: 'right', lineBreak: false });
       doc.moveTo(L, 130).lineTo(L + W, 130).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
 
       // ── Table columns ──
@@ -898,7 +898,7 @@ router.post('/payroll/:id/send-email', async (req, res, next) => {
       // Header row
       doc.rect(L, y, W, 16).fill('#1a1a1a');
       cols.forEach(c => {
-        doc.fontSize(7.5).font('Helvetica-Bold').fillColor('white')
+        doc.fontSize(9.5).font('Helvetica-Bold').fillColor('white')
           .text(c.label, c.x + 2, y + 4, { width: c.w - 4, align: c.align || 'left', lineBreak: false });
       });
       y += 16;
@@ -930,7 +930,7 @@ router.post('/payroll/:id/send-email', async (req, res, next) => {
         ];
 
         rowData.forEach(({ val, col, bold, color }) => {
-          doc.fontSize(8).font(bold ? 'Helvetica-Bold' : 'Helvetica')
+          doc.fontSize(10).font(bold ? 'Helvetica-Bold' : 'Helvetica')
             .fillColor(color || '#1a1a1a')
             .text(val, col.x + 2, y + 9, { width: col.w - 4, align: col.align || 'left', lineBreak: false });
         });
@@ -943,13 +943,13 @@ router.post('/payroll/:id/send-email', async (req, res, next) => {
       y += 8;
       const totalReg = enriched.reduce((s, e) => s + (parseFloat(e.regularHours) || 0), 0);
       const totalOT = enriched.reduce((s, e) => s + (parseFloat(e.overtimeHours) || 0), 0);
-      doc.fontSize(9).font('Helvetica').fillColor('#888')
+      doc.fontSize(11).font('Helvetica').fillColor('#888')
         .text(enriched.length + ' employees  ·  ' + totalReg + ' reg hrs  ·  ' + totalOT + ' OT hrs', L, y);
       doc.fontSize(11).font('Helvetica-Bold').fillColor('#1a1a1a')
         .text('Total: $' + parseFloat(payroll.totalGross || 0).toFixed(2), L, y, { align: 'right', width: W });
 
       // Footer
-      doc.fontSize(7).font('Helvetica').fillColor('#aaa')
+      doc.fontSize(10.5).font('Helvetica').fillColor('#aaa')
         .text('Carolina Rolling Co. Inc.  |  (562) 633-1044  |  keepitrolling@carolinarolling.com', L, 748, { width: W, align: 'center', lineBreak: false });
 
       doc.end();

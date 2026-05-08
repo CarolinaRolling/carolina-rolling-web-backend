@@ -2274,7 +2274,7 @@ router.get('/:id/pdf', async (req, res, next) => {
     } else {
       doc.fontSize(15).fillColor(darkColor).font('Helvetica-Bold').text('CAROLINA ROLLING CO. INC.', 130, 32, { lineBreak: false });
     }
-    doc.font('Helvetica').fontSize(8.5).fillColor(grayColor);
+    doc.font('Helvetica').fontSize(10.5).fillColor(grayColor);
     doc.text('9152 Sonrisa St., Bellflower, CA 90706', 130, 52, { lineBreak: false });
     doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 130, 63, { lineBreak: false });
     
@@ -2283,7 +2283,7 @@ router.get('/:id/pdf', async (req, res, next) => {
     doc.text('ESTIMATE', 350, 32, { width: 212, align: 'right', lineBreak: false });
     doc.font('Helvetica-Bold').fontSize(10).fillColor(darkColor);
     doc.text(estimate.estimateNumber, 350, 52, { width: 212, align: 'right', lineBreak: false });
-    doc.font('Helvetica').fontSize(9).fillColor(grayColor);
+    doc.font('Helvetica').fontSize(11).fillColor(grayColor);
     doc.text(`Date: ${formatDate(estimate.createdAt)}`, 350, 65, { width: 212, align: 'right', lineBreak: false });
     if (estimate.validUntil) {
       doc.text(`Valid Until: ${formatDate(estimate.validUntil)}`, 350, 76, { width: 212, align: 'right', lineBreak: false });
@@ -2317,7 +2317,7 @@ router.get('/:id/pdf', async (req, res, next) => {
     // Project description
     if (estimate.projectDescription) {
       yPos += 8;
-      doc.fontSize(9).fillColor(grayColor).text('Project:', 50, yPos);
+      doc.fontSize(11).fillColor(grayColor).text('Project:', 50, yPos);
       doc.fillColor(darkColor).text(estimate.projectDescription, 95, yPos, { width: 400 });
       yPos += doc.heightOfString(estimate.projectDescription, { width: 400 }) + 5;
     }
@@ -2331,7 +2331,7 @@ router.get('/:id/pdf', async (req, res, next) => {
     yPos += 25;
 
     // Table header
-    doc.fontSize(8).fillColor(grayColor);
+    doc.fontSize(10).fillColor(grayColor);
     doc.text('ITEM', 50, yPos, { lineBreak: false });
     doc.text('DESCRIPTION', 85, yPos, { lineBreak: false });
     doc.text('QTY', 400, yPos, { width: 30, align: 'center', lineBreak: false });
@@ -2388,11 +2388,11 @@ router.get('/:id/pdf', async (req, res, next) => {
         if (rushExpediteAmt > 0) rushLines.push(`Expedite: ${formatCurrency(rushExpediteAmt)}`);
         if (rushEmergencyAmt > 0) rushLines.push(`Emergency Off-Hours (${rfd._emergencyDay || ''}): ${formatCurrency(rushEmergencyAmt)}`);
         const rushDesc = rushLines.join('\n');
-        const rushDescHeight = doc.fontSize(8).heightOfString(rushDesc || 'Rush Service', { width: 300 });
+        const rushDescHeight = doc.fontSize(10).heightOfString(rushDesc || 'Rush Service', { width: 300 });
         const rushRowHeight = Math.max(rushDescHeight, 12) + 8;
         if (yPos + rushRowHeight > 700) { doc.addPage(); yPos = 50; }
-        doc.fontSize(9).fillColor(primaryColor).font('Helvetica-Bold').text(`#${part.partNumber}`, 50, yPos, { lineBreak: false });
-        doc.fontSize(8).fillColor(darkColor).font('Helvetica-Bold').text(PART_LABELS['rush_service'], 85, yPos, { lineBreak: false });
+        doc.fontSize(11).fillColor(primaryColor).font('Helvetica-Bold').text(`#${part.partNumber}`, 50, yPos, { lineBreak: false });
+        doc.fontSize(10).fillColor(darkColor).font('Helvetica-Bold').text(PART_LABELS['rush_service'], 85, yPos, { lineBreak: false });
         doc.font('Helvetica').fillColor(grayColor).text(rushDesc, 85, yPos + 11, { width: 300 });
         doc.fillColor(darkColor).text('1', 400, yPos, { width: 30, align: 'center', lineBreak: false });
         doc.text(formatCurrency(rushTotal), 440, yPos, { width: 50, align: 'right', lineBreak: false });
@@ -2552,7 +2552,7 @@ router.get('/:id/pdf', async (req, res, next) => {
       }
 
       const description = descLines.join('\n');
-      const descHeight = doc.fontSize(8).heightOfString(description, { width: 300 });
+      const descHeight = doc.fontSize(10).heightOfString(description, { width: 300 });
       const rowHeight = Math.max(descHeight, 12) + 8;
 
       // Check page break with full row height
@@ -2568,11 +2568,11 @@ router.get('/:id/pdf', async (req, res, next) => {
       }
 
       // Part number
-      doc.fontSize(9).fillColor(isLinkedSvc ? '#444' : primaryColor).font('Helvetica-Bold');
+      doc.fontSize(11).fillColor(isLinkedSvc ? '#444' : primaryColor).font('Helvetica-Bold');
       doc.text(isLinkedSvc ? '+' : `#${part.partNumber}`, 50 + xOffset, yPos, { lineBreak: false });
 
       // Part type + description  
-      doc.fontSize(8).fillColor(isLinkedSvc ? '#444' : darkColor).font('Helvetica-Bold');
+      doc.fontSize(10).fillColor(isLinkedSvc ? '#444' : darkColor).font('Helvetica-Bold');
       doc.text(partLabel + (isLinkedSvc && linkedParentPart ? ` (for Part #${linkedParentPart.partNumber})` : ''), 85 + xOffset, yPos, { lineBreak: false });
       doc.font('Helvetica').fillColor(grayColor);
       doc.text(description, 85 + xOffset, yPos + 11, { width: 300 - xOffset });
@@ -2600,7 +2600,7 @@ router.get('/:id/pdf', async (req, res, next) => {
           if (fs.existsSync(imgPath)) {
             if (yPos + 90 > 700) { doc.addPage(); yPos = 50; }
             doc.image(imgPath, 85, yPos, { width: 160 });
-            doc.fontSize(7).fillColor(grayColor).text(
+            doc.fontSize(10.5).fillColor(grayColor).text(
               `${part.rollType === 'easy_way' ? 'EW-OD' : 'HW-ID'} Option ${part._orientationOption}`,
               85, yPos + 72, { width: 160, align: 'center' }
             );
@@ -2618,12 +2618,12 @@ router.get('/:id/pdf', async (req, res, next) => {
     if (parseFloat(estimate.truckingCost) > 0 || estimate.truckingDescription) {
       if (yPos > 680) { doc.addPage(); yPos = 50; }
       
-      doc.fontSize(9).fillColor(darkColor).font('Helvetica-Bold').text('Trucking / Delivery', 85, yPos, { lineBreak: false });
+      doc.fontSize(11).fillColor(darkColor).font('Helvetica-Bold').text('Trucking / Delivery', 85, yPos, { lineBreak: false });
       doc.font('Helvetica');
       if (estimate.truckingDescription) {
-        doc.fontSize(8).fillColor(grayColor).text(estimate.truckingDescription, 85, yPos + 11, { width: 300 });
+        doc.fontSize(10).fillColor(grayColor).text(estimate.truckingDescription, 85, yPos + 11, { width: 300 });
       }
-      doc.fontSize(8).fillColor(darkColor).font('Helvetica-Bold')
+      doc.fontSize(10).fillColor(darkColor).font('Helvetica-Bold')
         .text(formatCurrency(estimate.truckingCost), 500, yPos, { width: 62, align: 'right', lineBreak: false });
       doc.font('Helvetica');
       yPos += 30;
@@ -2638,7 +2638,7 @@ router.get('/:id/pdf', async (req, res, next) => {
 
     // Minimum charge adjustment (the difference between minimum and actual labor)
     if (pdfMinInfo.minimumApplies && pdfMinInfo.laborDifference > 0) {
-      doc.fontSize(8).fillColor('#e65100').text(
+      doc.fontSize(10).fillColor('#e65100').text(
         `Minimum Labor Charge (${pdfMinInfo.highestMinRule?.label || ''})`,
         350, yPos, { lineBreak: false }
       );
@@ -2706,12 +2706,12 @@ router.get('/:id/pdf', async (req, res, next) => {
     const ccManualFee = (grandTotal * 3.5 / 100) + 0.15;
     const ccManualTotal = grandTotal + ccManualFee;
 
-    doc.fontSize(9).font('Helvetica-Bold').fillColor(darkColor);
+    doc.fontSize(11).font('Helvetica-Bold').fillColor(darkColor);
     doc.text('Total with Credit Card Fees', 50, yPos, { align: 'right', width: 512, lineBreak: false });
     doc.font('Helvetica');
     yPos += 14;
     
-    doc.fontSize(9).fillColor(darkColor);
+    doc.fontSize(11).fillColor(darkColor);
     doc.text(`In-Person (2.6% + $0.15): ${formatCurrency(ccInPersonTotal)}`, 50, yPos, { align: 'right', width: 512, lineBreak: false });
     yPos += 13;
     doc.text(`Manual (3.5% + $0.15): ${formatCurrency(ccManualTotal)}`, 50, yPos, { align: 'right', width: 512, lineBreak: false });
@@ -2750,14 +2750,14 @@ router.get('/:id/pdf', async (req, res, next) => {
 
       // Option A
       doc.rect(50, yPos, 245, 50).fillAndStroke('#e3f2fd', '#90caf9');
-      doc.fillColor('#1565c0').fontSize(9).font('Helvetica-Bold').text('Option A — With Material', 60, yPos + 6);
-      doc.fillColor('#666').fontSize(7.5).font('Helvetica').text('We supply all material', 60, yPos + 18);
+      doc.fillColor('#1565c0').fontSize(11).font('Helvetica-Bold').text('Option A — With Material', 60, yPos + 6);
+      doc.fillColor('#666').fontSize(9.5).font('Helvetica').text('We supply all material', 60, yPos + 18);
       doc.fillColor('#1565c0').fontSize(14).font('Helvetica-Bold').text(formatCurrency(grandTotal), 60, yPos + 30, { width: 225 });
 
       // Option B
       doc.rect(310, yPos, 252, 50).fillAndStroke('#fff8e1', '#ffcc80');
-      doc.fillColor('#e65100').fontSize(9).font('Helvetica-Bold').text('Option B — Labor Only', 320, yPos + 6);
-      doc.fillColor('#666').fontSize(7.5).font('Helvetica').text('Customer supplies material', 320, yPos + 18);
+      doc.fillColor('#e65100').fontSize(11).font('Helvetica-Bold').text('Option B — Labor Only', 320, yPos + 6);
+      doc.fillColor('#666').fontSize(9.5).font('Helvetica').text('Customer supplies material', 320, yPos + 18);
       doc.fillColor('#e65100').fontSize(14).font('Helvetica-Bold').text(formatCurrency(laborOnlyTotal), 320, yPos + 30, { width: 232 });
       
       doc.font('Helvetica');
@@ -2773,7 +2773,7 @@ router.get('/:id/pdf', async (req, res, next) => {
       
       doc.fontSize(10).fillColor(primaryColor).text('NOTES:', 50, yPos, { lineBreak: false });
       yPos += 15;
-      doc.fontSize(9).fillColor(grayColor).text(estimate.notes, 50, yPos, { width: 500 });
+      doc.fontSize(11).fillColor(grayColor).text(estimate.notes, 50, yPos, { width: 500 });
     }
 
     // ========== FOOTER ==========
@@ -2783,7 +2783,7 @@ router.get('/:id/pdf', async (req, res, next) => {
       // Temporarily remove bottom margin so writing near page bottom doesn't auto-create pages
       const savedBottomMargin = doc.page.margins.bottom;
       doc.page.margins.bottom = 0;
-      doc.fontSize(7).fillColor(grayColor);
+      doc.fontSize(10.5).fillColor(grayColor);
       doc.text(
         'Carolina Rolling Co. Inc. | 9152 Sonrisa St., Bellflower, CA 90706 | (562) 633-1044 | keepitrolling@carolinarolling.com',
         50, 745, { align: 'center', width: 512, lineBreak: false }

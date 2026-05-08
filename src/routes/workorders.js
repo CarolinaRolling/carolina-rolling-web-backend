@@ -36,7 +36,7 @@ async function generatePickupReceiptBuffer(workOrder, entry, idx) {
     if (logoFile) try { doc.image(logoFile, 50, 20, { width: 60 }); } catch {}
     if (hasYellowcake) doc.font('Yellowcake').fontSize(14).fillColor('#333').text('Carolina Rolling Co. Inc.', 125, 28);
     else doc.font('Helvetica-Bold').fontSize(14).fillColor('#333').text('CAROLINA ROLLING CO. INC.', 125, 28);
-    doc.font('Helvetica').fontSize(8).fillColor('#666');
+    doc.font('Helvetica').fontSize(10).fillColor('#666');
     doc.text('9152 Sonrisa St., Bellflower, CA 90706', 125, 46);
     doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 125, 57);
     doc.moveTo(50, 92).lineTo(562, 92).lineWidth(1).strokeColor('#e0e0e0').stroke();
@@ -50,23 +50,23 @@ async function generatePickupReceiptBuffer(workOrder, entry, idx) {
     const titleLabel = entry.type === 'full' ? 'PICKUP RECEIPT — FULL SHIPMENT' : `PICKUP RECEIPT — PARTIAL SHIPMENT #${pickupNum}`;
     doc.font('Helvetica-Bold').fontSize(11).fillColor('#e65100').text(titleLabel, 50, 102);
     doc.font('Helvetica-Bold').fontSize(10).fillColor('#333').text('DR-' + String(workOrder.drNumber || ''), 400, 102, { width: 162, align: 'right' });
-    doc.font('Helvetica').fontSize(8).fillColor('#666');
+    doc.font('Helvetica').fontSize(10).fillColor('#666');
     doc.text(fmtDatePT(pickupDate) + '  ' + fmtTimePT(pickupDate) + ' PT', 400, 116, { width: 162, align: 'right' });
     doc.moveTo(50, 128).lineTo(562, 128).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
 
     // Customer info
     let ry = 138;
-    doc.font('Helvetica').fontSize(8).fillColor('#666').text('Customer', 50, ry); ry += 12;
+    doc.font('Helvetica').fontSize(10).fillColor('#666').text('Customer', 50, ry); ry += 12;
     doc.font('Helvetica').fontSize(10).fillColor('#333').text(workOrder.clientName || '', 50, ry); ry += 14;
-    doc.font('Helvetica').fontSize(9).fillColor('#666');
+    doc.font('Helvetica').fontSize(11).fillColor('#666');
     doc.text('P.O: ' + (workOrder.clientPurchaseOrderNumber || '—'), 50, ry); ry += 12;
     doc.text('Picked Up By: ' + (entry.pickedUpBy || '—'), 50, ry); ry += 12;
-    doc.font('Helvetica-Bold').fontSize(9).fillColor('#333');
+    doc.font('Helvetica-Bold').fontSize(11).fillColor('#333');
     doc.text('Date & Time: ' + fmtDateLongPT(pickupDate) + ' at ' + fmtTimeFullPT(pickupDate) + ' PT', 50, ry); ry += 20;
 
     // Items table
     doc.moveTo(50, ry).lineTo(562, ry).lineWidth(0.5).strokeColor('#e0e0e0').stroke(); ry += 8;
-    doc.font('Helvetica-Bold').fontSize(8).fillColor('#666');
+    doc.font('Helvetica-Bold').fontSize(10).fillColor('#666');
     doc.text('QTY', 50, ry, { width: 35 });
     doc.text('PART #', 90, ry);
     doc.text('DESCRIPTION', 200, ry);
@@ -96,7 +96,7 @@ async function generatePickupReceiptBuffer(workOrder, entry, idx) {
       if (ry > 680) { doc.addPage(); ry = 50; }
       doc.font('Helvetica-Bold').fontSize(10).fillColor('#333');
       doc.text(String(item.quantity || 0), 50, ry, { width: 35 });
-      doc.font('Helvetica').fontSize(9).fillColor('#333');
+      doc.font('Helvetica').fontSize(11).fillColor('#333');
       doc.text(item.clientPartNumber || (workOrder.drNumber ? String(workOrder.drNumber) + '-' + String(item.partNumber || '') : String(item.partNumber || '')), 90, ry, { width: 105 });
       let desc = (item.description || '')
         .replace(/^\d+pc:\s*/i, '')
@@ -106,7 +106,7 @@ async function generatePickupReceiptBuffer(workOrder, entry, idx) {
       doc.text(desc, 200, ry, { width: 360 });
       ry += doc.heightOfString(desc, { width: 360 }) + 1;
       if (item.rollingDescription) {
-        doc.font('Helvetica').fontSize(8.5).fillColor('#555');
+        doc.font('Helvetica').fontSize(10.5).fillColor('#555');
         doc.text(item.rollingDescription, 200, ry, { width: 360 });
         ry += doc.heightOfString(item.rollingDescription, { width: 360 }) + 1;
       }
@@ -120,7 +120,7 @@ async function generatePickupReceiptBuffer(workOrder, entry, idx) {
       });
       svcLabels.forEach(label => {
         ry += 2;
-        doc.font('Helvetica').fontSize(8).fillColor('#1565c0').text('  + ' + label, 200, ry, { width: 360 });
+        doc.font('Helvetica').fontSize(10).fillColor('#1565c0').text('  + ' + label, 200, ry, { width: 360 });
         ry += doc.heightOfString('  + ' + label, { width: 360 }) + 1;
       });
       ry += 5;
@@ -134,11 +134,11 @@ async function generatePickupReceiptBuffer(workOrder, entry, idx) {
     doc.font('Helvetica-Bold').fontSize(10).fillColor('#333').text('Total items shipped: ' + totalItems, 50, ry);
     ry += 40;
     doc.moveTo(50, ry).lineTo(250, ry).lineWidth(0.5).strokeColor('#999').stroke();
-    doc.font('Helvetica').fontSize(8).fillColor('#666').text('Signature', 50, ry + 4);
+    doc.font('Helvetica').fontSize(10).fillColor('#666').text('Signature', 50, ry + 4);
     doc.moveTo(300, ry).lineTo(500, ry).lineWidth(0.5).strokeColor('#999').stroke();
     doc.text('Date', 300, ry + 4);
     doc.page.margins.bottom = 0;
-    doc.font('Helvetica').fontSize(7).fillColor('#666');
+    doc.font('Helvetica').fontSize(10.5).fillColor('#666');
     doc.text('Carolina Rolling Co. Inc. | (562) 633-1044 | keepitrolling@carolinarolling.com', 50, 755, { width: 512, align: 'center', lineBreak: false });
     doc.end();
   });
@@ -2201,7 +2201,7 @@ router.get('/:id/pickup/:index/receipt', async (req, res, next) => {
     if (logoFile) try { doc.image(logoFile, 50, 20, { width: 60 }); } catch {}
     if (hasYellowcake) doc.font('Yellowcake').fontSize(14).fillColor('#333').text('Carolina Rolling Co. Inc.', 125, 28);
     else doc.font('Helvetica-Bold').fontSize(14).fillColor('#333').text('CAROLINA ROLLING CO. INC.', 125, 28);
-    doc.font('Helvetica').fontSize(8).fillColor('#666');
+    doc.font('Helvetica').fontSize(10).fillColor('#666');
     doc.text('9152 Sonrisa St., Bellflower, CA 90706', 125, 46);
     doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 125, 57);
     doc.moveTo(50, 92).lineTo(562, 92).lineWidth(1).strokeColor('#e0e0e0').stroke();
@@ -2216,23 +2216,23 @@ router.get('/:id/pickup/:index/receipt', async (req, res, next) => {
     const titleLabel = entry.type === 'full' ? 'PICKUP RECEIPT — FULL SHIPMENT' : `PICKUP RECEIPT — PARTIAL SHIPMENT #${pickupNum}`;
     doc.font('Helvetica-Bold').fontSize(11).fillColor('#e65100').text(titleLabel, 50, 102);
     doc.font('Helvetica-Bold').fontSize(10).fillColor('#333').text('DR-' + String(workOrder.drNumber || ''), 400, 102, { width: 162, align: 'right' });
-    doc.font('Helvetica').fontSize(8).fillColor('#666');
+    doc.font('Helvetica').fontSize(10).fillColor('#666');
     doc.text(fmtDatePT(pickupDate) + '  ' + fmtTimePT(pickupDate) + ' PT', 400, 116, { width: 162, align: 'right' });
     doc.moveTo(50, 128).lineTo(562, 128).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
 
     // Customer info
     let ry = 138;
-    doc.font('Helvetica').fontSize(8).fillColor('#666').text('Customer', 50, ry); ry += 12;
+    doc.font('Helvetica').fontSize(10).fillColor('#666').text('Customer', 50, ry); ry += 12;
     doc.font('Helvetica').fontSize(10).fillColor('#333').text(workOrder.clientName || '', 50, ry); ry += 14;
-    doc.font('Helvetica').fontSize(9).fillColor('#666');
+    doc.font('Helvetica').fontSize(11).fillColor('#666');
     doc.text('P.O: ' + (workOrder.clientPurchaseOrderNumber || '—'), 50, ry); ry += 12;
     doc.text('Picked Up By: ' + (entry.pickedUpBy || '—'), 50, ry); ry += 12;
-    doc.font('Helvetica-Bold').fontSize(9).fillColor('#333');
+    doc.font('Helvetica-Bold').fontSize(11).fillColor('#333');
     doc.text('Date & Time: ' + fmtDateLongPT(pickupDate) + ' at ' + fmtTimeFullPT(pickupDate) + ' PT', 50, ry); ry += 20;
 
     // Items table
     doc.moveTo(50, ry).lineTo(562, ry).lineWidth(0.5).strokeColor('#e0e0e0').stroke(); ry += 8;
-    doc.font('Helvetica-Bold').fontSize(8).fillColor('#666');
+    doc.font('Helvetica-Bold').fontSize(10).fillColor('#666');
     doc.text('QTY', 50, ry, { width: 35 });
     doc.text('PART #', 90, ry);
     doc.text('DESCRIPTION', 200, ry);
@@ -2271,7 +2271,7 @@ router.get('/:id/pickup/:index/receipt', async (req, res, next) => {
       if (ry > 680) { doc.addPage(); ry = 50; }
       doc.font('Helvetica-Bold').fontSize(10).fillColor('#333');
       doc.text(String(item.quantity || 0), 50, ry, { width: 35 });
-      doc.font('Helvetica').fontSize(9).fillColor('#333');
+      doc.font('Helvetica').fontSize(11).fillColor('#333');
       doc.text(item.clientPartNumber || (workOrder.drNumber ? String(workOrder.drNumber) + '-' + String(item.partNumber || '') : String(item.partNumber || '')), 90, ry, { width: 105 });
       let desc = (item.description || '')
         .replace(/^\d+pc:\s*/i, '')
@@ -2281,7 +2281,7 @@ router.get('/:id/pickup/:index/receipt', async (req, res, next) => {
       doc.text(desc, 200, ry, { width: 360 });
       ry += doc.heightOfString(desc, { width: 360 }) + 1;
       if (item.rollingDescription) {
-        doc.font('Helvetica').fontSize(8.5).fillColor('#555');
+        doc.font('Helvetica').fontSize(10.5).fillColor('#555');
         doc.text(item.rollingDescription, 200, ry, { width: 360 });
         ry += doc.heightOfString(item.rollingDescription, { width: 360 }) + 1;
       }
@@ -2301,7 +2301,7 @@ router.get('/:id/pickup/:index/receipt', async (req, res, next) => {
       });
       svcLabels.forEach(label => {
         ry += 2;
-        doc.font('Helvetica').fontSize(8).fillColor('#1565c0')
+        doc.font('Helvetica').fontSize(10).fillColor('#1565c0')
           .text('  + ' + label, 200, ry, { width: 360 });
         ry += doc.heightOfString('  + ' + label, { width: 360 }) + 1;
       });
@@ -2322,7 +2322,7 @@ router.get('/:id/pickup/:index/receipt', async (req, res, next) => {
       if (ry > 680) { doc.addPage(); ry = 50; }
       doc.font('Helvetica-Bold').fontSize(10).fillColor('#333');
       doc.text(String(item.quantity || 0), 50, ry, { width: 35 });
-      doc.font('Helvetica').fontSize(9).fillColor('#333');
+      doc.font('Helvetica').fontSize(11).fillColor('#333');
       doc.text(String(item.partNumber || ''), 90, ry, { width: 105 });
       const woPart = woPartsMap[item.partId] || woPartsMap[item.partNumber];
       const fd = woPart?.formData && typeof woPart.formData === 'object' ? woPart.formData : {};
@@ -2340,13 +2340,13 @@ router.get('/:id/pickup/:index/receipt', async (req, res, next) => {
     // Signature lines
     ry += 40;
     doc.moveTo(50, ry).lineTo(250, ry).lineWidth(0.5).strokeColor('#999').stroke();
-    doc.font('Helvetica').fontSize(8).fillColor('#666').text('Signature', 50, ry + 4);
+    doc.font('Helvetica').fontSize(10).fillColor('#666').text('Signature', 50, ry + 4);
     doc.moveTo(300, ry).lineTo(500, ry).lineWidth(0.5).strokeColor('#999').stroke();
     doc.text('Date', 300, ry + 4);
 
     // Footer
     doc.page.margins.bottom = 0;
-    doc.font('Helvetica').fontSize(7).fillColor('#666');
+    doc.font('Helvetica').fontSize(10.5).fillColor('#666');
     doc.text('Carolina Rolling Co. Inc. | (562) 633-1044 | keepitrolling@carolinarolling.com', 50, 755, { width: 512, align: 'center', lineBreak: false });
 
     doc.end();
@@ -3170,7 +3170,7 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
                 doc.moveTo(50, 185).lineTo(562, 185).lineWidth(0.5).strokeColor('#ccc').stroke();
                 // Parts table
                 let y = 200;
-                doc.fontSize(9).font('Helvetica-Bold').fillColor('white');
+                doc.fontSize(11).font('Helvetica-Bold').fillColor('white');
                 doc.rect(50, y, 512, 16).fill('#1976d2');
                 doc.text('#', 55, y + 4, { width: 25, lineBreak: false });
                 doc.text('Description', 80, y + 4, { width: 260, lineBreak: false });
@@ -3185,7 +3185,7 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
                   const desc = merged._materialDescription || merged.materialDescription || merged.partType || '';
                   if (y > 700) { doc.addPage(); y = 50; }
                   if (idx % 2 === 1) doc.rect(50, y, 512, 18).fill('#f5f5f5');
-                  doc.fontSize(8).font('Helvetica').fillColor('#333');
+                  doc.fontSize(10).font('Helvetica').fillColor('#333');
                   doc.text(String(p.partNumber), 55, y + 4, { width: 25, lineBreak: false });
                   doc.text(desc.substring(0, 55), 80, y + 4, { width: 260, lineBreak: false });
                   doc.text(String(p.quantity || ''), 340, y + 4, { width: 40, lineBreak: false });
@@ -3197,7 +3197,7 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
                 y += 16;
                 doc.moveTo(50, y).lineTo(562, y).lineWidth(0.5).strokeColor('#ccc').stroke();
                 y += 12;
-                doc.fontSize(9).font('Helvetica').fillColor('#333')
+                doc.fontSize(11).font('Helvetica').fillColor('#333')
                   .text('Carolina Rolling Co. Inc. certifies that the above described material and/or parts conform to all applicable requirements specified and were produced in accordance with applicable quality standards.', 50, y, { width: 512 });
                 y += 40;
                 doc.text('Certified By: Jason Thornton', 50, y);
@@ -3205,7 +3205,7 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
                 y += 20;
                 doc.moveTo(50, y).lineTo(250, y).lineWidth(0.5).strokeColor('#555').stroke();
                 doc.text('Authorized Signature', 50, y + 4, { fontSize: 8 });
-                doc.fontSize(7).fillColor('#888').text('Carolina Rolling Co. Inc. | (562) 633-1044 | keepitrolling@carolinarolling.com', 50, 750, { width: 512, align: 'center' });
+                doc.fontSize(10.5).fillColor('#888').text('Carolina Rolling Co. Inc. | (562) 633-1044 | keepitrolling@carolinarolling.com', 50, 750, { width: 512, align: 'center' });
                 doc.end();
               });
               const pdfBuffer = Buffer.concat(chunks);
@@ -4562,7 +4562,7 @@ async function generateTransportPO(poNumber, vendor, trip, workOrder, parts) {
 
       const headerY = 52;
       doc.fontSize(14).font('Helvetica-Bold').fillColor('#7b1fa2').text('CAROLINA ROLLING COMPANY INC.', L, headerY);
-      doc.fontSize(8).font('Helvetica').fillColor('#444');
+      doc.fontSize(10).font('Helvetica').fillColor('#444');
       doc.text('9152 Sonrisa St, Bellflower, CA 90706', L, headerY + 18);
       doc.text('Phone: (562) 633-1044  •  Email: keepitrolling@carolinarolling.com', L, headerY + 28);
 
@@ -4579,19 +4579,19 @@ async function generateTransportPO(poNumber, vendor, trip, workOrder, parts) {
       // VENDOR box
       doc.rect(L, boxY, halfW, boxH).lineWidth(1).strokeColor('#ddd').stroke();
       doc.rect(L, boxY, halfW, 16).fill('#F3E5F5');
-      doc.fontSize(8).font('Helvetica-Bold').fillColor('#7b1fa2').text('TRUCKING VENDOR', L + 8, boxY + 4);
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#7b1fa2').text('TRUCKING VENDOR', L + 8, boxY + 4);
       doc.fontSize(10).font('Helvetica-Bold').fillColor('#000').text(vendor.name || '', L + 8, boxY + 22, { width: halfW - 16 });
-      if (vendor.contactName) doc.fontSize(8).font('Helvetica').text(`Attn: ${vendor.contactName}`, L + 8, boxY + 38);
-      if (vendor.address) doc.fontSize(8).text(vendor.address, L + 8, boxY + 50, { width: halfW - 16 });
+      if (vendor.contactName) doc.fontSize(10).font('Helvetica').text(`Attn: ${vendor.contactName}`, L + 8, boxY + 38);
+      if (vendor.address) doc.fontSize(10).text(vendor.address, L + 8, boxY + 50, { width: halfW - 16 });
 
       // SERVICE box
       const boxX2 = L + halfW + 16;
       doc.rect(boxX2, boxY, halfW, boxH).lineWidth(1).strokeColor('#ddd').stroke();
       doc.rect(boxX2, boxY, halfW, 16).fill('#F3E5F5');
-      doc.fontSize(8).font('Helvetica-Bold').fillColor('#7b1fa2').text('TRANSPORT TYPE', boxX2 + 8, boxY + 4);
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#7b1fa2').text('TRANSPORT TYPE', boxX2 + 8, boxY + 4);
       doc.fontSize(11).font('Helvetica-Bold').fillColor('#000').text(`${trip.leg} Transport`, boxX2 + 8, boxY + 22, { width: halfW - 16 });
-      doc.fontSize(8).font('Helvetica').fillColor('#666').text('REFERENCE WORK ORDER', boxX2 + 8, boxY + 50);
-      doc.fontSize(9).font('Helvetica-Bold').fillColor('#000').text(workOrder.drNumber ? `DR-${workOrder.drNumber}` : (workOrder.orderNumber || '-'), boxX2 + 8, boxY + 62);
+      doc.fontSize(10).font('Helvetica').fillColor('#666').text('REFERENCE WORK ORDER', boxX2 + 8, boxY + 50);
+      doc.fontSize(11).font('Helvetica-Bold').fillColor('#000').text(workOrder.drNumber ? `DR-${workOrder.drNumber}` : (workOrder.orderNumber || '-'), boxX2 + 8, boxY + 62);
 
       // PO details row
       const detY = boxY + boxH + 12;
@@ -4605,14 +4605,14 @@ async function generateTransportPO(poNumber, vendor, trip, workOrder, parts) {
         const x = L + (i * colW);
         doc.rect(x, detY, colW, 32).lineWidth(0.5).strokeColor('#ddd').stroke();
         doc.rect(x, detY, colW, 14).fill('#f5f5f5');
-        doc.fontSize(7).font('Helvetica-Bold').fillColor('#888').text(label, x + 6, detY + 3);
-        doc.fontSize(9).font('Helvetica-Bold').fillColor('#000').text(value, x + 6, detY + 17, { width: colW - 12 });
+        doc.fontSize(10.5).font('Helvetica-Bold').fillColor('#888').text(label, x + 6, detY + 3);
+        doc.fontSize(11).font('Helvetica-Bold').fillColor('#000').text(value, x + 6, detY + 17, { width: colW - 12 });
       });
 
       // Items being transported
       const tableY = detY + 46;
       doc.rect(L, tableY, W, 18).fill('#7b1fa2');
-      doc.fontSize(8).font('Helvetica-Bold').fillColor('#fff');
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#fff');
       doc.text('PART #', L + 6, tableY + 5);
       doc.text('QTY', L + 70, tableY + 5);
       doc.text('DESCRIPTION', L + 110, tableY + 5);
@@ -4639,9 +4639,9 @@ async function generateTransportPO(poNumber, vendor, trip, workOrder, parts) {
         doc.moveTo(L, rowY + rowHeight).lineTo(R, rowY + rowHeight).strokeColor('#e0e0e0').lineWidth(0.5).stroke();
 
         doc.fillColor('#000');
-        doc.fontSize(9).font('Helvetica-Bold').text(`${partObj.partNumber}`, L + 6, rowY + 6);
+        doc.fontSize(11).font('Helvetica-Bold').text(`${partObj.partNumber}`, L + 6, rowY + 6);
         doc.font('Helvetica').text(`${qty}`, L + 70, rowY + 6);
-        doc.fontSize(8.5).text(cleanDesc, L + 110, rowY + 6, { width: W - 116 });
+        doc.fontSize(10.5).text(cleanDesc, L + 110, rowY + 6, { width: W - 116 });
         rowY += rowHeight;
       });
 
@@ -4660,18 +4660,18 @@ async function generateTransportPO(poNumber, vendor, trip, workOrder, parts) {
 
       doc.rect(L, rowY, W, 36).lineWidth(1.5).strokeColor('#7b1fa2').stroke();
       doc.rect(L, rowY, W, 14).fill('#F3E5F5');
-      doc.fontSize(8).font('Helvetica-Bold').fillColor('#7b1fa2').text('⚠ IMPORTANT', L + 8, rowY + 3);
-      doc.fontSize(9).font('Helvetica-Bold').fillColor('#7b1fa2');
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#7b1fa2').text('⚠ IMPORTANT', L + 8, rowY + 3);
+      doc.fontSize(11).font('Helvetica-Bold').fillColor('#7b1fa2');
       doc.text(`Reference ${poNumber} on all paperwork.`, L + 8, rowY + 18);
       rowY += 46;
 
-      doc.fontSize(8).font('Helvetica-Bold').fillColor('#333').text('TERMS:', L, rowY);
-      doc.fontSize(8).font('Helvetica').fillColor('#444');
+      doc.fontSize(10).font('Helvetica-Bold').fillColor('#333').text('TERMS:', L, rowY);
+      doc.fontSize(10).font('Helvetica').fillColor('#444');
       doc.text(`• Reference Work Order: ${workOrder.drNumber ? 'DR-' + workOrder.drNumber : workOrder.orderNumber}`, L + 8, rowY + 14);
       doc.text(`• ${trip.leg === 'Outbound' ? 'Pickup from Carolina Rolling, deliver to outside processor' : 'Pickup from outside processor, deliver to Carolina Rolling'}`, L + 8, rowY + 26);
       if (trip.notes) {
-        doc.fontSize(8).font('Helvetica-Bold').fillColor('#333').text('NOTES:', L, rowY + 46);
-        doc.fontSize(8).font('Helvetica').fillColor('#444').text(trip.notes, L + 8, rowY + 58, { width: W - 16 });
+        doc.fontSize(10).font('Helvetica-Bold').fillColor('#333').text('NOTES:', L, rowY + 46);
+        doc.fontSize(10).font('Helvetica').fillColor('#444').text(trip.notes, L + 8, rowY + 58, { width: W - 16 });
       }
 
       doc.end();
@@ -6519,7 +6519,7 @@ router.post('/:id/coc', async (req, res, next) => {
     const writeFooter = () => {
       const savedY = doc.y;
       doc.page.margins.bottom = 0; // temporarily remove bottom margin
-      doc.font('Helvetica').fontSize(7).fillColor(grayColor);
+      doc.font('Helvetica').fontSize(10.5).fillColor(grayColor);
       doc.text('Carolina Rolling Co. Inc. | (562) 633-1044 | keepitrolling@carolinarolling.com          Page ' + pageNum, 50, 755, { width: 512, align: 'center', lineBreak: false });
       doc.page.margins.bottom = 50; // restore
       doc.y = savedY; // restore cursor
@@ -6537,7 +6537,7 @@ router.post('/:id/coc', async (req, res, next) => {
     // ===== PAGE 1 HEADER (only on first page) =====
     if (logoFile) try { doc.image(logoFile, 50, 18, { width: 58 }); } catch {}
     drawCompanyName(125, 28);
-    doc.font('Helvetica').fontSize(8.5).fillColor(grayColor);
+    doc.font('Helvetica').fontSize(10.5).fillColor(grayColor);
     doc.text('9152 Sonrisa St., Bellflower, CA 90706', 125, 48);
     doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 125, 60);
 
@@ -6546,7 +6546,7 @@ router.post('/:id/coc', async (req, res, next) => {
     doc.text('CERTIFICATE OF CONFORMANCE', 340, 28, { width: 222, align: 'right' });
     doc.font('Helvetica-Bold').fontSize(10).fillColor(darkColor);
     doc.text('Job No: ' + String(workOrder.drNumber || ''), 340, 48, { width: 222, align: 'right' });
-    doc.font('Helvetica').fontSize(9).fillColor(grayColor);
+    doc.font('Helvetica').fontSize(11).fillColor(grayColor);
     doc.text('Date: ' + dateStr, 340, 62, { width: 222, align: 'right' });
 
     // Divider below header
@@ -6554,7 +6554,7 @@ router.post('/:id/coc', async (req, res, next) => {
 
     // Customer section — left justified, not bold, proper spacing
     let y = 94;
-    doc.font('Helvetica').fontSize(8).fillColor(grayColor);
+    doc.font('Helvetica').fontSize(10).fillColor(grayColor);
     doc.text('Customer', 50, y);
     y += 14;
     doc.font('Helvetica').fontSize(10).fillColor(darkColor);
@@ -6562,7 +6562,7 @@ router.post('/:id/coc', async (req, res, next) => {
     y += 14;
     const client = await Client.findOne({ where: { name: workOrder.clientName || '' } });
     if (client) {
-      doc.font('Helvetica').fontSize(9).fillColor(grayColor);
+      doc.font('Helvetica').fontSize(11).fillColor(grayColor);
       if (client.address) { doc.text(client.address, 50, y); y += 12; }
       let cl = '';
       if (client.city) cl += client.city;
@@ -6571,14 +6571,14 @@ router.post('/:id/coc', async (req, res, next) => {
       if (cl) { doc.text(cl, 50, y); y += 12; }
     }
     y += 6;
-    doc.font('Helvetica').fontSize(9).fillColor(grayColor);
+    doc.font('Helvetica').fontSize(11).fillColor(grayColor);
     doc.text('Customer P.O: ' + (workOrder.clientPurchaseOrderNumber || '—'), 50, y);
     y += 20;
 
     // Parts table
     doc.moveTo(50, y).lineTo(562, y).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
     y += 8;
-    doc.font('Helvetica-Bold').fontSize(8).fillColor(grayColor);
+    doc.font('Helvetica-Bold').fontSize(10).fillColor(grayColor);
     doc.text('QTY', 50, y, { width: 30 });
     doc.text('PART NUMBER', 85, y);
     doc.text('SIZE / MATERIAL', 200, y);
@@ -6605,20 +6605,20 @@ router.post('/:id/coc', async (req, res, next) => {
 
       doc.font('Helvetica-Bold').fontSize(10).fillColor(darkColor);
       doc.text(String(p.quantity || 1), 50, y, { width: 30 });
-      doc.font('Helvetica').fontSize(9).fillColor(darkColor);
+      doc.font('Helvetica').fontSize(11).fillColor(darkColor);
       doc.text(p.clientPartNumber || 'SEE DESCRIPTION', 85, y, { width: 110 });
       if (matDesc) {
-        doc.font('Helvetica').fontSize(9).fillColor(darkColor);
+        doc.font('Helvetica').fontSize(11).fillColor(darkColor);
         doc.text(matDesc, 200, y, { width: 360 });
         y += doc.heightOfString(matDesc, { width: 360 }) + 1;
       } else { y += 12; }
       if (rollDesc) {
-        doc.font('Helvetica').fontSize(8.5).fillColor(grayColor);
+        doc.font('Helvetica').fontSize(10.5).fillColor(grayColor);
         doc.text(rollDesc, 200, y, { width: 360 });
         y += doc.heightOfString(rollDesc, { width: 360 }) + 1;
       }
       if (p.specialInstructions) {
-        doc.font('Helvetica-Oblique').fontSize(8).fillColor('#999');
+        doc.font('Helvetica-Oblique').fontSize(10).fillColor('#999');
         doc.text(p.specialInstructions, 200, y, { width: 360 });
         y += doc.heightOfString(p.specialInstructions, { width: 360 }) + 1;
       }
@@ -6634,15 +6634,15 @@ router.post('/:id/coc', async (req, res, next) => {
     y += 16;
     doc.moveTo(50, y).lineTo(562, y).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
     y += 12;
-    doc.font('Helvetica').fontSize(9).fillColor(darkColor);
+    doc.font('Helvetica').fontSize(11).fillColor(darkColor);
     doc.text('We hereby certify that parts described above were cold formed and comply with', 50, y, { width: 512, align: 'center' });
     y += 13;
     doc.font('Helvetica-Bold').fontSize(10).fillColor(darkColor);
     doc.text('ASME Section VIII Div.1, UG-79, UG-80, & UCS-79', 50, y, { width: 512, align: 'center' });
     y += 26;
-    doc.font('Helvetica-Bold').fontSize(9).fillColor(darkColor).text('Certified By:', 50, y); y += 13;
+    doc.font('Helvetica-Bold').fontSize(11).fillColor(darkColor).text('Certified By:', 50, y); y += 13;
     doc.font('Helvetica-Bold').fontSize(11).text(certifiedBy || 'Jason Thornton', 50, y); y += 13;
-    doc.font('Helvetica').fontSize(9).fillColor(grayColor).text('Carolina Rolling Co., Inc.', 50, y); y += 13;
+    doc.font('Helvetica').fontSize(11).fillColor(grayColor).text('Carolina Rolling Co., Inc.', 50, y); y += 13;
     doc.text('Date: ' + dateStr, 50, y);
 
     // WPS page
@@ -6651,20 +6651,20 @@ router.post('/:id/coc', async (req, res, next) => {
       // WPS header — only on WPS page
       if (logoFile) try { doc.image(logoFile, 50, 18, { width: 58 }); } catch {}
       drawCompanyName(125, 28);
-      doc.font('Helvetica').fontSize(8.5).fillColor(grayColor);
+      doc.font('Helvetica').fontSize(10.5).fillColor(grayColor);
       doc.text('9152 Sonrisa St., Bellflower, CA 90706', 125, 48);
       doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 125, 60);
       doc.font('Helvetica-Bold').fontSize(11).fillColor(primaryColor);
       doc.text('WELDING PROCEDURE SPECIFICATION', 340, 28, { width: 222, align: 'right' });
       doc.font('Helvetica-Bold').fontSize(10).fillColor(darkColor);
       doc.text('WPS: ' + (wps.wpsNumber || ''), 340, 48, { width: 222, align: 'right' });
-      doc.font('Helvetica').fontSize(9).fillColor(grayColor);
+      doc.font('Helvetica').fontSize(11).fillColor(grayColor);
       doc.text('Date: ' + new Date(wps.updatedAt || wps.createdAt).toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: '2-digit', day: '2-digit', year: '2-digit' }), 340, 62, { width: 222, align: 'right' });
       doc.moveTo(50, 82).lineTo(562, 82).lineWidth(1).strokeColor('#e0e0e0').stroke();
 
       let wy = 96;
-      const wR = (l, v) => { if (!v) return; doc.font('Helvetica-Bold').fontSize(9).fillColor(grayColor).text(l, 50, wy, { width: 130 }); doc.font('Helvetica').fontSize(9).fillColor(darkColor).text(v, 185, wy, { width: 370 }); wy += 15; };
-      const wH = (t) => { wy += 5; doc.font('Helvetica-Bold').fontSize(9).fillColor(primaryColor).text(t, 50, wy); wy += 12; doc.moveTo(50, wy).lineTo(562, wy).lineWidth(0.3).strokeColor('#ddd').stroke(); wy += 7; };
+      const wR = (l, v) => { if (!v) return; doc.font('Helvetica-Bold').fontSize(11).fillColor(grayColor).text(l, 50, wy, { width: 130 }); doc.font('Helvetica').fontSize(11).fillColor(darkColor).text(v, 185, wy, { width: 370 }); wy += 15; };
+      const wH = (t) => { wy += 5; doc.font('Helvetica-Bold').fontSize(11).fillColor(primaryColor).text(t, 50, wy); wy += 12; doc.moveTo(50, wy).lineTo(562, wy).lineWidth(0.3).strokeColor('#ddd').stroke(); wy += 7; };
       wR('Process', wps.process); wR('Type', wps.processType);
       wH('Base Materials'); wR('Base Materials', wps.baseMaterials);
       wH('Filler'); wR('SFA Specification', wps.sfaSpecification); wR('AWS Classification', wps.awsClassification); wR('Size', wps.fillerSize);
@@ -6672,11 +6672,11 @@ router.post('/:id/coc', async (req, res, next) => {
       wR('Back Gouging', wps.backGouging); wR('Pass Type', wps.passType); wR('Preheat', wps.preheat); wR('Current', wps.current); wR('Voltage', wps.voltage);
       if (wps.notes) {
         wH('Notes / Procedure');
-        doc.font('Helvetica').fontSize(8.5).fillColor(darkColor);
+        doc.font('Helvetica').fontSize(10.5).fillColor(darkColor);
         wps.notes.split('\n').forEach(ln => { if (ln.trim()) { doc.text(ln.trim(), 50, wy, { width: 512 }); wy += doc.heightOfString(ln.trim(), { width: 512 }) + 2; } });
       }
       wy += 14; doc.moveTo(50, wy).lineTo(562, wy).lineWidth(0.5).strokeColor('#e0e0e0').stroke(); wy += 10;
-      doc.font('Helvetica').fontSize(8).fillColor(grayColor);
+      doc.font('Helvetica').fontSize(10).fillColor(grayColor);
       doc.text('Updated by: ' + (wps.updatedBy || 'Jason Thornton'), 50, wy); wy += 11;
       doc.text('Date: ' + new Date(wps.updatedAt || wps.createdAt).toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: '2-digit', day: '2-digit', year: '2-digit' }), 50, wy); wy += 11;
       doc.text('Signature: ' + (wps.updatedBy || 'Jason Thornton'), 50, wy);

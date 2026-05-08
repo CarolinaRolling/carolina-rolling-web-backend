@@ -231,6 +231,29 @@ function mergeFormData(part) {
  * even if the cached _rollingDescription or _materialDescription in formData is stale.
  * Does NOT modify the database — only enriches the API response.
  */
+// Portal whitelist — only expose safe fields to client portal API keys
+function portalSanitizeWO(wo) {
+  const WO_ALLOWED = ['id', 'drNumber', 'orderNumber', 'status', 'clientName',
+    'clientPurchaseOrderNumber', 'description', 'promisedDate', 'requestedDueDate',
+    'receivedAt', 'shippedAt', 'completedAt', 'pickedUpAt', 'pickedUpBy',
+    'estimateNumber', 'estimateId', 'priority', 'pickupHistory', 'createdAt', 'updatedAt'];
+  const safe = {};
+  WO_ALLOWED.forEach(f => { if (wo[f] !== undefined) safe[f] = wo[f]; });
+  if (wo.parts) {
+    safe.parts = wo.parts.map(p => ({
+      id: p.id, partNumber: p.partNumber, partType: p.partType, quantity: p.quantity,
+      status: p.status, clientPartNumber: p.clientPartNumber, heatNumber: p.heatNumber,
+      materialDescription: p.materialDescription, description: p.description,
+      specialInstructions: p.specialInstructions, completedAt: p.completedAt,
+      completedBy: p.completedBy, progressCount: p.progressCount,
+      files: (p.files || []).filter(f => f.vendorPortalVisible || f.fileType === 'pdf_print')
+        .map(f => ({ id: f.id, originalName: f.originalName, fileType: f.fileType, url: f.url, cloudinaryId: f.cloudinaryId }))
+    }));
+  }
+  if (wo.documents) safe.documents = wo.documents.filter(d => d.portalVisible);
+  return safe;
+}
+
 function refreshDerivedFields(part) {
   // === Rolling Description: rebuild direction from rollType ===
   if (part._rollingDescription && part.rollType) {
@@ -1123,8 +1146,11 @@ router.get('/', async (req, res, next) => {
       return data;
     });
 
+    const finalRows = (req.apiKey && req.apiKey.clientName && !req.apiKey.deviceName)
+      ? rowsWithThumbnails.map(portalSanitizeWO)
+      : rowsWithThumbnails;
     res.json({
-      data: rowsWithThumbnails,
+      data: finalRows,
       total: workOrders.count,
       limit: parseInt(limit),
       offset: parseInt(offset)
@@ -1412,41 +1438,8 @@ router.get('/:id', async (req, res, next) => {
       woJson.vendorIssues = [];
     }
 
-    // Whitelist — only expose what the portal needs from work orders
     if (req.apiKey && req.apiKey.clientName && !req.apiKey.deviceName) {
-      const WO_ALLOWED = ['id', 'drNumber', 'orderNumber', 'status', 'clientName',
-        'clientPurchaseOrderNumber', 'description', 'promisedDate', 'requestedDueDate',
-        'receivedAt', 'shippedAt', 'completedAt', 'pickedUpAt', 'pickedUpBy',
-        'estimateNumber', 'estimateId', 'priority', 'notes',
-        'pickupHistory', 'requiresPartLabels', 'vendorIssues', 'createdAt', 'updatedAt'];
-      const portalWO = {};
-      WO_ALLOWED.forEach(f => { if (woJson[f] !== undefined) portalWO[f] = woJson[f]; });
-
-      // Parts: only operational/descriptive fields
-      if (woJson.parts) {
-        portalWO.parts = woJson.parts.map(p => ({
-          id: p.id,
-          partNumber: p.partNumber,
-          partType: p.partType,
-          quantity: p.quantity,
-          status: p.status,
-          clientPartNumber: p.clientPartNumber,
-          heatNumber: p.heatNumber,
-          materialDescription: p.materialDescription,
-          description: p.description,
-          specialInstructions: p.specialInstructions,
-          completedAt: p.completedAt,
-          completedBy: p.completedBy,
-          progressCount: p.progressCount
-        }));
-      }
-
-      // Documents: only portal-visible ones
-      if (woJson.documents) {
-        portalWO.documents = (woJson.documents || []).filter(d => d.portalVisible);
-      }
-
-      res.json({ data: portalWO });
+      res.json({ data: portalSanitizeWO(woJson) });
       return;
     }
 

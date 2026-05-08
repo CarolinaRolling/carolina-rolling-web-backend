@@ -784,6 +784,12 @@ async function startServer() {
         `ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commArchived" BOOLEAN DEFAULT false`,
         `ALTER TABLE payroll_entries ADD COLUMN IF NOT EXISTS "sortOrder" INTEGER DEFAULT 999`,
     ];
+    // Fix existing MTR/COC docs that weren't set as portalVisible
+    try {
+      await sequelize.query(`UPDATE work_order_documents SET "portalVisible" = true WHERE "documentType" IN ('mtr','coc','shipping_doc') AND "portalVisible" = false`);
+      console.log('MTR/COC portalVisible backfill complete');
+    } catch (e) { console.log('portalVisible backfill skip:', e.message); }
+
     for (const sql of migrations) {
       try { await sequelize.query(sql); } catch (e) { console.log('migration skip:', e.message.split('\n')[0]); }
     }

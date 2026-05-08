@@ -4096,7 +4096,8 @@ router.post('/:id/documents', documentUpload.array('documents', 10), async (req,
           url: result.url,
           cloudinaryId: result.storageId,
           documentType: req.body.documentType || null,
-          portalVisible: req.body.portalVisible === 'true' || req.body.portalVisible === true || false
+          portalVisible: req.body.portalVisible === 'true' || req.body.portalVisible === true
+            || ['mtr', 'coc', 'shipping_doc'].includes(req.body.documentType) || false
         });
 
         documents.push(document);

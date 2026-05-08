@@ -112,22 +112,31 @@ function cleanNumericFields(data, fields = NUMERIC_FIELDS) {
 
 // Helper to log activity for daily email
 
-// Strip sensitive pricing from estimate parts for portal keys
+// Whitelist — only expose what the portal needs from estimates
 function stripEstimatePricing(estimate) {
-  const PART_PRICING = ['materialUnitCost', 'materialMarkupPercent', 'materialTotal',
-    'laborTotal', 'setupCharge', 'otherCharges', 'partTotal', 'laborRate', 'laborHours',
-    'outsideProcessingCost', 'serviceFittingCost', 'serviceWeldingCost', 'serviceWeldingPercent',
-    'rfqContact', 'rfqEmail', 'rfqPhone', 'rfqSentAt', 'vendorId', 'supplierName'];
   const e = estimate.toJSON ? estimate.toJSON() : { ...estimate };
+  // Estimate-level: only operational + total fields
+  const ESTIMATE_ALLOWED = ['id', 'estimateNumber', 'status', 'clientName',
+    'clientPurchaseOrderNumber', 'grandTotal', 'subtotal', 'taxAmount', 'taxRate',
+    'truckingCost', 'discount', 'sentAt', 'acceptedAt', 'validUntil', 'createdAt',
+    'updatedAt', 'notes', 'internalNotes'];
+  const safe = {};
+  ESTIMATE_ALLOWED.forEach(f => { if (e[f] !== undefined) safe[f] = e[f]; });
+  // Parts: only descriptive fields, no pricing
   if (e.parts) {
-    e.parts = e.parts.map(p => {
-      const part = { ...p };
-      PART_PRICING.forEach(f => delete part[f]);
-      return part;
-    });
+    safe.parts = e.parts.map(p => ({
+      id: p.id,
+      partNumber: p.partNumber,
+      partType: p.partType,
+      quantity: p.quantity,
+      clientPartNumber: p.clientPartNumber,
+      description: p.description || p.materialDescription,
+      status: p.status
+    }));
   }
-  // Keep grandTotal, subtotal, taxAmount, taxRate — client sees their quote total
-  return e;
+  // Files: keep all (PDFs, COCs etc.)
+  if (e.files) safe.files = e.files;
+  return safe;
 }
 
 async function logActivity(type, resourceType, resourceId, resourceNumber, clientName, description, details = {}) {

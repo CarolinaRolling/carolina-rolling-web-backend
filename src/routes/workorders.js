@@ -1412,28 +1412,42 @@ router.get('/:id', async (req, res, next) => {
       woJson.vendorIssues = [];
     }
 
-    // Strip sensitive pricing fields if request is from a client portal key
+    // Whitelist — only expose what the portal needs from work orders
     if (req.apiKey && req.apiKey.clientName && !req.apiKey.deviceName) {
-      const PRICING_FIELDS = ['materialUnitCost', 'materialMarkupPercent', 'materialTotal', 'laborTotal',
-        'setupCharge', 'otherCharges', 'partTotal', 'outsideProcessingCost', 'outsideProcessingVendor',
-        'outsideProcessingStatus', 'serviceFittingCost', 'serviceWeldingCost', 'serviceWeldingPercent',
-        'rfqContact', 'rfqEmail', 'rfqPhone', 'rfqSentAt', 'vendorEstimateNumber',
-        'materialMarkup', 'totalPrice', 'laborRate', 'laborHours'];
-      const stripPricing = (part) => {
-        const p = { ...part };
-        PRICING_FIELDS.forEach(f => delete p[f]);
-        // Also strip from formData
-        if (p.formData && typeof p.formData === 'object') {
-          const fd = { ...p.formData };
-          ['_materialCost', '_laborCost', '_markup', '_unitCost', '_pricePerUnit'].forEach(f => delete fd[f]);
-          p.formData = fd;
-        }
-        return p;
-      };
-      if (woJson.parts) woJson.parts = woJson.parts.map(stripPricing);
-      // Also strip WO-level pricing
-      delete woJson.totalPrice;
-      delete woJson.laborRate;
+      const WO_ALLOWED = ['id', 'drNumber', 'orderNumber', 'status', 'clientName',
+        'clientPurchaseOrderNumber', 'description', 'promisedDate', 'requestedDueDate',
+        'receivedAt', 'shippedAt', 'completedAt', 'pickedUpAt', 'pickedUpBy',
+        'estimateNumber', 'estimateId', 'priority', 'notes',
+        'pickupHistory', 'requiresPartLabels', 'vendorIssues', 'createdAt', 'updatedAt'];
+      const portalWO = {};
+      WO_ALLOWED.forEach(f => { if (woJson[f] !== undefined) portalWO[f] = woJson[f]; });
+
+      // Parts: only operational/descriptive fields
+      if (woJson.parts) {
+        portalWO.parts = woJson.parts.map(p => ({
+          id: p.id,
+          partNumber: p.partNumber,
+          partType: p.partType,
+          quantity: p.quantity,
+          status: p.status,
+          clientPartNumber: p.clientPartNumber,
+          heatNumber: p.heatNumber,
+          materialDescription: p.materialDescription,
+          description: p.description,
+          specialInstructions: p.specialInstructions,
+          completedAt: p.completedAt,
+          completedBy: p.completedBy,
+          progressCount: p.progressCount
+        }));
+      }
+
+      // Documents: only portal-visible ones
+      if (woJson.documents) {
+        portalWO.documents = (woJson.documents || []).filter(d => d.portalVisible);
+      }
+
+      res.json({ data: portalWO });
+      return;
     }
 
     res.json({ data: woJson });

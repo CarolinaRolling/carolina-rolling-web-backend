@@ -1412,6 +1412,30 @@ router.get('/:id', async (req, res, next) => {
       woJson.vendorIssues = [];
     }
 
+    // Strip sensitive pricing fields if request is from a client portal key
+    if (req.apiKey && req.apiKey.clientName && !req.apiKey.deviceName) {
+      const PRICING_FIELDS = ['materialUnitCost', 'materialMarkupPercent', 'materialTotal', 'laborTotal',
+        'setupCharge', 'otherCharges', 'partTotal', 'outsideProcessingCost', 'outsideProcessingVendor',
+        'outsideProcessingStatus', 'serviceFittingCost', 'serviceWeldingCost', 'serviceWeldingPercent',
+        'rfqContact', 'rfqEmail', 'rfqPhone', 'rfqSentAt', 'vendorEstimateNumber',
+        'materialMarkup', 'totalPrice', 'laborRate', 'laborHours'];
+      const stripPricing = (part) => {
+        const p = { ...part };
+        PRICING_FIELDS.forEach(f => delete p[f]);
+        // Also strip from formData
+        if (p.formData && typeof p.formData === 'object') {
+          const fd = { ...p.formData };
+          ['_materialCost', '_laborCost', '_markup', '_unitCost', '_pricePerUnit'].forEach(f => delete fd[f]);
+          p.formData = fd;
+        }
+        return p;
+      };
+      if (woJson.parts) woJson.parts = woJson.parts.map(stripPricing);
+      // Also strip WO-level pricing
+      delete woJson.totalPrice;
+      delete woJson.laborRate;
+    }
+
     res.json({ data: woJson });
   } catch (error) {
     next(error);

@@ -111,6 +111,25 @@ function cleanNumericFields(data, fields = NUMERIC_FIELDS) {
 }
 
 // Helper to log activity for daily email
+
+// Strip sensitive pricing from estimate parts for portal keys
+function stripEstimatePricing(estimate) {
+  const PART_PRICING = ['materialUnitCost', 'materialMarkupPercent', 'materialTotal',
+    'laborTotal', 'setupCharge', 'otherCharges', 'partTotal', 'laborRate', 'laborHours',
+    'outsideProcessingCost', 'serviceFittingCost', 'serviceWeldingCost', 'serviceWeldingPercent',
+    'rfqContact', 'rfqEmail', 'rfqPhone', 'rfqSentAt', 'vendorId', 'supplierName'];
+  const e = estimate.toJSON ? estimate.toJSON() : { ...estimate };
+  if (e.parts) {
+    e.parts = e.parts.map(p => {
+      const part = { ...p };
+      PART_PRICING.forEach(f => delete part[f]);
+      return part;
+    });
+  }
+  // Keep grandTotal, subtotal, taxAmount, taxRate — client sees their quote total
+  return e;
+}
+
 async function logActivity(type, resourceType, resourceId, resourceNumber, clientName, description, details = {}) {
   try {
     await DailyActivity.create({
@@ -617,8 +636,11 @@ router.get('/', async (req, res, next) => {
       }
     }
 
+    const rows = req.apiKey?.clientName && !req.apiKey?.deviceName
+      ? estimates.rows.map(stripEstimatePricing)
+      : estimates.rows;
     res.json({
-      data: estimates.rows,
+      data: rows,
       total: estimates.count,
       limit: parseInt(limit),
       offset: parseInt(offset)
@@ -677,7 +699,10 @@ router.get('/:id', async (req, res, next) => {
       });
     }
 
-    res.json({ data: estimateData });
+    const responseData = req.apiKey?.clientName && !req.apiKey?.deviceName
+      ? stripEstimatePricing(estimateData)
+      : estimateData;
+    res.json({ data: responseData });
   } catch (error) {
     next(error);
   }

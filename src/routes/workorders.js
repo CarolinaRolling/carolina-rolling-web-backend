@@ -231,14 +231,17 @@ function mergeFormData(part) {
  * even if the cached _rollingDescription or _materialDescription in formData is stale.
  * Does NOT modify the database — only enriches the API response.
  */
-// Portal whitelist — only expose safe fields to client portal API keys
+// Portal whitelist — only expose what the portal needs from work orders
 function portalSanitizeWO(wo) {
   const WO_ALLOWED = ['id', 'drNumber', 'orderNumber', 'status', 'clientName',
     'clientPurchaseOrderNumber', 'description', 'promisedDate', 'requestedDueDate',
     'receivedAt', 'shippedAt', 'completedAt', 'pickedUpAt', 'pickedUpBy',
-    'estimateNumber', 'estimateId', 'priority', 'pickupHistory', 'createdAt', 'updatedAt'];
+    'estimateNumber', 'estimateId', 'priority', 'pickupHistory', 'thumbnailUrl',
+    'createdAt', 'updatedAt'];
   const safe = {};
   WO_ALLOWED.forEach(f => { if (wo[f] !== undefined) safe[f] = wo[f]; });
+
+  // Parts: only operational/descriptive fields
   if (wo.parts) {
     safe.parts = wo.parts.map(p => ({
       id: p.id, partNumber: p.partNumber, partType: p.partType, quantity: p.quantity,
@@ -246,11 +249,37 @@ function portalSanitizeWO(wo) {
       materialDescription: p.materialDescription, description: p.description,
       specialInstructions: p.specialInstructions, completedAt: p.completedAt,
       completedBy: p.completedBy, progressCount: p.progressCount,
-      files: (p.files || []).filter(f => f.vendorPortalVisible || f.fileType === 'pdf_print')
+      files: (p.files || []).filter(f => f.fileType === 'pdf_print')
         .map(f => ({ id: f.id, originalName: f.originalName, fileType: f.fileType, url: f.url, cloudinaryId: f.cloudinaryId }))
     }));
   }
-  if (wo.documents) safe.documents = wo.documents.filter(d => d.portalVisible);
+
+  // Documents: COCs, MTRs, shipping docs — anything portal-visible
+  if (wo.documents) {
+    safe.documents = wo.documents
+      .filter(d => d.portalVisible)
+      .map(d => ({ id: d.id, originalName: d.originalName, documentType: d.documentType,
+        mimeType: d.mimeType, size: d.size, url: d.url, cloudinaryId: d.cloudinaryId,
+        createdAt: d.createdAt }));
+  }
+
+  // Shipment photos — client can see what we shipped them
+  if (wo.shipment) {
+    safe.shipment = {
+      id: wo.shipment.id,
+      location: wo.shipment.location,
+      status: wo.shipment.status,
+      receivedAt: wo.shipment.receivedAt,
+      photos: (wo.shipment.photos || []).map(p => ({ id: p.id, url: p.url, caption: p.caption }))
+    };
+  }
+  if (wo.shipments) {
+    safe.shipments = wo.shipments.map(s => ({
+      id: s.id, location: s.location, status: s.status, receivedAt: s.receivedAt,
+      photos: (s.photos || []).map(p => ({ id: p.id, url: p.url, caption: p.caption }))
+    }));
+  }
+
   return safe;
 }
 

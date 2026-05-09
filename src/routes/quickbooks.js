@@ -1,4 +1,6 @@
 const express = require('express');
+const path = require('path');
+const fs = require('fs');
 const { WorkOrder, WorkOrderPart, Client, InvoiceNumber, AppSettings, sequelize } = require('../models');
 
 const router = express.Router();
@@ -368,6 +370,298 @@ async function buildInvoiceIIF(wo, parts, client, invoiceNum) {
   };
 }
 
+
+// ==================== INVOICE PDF GENERATOR ====================
+
+async function generateInvoicePDFBuffer(wo, parts, client) {
+  const PDFDocument = require('pdfkit');
+  const { calculatePartTotal } = require('../services/pricing');
+
+  return new Promise(async (resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ margin: 50, size: 'letter' });
+      const chunks = [];
+      doc.on('data', c => chunks.push(c));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+
+      const logoFile = [path.join(__dirname, '../assets/logo.png'), path.join(__dirname, '../assets/logo.jpg')].find(p => fs.existsSync(p));
+      const yellowcakePath = path.join(__dirname, '../assets/fonts/Yellowcake-Regular.ttf');
+      let hasYellowcake = false;
+      try { if (fs.existsSync(yellowcakePath)) { doc.registerFont('Yellowcake', yellowcakePath); hasYellowcake = true; } } catch {}
+
+      const fmtDate = (d) => new Date(d).toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: '2-digit', day: '2-digit', year: 'numeric' });
+      const fmtCur = (v) => '$' + (parseFloat(v) || 0).toFixed(2);
+
+      // ── Header ──
+      if (logoFile) try { doc.image(logoFile, 50, 20, { width: 60 }); } catch {}
+      if (hasYellowcake) doc.font('Yellowcake').fontSize(14).fillColor('#333').text('Carolina Rolling Co. Inc.', 125, 28);
+      else doc.font('Helvetica-Bold').fontSize(14).fillColor('#333').text('CAROLINA ROLLING CO. INC.', 125, 28);
+      doc.font('Helvetica').fontSize(10).fillColor('#666');
+      doc.text('9152 Sonrisa St., Bellflower, CA 90706', 125, 46);
+      doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 125, 57);
+      doc.moveTo(50, 86).lineTo(562, 86).lineWidth(2).strokeColor('#e65100').stroke();
+
+      // ── Invoice title + number ──
+      doc.font('Helvetica-Bold').fontSize(13).fillColor('#e65100').text('INVOICE', 50, 96);
+      const invNum = wo.invoiceNumber || wo.drNumber;
+      doc.font('Helvetica-Bold').fontSize(11).fillColor('#333').text(`#${invNum}`, 400, 96, { width: 162, align: 'right' });
+      doc.moveTo(50, 116).lineTo(562, 116).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
+
+      // ── Bill To + Invoice Details ──
+      let y = 126;
+      const clientName = client?.name || wo.clientName || '';
+      const terms = mapTerms(client?.paymentTerms);
+      const invoiceDate = fmtDate(wo.invoiceDate || wo.shippedAt || wo.completedAt || new Date());
+      const drLabel = wo.drNumber ? `DR-${wo.drNumber}` : (wo.orderNumber || '');
+      const clientPO = wo.clientPurchaseOrderNumber || '';
+
+      doc.font('Helvetica-Bold').fontSize(9.5).fillColor('#888').text('BILL TO', 50, y);
+      doc.font('Helvetica-Bold').fontSize(9.5).fillColor('#888').text('INVOICE DATE', 370, y);
+      doc.font('Helvetica-Bold').fontSize(9.5).fillColor('#888').text('WORK ORDER', 480, y);
+      y += 14;
+      doc.font('Helvetica-Bold').fontSize(11).fillColor('#333').text(clientName, 50, y, { width: 250 });
+      doc.font('Helvetica').fontSize(11).fillColor('#333').text(invoiceDate, 370, y);
+      doc.font('Helvetica').fontSize(11).fillColor('#333').text(drLabel, 480, y);
+      y += 16;
+      if (clientPO) {
+        doc.font('Helvetica').fontSize(10).fillColor('#555').text(`P.O.: ${clientPO}`, 50, y);
+        y += 14;
+      }
+      doc.font('Helvetica').fontSize(10).fillColor('#555').text(`Terms: ${terms}`, 50, y);
+      y += 20;
+      doc.moveTo(50, y).lineTo(562, y).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
+      y += 8;
+
+      // ── Table Header ──
+      doc.rect(50, y, 512, 18).fill('#333');
+      doc.font('Helvetica-Bold').fontSize(9.5).fillColor('white');
+      doc.text('PART #', 55, y + 4, { width: 50 });
+      doc.text('DESCRIPTION', 110, y + 4, { width: 250 });
+      doc.text('QTY', 365, y + 4, { width: 40, align: 'right' });
+      doc.text('UNIT PRICE', 410, y + 4, { width: 80, align: 'right' });
+      doc.text('AMOUNT', 495, y + 4, { width: 62, align: 'right' });
+      y += 22;
+
+      // ── Line Items ──
+      const SERVICE_TYPES = ['fab_service', 'shop_rate', 'rush_service'];
+      const sorted = [...parts].sort((a, b) => (a.partNumber || 0) - (b.partNumber || 0));
+      const regularParts = sorted.filter(p => !SERVICE_TYPES.includes(p.partType));
+      const serviceParts = sorted.filter(p => SERVICE_TYPES.includes(p.partType));
+
+      const servicesByParent = new Map();
+      for (const svc of serviceParts) {
+        const fd = svc.formData && typeof svc.formData === 'object' ? svc.formData : {};
+        const parentId = fd._linkedPartId || regularParts.find(p => (p.partNumber || 0) < (svc.partNumber || 0))?.id;
+        if (parentId) {
+          if (!servicesByParent.has(parentId)) servicesByParent.set(parentId, []);
+          servicesByParent.get(parentId).push(svc);
+        }
+      }
+
+      let subtotal = 0;
+      const isResale = (client?.taxStatus || '').toLowerCase() === 'resale' || (client?.taxStatus || '').toLowerCase() === 'exempt';
+
+      for (let i = 0; i < regularParts.length; i++) {
+        const part = regularParts[i];
+        const linked = servicesByParent.get(part.id) || [];
+        const partAmt = calculatePartTotal(part);
+        const svcAmt = linked.reduce((s, svc) => s + calculatePartTotal(svc), 0);
+        const total = partAmt + svcAmt;
+        const qty = parseInt(part.quantity) || 1;
+        const unitPrice = qty > 0 ? total / qty : total;
+        subtotal += total;
+
+        const fd = part.formData && typeof part.formData === 'object' ? part.formData : {};
+        let matDesc = clean(fd._materialDescription || part.materialDescription || '').replace(/^\d+pc:?\s*/i, '');
+        const rollDesc = fd._rollingDescription ? clean(fd._rollingDescription.split(/\n/)[0]) : '';
+        const partLabel = wo.drNumber ? `${wo.drNumber}-${part.partNumber}` : String(part.partNumber || '');
+
+        if (y > 690) { doc.addPage(); y = 50; }
+
+        const shade = i % 2 === 1;
+        const rowH = rollDesc ? 32 : 18;
+        if (shade) doc.rect(50, y, 512, rowH).fill('#fafafa');
+
+        doc.font('Helvetica').fontSize(10).fillColor('#333');
+        doc.text(partLabel, 55, y + 4, { width: 50 });
+        doc.font('Helvetica-Bold').fontSize(10).fillColor('#333').text(matDesc.substring(0, 45), 110, y + 4, { width: 250 });
+        if (rollDesc) doc.font('Helvetica').fontSize(9).fillColor('#666').text(rollDesc.substring(0, 55), 110, y + 16, { width: 250 });
+        doc.font('Helvetica').fontSize(10).fillColor('#333');
+        doc.text(String(qty), 365, y + 4, { width: 40, align: 'right' });
+        doc.text(fmtCur(unitPrice), 410, y + 4, { width: 80, align: 'right' });
+        doc.font('Helvetica-Bold').fontSize(10).fillColor('#333').text(fmtCur(total), 495, y + 4, { width: 62, align: 'right' });
+        y += rowH;
+        doc.moveTo(50, y).lineTo(562, y).lineWidth(0.2).strokeColor('#eee').stroke();
+      }
+
+      // Unlinked services
+      for (const svc of serviceParts.filter(s => !Array.from(servicesByParent.values()).flat().includes(s))) {
+        const amt = calculatePartTotal(svc);
+        if (amt <= 0) continue;
+        subtotal += amt;
+        if (y > 690) { doc.addPage(); y = 50; }
+        const fd = svc.formData && typeof svc.formData === 'object' ? svc.formData : {};
+        const label = clean(fd._serviceType || svc.partType || 'Service');
+        doc.font('Helvetica').fontSize(10).fillColor('#333');
+        doc.text('—', 55, y + 4, { width: 50 });
+        doc.text(label, 110, y + 4, { width: 250 });
+        doc.text('1', 365, y + 4, { width: 40, align: 'right' });
+        doc.text(fmtCur(amt), 410, y + 4, { width: 80, align: 'right' });
+        doc.font('Helvetica-Bold').fontSize(10).text(fmtCur(amt), 495, y + 4, { width: 62, align: 'right' });
+        y += 18;
+        doc.moveTo(50, y).lineTo(562, y).lineWidth(0.2).strokeColor('#eee').stroke();
+      }
+
+      // Trucking
+      const trucking = parseFloat(wo.truckingCost) || 0;
+      if (trucking > 0) {
+        subtotal += trucking;
+        if (y > 690) { doc.addPage(); y = 50; }
+        doc.font('Helvetica').fontSize(10).fillColor('#333');
+        doc.text('—', 55, y + 4, { width: 50 });
+        doc.text(clean(wo.truckingDescription || 'Trucking / Delivery'), 110, y + 4, { width: 250 });
+        doc.text('1', 365, y + 4, { width: 40, align: 'right' });
+        doc.text(fmtCur(trucking), 410, y + 4, { width: 80, align: 'right' });
+        doc.font('Helvetica-Bold').fontSize(10).text(fmtCur(trucking), 495, y + 4, { width: 62, align: 'right' });
+        y += 18;
+        doc.moveTo(50, y).lineTo(562, y).lineWidth(0.2).strokeColor('#eee').stroke();
+      }
+
+      // Discount
+      const discountPct = parseFloat(wo.discountPercent) || 0;
+      const discountAmt = parseFloat(wo.discountAmount) || 0;
+      let discountTotal = discountPct > 0 ? Math.round(subtotal * discountPct / 100 * 100) / 100 : discountAmt;
+      if (discountTotal > 0) {
+        subtotal -= discountTotal;
+        const reason = wo.discountReason ? ` (${clean(wo.discountReason)})` : '';
+        const label = discountPct > 0 ? `Discount ${discountPct}%${reason}` : `Discount${reason}`;
+        doc.font('Helvetica').fontSize(10).fillColor('#c62828');
+        doc.text(label, 110, y + 4, { width: 380 });
+        doc.font('Helvetica-Bold').fontSize(10).text(`-${fmtCur(discountTotal)}`, 495, y + 4, { width: 62, align: 'right' });
+        y += 18;
+        doc.moveTo(50, y).lineTo(562, y).lineWidth(0.2).strokeColor('#eee').stroke();
+      }
+
+      // ── Totals ──
+      y += 8;
+      const taxRate = isResale ? 0 : (parseFloat(wo.taxRate) || 0);
+      const taxAmt = Math.round(subtotal * taxRate / 100 * 100) / 100;
+      const grandTotal = Math.round((subtotal + taxAmt) * 100) / 100;
+
+      const totRow = (label, value, bold = false) => {
+        doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(10).fillColor(bold ? '#333' : '#555');
+        doc.text(label, 370, y, { width: 120, align: 'right' });
+        doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(10).fillColor(bold ? '#333' : '#555');
+        doc.text(fmtCur(value), 495, y, { width: 62, align: 'right' });
+        y += 16;
+      };
+
+      totRow('Subtotal', subtotal);
+      if (taxAmt > 0) totRow(`Tax (${taxRate}%)`, taxAmt);
+      else if (!isResale) totRow('Tax', 0);
+      if (isResale) { doc.font('Helvetica').fontSize(8.5).fillColor('#888').text('Tax Exempt / Resale', 370, y, { width: 187, align: 'right' }); y += 12; }
+
+      // Grand total bar
+      doc.rect(370, y, 192, 22).fill('#333');
+      doc.font('Helvetica-Bold').fontSize(11).fillColor('white');
+      doc.text('TOTAL DUE', 375, y + 5, { width: 120, align: 'right' });
+      doc.text(fmtCur(grandTotal), 495, y + 5, { width: 62, align: 'right' });
+      y += 30;
+
+      // ── Footer ──
+      doc.moveTo(50, 730).lineTo(562, 730).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
+      doc.font('Helvetica').fontSize(8.5).fillColor('#aaa').text('Carolina Rolling Co. Inc.  |  (562) 633-1044  |  keepitrolling@carolinarolling.com  |  Thank you for your business!', 50, 738, { width: 512, align: 'center' });
+
+      doc.end();
+    } catch (err) { reject(err); }
+  });
+}
+
+// ==================== RECONCILIATION PDF GENERATOR ====================
+
+async function generateReconciliationPDFBuffer(items, batchId, exportDate) {
+  const PDFDocument = require('pdfkit');
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ margin: 50, size: 'letter' });
+    const chunks = [];
+    doc.on('data', c => chunks.push(c));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+
+    const logoFile = [path.join(__dirname, '../assets/logo.png'), path.join(__dirname, '../assets/logo.jpg')].find(p => fs.existsSync(p));
+    const yellowcakePath = path.join(__dirname, '../assets/fonts/Yellowcake-Regular.ttf');
+    let hasYellowcake = false;
+    try { if (fs.existsSync(yellowcakePath)) { doc.registerFont('Yellowcake', yellowcakePath); hasYellowcake = true; } } catch {}
+
+    const fmtDate = (d) => new Date(d).toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: '2-digit', day: '2-digit', year: 'numeric' });
+    const fmtCur = (v) => '$' + (parseFloat(v) || 0).toFixed(2);
+
+    // Header
+    if (logoFile) try { doc.image(logoFile, 50, 20, { width: 60 }); } catch {}
+    if (hasYellowcake) doc.font('Yellowcake').fontSize(14).fillColor('#333').text('Carolina Rolling Co. Inc.', 125, 28);
+    else doc.font('Helvetica-Bold').fontSize(14).fillColor('#333').text('CAROLINA ROLLING CO. INC.', 125, 28);
+    doc.font('Helvetica').fontSize(10).fillColor('#666').text('9152 Sonrisa St., Bellflower, CA 90706', 125, 46);
+    doc.moveTo(50, 80).lineTo(562, 80).lineWidth(2).strokeColor('#e65100').stroke();
+
+    doc.font('Helvetica-Bold').fontSize(13).fillColor('#e65100').text('QUICKBOOKS EXPORT — RECONCILIATION', 50, 90);
+    doc.font('Helvetica').fontSize(10).fillColor('#555');
+    doc.text(`Batch ID: ${batchId}`, 50, 108);
+    doc.text(`Export Date: ${fmtDate(exportDate)}`, 50, 120);
+    doc.text(`${items.length} invoice(s)`, 50, 132);
+    doc.moveTo(50, 148).lineTo(562, 148).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
+
+    let y = 158;
+
+    // Table header
+    doc.rect(50, y, 512, 18).fill('#333');
+    doc.font('Helvetica-Bold').fontSize(9).fillColor('white');
+    doc.text('✓', 56, y + 4, { width: 20 });
+    doc.text('INVOICE #', 82, y + 4, { width: 80 });
+    doc.text('DR #', 167, y + 4, { width: 60 });
+    doc.text('CLIENT', 232, y + 4, { width: 180 });
+    doc.text('CLIENT PO', 417, y + 4, { width: 90 });
+    doc.text('AMOUNT', 500, y + 4, { width: 57, align: 'right' });
+    y += 22;
+
+    let grandTotal = 0;
+    items.forEach((item, i) => {
+      if (y > 700) { doc.addPage(); y = 50; }
+      const shade = i % 2 === 1;
+      if (shade) doc.rect(50, y, 512, 18).fill('#f9f9f9');
+
+      // Checkbox
+      doc.rect(56, y + 3, 12, 12).lineWidth(1).strokeColor('#999').stroke();
+
+      doc.font('Helvetica-Bold').fontSize(10).fillColor('#2e7d32').text(`#${item.invoiceNumber}`, 82, y + 4, { width: 80 });
+      doc.font('Helvetica').fontSize(10).fillColor('#1565c0').text(item.drLabel, 167, y + 4, { width: 60 });
+      doc.font('Helvetica').fontSize(10).fillColor('#333').text((item.clientName || '').substring(0, 28), 232, y + 4, { width: 180 });
+      doc.font('Helvetica').fontSize(9).fillColor('#555').text((item.clientPO || '—').substring(0, 16), 417, y + 4, { width: 90 });
+      doc.font('Helvetica-Bold').fontSize(10).fillColor('#333').text(fmtCur(item.total), 500, y + 4, { width: 57, align: 'right' });
+      grandTotal += parseFloat(item.total) || 0;
+      y += 18;
+      doc.moveTo(50, y).lineTo(562, y).lineWidth(0.2).strokeColor('#eee').stroke();
+    });
+
+    // Total row
+    y += 6;
+    doc.moveTo(50, y).lineTo(562, y).lineWidth(1).strokeColor('#333').stroke();
+    y += 6;
+    doc.font('Helvetica-Bold').fontSize(11).fillColor('#333');
+    doc.text(`Total — ${items.length} invoices`, 50, y, { width: 400 });
+    doc.text(fmtCur(grandTotal), 500, y, { width: 57, align: 'right' });
+    y += 24;
+
+    // Instructions note
+    doc.moveTo(50, y).lineTo(562, y).lineWidth(0.5).strokeColor('#e0e0e0').stroke();
+    y += 10;
+    doc.font('Helvetica').fontSize(8.5).fillColor('#888');
+    doc.text('Instructions: After importing this batch into QuickBooks, check each invoice against the QB import log. Check the box next to each confirmed entry. Keep this document for your records.', 50, y, { width: 512 });
+
+    doc.end();
+  });
+}
+
 const IIF_HEADER = [
   '!TRNS\tTRNSID\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tDOCNUM\tMEMO\tCLEAR\tTOPRINT\tTERMS\tPONUM\tOTHER1',
   '!SPL\tSPLID\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tDOCNUM\tMEMO\tCLEAR\tQNTY\tPRICE\tINVITEM\tTAXABLE',
@@ -713,6 +1007,130 @@ router.post('/import-invoice-numbers', async (req, res, next) => {
     });
   } catch (error) {
     await transaction.rollback();
+    next(error);
+  }
+});
+
+
+// ==================== INVOICE PDF ====================
+
+// GET /api/quickbooks/invoice-pdf/:id — Generate + download invoice PDF
+router.get('/invoice-pdf/:id', async (req, res, next) => {
+  try {
+    const wo = await WorkOrder.findByPk(req.params.id, {
+      include: [
+        { model: WorkOrderPart, as: 'parts' },
+        { model: Client, as: 'client', attributes: ['id', 'name', 'taxStatus', 'paymentTerms', 'quickbooksName'] }
+      ]
+    });
+    if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
+    if (!wo.invoiceNumber) {
+      // Auto-assign if not yet assigned
+      const result = await sequelize.transaction(async (t) => {
+        const setting = await AppSettings.findOne({ where: { key: 'next_invoice_number' }, transaction: t });
+        let nextNum = setting?.value || 1001;
+        const highest = await InvoiceNumber.findOne({ order: [['invoiceNumber', 'DESC']], transaction: t });
+        if (highest && highest.invoiceNumber >= nextNum) nextNum = highest.invoiceNumber + 1;
+        await InvoiceNumber.create({ invoiceNumber: nextNum, workOrderId: wo.id, clientId: wo.clientId, clientName: wo.clientName }, { transaction: t });
+        await wo.update({ invoiceNumber: String(nextNum) }, { transaction: t });
+        await AppSettings.upsert({ key: 'next_invoice_number', value: nextNum + 1 }, { transaction: t });
+        return nextNum;
+      });
+      wo.invoiceNumber = String(result);
+    }
+    const client = await resolveClient(wo);
+    const pdfBuffer = await generateInvoicePDFBuffer(wo, wo.parts || [], client);
+    const filename = `invoice-${wo.invoiceNumber}-${(wo.clientName || '').replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(pdfBuffer);
+  } catch (error) {
+    console.error('[invoice-pdf] Error:', error.message);
+    next(error);
+  }
+});
+
+// POST /api/quickbooks/export-batch-with-reconciliation
+// Exports IIF + marks exported + returns reconciliation PDF
+router.post('/export-batch-with-reconciliation', async (req, res, next) => {
+  try {
+    const { workOrderIds } = req.body;
+    if (!workOrderIds?.length) return res.status(400).json({ error: { message: 'No work order IDs provided' } });
+
+    const { Op } = require('sequelize');
+    const workOrders = await WorkOrder.findAll({
+      where: { id: { [Op.in]: workOrderIds } },
+      include: [
+        { model: WorkOrderPart, as: 'parts' },
+        { model: Client, as: 'client', attributes: ['id', 'name', 'taxStatus', 'paymentTerms', 'quickbooksName'] }
+      ],
+      order: [['drNumber', 'ASC']]
+    });
+
+    // Assign invoice numbers to any without one
+    for (const wo of workOrders) {
+      if (!wo.invoiceNumber) {
+        const result = await sequelize.transaction(async (t) => {
+          const setting = await AppSettings.findOne({ where: { key: 'next_invoice_number' }, transaction: t });
+          let nextNum = setting?.value || 1001;
+          const highest = await InvoiceNumber.findOne({ order: [['invoiceNumber', 'DESC']], transaction: t });
+          if (highest && highest.invoiceNumber >= nextNum) nextNum = highest.invoiceNumber + 1;
+          await InvoiceNumber.create({ invoiceNumber: nextNum, workOrderId: wo.id, clientId: wo.clientId, clientName: wo.clientName }, { transaction: t });
+          await wo.update({ invoiceNumber: String(nextNum) }, { transaction: t });
+          await AppSettings.upsert({ key: 'next_invoice_number', value: nextNum + 1 }, { transaction: t });
+          return nextNum;
+        });
+        wo.invoiceNumber = String(result);
+      }
+    }
+
+    // Build IIF
+    const allLines = [];
+    const summaries = [];
+    const batchId = `BATCH-${new Date().toISOString().slice(0, 10)}-${Date.now().toString(36).toUpperCase()}`;
+    const exportDate = new Date();
+
+    for (const wo of workOrders) {
+      const client = await resolveClient(wo);
+      const result = await buildInvoiceIIF(wo, wo.parts || [], client, wo.invoiceNumber);
+      if (result) {
+        allLines.push(...result.lines);
+        summaries.push({
+          invoiceNumber: result.summary.invoiceNumber,
+          drLabel: result.summary.drNumber,
+          clientName: result.summary.clientName,
+          clientPO: result.summary.clientPO,
+          total: result.summary.total
+        });
+      }
+    }
+
+    if (allLines.length === 0) return res.status(400).json({ error: { message: 'No billable items found' } });
+
+    // Mark all as exported
+    await InvoiceNumber.update(
+      { iifExportedAt: exportDate, iifBatchId: batchId },
+      { where: { workOrderId: { [Op.in]: workOrderIds }, iifExportedAt: null } }
+    );
+
+    // Generate reconciliation PDF
+    const reconcPdf = await generateReconciliationPDFBuffer(summaries, batchId, exportDate);
+    const iifContent = [...IIF_HEADER, ...allLines].join('\r\n') + '\r\n';
+
+    // Return both as JSON with base64 encoded content
+    res.json({
+      data: {
+        batchId,
+        invoiceCount: summaries.length,
+        iifContent: Buffer.from(iifContent).toString('base64'),
+        iifFilename: `quickbooks-batch-${exportDate.toISOString().split('T')[0]}.iif`,
+        reconcPdf: reconcPdf.toString('base64'),
+        reconcFilename: `reconciliation-${batchId}.pdf`,
+        summaries
+      }
+    });
+  } catch (error) {
+    console.error('[export-batch-with-reconciliation] Error:', error.message);
     next(error);
   }
 });

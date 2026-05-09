@@ -436,8 +436,13 @@ portalRouter.get('/:drNumber/documents', async (req, res, next) => {
     if (!drNumber) return res.status(400).json({ error: { message: 'Invalid DR number' } });
     const workOrder = await portalModels.WorkOrder.findOne({ where: { drNumber } });
     if (!workOrder) return res.status(404).json({ error: { message: 'Order not found' } });
+    const { Op: portalOp } = require('sequelize');
     const documents = await portalModels.WorkOrderDocument.findAll({
-      where: { workOrderId: workOrder.id, portalVisible: true },
+      where: {
+        workOrderId: workOrder.id,
+        portalVisible: true,
+        documentType: { [portalOp.notIn]: ['mtr', 'purchase_order', 'outside_processing_po'] }
+      },
       order: [['createdAt', 'DESC']]
     });
     const data = await Promise.all(documents.map(async (d) => {
@@ -784,6 +789,14 @@ async function startServer() {
         `ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commArchived" BOOLEAN DEFAULT false`,
         `ALTER TABLE payroll_entries ADD COLUMN IF NOT EXISTS "sortOrder" INTEGER DEFAULT 999`,
     ];
+    // Add invoice export tracking fields
+    try {
+      await sequelize.query(`ALTER TABLE invoice_numbers ADD COLUMN IF NOT EXISTS "iifExportedAt" TIMESTAMP WITH TIME ZONE`);
+      await sequelize.query(`ALTER TABLE invoice_numbers ADD COLUMN IF NOT EXISTS "iifBatchId" VARCHAR(255)`);
+      await sequelize.query(`ALTER TABLE invoice_numbers ADD COLUMN IF NOT EXISTS "invoicePdfUrl" TEXT`);
+      await sequelize.query(`ALTER TABLE invoice_numbers ADD COLUMN IF NOT EXISTS "invoicePdfGenerated" BOOLEAN DEFAULT false`);
+    } catch (e) { console.log('Invoice fields migration skip:', e.message); }
+
     // Fix existing MTR/COC docs that weren't set as portalVisible
     try {
       await sequelize.query(`UPDATE work_order_documents SET "portalVisible" = true WHERE "documentType" IN ('mtr','coc','shipping_doc') AND "portalVisible" = false`);

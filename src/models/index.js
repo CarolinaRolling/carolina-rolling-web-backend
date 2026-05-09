@@ -2000,6 +2000,22 @@ const InvoiceNumber = sequelize.define('InvoiceNumber', {
   voidReason: {
     type: DataTypes.TEXT,
     allowNull: true
+  },
+  iifExportedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  iifBatchId: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  invoicePdfUrl: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  invoicePdfGenerated: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
   }
 }, {
   tableName: 'invoice_numbers',

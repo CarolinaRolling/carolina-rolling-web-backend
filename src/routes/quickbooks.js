@@ -1393,42 +1393,26 @@ router.post('/invoice-email/:id', async (req, res, next) => {
     // RFC 2047 encode subject to handle special characters (em dashes, accents, etc.)
     const emailSubject = `=?UTF-8?B?${Buffer.from(rawSubject).toString('base64')}?=`;
 
-    // Get invoice PDF from storage
-    const invoiceDoc = await require('../models').WorkOrderDocument.findOne({
-      where: { workOrderId: wo.id, documentType: 'invoice' },
-      order: [['createdAt', 'DESC']]
-    });
-
     let boundary = 'crco_boundary_' + Date.now();
     let pdfBase64 = '';
     let pdfFilename = `Invoice-${wo.invoiceNumber || drLabel}-${clientName.replace(/[^a-zA-Z0-9]/g,'_')}.pdf`;
 
-    if (invoiceDoc?.url) {
-      try {
-        // Try presigned URL first for S3, fall back to direct URL for Cloudinary
-        let fetchUrl = invoiceDoc.url;
-        if (invoiceDoc.cloudinaryId?.startsWith('s3:')) {
-          const presigned = await fileStorage.getPresignedUrl(invoiceDoc.cloudinaryId, 300);
-          if (presigned) fetchUrl = presigned;
-        }
-        const axios = require('axios');
-        const pdfRes = await axios.get(fetchUrl, { responseType: 'arraybuffer', timeout: 20000 });
-        const raw = Buffer.from(pdfRes.data).toString('base64');
-        pdfBase64 = raw.match(/.{1,76}/g).join('\r\n');
-        console.log('[invoice-email] PDF fetched ok, size:', pdfRes.data.byteLength);
-      } catch (e) {
-        console.error('[invoice-email] PDF fetch failed:', e.message);
-        // Last resort: try the stored URL directly
+    // Generate PDF fresh in memory — avoids S3 access issues entirely
+    try {
+      const WOPayment = sequelize.models.WorkOrderPayment;
+      let payments = [];
+      if (WOPayment) {
         try {
-          const axios = require('axios');
-          const pdfRes = await axios.get(invoiceDoc.url, { responseType: 'arraybuffer', timeout: 20000 });
-          const raw = Buffer.from(pdfRes.data).toString('base64');
-          pdfBase64 = raw.match(/.{1,76}/g).join('\r\n');
-          console.log('[invoice-email] PDF fetched via fallback, size:', pdfRes.data.byteLength);
-        } catch (e2) { console.error('[invoice-email] Both fetch attempts failed:', e2.message); }
+          const pmts = await WOPayment.findAll({ where: { workOrderId: wo.id, voidedAt: null }, order: [['paymentDate','ASC']] });
+          payments = pmts.map(p => p.toJSON());
+        } catch {}
       }
-    } else {
-      console.warn('[invoice-email] No invoice document found for WO:', wo.id);
+      const pdfBuffer = await generateInvoicePDFBuffer(wo, wo.parts || [], client, payments);
+      const raw = pdfBuffer.toString('base64');
+      pdfBase64 = raw.match(/.{1,76}/g).join('\r\n');
+      console.log('[invoice-email] PDF generated in memory, size:', pdfBuffer.length);
+    } catch (e) {
+      console.error('[invoice-email] PDF generation failed:', e.message);
     }
 
     const bodyText = body || `Dear ${clientName},

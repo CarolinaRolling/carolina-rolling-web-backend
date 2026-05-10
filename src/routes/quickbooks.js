@@ -453,11 +453,13 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = []) {
         doc.text('Due: Upon Receipt (COD)', 350, 87, { width: 212, align: 'right', lineBreak: false });
       }
 
-      // Divider
-      doc.strokeColor(lightGray).lineWidth(1).moveTo(50, 92).lineTo(562, 92).stroke();
+      // Divider — pushed down to give Due Date room
+      const hasTermsDue = getNetDays(client?.paymentTerms) !== null || (client?.paymentTerms || '').toUpperCase().includes('COD');
+      const headerDividerY = hasTermsDue ? 102 : 92;
+      doc.strokeColor(lightGray).lineWidth(1).moveTo(50, headerDividerY).lineTo(562, headerDividerY).stroke();
 
       // ── Bill To ──
-      let yPos = 104;
+      let yPos = headerDividerY + 12;
       doc.fontSize(10).fillColor(primaryColor).font('Helvetica-Bold').text('BILL TO:', 50, yPos, { lineBreak: false });
       doc.font('Helvetica');
       yPos += 16;
@@ -531,7 +533,9 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = []) {
         subtotal += total;
 
         const fd = (part.formData && typeof part.formData === 'object') ? part.formData : {};
-        const matDesc = clean(fd._materialDescription || part.materialDescription || '').replace(/^\d+pc:?\s*/i, '');
+        let matDesc = clean(fd._materialDescription || part.materialDescription || '').replace(/^\d+pc:?\s*/i, '');
+        if (!matDesc && part.specialInstructions) matDesc = '(See note below)';
+        else if (!matDesc) matDesc = PART_LABELS[part.partType] || 'Service';
         const typeLabel = PART_LABELS[part.partType] || (part.partType || '').replace(/_/g, ' ');
         const rollDesc = fd._rollingDescription ? clean(fd._rollingDescription.split(/\n/)[0]) : '';
         const partLabel = wo.drNumber ? `${wo.drNumber}-${part.partNumber}` : String(part.partNumber || itemNum);

@@ -682,8 +682,9 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = []) {
           doc.strokeColor('#f0f0f0').lineWidth(0.3).moveTo(50, yPos - 2).lineTo(562, yPos - 2).stroke();
         }
 
-        // Balance due
+        // Balance due — check page room first
         yPos += 4;
+        if (yPos + 26 > 720) { doc.addPage(); yPos = 50; }
         const finalBalance = Math.max(0, runningBalance);
         if (finalBalance <= 0.01) {
           doc.rect(50, yPos, 512, 22).fill('#e8f5e9');
@@ -695,12 +696,13 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = []) {
           doc.text('BALANCE DUE', 55, yPos + 6, { lineBreak: false });
           doc.text(fmtCur(finalBalance), 498, yPos + 6, { width: 64, align: 'right', lineBreak: false });
         }
-        yPos += 30;
+        yPos += 26;
       }
 
-      // Footer — only draw on first page, use yPos if there's room, otherwise fixed bottom
-      const footerY = yPos + 10 < 720 ? 730 : Math.min(yPos + 10, 760);
-      if (footerY <= 762) {
+      // Footer — only draw if enough room remains on this page (need ~30px)
+      const pageBottom = 742; // PDFKit letter page bottom margin
+      if (yPos + 30 < pageBottom) {
+        const footerY = Math.max(yPos + 10, 720);
         doc.strokeColor(lightGray).lineWidth(0.5).moveTo(50, footerY).lineTo(562, footerY).stroke();
         doc.font('Helvetica').fontSize(8.5).fillColor('#aaa')
           .text('Carolina Rolling Co. Inc.  |  9152 Sonrisa St., Bellflower, CA 90706  |  (562) 633-1044  |  keepitrolling@carolinarolling.com', 50, footerY + 8, { width: 512, align: 'center', lineBreak: false });
@@ -1403,19 +1405,28 @@ router.post('/invoice-email/:id', async (req, res, next) => {
 
     if (invoiceDoc?.url) {
       try {
-        const axios = require('axios');
-        // For S3 docs, get a fresh presigned URL to ensure access
+        // Try presigned URL first for S3, fall back to direct URL for Cloudinary
         let fetchUrl = invoiceDoc.url;
         if (invoiceDoc.cloudinaryId?.startsWith('s3:')) {
-          const key = invoiceDoc.cloudinaryId.slice(3);
-          fetchUrl = await fileStorage.getPresignedUrl(key, 300);
+          const presigned = await fileStorage.getPresignedUrl(invoiceDoc.cloudinaryId, 300);
+          if (presigned) fetchUrl = presigned;
         }
+        const axios = require('axios');
         const pdfRes = await axios.get(fetchUrl, { responseType: 'arraybuffer', timeout: 20000 });
-        // MIME requires base64 in 76-char lines
         const raw = Buffer.from(pdfRes.data).toString('base64');
         pdfBase64 = raw.match(/.{1,76}/g).join('\r\n');
-        console.log('[invoice-email] PDF fetched, size:', pdfRes.data.byteLength);
-      } catch (e) { console.error('[invoice-email] PDF fetch failed:', e.message, invoiceDoc.url); }
+        console.log('[invoice-email] PDF fetched ok, size:', pdfRes.data.byteLength);
+      } catch (e) {
+        console.error('[invoice-email] PDF fetch failed:', e.message);
+        // Last resort: try the stored URL directly
+        try {
+          const axios = require('axios');
+          const pdfRes = await axios.get(invoiceDoc.url, { responseType: 'arraybuffer', timeout: 20000 });
+          const raw = Buffer.from(pdfRes.data).toString('base64');
+          pdfBase64 = raw.match(/.{1,76}/g).join('\r\n');
+          console.log('[invoice-email] PDF fetched via fallback, size:', pdfRes.data.byteLength);
+        } catch (e2) { console.error('[invoice-email] Both fetch attempts failed:', e2.message); }
+      }
     } else {
       console.warn('[invoice-email] No invoice document found for WO:', wo.id);
     }

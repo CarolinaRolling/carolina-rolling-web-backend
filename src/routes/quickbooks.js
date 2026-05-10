@@ -1,7 +1,8 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
-const { WorkOrder, WorkOrderPart, Client, InvoiceNumber, AppSettings, sequelize } = require('../models');
+const fileStorage = require('../utils/storage');
+const { WorkOrder, WorkOrderPart, WorkOrderDocument, Client, InvoiceNumber, AppSettings, sequelize } = require('../models');
 
 const router = express.Router();
 
@@ -1041,6 +1042,46 @@ router.get('/invoice-pdf/:id', async (req, res, next) => {
     const client = await resolveClient(wo);
     const pdfBuffer = await generateInvoicePDFBuffer(wo, wo.parts || [], client);
     const filename = `invoice-${wo.invoiceNumber}-${(wo.clientName || '').replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
+
+    // Upload to storage and save as WO document
+    try {
+      const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, {
+        folder: `work-orders/${wo.id}/documents`,
+        filename,
+        mimeType: 'application/pdf'
+      });
+      console.log('[invoice-pdf] Upload result:', uploadResult?.url);
+
+      // Remove any previous invoice documents
+      await WorkOrderDocument.destroy({
+        where: { workOrderId: wo.id, documentType: 'invoice' }
+      });
+
+      // Save new invoice document
+      const doc = await WorkOrderDocument.create({
+        workOrderId: wo.id,
+        originalName: filename,
+        mimeType: 'application/pdf',
+        size: pdfBuffer.length,
+        url: uploadResult.url,
+        cloudinaryId: uploadResult.storageId,
+        documentType: 'invoice',
+        portalVisible: false
+      });
+      console.log('[invoice-pdf] Document saved:', doc.id);
+
+      // Update invoice record with PDF url (only if column exists)
+      try {
+        await InvoiceNumber.update(
+          { invoicePdfUrl: uploadResult.url, invoicePdfGenerated: true },
+          { where: { workOrderId: wo.id } }
+        );
+      } catch (invErr) { console.warn('[invoice-pdf] InvoiceNumber update skipped:', invErr.message); }
+
+    } catch (uploadErr) {
+      console.error('[invoice-pdf] Upload/save failed:', uploadErr.message, uploadErr.stack);
+    }
+
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(pdfBuffer);

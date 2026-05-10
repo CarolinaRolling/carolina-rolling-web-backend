@@ -49,6 +49,29 @@ function mapTerms(terms) {
   return TERMS_MAP[terms] || TERMS_MAP[terms.toUpperCase()] || terms.toUpperCase();
 }
 
+// Extract net days from payment terms string
+function getNetDays(terms) {
+  if (!terms) return null;
+  const t = terms.toUpperCase();
+  if (t === 'COD' || t === 'C.O.D.' || t.includes('COD')) return 0;
+  // Match "NET 30", "NET 60", "NET 30 DAYS", etc.
+  const netMatch = t.match(/NET\s+(\d+)/);
+  if (netMatch) return parseInt(netMatch[1]);
+  // Match "30 DAYS", "60 DAYS"
+  const daysMatch = t.match(/^(\d+)\s+DAYS?$/);
+  if (daysMatch) return parseInt(daysMatch[1]);
+  return null;
+}
+
+// Get the final (full) ship date from pickup history or shippedAt
+function getFinalShipDate(wo) {
+  const history = Array.isArray(wo.pickupHistory) ? wo.pickupHistory : [];
+  const fullShip = history.filter(e => e.type === 'full' || e.type === 'pickup').sort((a, b) => new Date(b.date || b.createdAt) - new Date(a.date || a.createdAt))[0];
+  if (fullShip?.date) return new Date(fullShip.date);
+  if (wo.shippedAt) return new Date(wo.shippedAt);
+  return null;
+}
+
 // Pricing utilities from shared module
 const { calculatePartTotal, roundUpMaterial, loadLaborMinimums, calculateMinimumAdjustment } = require('../services/pricing');
 
@@ -412,10 +435,23 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = []) {
       const invNum = wo.invoiceNumber || (wo.drNumber ? 'DR-' + wo.drNumber : '');
       doc.font('Helvetica-Bold').fontSize(10).fillColor(darkColor);
       doc.text('#' + invNum, 350, 52, { width: 212, align: 'right', lineBreak: false });
-      doc.font('Helvetica').fontSize(11).fillColor(grayColor);
+      doc.font('Helvetica').fontSize(10).fillColor(grayColor);
       doc.text('Date: ' + fmtDate(wo.invoiceDate || wo.shippedAt || wo.completedAt || new Date()), 350, 65, { width: 212, align: 'right', lineBreak: false });
       const terms = mapTerms(client?.paymentTerms);
-      doc.text('Terms: ' + terms, 350, 77, { width: 212, align: 'right', lineBreak: false });
+      doc.text('Terms: ' + terms, 350, 76, { width: 212, align: 'right', lineBreak: false });
+
+      // Due Date — based on final ship date + net days from terms
+      const netDays = getNetDays(client?.paymentTerms);
+      const finalShip = getFinalShipDate(wo);
+      if (netDays !== null && netDays > 0 && finalShip) {
+        const dueDate = new Date(finalShip);
+        dueDate.setDate(dueDate.getDate() + netDays);
+        doc.font('Helvetica-Bold').fontSize(10).fillColor('#c62828');
+        doc.text('Due: ' + fmtDate(dueDate), 350, 87, { width: 212, align: 'right', lineBreak: false });
+      } else if (netDays === 0) {
+        doc.font('Helvetica-Bold').fontSize(10).fillColor('#c62828');
+        doc.text('Due: Upon Receipt (COD)', 350, 87, { width: 212, align: 'right', lineBreak: false });
+      }
 
       // Divider
       doc.strokeColor(lightGray).lineWidth(1).moveTo(50, 92).lineTo(562, 92).stroke();

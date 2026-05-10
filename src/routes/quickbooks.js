@@ -379,7 +379,7 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = []) {
 
   return new Promise(async (resolve, reject) => {
     try {
-      const doc = new PDFDocument({ margin: 50, size: 'letter', bufferPages: true });
+      const doc = new PDFDocument({ margin: 50, size: 'letter' });
       const chunks = [];
       doc.on('data', c => chunks.push(c));
       doc.on('end', () => resolve(Buffer.concat(chunks)));
@@ -601,9 +601,10 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = []) {
 
       // Grand total box
       yPos += 4;
+      const hasPayments = payments.filter(p => !p.voidedAt).length > 0;
       doc.rect(350, yPos, 212, 26).fill(primaryColor).stroke();
       doc.font('Helvetica-Bold').fontSize(12).fillColor('white');
-      doc.text('TOTAL DUE', 355, yPos + 7, { width: 100, lineBreak: false });
+      doc.text(hasPayments ? 'INVOICE TOTAL' : 'TOTAL DUE', 355, yPos + 7, { width: 100, lineBreak: false });
       doc.text(fmtCur(grandTotal), 458, yPos + 7, { width: 100, align: 'right', lineBreak: false });
       yPos += 40;
 
@@ -631,7 +632,7 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = []) {
         const fmtPayDate = (d) => d ? new Date(d).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }) : '';
         const typeLabel = { downpayment: 'Down Payment', partial: 'Partial Payment', full: 'Payment in Full' };
         const methodLabel = { check: 'Check', ach: 'ACH', wire: 'Wire Transfer', credit_card: 'Credit Card', cash: 'Cash', other: 'Other' };
-        let runningBalance = subtotal + (isResale ? 0 : Math.round(subtotal * ((parseFloat(wo.taxRate)||0)/100) * 100)/100);
+        let runningBalance = grandTotal; // start from final invoice total including tax
         const grandTotal2 = runningBalance;
 
         for (const pmt of activePayments) {

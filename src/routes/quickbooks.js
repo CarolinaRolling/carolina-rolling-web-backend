@@ -438,7 +438,6 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = []) {
       doc.fontSize(10).fillColor(grayColor).font('Helvetica');
       const drLabel = wo.drNumber ? 'DR-' + wo.drNumber : (wo.orderNumber || '');
       doc.text('Work Order: ' + drLabel, 350, 104, { width: 212, align: 'right', lineBreak: false });
-      if (wo.completedAt) doc.text('Completed: ' + fmtDate(wo.completedAt), 350, 117, { width: 212, align: 'right', lineBreak: false });
 
       // ── Services & Materials table ──
       yPos = Math.max(yPos + 20, 165);
@@ -518,6 +517,14 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = []) {
         doc.font('Helvetica-Bold').fontSize(10).fillColor(darkColor).text(fmtCur(total), 498, yPos, { width: 64, align: 'right', lineBreak: false });
         yPos += rowH;
 
+        // Special instructions under part
+        const specialInstr = clean(part.specialInstructions || fd.specialInstructions || '');
+        if (specialInstr) {
+          if (yPos > 700) { doc.addPage(); yPos = 50; }
+          doc.font('Helvetica').fontSize(9).fillColor(grayColor).text('  Note: ' + specialInstr, 85, yPos, { width: 420, lineBreak: false });
+          yPos += 13;
+        }
+
         // Service note under part
         for (const svc of linked) {
           if (yPos > 700) { doc.addPage(); yPos = 50; }
@@ -532,14 +539,44 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = []) {
         itemNum++;
       }
 
-      // Unlinked services
+      // Unlinked services (fab, shop rate, etc.)
       for (const svc of serviceParts.filter(s => !Array.from(servicesByParent.values()).flat().includes(s))) {
-        const amt = calculatePartTotal(svc);
+        let amt = calculatePartTotal(svc);
+
+        // Rush service — fee stored in formData, not partTotal
+        if (svc.partType === 'rush_service' && amt <= 0) {
+          const fd = (svc.formData && typeof svc.formData === 'object') ? svc.formData : {};
+          if (fd._expediteEnabled) {
+            if (fd._expediteType === 'custom_amt') {
+              amt += parseFloat(fd._expediteCustomAmt) || 0;
+            } else {
+              let pct = parseFloat(fd._expediteType) || 0;
+              if (fd._expediteType === 'custom_pct') pct = parseFloat(fd._expediteCustomPct) || 0;
+              amt += subtotal * (pct / 100);
+            }
+          }
+          if (fd._emergencyEnabled) {
+            const emergOpts = { 'Saturday': 600, 'Saturday Night': 800, 'Sunday': 600, 'Sunday Night': 800 };
+            amt += emergOpts[fd._emergencyDay] || 0;
+          }
+        }
+
         if (amt <= 0) continue;
         subtotal += amt;
         if (yPos > 700) { doc.addPage(); yPos = 50; }
         const fd = (svc.formData && typeof svc.formData === 'object') ? svc.formData : {};
-        const label = clean(fd._serviceNotes || fd._serviceType || PART_LABELS[svc.partType] || 'Service');
+        let label;
+        if (svc.partType === 'rush_service') {
+          const parts = [];
+          if (fd._expediteEnabled) {
+            const pct = fd._expediteType === 'custom_pct' ? fd._expediteCustomPct : fd._expediteType;
+            parts.push(fd._expediteType === 'custom_amt' ? `Expedite Fee` : `Expedite Service (${pct}%)`);
+          }
+          if (fd._emergencyEnabled) parts.push(`Emergency Off-Hours (${fd._emergencyDay})`);
+          label = parts.join(' + ') || 'Rush / Emergency Service';
+        } else {
+          label = clean(fd._serviceNotes || fd._serviceType || PART_LABELS[svc.partType] || 'Service');
+        }
         doc.font('Helvetica').fontSize(10).fillColor(grayColor).text(String(itemNum), 50, yPos, { width: 30, lineBreak: false });
         doc.font('Helvetica').fontSize(10).fillColor(darkColor).text(label.substring(0, 48), 85, yPos, { width: 310, lineBreak: false });
         doc.text('1', 400, yPos, { width: 30, align: 'center', lineBreak: false });
@@ -608,17 +645,6 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = []) {
       doc.text(fmtCur(grandTotal), 458, yPos + 7, { width: 100, align: 'right', lineBreak: false });
       yPos += 40;
 
-      // Notes
-      if (wo.notes) {
-        yPos += 8;
-        doc.strokeColor(lightGray).lineWidth(0.5).moveTo(50, yPos).lineTo(562, yPos).stroke();
-        yPos += 10;
-        doc.font('Helvetica-Bold').fontSize(10).fillColor(primaryColor).text('NOTES', 50, yPos, { lineBreak: false });
-        yPos += 14;
-        doc.font('Helvetica').fontSize(10).fillColor(darkColor).text(clean(wo.notes), 50, yPos, { width: 512 });
-        yPos += doc.heightOfString(clean(wo.notes), { width: 512 }) + 8;
-      }
-
       // ── Payment History ──
       const activePayments = payments.filter(p => !p.voidedAt);
       if (activePayments.length > 0) {
@@ -642,15 +668,18 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = []) {
           const label = typeLabel[pmt.paymentType] || 'Payment';
           const method = methodLabel[pmt.paymentMethod] || pmt.paymentMethod || '';
           const ref = pmt.paymentReference ? ` — Ref: ${pmt.paymentReference}` : '';
+
+          // Layout: Date(80) | Description(220) | Amount(90,right) | Balance label+value(120,right)
           doc.font('Helvetica-Bold').fontSize(10).fillColor('#2e7d32');
-          doc.text(fmtPayDate(pmt.paymentDate), 50, yPos, { width: 90, lineBreak: false });
+          doc.text(fmtPayDate(pmt.paymentDate), 50, yPos, { width: 80, lineBreak: false });
           doc.font('Helvetica').fontSize(10).fillColor(darkColor);
-          doc.text(`${label}${method ? ' (' + method + ')' : ''}${ref}`, 145, yPos, { width: 270, lineBreak: false });
+          doc.text(`${label}${method ? ' (' + method + ')' : ''}${ref}`, 135, yPos, { width: 220, lineBreak: false });
           doc.font('Helvetica-Bold').fontSize(10).fillColor('#2e7d32');
-          doc.text('-' + fmtCur(pmtAmt), 420, yPos, { width: 80, align: 'right', lineBreak: false });
+          doc.text('-' + fmtCur(pmtAmt), 358, yPos, { width: 90, align: 'right', lineBreak: false });
           doc.font('Helvetica').fontSize(9).fillColor(grayColor);
-          doc.text('Balance: ' + fmtCur(Math.max(0, runningBalance)), 505, yPos, { width: 57, align: 'right', lineBreak: false });
-          yPos += 16;
+          doc.text('Bal: ' + fmtCur(Math.max(0, runningBalance)), 452, yPos, { width: 110, align: 'right', lineBreak: false });
+          yPos += 18;
+          doc.strokeColor('#f0f0f0').lineWidth(0.3).moveTo(50, yPos - 2).lineTo(562, yPos - 2).stroke();
         }
 
         // Balance due

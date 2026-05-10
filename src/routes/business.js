@@ -108,7 +108,8 @@ router.get('/ledger', async (req, res, next) => {
       sequelize.where(sequelize.cast(sequelize.col('drNumber'), 'TEXT'), { [Op.iLike]: `%${search}%` })
     ];
 
-    const { WorkOrderPart: WOPart, WorkOrderPayment: WOPayment } = require('../models');
+    const WOPart = sequelize.models.WorkOrderPart || require('../models').WorkOrderPart;
+    const WOPayment = sequelize.models.WorkOrderPayment || require('../models').WorkOrderPayment;
 
     // Load WOs with parts first
     const wos = await WorkOrder.findAll({
@@ -202,7 +203,7 @@ router.get('/ledger/:woId/payments', async (req, res, next) => {
 // POST /api/business/ledger/:woId/payments — Record a payment
 router.post('/ledger/:woId/payments', async (req, res, next) => {
   try {
-    const { WorkOrderPayment: WOP } = require('../models');
+    const WOP = sequelize.models.WorkOrderPayment || require('../models').WorkOrderPayment;
     if (!WOP) return res.status(503).json({ error: { message: 'Payment system initializing — please retry after deployment completes' } });
 
     const wo = await WorkOrder.findByPk(req.params.woId, {
@@ -246,7 +247,7 @@ router.post('/ledger/:woId/payments', async (req, res, next) => {
 // DELETE /api/business/ledger/payments/:paymentId — Void a payment
 router.delete('/ledger/payments/:paymentId', async (req, res, next) => {
   try {
-    const { WorkOrderPayment: WOP } = require('../models');
+    const WOP = sequelize.models.WorkOrderPayment || require('../models').WorkOrderPayment;
     if (!WOP) return res.status(503).json({ error: { message: 'Payment system initializing' } });
     const payment = await WOP.findByPk(req.params.paymentId);
     if (!payment) return res.status(404).json({ error: { message: 'Payment not found' } });

@@ -669,10 +669,13 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = []) {
         yPos += 30;
       }
 
-      // Footer
-      doc.strokeColor(lightGray).lineWidth(0.5).moveTo(50, 730).lineTo(562, 730).stroke();
-      doc.font('Helvetica').fontSize(8.5).fillColor('#aaa')
-        .text('Carolina Rolling Co. Inc.  |  9152 Sonrisa St., Bellflower, CA 90706  |  (562) 633-1044  |  keepitrolling@carolinarolling.com', 50, 738, { width: 512, align: 'center', lineBreak: false });
+      // Footer — only draw on first page, use yPos if there's room, otherwise fixed bottom
+      const footerY = yPos + 10 < 720 ? 730 : Math.min(yPos + 10, 760);
+      if (footerY <= 762) {
+        doc.strokeColor(lightGray).lineWidth(0.5).moveTo(50, footerY).lineTo(562, footerY).stroke();
+        doc.font('Helvetica').fontSize(8.5).fillColor('#aaa')
+          .text('Carolina Rolling Co. Inc.  |  9152 Sonrisa St., Bellflower, CA 90706  |  (562) 633-1044  |  keepitrolling@carolinarolling.com', 50, footerY + 8, { width: 512, align: 'center', lineBreak: false });
+      }
 
       doc.end();
     } catch (err) { reject(err); }

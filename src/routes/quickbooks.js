@@ -1118,8 +1118,8 @@ router.post('/import-invoice-numbers', async (req, res, next) => {
 // GET /api/quickbooks/invoice-pdf/:id — Generate + download invoice PDF
 router.get('/invoice-pdf/:id', async (req, res, next) => {
   try {
-    const { WorkOrderPayment } = require('../models');
-    const paymentInclude = WorkOrderPayment ? [{ model: WorkOrderPayment, as: 'payments', where: { voidedAt: null }, required: false, order: [['paymentDate', 'ASC']] }] : [];
+    const WOPayment = sequelize.models.WorkOrderPayment;
+    const paymentInclude = WOPayment ? [{ model: WOPayment, as: 'payments', where: { voidedAt: null }, required: false, order: [['paymentDate', 'ASC']] }] : [];
     const wo = await WorkOrder.findByPk(req.params.id, {
       include: [
         { model: WorkOrderPart, as: 'parts' },
@@ -1129,13 +1129,13 @@ router.get('/invoice-pdf/:id', async (req, res, next) => {
     });
     if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
 
-    // Load payments separately as fallback if include failed
+    // Load payments separately as fallback
     let payments = wo.payments || [];
-    if (!payments.length && WorkOrderPayment) {
+    if (!payments.length && WOPayment) {
       try {
-        const pmts = await WorkOrderPayment.findAll({ where: { workOrderId: wo.id, voidedAt: null }, order: [['paymentDate','ASC']] });
+        const pmts = await WOPayment.findAll({ where: { workOrderId: wo.id, voidedAt: null }, order: [['paymentDate','ASC']] });
         payments = pmts.map(p => p.toJSON());
-      } catch {}
+      } catch (e) { console.warn('[invoice-pdf] payments fallback failed:', e.message); }
     }
     if (!wo.invoiceNumber) {
       // Auto-assign if not yet assigned
@@ -1153,7 +1153,7 @@ router.get('/invoice-pdf/:id', async (req, res, next) => {
     }
     const client = await resolveClient(wo);
     const pdfBuffer = await generateInvoicePDFBuffer(wo, wo.parts || [], client, payments);
-    const filename = `invoice-${wo.invoiceNumber}-${(wo.clientName || '').replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
+    const filename = `Invoice-${wo.invoiceNumber}-${(wo.clientName || '').replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
 
     // Upload to storage and save as WO document
     try {
@@ -1311,13 +1311,128 @@ async function regenerateInvoicePDF(workOrderId) {
 
   const client = await resolveClient(wo);
   const pdfBuffer = await generateInvoicePDFBuffer(wo, wo.parts || [], client, payments);
-  const filename = `invoice-${wo.invoiceNumber}-${(wo.clientName || '').replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
+  const filename = `Invoice-${wo.invoiceNumber}-${(wo.clientName || '').replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
   const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, { folder: `work-orders/${workOrderId}/documents`, filename, mimeType: 'application/pdf' });
   await WorkOrderDocument.destroy({ where: { workOrderId, documentType: 'invoice' } });
   await WorkOrderDocument.create({ workOrderId, originalName: filename, mimeType: 'application/pdf', size: pdfBuffer.length, url: uploadResult.url, cloudinaryId: uploadResult.storageId, documentType: 'invoice', portalVisible: false });
   await InvoiceNumber.update({ invoicePdfUrl: uploadResult.url, invoicePdfGenerated: true }, { where: { workOrderId } }).catch(() => {});
   return uploadResult.url;
 }
+
+
+// POST /api/quickbooks/invoice-email/:id — Create Gmail draft with invoice attached
+router.post('/invoice-email/:id', async (req, res, next) => {
+  try {
+    const { gmailAccountId, toEmail, subject, body } = req.body;
+    if (!gmailAccountId) return res.status(400).json({ error: { message: 'gmailAccountId required' } });
+
+    const wo = await WorkOrder.findByPk(req.params.id, {
+      include: [
+        { model: WorkOrderPart, as: 'parts' },
+        { model: Client, as: 'client', attributes: ['id','name','apEmail','contactEmail','quickbooksName'] }
+      ]
+    });
+    if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
+
+    const { GmailAccount } = require('../models');
+    const account = await GmailAccount.findByPk(gmailAccountId);
+    if (!account) return res.status(400).json({ error: { message: 'Gmail account not found' } });
+
+    const { getGmailClient } = require('../services/emailScanner');
+    const gmail = await getGmailClient(account);
+
+    const client = wo.client || {};
+    const recipientEmail = toEmail || client.apEmail || client.contactEmail || '';
+    if (!recipientEmail) return res.status(400).json({ error: { message: 'No recipient email. Set AP email on client profile.' } });
+
+    const invNum = wo.invoiceNumber ? `#${wo.invoiceNumber}` : '';
+    const drLabel = wo.drNumber ? `DR-${wo.drNumber}` : (wo.orderNumber || '');
+    const clientPO = wo.clientPurchaseOrderNumber ? ` — PO: ${wo.clientPurchaseOrderNumber}` : '';
+    const clientName = client.quickbooksName || client.name || wo.clientName || '';
+
+    const emailSubject = subject || `Invoice ${invNum} — ${clientName}${clientPO}`;
+
+    // Get invoice PDF from storage
+    const invoiceDoc = await require('../models').WorkOrderDocument.findOne({
+      where: { workOrderId: wo.id, documentType: 'invoice' },
+      order: [['createdAt', 'DESC']]
+    });
+
+    let attachmentPart = '';
+    let boundary = 'boundary_' + Date.now();
+    let pdfBase64 = '';
+    let pdfFilename = `Invoice-${wo.invoiceNumber || drLabel}-${clientName.replace(/[^a-zA-Z0-9]/g,'_')}.pdf`;
+
+    if (invoiceDoc?.url) {
+      try {
+        const axios = require('axios');
+        const pdfRes = await axios.get(invoiceDoc.url, { responseType: 'arraybuffer', timeout: 15000 });
+        pdfBase64 = Buffer.from(pdfRes.data).toString('base64');
+      } catch (e) { console.warn('[invoice-email] PDF fetch failed:', e.message); }
+    }
+
+    const bodyText = body || `Dear ${clientName},
+
+Please find attached Invoice ${invNum} for work order ${drLabel}${clientPO}.
+
+${wo.invoiceDate ? `Invoice Date: ${new Date(wo.invoiceDate).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}` : ''}
+
+If you have any questions regarding this invoice, please do not hesitate to contact us.
+
+Thank you for your business.
+
+Carolina Rolling Co., Inc.
+9152 Sonrisa St., Bellflower, CA 90706
+Phone: (562) 633-1044
+Email: keepitrolling@carolinarolling.com`;
+
+    let rawMessage;
+    if (pdfBase64) {
+      rawMessage = [
+        `MIME-Version: 1.0`,
+        `To: ${recipientEmail}`,
+        `Subject: ${emailSubject}`,
+        `Content-Type: multipart/mixed; boundary="${boundary}"`,
+        ``,
+        `--${boundary}`,
+        `Content-Type: text/plain; charset="UTF-8"`,
+        ``,
+        bodyText,
+        ``,
+        `--${boundary}`,
+        `Content-Type: application/pdf; name="${pdfFilename}"`,
+        `Content-Disposition: attachment; filename="${pdfFilename}"`,
+        `Content-Transfer-Encoding: base64`,
+        ``,
+        pdfBase64,
+        `--${boundary}--`
+      ].join('\r\n');
+    } else {
+      rawMessage = [
+        `MIME-Version: 1.0`,
+        `To: ${recipientEmail}`,
+        `Subject: ${emailSubject}`,
+        `Content-Type: text/plain; charset="UTF-8"`,
+        ``,
+        bodyText + '\r\n\r\n(Note: Invoice PDF could not be attached — please attach manually)'
+      ].join('\r\n');
+    }
+
+    const encodedMessage = Buffer.from(rawMessage).toString('base64url');
+    const draft = await gmail.users.drafts.create({
+      userId: 'me',
+      requestBody: { message: { raw: encodedMessage } }
+    });
+
+    const draftMsgId = draft.data.message?.id || draft.data.id;
+    const draftUrl = `https://mail.google.com/mail/?authuser=${encodeURIComponent(account.email)}#drafts/${draftMsgId}`;
+
+    res.json({ data: { draftUrl, draftId: draft.data.id, recipientEmail, subject: emailSubject }, message: 'Draft created' });
+  } catch (error) {
+    console.error('[invoice-email] Error:', error.message);
+    next(error);
+  }
+});
 
 module.exports = router;
 module.exports.regenerateInvoicePDF = regenerateInvoicePDF;

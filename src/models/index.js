@@ -3336,6 +3336,23 @@ const WorkOrderPayment = sequelize.define('WorkOrderPayment', {
 WorkOrder.hasMany(WorkOrderPayment, { foreignKey: 'workOrderId', as: 'payments' });
 WorkOrderPayment.belongsTo(WorkOrder, { foreignKey: 'workOrderId', as: 'workOrder' });
 
+
+// WorkOrderInvoiceSend — log of every time an invoice was sent
+const WorkOrderInvoiceSend = sequelize.define('WorkOrderInvoiceSend', {
+  id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+  workOrderId: { type: DataTypes.UUID, allowNull: false },
+  sentAt: { type: DataTypes.DATE, allowNull: false, defaultValue: DataTypes.NOW },
+  sentMethod: { type: DataTypes.STRING, allowNull: true }, // 'gmail_draft', 'email', 'manual', 'fax', 'mail', 'hand_delivered'
+  sentTo: { type: DataTypes.STRING, allowNull: true },
+  sentFrom: { type: DataTypes.STRING, allowNull: true },
+  gmailDraftId: { type: DataTypes.STRING, allowNull: true },
+  notes: { type: DataTypes.TEXT, allowNull: true },
+  recordedBy: { type: DataTypes.STRING, allowNull: true }
+}, { tableName: 'work_order_invoice_sends', timestamps: true });
+
+WorkOrder.hasMany(WorkOrderInvoiceSend, { foreignKey: 'workOrderId', as: 'invoiceSends' });
+WorkOrderInvoiceSend.belongsTo(WorkOrder, { foreignKey: 'workOrderId', as: 'workOrder' });
+
 module.exports = {
   sequelize,
   User,

@@ -1430,11 +1430,57 @@ Email: keepitrolling@carolinarolling.com`;
     const draftMsgId = draft.data.message?.id || draft.data.id;
     const draftUrl = `https://mail.google.com/mail/?authuser=${encodeURIComponent(account.email)}#drafts/${draftMsgId}`;
 
+    // Log the send event
+    try {
+      const WIS = sequelize.models.WorkOrderInvoiceSend;
+      if (WIS) await WIS.create({
+        workOrderId: req.params.id,
+        sentAt: new Date(),
+        sentMethod: 'gmail_draft',
+        sentTo: recipientEmail,
+        sentFrom: account.email,
+        gmailDraftId: draft.data.id,
+        recordedBy: req.user?.username || 'admin'
+      });
+    } catch (e) { console.warn('[invoice-email] log send failed:', e.message); }
+
     res.json({ data: { draftUrl, draftId: draft.data.id, recipientEmail, subject: emailSubject }, message: 'Draft created' });
   } catch (error) {
     console.error('[invoice-email] Error:', error.message);
     next(error);
   }
+});
+
+// GET /api/quickbooks/invoice-sends/:id — Get send history for a WO
+router.get('/invoice-sends/:id', async (req, res, next) => {
+  try {
+    const WIS = sequelize.models.WorkOrderInvoiceSend;
+    if (!WIS) return res.json({ data: [] });
+    const sends = await WIS.findAll({
+      where: { workOrderId: req.params.id },
+      order: [['sentAt', 'DESC']]
+    });
+    res.json({ data: sends });
+  } catch (error) { next(error); }
+});
+
+// POST /api/quickbooks/invoice-sends/:id — Manually log a send event
+router.post('/invoice-sends/:id', async (req, res, next) => {
+  try {
+    const WIS = sequelize.models.WorkOrderInvoiceSend;
+    if (!WIS) return res.status(503).json({ error: { message: 'System initializing' } });
+    const { sentAt, sentMethod, sentTo, sentFrom, notes } = req.body;
+    const send = await WIS.create({
+      workOrderId: req.params.id,
+      sentAt: sentAt ? new Date(sentAt) : new Date(),
+      sentMethod: sentMethod || 'manual',
+      sentTo: sentTo || null,
+      sentFrom: sentFrom || null,
+      notes: notes || null,
+      recordedBy: req.user?.username || 'admin'
+    });
+    res.json({ data: send, message: 'Send event logged' });
+  } catch (error) { next(error); }
 });
 
 module.exports = router;

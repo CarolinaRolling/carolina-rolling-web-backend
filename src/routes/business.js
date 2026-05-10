@@ -192,7 +192,9 @@ router.get('/ledger', async (req, res, next) => {
 // GET /api/business/ledger/:woId/payments — Payment history for one WO
 router.get('/ledger/:woId/payments', async (req, res, next) => {
   try {
-    const payments = await WorkOrderPayment.findAll({
+    const WOP = sequelize.models.WorkOrderPayment;
+    if (!WOP) return res.json({ data: [] });
+    const payments = await WOP.findAll({
       where: { workOrderId: req.params.woId, voidedAt: null },
       order: [['paymentDate','ASC']]
     });

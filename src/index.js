@@ -807,6 +807,23 @@ async function startServer() {
       )`);
     } catch (e) { console.log('work_order_payments table skip:', e.message); }
 
+    // Create work_order_invoice_sends table
+    try {
+      await sequelize.query(`CREATE TABLE IF NOT EXISTS work_order_invoice_sends (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        "workOrderId" UUID NOT NULL REFERENCES work_orders(id) ON DELETE CASCADE,
+        "sentAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+        "sentMethod" VARCHAR(100),
+        "sentTo" TEXT,
+        "sentFrom" TEXT,
+        "gmailDraftId" VARCHAR(255),
+        notes TEXT,
+        "recordedBy" VARCHAR(255),
+        "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      )`);
+    } catch (e) { console.log('work_order_invoice_sends skip:', e.message); }
+
     // Add invoice export tracking fields
     try {
       await sequelize.query(`ALTER TABLE invoice_numbers ADD COLUMN IF NOT EXISTS "iifExportedAt" TIMESTAMP WITH TIME ZONE`);

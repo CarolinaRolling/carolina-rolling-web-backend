@@ -1384,10 +1384,12 @@ router.post('/invoice-email/:id', async (req, res, next) => {
 
     const invNum = wo.invoiceNumber ? `#${wo.invoiceNumber}` : '';
     const drLabel = wo.drNumber ? `DR-${wo.drNumber}` : (wo.orderNumber || '');
-    const clientPO = wo.clientPurchaseOrderNumber ? ` — PO: ${wo.clientPurchaseOrderNumber}` : '';
+    const clientPO = wo.clientPurchaseOrderNumber ? ` - PO: ${wo.clientPurchaseOrderNumber}` : '';
     const clientName = client.quickbooksName || client.name || wo.clientName || '';
 
-    const emailSubject = subject || `Invoice ${invNum} — ${clientName}${clientPO}`;
+    const rawSubject = subject || `Invoice ${invNum} - ${clientName}${clientPO}`;
+    // RFC 2047 encode subject to handle special characters (em dashes, accents, etc.)
+    const emailSubject = `=?UTF-8?B?${Buffer.from(rawSubject).toString('base64')}?=`;
 
     // Get invoice PDF from storage
     const invoiceDoc = await require('../models').WorkOrderDocument.findOne({
@@ -1395,17 +1397,27 @@ router.post('/invoice-email/:id', async (req, res, next) => {
       order: [['createdAt', 'DESC']]
     });
 
-    let attachmentPart = '';
-    let boundary = 'boundary_' + Date.now();
+    let boundary = 'crco_boundary_' + Date.now();
     let pdfBase64 = '';
     let pdfFilename = `Invoice-${wo.invoiceNumber || drLabel}-${clientName.replace(/[^a-zA-Z0-9]/g,'_')}.pdf`;
 
     if (invoiceDoc?.url) {
       try {
         const axios = require('axios');
-        const pdfRes = await axios.get(invoiceDoc.url, { responseType: 'arraybuffer', timeout: 15000 });
-        pdfBase64 = Buffer.from(pdfRes.data).toString('base64');
-      } catch (e) { console.warn('[invoice-email] PDF fetch failed:', e.message); }
+        // For S3 docs, get a fresh presigned URL to ensure access
+        let fetchUrl = invoiceDoc.url;
+        if (invoiceDoc.cloudinaryId?.startsWith('s3:')) {
+          const key = invoiceDoc.cloudinaryId.slice(3);
+          fetchUrl = await fileStorage.getPresignedUrl(key, 300);
+        }
+        const pdfRes = await axios.get(fetchUrl, { responseType: 'arraybuffer', timeout: 20000 });
+        // MIME requires base64 in 76-char lines
+        const raw = Buffer.from(pdfRes.data).toString('base64');
+        pdfBase64 = raw.match(/.{1,76}/g).join('\r\n');
+        console.log('[invoice-email] PDF fetched, size:', pdfRes.data.byteLength);
+      } catch (e) { console.error('[invoice-email] PDF fetch failed:', e.message, invoiceDoc.url); }
+    } else {
+      console.warn('[invoice-email] No invoice document found for WO:', wo.id);
     }
 
     const bodyText = body || `Dear ${clientName},

@@ -3314,6 +3314,28 @@ const WeldProcedure = sequelize.define('WeldProcedure', {
   timestamps: true
 });
 
+
+// WorkOrderPayment — ledger of all payments against an invoice
+const WorkOrderPayment = sequelize.define('WorkOrderPayment', {
+  id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+  workOrderId: { type: DataTypes.UUID, allowNull: false, references: { model: 'work_orders', key: 'id' } },
+  paymentType: {
+    type: DataTypes.ENUM('downpayment', 'partial', 'full'),
+    allowNull: false,
+    defaultValue: 'partial'
+  },
+  amount: { type: DataTypes.DECIMAL(10, 2), allowNull: false },
+  paymentDate: { type: DataTypes.DATEONLY, allowNull: false },
+  paymentMethod: { type: DataTypes.STRING, allowNull: true }, // check, ach, wire, credit_card, cash, other
+  paymentReference: { type: DataTypes.STRING, allowNull: true },
+  notes: { type: DataTypes.TEXT, allowNull: true },
+  recordedBy: { type: DataTypes.STRING, allowNull: true },
+  voidedAt: { type: DataTypes.DATE, allowNull: true }
+}, { tableName: 'work_order_payments', timestamps: true });
+
+WorkOrder.hasMany(WorkOrderPayment, { foreignKey: 'workOrderId', as: 'payments' });
+WorkOrderPayment.belongsTo(WorkOrder, { foreignKey: 'workOrderId', as: 'workOrder' });
+
 module.exports = {
   sequelize,
   User,

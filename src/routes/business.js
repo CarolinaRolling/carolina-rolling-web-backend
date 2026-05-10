@@ -92,6 +92,129 @@ router.post('/payments/:woId/clear', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+
+// ============= PAYMENT LEDGER =============
+
+// GET /api/business/ledger — All invoiced WOs with payment summaries
+router.get('/ledger', async (req, res, next) => {
+  try {
+    const { Op } = require('sequelize');
+    const { status, clientName, search } = req.query;
+    const where = { invoiceNumber: { [Op.ne]: null }, isVoided: { [Op.or]: [null, false] } };
+    if (clientName) where.clientName = { [Op.iLike]: `%${clientName}%` };
+    if (search) where[Op.or] = [
+      { clientName: { [Op.iLike]: `%${search}%` } },
+      { drNumber: { [Op.iLike]: `%${search}%` } },
+      { invoiceNumber: { [Op.iLike]: `%${search}%` } }
+    ];
+
+    const wos = await WorkOrder.findAll({
+      where,
+      attributes: ['id','drNumber','orderNumber','clientName','clientPurchaseOrderNumber','invoiceNumber','invoiceDate','grandTotal','status','completedAt','shippedAt','createdAt'],
+      include: [{ model: WorkOrderPayment, as: 'payments', where: { voidedAt: null }, required: false, order: [['paymentDate','ASC']] }],
+      order: [['invoiceDate','DESC NULLS LAST'],['createdAt','DESC']]
+    });
+
+    const now = new Date();
+    const data = wos.map(wo => {
+      const j = wo.toJSON();
+      const totalPaid = (j.payments||[]).reduce((s,p) => s + parseFloat(p.amount||0), 0);
+      const balance = (parseFloat(j.grandTotal)||0) - totalPaid;
+      const invDate = j.invoiceDate ? new Date(j.invoiceDate) : new Date(j.createdAt);
+      const daysOut = Math.floor((now - invDate) / 86400000);
+      const isPaid = balance <= 0.01;
+      return { ...j, totalPaid: totalPaid.toFixed(2), balance: balance.toFixed(2), isPaid, daysOutstanding: daysOut };
+    });
+
+    const filtered = status === 'paid' ? data.filter(d => d.isPaid)
+      : status === 'outstanding' ? data.filter(d => !d.isPaid)
+      : data;
+
+    const totalOutstanding = filtered.filter(d => !d.isPaid).reduce((s,d) => s + parseFloat(d.balance), 0);
+    const totalPaid = filtered.filter(d => d.isPaid).reduce((s,d) => s + parseFloat(d.grandTotal||0), 0);
+
+    res.json({ data: { invoices: filtered, totalOutstanding, totalPaid, count: filtered.length } });
+  } catch (error) { next(error); }
+});
+
+// GET /api/business/ledger/:woId/payments — Payment history for one WO
+router.get('/ledger/:woId/payments', async (req, res, next) => {
+  try {
+    const payments = await WorkOrderPayment.findAll({
+      where: { workOrderId: req.params.woId, voidedAt: null },
+      order: [['paymentDate','ASC']]
+    });
+    res.json({ data: payments });
+  } catch (error) { next(error); }
+});
+
+// POST /api/business/ledger/:woId/payments — Record a payment
+router.post('/ledger/:woId/payments', async (req, res, next) => {
+  try {
+    const wo = await WorkOrder.findByPk(req.params.woId, {
+      include: [{ model: WorkOrderPart, as: 'parts' }]
+    });
+    if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
+
+    const { paymentType, amount, paymentDate, paymentMethod, paymentReference, notes } = req.body;
+    if (!amount || parseFloat(amount) <= 0) return res.status(400).json({ error: { message: 'Amount required' } });
+
+    const payment = await WorkOrderPayment.create({
+      workOrderId: wo.id,
+      paymentType: paymentType || 'partial',
+      amount: parseFloat(amount).toFixed(2),
+      paymentDate: paymentDate || new Date().toISOString().split('T')[0],
+      paymentMethod: paymentMethod || null,
+      paymentReference: paymentReference || null,
+      notes: notes || null,
+      recordedBy: req.user?.username || 'admin'
+    });
+
+    // Check if fully paid — update WO paymentDate for backward compat
+    const allPayments = await WorkOrderPayment.findAll({ where: { workOrderId: wo.id, voidedAt: null } });
+    const totalPaid = allPayments.reduce((s,p) => s + parseFloat(p.amount||0), 0);
+    const grandTotal = parseFloat(wo.grandTotal) || 0;
+    if (totalPaid >= grandTotal - 0.01) {
+      await wo.update({ paymentDate: payment.paymentDate, paymentMethod, paymentReference, paymentRecordedBy: req.user?.username || 'admin' });
+    }
+
+    // Auto-regenerate invoice PDF
+    try {
+      const qbRoutes = require('./quickbooks');
+      if (qbRoutes.regenerateInvoicePDF) await qbRoutes.regenerateInvoicePDF(wo.id);
+    } catch (pdfErr) { console.warn('[payment] PDF regen failed:', pdfErr.message); }
+
+    res.json({ data: payment, message: 'Payment recorded' });
+  } catch (error) { next(error); }
+});
+
+// DELETE /api/business/ledger/payments/:paymentId — Void a payment
+router.delete('/ledger/payments/:paymentId', async (req, res, next) => {
+  try {
+    const payment = await WorkOrderPayment.findByPk(req.params.paymentId);
+    if (!payment) return res.status(404).json({ error: { message: 'Payment not found' } });
+    await payment.update({ voidedAt: new Date() });
+
+    // Clear WO paymentDate if no longer fully paid
+    const allPayments = await WorkOrderPayment.findAll({ where: { workOrderId: payment.workOrderId, voidedAt: null } });
+    const wo = await WorkOrder.findByPk(payment.workOrderId, { include: [{ model: WorkOrderPart, as: 'parts' }] });
+    if (wo) {
+      const totalPaid = allPayments.reduce((s,p) => s + parseFloat(p.amount||0), 0);
+      const grandTotal = parseFloat(wo.grandTotal) || 0;
+      if (totalPaid < grandTotal - 0.01) {
+        await wo.update({ paymentDate: null, paymentMethod: null, paymentReference: null, paymentRecordedBy: null });
+      }
+      // Re-regen invoice PDF
+      try {
+        const qbRoutes = require('./quickbooks');
+        if (qbRoutes.regenerateInvoicePDF) await qbRoutes.regenerateInvoicePDF(wo.id);
+      } catch {}
+    }
+
+    res.json({ data: payment, message: 'Payment voided' });
+  } catch (error) { next(error); }
+});
+
 // ============= LIABILITIES =============
 
 // GET /api/business/liabilities

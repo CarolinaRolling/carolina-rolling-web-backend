@@ -789,6 +789,24 @@ async function startServer() {
         `ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commArchived" BOOLEAN DEFAULT false`,
         `ALTER TABLE payroll_entries ADD COLUMN IF NOT EXISTS "sortOrder" INTEGER DEFAULT 999`,
     ];
+    // Create work_order_payments table
+    try {
+      await sequelize.query(`CREATE TABLE IF NOT EXISTS work_order_payments (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        "workOrderId" UUID NOT NULL REFERENCES work_orders(id) ON DELETE CASCADE,
+        "paymentType" VARCHAR(20) NOT NULL DEFAULT 'partial',
+        amount DECIMAL(10,2) NOT NULL,
+        "paymentDate" DATE NOT NULL,
+        "paymentMethod" VARCHAR(100),
+        "paymentReference" VARCHAR(255),
+        notes TEXT,
+        "recordedBy" VARCHAR(255),
+        "voidedAt" TIMESTAMP WITH TIME ZONE,
+        "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      )`);
+    } catch (e) { console.log('work_order_payments table skip:', e.message); }
+
     // Add invoice export tracking fields
     try {
       await sequelize.query(`ALTER TABLE invoice_numbers ADD COLUMN IF NOT EXISTS "iifExportedAt" TIMESTAMP WITH TIME ZONE`);

@@ -202,6 +202,9 @@ router.get('/ledger/:woId/payments', async (req, res, next) => {
 // POST /api/business/ledger/:woId/payments — Record a payment
 router.post('/ledger/:woId/payments', async (req, res, next) => {
   try {
+    const { WorkOrderPayment: WOP } = require('../models');
+    if (!WOP) return res.status(503).json({ error: { message: 'Payment system initializing — please retry after deployment completes' } });
+
     const wo = await WorkOrder.findByPk(req.params.woId, {
       include: [{ model: WorkOrderPart, as: 'parts' }]
     });
@@ -210,7 +213,7 @@ router.post('/ledger/:woId/payments', async (req, res, next) => {
     const { paymentType, amount, paymentDate, paymentMethod, paymentReference, notes } = req.body;
     if (!amount || parseFloat(amount) <= 0) return res.status(400).json({ error: { message: 'Amount required' } });
 
-    const payment = await WorkOrderPayment.create({
+    const payment = await WOP.create({
       workOrderId: wo.id,
       paymentType: paymentType || 'partial',
       amount: parseFloat(amount).toFixed(2),
@@ -222,10 +225,11 @@ router.post('/ledger/:woId/payments', async (req, res, next) => {
     });
 
     // Check if fully paid — update WO paymentDate for backward compat
-    const allPayments = await WorkOrderPayment.findAll({ where: { workOrderId: wo.id, voidedAt: null } });
+    const allPayments = await WOP.findAll({ where: { workOrderId: wo.id, voidedAt: null } });
     const totalPaid = allPayments.reduce((s,p) => s + parseFloat(p.amount||0), 0);
-    const grandTotal = parseFloat(wo.grandTotal) || 0;
-    if (totalPaid >= grandTotal - 0.01) {
+    const partsTotal = (wo.parts||[]).reduce((s,p) => s + (parseFloat(p.partTotal)||0), 0);
+    const grandTotal = parseFloat(wo.grandTotal) || partsTotal;
+    if (grandTotal > 0 && totalPaid >= grandTotal - 0.01) {
       await wo.update({ paymentDate: payment.paymentDate, paymentMethod, paymentReference, paymentRecordedBy: req.user?.username || 'admin' });
     }
 
@@ -242,12 +246,14 @@ router.post('/ledger/:woId/payments', async (req, res, next) => {
 // DELETE /api/business/ledger/payments/:paymentId — Void a payment
 router.delete('/ledger/payments/:paymentId', async (req, res, next) => {
   try {
-    const payment = await WorkOrderPayment.findByPk(req.params.paymentId);
+    const { WorkOrderPayment: WOP } = require('../models');
+    if (!WOP) return res.status(503).json({ error: { message: 'Payment system initializing' } });
+    const payment = await WOP.findByPk(req.params.paymentId);
     if (!payment) return res.status(404).json({ error: { message: 'Payment not found' } });
     await payment.update({ voidedAt: new Date() });
 
     // Clear WO paymentDate if no longer fully paid
-    const allPayments = await WorkOrderPayment.findAll({ where: { workOrderId: payment.workOrderId, voidedAt: null } });
+    const allPayments = await WOP.findAll({ where: { workOrderId: payment.workOrderId, voidedAt: null } });
     const wo = await WorkOrder.findByPk(payment.workOrderId, { include: [{ model: WorkOrderPart, as: 'parts' }] });
     if (wo) {
       const totalPaid = allPayments.reduce((s,p) => s + parseFloat(p.amount||0), 0);

@@ -1177,11 +1177,16 @@ router.get('/invoice-pdf/:id', async (req, res, next) => {
         const highest = await InvoiceNumber.findOne({ order: [['invoiceNumber', 'DESC']], transaction: t });
         if (highest && highest.invoiceNumber >= nextNum) nextNum = highest.invoiceNumber + 1;
         await InvoiceNumber.create({ invoiceNumber: nextNum, workOrderId: wo.id, clientId: wo.clientId, clientName: wo.clientName }, { transaction: t });
-        await wo.update({ invoiceNumber: String(nextNum) }, { transaction: t });
+        await wo.update({ invoiceNumber: String(nextNum), invoiceDate: new Date() }, { transaction: t });
         await AppSettings.upsert({ key: 'next_invoice_number', value: nextNum + 1 }, { transaction: t });
         return nextNum;
       });
       wo.invoiceNumber = String(result);
+      wo.invoiceDate = new Date();
+    } else if (!wo.invoiceDate) {
+      // Has invoice number but no date — set now
+      await wo.update({ invoiceDate: new Date() });
+      wo.invoiceDate = new Date();
     }
     const client = await resolveClient(wo);
     const pdfBuffer = await generateInvoicePDFBuffer(wo, wo.parts || [], client, payments);

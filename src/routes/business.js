@@ -4,7 +4,7 @@ const { Op } = require('sequelize');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const { Liability, Employee, PayrollWeek, PayrollEntry, WorkOrder, WorkOrderPart, Vendor, PONumber, InboundOrder, sequelize } = require('../models');
+const { Liability, Employee, PayrollWeek, PayrollEntry, WorkOrder, WorkOrderPart, WorkOrderPayment, Vendor, PONumber, InboundOrder, sequelize } = require('../models');
 const fileStorage = require('../utils/storage');
 
 // Multer config for bill attachments
@@ -100,40 +100,72 @@ router.get('/ledger', async (req, res, next) => {
   try {
     const { Op } = require('sequelize');
     const { status, clientName, search } = req.query;
-    const where = { invoiceNumber: { [Op.ne]: null }, isVoided: { [Op.or]: [null, false] } };
+    const where = { invoiceNumber: { [Op.ne]: null } };
     if (clientName) where.clientName = { [Op.iLike]: `%${clientName}%` };
     if (search) where[Op.or] = [
       { clientName: { [Op.iLike]: `%${search}%` } },
-      { drNumber: { [Op.iLike]: `%${search}%` } },
-      { invoiceNumber: { [Op.iLike]: `%${search}%` } }
+      { invoiceNumber: { [Op.iLike]: `%${search}%` } },
+      sequelize.where(sequelize.cast(sequelize.col('drNumber'), 'TEXT'), { [Op.iLike]: `%${search}%` })
     ];
 
     const wos = await WorkOrder.findAll({
       where,
-      attributes: ['id','drNumber','orderNumber','clientName','clientPurchaseOrderNumber','invoiceNumber','invoiceDate','grandTotal','status','completedAt','shippedAt','createdAt'],
-      include: [{ model: WorkOrderPayment, as: 'payments', where: { voidedAt: null }, required: false, order: [['paymentDate','ASC']] }],
+      attributes: ['id','drNumber','orderNumber','clientName','clientPurchaseOrderNumber','invoiceNumber','invoiceDate','grandTotal','truckingCost','status','completedAt','shippedAt','createdAt','paymentDate','paymentMethod','paymentReference'],
+      include: [
+        { model: WorkOrderPayment, as: 'payments', where: { voidedAt: null }, required: false, order: [['paymentDate','ASC']] },
+        { model: WorkOrderPart, as: 'parts', attributes: ['id','partType','partTotal','quantity'], required: false }
+      ],
       order: [['invoiceDate','DESC NULLS LAST'],['createdAt','DESC']]
     });
 
     const now = new Date();
     const data = wos.map(wo => {
       const j = wo.toJSON();
+
+      // Calculate total same way InvoiceCenterPage does — sum partTotals + trucking
+      const partsTotal = (j.parts||[]).reduce((s, p) => s + (parseFloat(p.partTotal)||0), 0);
+      const trucking = parseFloat(j.truckingCost) || 0;
+      const calculatedTotal = partsTotal + trucking;
+      // Use calculated total if grandTotal not set or is 0
+      const total = (parseFloat(j.grandTotal) > 0 ? parseFloat(j.grandTotal) : calculatedTotal);
+
+      // Payments from new ledger system
       const totalPaid = (j.payments||[]).reduce((s,p) => s + parseFloat(p.amount||0), 0);
-      const balance = (parseFloat(j.grandTotal)||0) - totalPaid;
+      // Legacy single payment (old system)
+      const legacyPaid = (!j.payments?.length && j.paymentDate && total > 0) ? total : 0;
+      const effectivePaid = totalPaid + legacyPaid;
+
+      const balance = Math.max(0, total - effectivePaid);
       const invDate = j.invoiceDate ? new Date(j.invoiceDate) : new Date(j.createdAt);
       const daysOut = Math.floor((now - invDate) / 86400000);
-      const isPaid = balance <= 0.01;
-      return { ...j, totalPaid: totalPaid.toFixed(2), balance: balance.toFixed(2), isPaid, daysOutstanding: daysOut };
+      // Only mark as paid if total > 0 AND balance is 0
+      const isPaid = total > 0 && balance <= 0.01;
+      // needsPricing = total is 0, needs attention
+      const needsPricing = total === 0;
+
+      const { parts: _p, ...safeJ } = j;
+      return {
+        ...safeJ,
+        grandTotal: total.toFixed(2),
+        totalPaid: effectivePaid.toFixed(2),
+        balance: balance.toFixed(2),
+        isPaid,
+        needsPricing,
+        daysOutstanding: daysOut,
+        legacyPayment: legacyPaid > 0 ? { date: j.paymentDate, method: j.paymentMethod, reference: j.paymentReference } : null
+      };
     });
 
     const filtered = status === 'paid' ? data.filter(d => d.isPaid)
       : status === 'outstanding' ? data.filter(d => !d.isPaid)
+      : status === 'needs_pricing' ? data.filter(d => d.needsPricing)
       : data;
 
-    const totalOutstanding = filtered.filter(d => !d.isPaid).reduce((s,d) => s + parseFloat(d.balance), 0);
-    const totalPaid = filtered.filter(d => d.isPaid).reduce((s,d) => s + parseFloat(d.grandTotal||0), 0);
+    const totalOutstanding = data.filter(d => !d.isPaid && !d.needsPricing).reduce((s,d) => s + parseFloat(d.balance), 0);
+    const totalCollected = data.filter(d => d.isPaid).reduce((s,d) => s + parseFloat(d.grandTotal||0), 0);
+    const needsPricingCount = data.filter(d => d.needsPricing).length;
 
-    res.json({ data: { invoices: filtered, totalOutstanding, totalPaid, count: filtered.length } });
+    res.json({ data: { invoices: filtered, totalOutstanding, totalCollected, needsPricingCount, count: filtered.length } });
   } catch (error) { next(error); }
 });
 

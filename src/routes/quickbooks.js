@@ -1290,21 +1290,30 @@ router.post('/export-batch-with-reconciliation', async (req, res, next) => {
 
 // ==================== REGEN HELPER (called after payment recorded) ====================
 async function regenerateInvoicePDF(workOrderId) {
-  const { WorkOrderPayment } = require('../models');
+  const WOPayment = sequelize.models.WorkOrderPayment;
   const wo = await WorkOrder.findByPk(workOrderId, {
     include: [
       { model: WorkOrderPart, as: 'parts' },
-      { model: require('../models').WorkOrderPayment, as: 'payments', where: { voidedAt: null }, required: false, order: [['paymentDate', 'ASC']] },
       { model: Client, as: 'client', attributes: ['id', 'name', 'taxStatus', 'paymentTerms', 'quickbooksName'] }
     ]
   });
   if (!wo || !wo.invoiceNumber) return;
+
+  // Load payments separately
+  let payments = [];
+  if (WOPayment) {
+    try {
+      const pmts = await WOPayment.findAll({ where: { workOrderId, voidedAt: null }, order: [['paymentDate', 'ASC']] });
+      payments = pmts.map(p => p.toJSON());
+    } catch (e) { console.warn('[regen] payments load skip:', e.message); }
+  }
+
   const client = await resolveClient(wo);
-  const pdfBuffer = await generateInvoicePDFBuffer(wo, wo.parts || [], client, wo.payments || []);
+  const pdfBuffer = await generateInvoicePDFBuffer(wo, wo.parts || [], client, payments);
   const filename = `invoice-${wo.invoiceNumber}-${(wo.clientName || '').replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
   const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, { folder: `work-orders/${workOrderId}/documents`, filename, mimeType: 'application/pdf' });
-  await require('../models').WorkOrderDocument.destroy({ where: { workOrderId, documentType: 'invoice' } });
-  await require('../models').WorkOrderDocument.create({ workOrderId, originalName: filename, mimeType: 'application/pdf', size: pdfBuffer.length, url: uploadResult.url, cloudinaryId: uploadResult.storageId, documentType: 'invoice', portalVisible: false });
+  await WorkOrderDocument.destroy({ where: { workOrderId, documentType: 'invoice' } });
+  await WorkOrderDocument.create({ workOrderId, originalName: filename, mimeType: 'application/pdf', size: pdfBuffer.length, url: uploadResult.url, cloudinaryId: uploadResult.storageId, documentType: 'invoice', portalVisible: false });
   await InvoiceNumber.update({ invoicePdfUrl: uploadResult.url, invoicePdfGenerated: true }, { where: { workOrderId } }).catch(() => {});
   return uploadResult.url;
 }

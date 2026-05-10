@@ -108,15 +108,33 @@ router.get('/ledger', async (req, res, next) => {
       sequelize.where(sequelize.cast(sequelize.col('drNumber'), 'TEXT'), { [Op.iLike]: `%${search}%` })
     ];
 
+    const { WorkOrderPart: WOPart, WorkOrderPayment: WOPayment } = require('../models');
+
+    // Load WOs with parts first
     const wos = await WorkOrder.findAll({
       where,
       attributes: ['id','drNumber','orderNumber','clientName','clientPurchaseOrderNumber','invoiceNumber','invoiceDate','grandTotal','truckingCost','status','completedAt','shippedAt','createdAt','paymentDate','paymentMethod','paymentReference'],
       include: [
-        { model: WorkOrderPayment, as: 'payments', where: { voidedAt: null }, required: false, order: [['paymentDate','ASC']] },
-        { model: WorkOrderPart, as: 'parts', attributes: ['id','partType','partTotal','quantity'], required: false }
+        { model: WOPart, as: 'parts', attributes: ['id','partType','partTotal','quantity'], required: false }
       ],
       order: [['invoiceDate','DESC NULLS LAST'],['createdAt','DESC']]
     });
+
+    // Load payments separately (table may not exist yet)
+    let paymentsMap = {};
+    try {
+      if (WOPayment) {
+        const allPayments = await WOPayment.findAll({
+          where: { workOrderId: wos.map(w => w.id), voidedAt: null },
+          order: [['paymentDate','ASC']]
+        });
+        allPayments.forEach(p => {
+          const pid = p.workOrderId;
+          if (!paymentsMap[pid]) paymentsMap[pid] = [];
+          paymentsMap[pid].push(p.toJSON());
+        });
+      }
+    } catch (payErr) { console.warn('[ledger] payments load skip:', payErr.message); }
 
     const now = new Date();
     const data = wos.map(wo => {
@@ -129,10 +147,10 @@ router.get('/ledger', async (req, res, next) => {
       // Use calculated total if grandTotal not set or is 0
       const total = (parseFloat(j.grandTotal) > 0 ? parseFloat(j.grandTotal) : calculatedTotal);
 
-      // Payments from new ledger system
-      const totalPaid = (j.payments||[]).reduce((s,p) => s + parseFloat(p.amount||0), 0);
+      const payments = paymentsMap[j.id] || [];
+      const totalPaid = payments.reduce((s,p) => s + parseFloat(p.amount||0), 0);
       // Legacy single payment (old system)
-      const legacyPaid = (!j.payments?.length && j.paymentDate && total > 0) ? total : 0;
+      const legacyPaid = (!payments.length && j.paymentDate && total > 0) ? total : 0;
       const effectivePaid = totalPaid + legacyPaid;
 
       const balance = Math.max(0, total - effectivePaid);
@@ -152,6 +170,7 @@ router.get('/ledger', async (req, res, next) => {
         isPaid,
         needsPricing,
         daysOutstanding: daysOut,
+        payments,
         legacyPayment: legacyPaid > 0 ? { date: j.paymentDate, method: j.paymentMethod, reference: j.paymentReference } : null
       };
     });

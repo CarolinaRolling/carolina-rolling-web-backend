@@ -1118,14 +1118,24 @@ router.post('/import-invoice-numbers', async (req, res, next) => {
 router.get('/invoice-pdf/:id', async (req, res, next) => {
   try {
     const { WorkOrderPayment } = require('../models');
+    const paymentInclude = WorkOrderPayment ? [{ model: WorkOrderPayment, as: 'payments', where: { voidedAt: null }, required: false, order: [['paymentDate', 'ASC']] }] : [];
     const wo = await WorkOrder.findByPk(req.params.id, {
       include: [
         { model: WorkOrderPart, as: 'parts' },
-        { model: WorkOrderPayment, as: 'payments', where: { voidedAt: null }, required: false, order: [['paymentDate', 'ASC']] },
+        ...paymentInclude,
         { model: Client, as: 'client', attributes: ['id', 'name', 'taxStatus', 'paymentTerms', 'quickbooksName'] }
       ]
     });
     if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
+
+    // Load payments separately as fallback if include failed
+    let payments = wo.payments || [];
+    if (!payments.length && WorkOrderPayment) {
+      try {
+        const pmts = await WorkOrderPayment.findAll({ where: { workOrderId: wo.id, voidedAt: null }, order: [['paymentDate','ASC']] });
+        payments = pmts.map(p => p.toJSON());
+      } catch {}
+    }
     if (!wo.invoiceNumber) {
       // Auto-assign if not yet assigned
       const result = await sequelize.transaction(async (t) => {
@@ -1141,7 +1151,7 @@ router.get('/invoice-pdf/:id', async (req, res, next) => {
       wo.invoiceNumber = String(result);
     }
     const client = await resolveClient(wo);
-    const pdfBuffer = await generateInvoicePDFBuffer(wo, wo.parts || [], client, wo.payments || []);
+    const pdfBuffer = await generateInvoicePDFBuffer(wo, wo.parts || [], client, payments);
     const filename = `invoice-${wo.invoiceNumber}-${(wo.clientName || '').replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
 
     // Upload to storage and save as WO document

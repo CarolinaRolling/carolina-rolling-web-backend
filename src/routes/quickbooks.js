@@ -1564,5 +1564,46 @@ router.post('/invoice-sends/:id', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+
+// PUT /api/quickbooks/invoice-number/:id — Update invoice number with uniqueness check
+router.put('/invoice-number/:id', async (req, res, next) => {
+  try {
+    const { invoiceNumber } = req.body;
+    const newNum = String(invoiceNumber).trim();
+    if (!newNum) return res.status(400).json({ error: { message: 'Invoice number required' } });
+
+    const wo = await WorkOrder.findByPk(req.params.id);
+    if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
+
+    if (wo.invoiceNumber === newNum) return res.json({ data: wo.toJSON(), message: 'No change' });
+
+    // Check uniqueness — scan both WorkOrder and InvoiceNumber tables
+    const existingWO = await WorkOrder.findOne({ where: { invoiceNumber: newNum } });
+    if (existingWO && existingWO.id !== wo.id) {
+      const drRef = existingWO.drNumber ? `DR-${existingWO.drNumber}` : existingWO.orderNumber;
+      return res.status(409).json({ error: { message: `Invoice #${newNum} is already assigned to ${drRef} (${existingWO.clientName})` } });
+    }
+
+    const existingInv = await InvoiceNumber.findOne({ where: { invoiceNumber: parseInt(newNum) || 0 } });
+    if (existingInv && existingInv.workOrderId !== wo.id) {
+      const refWO = await WorkOrder.findByPk(existingInv.workOrderId, { attributes: ['drNumber','orderNumber','clientName'] });
+      const drRef = refWO?.drNumber ? `DR-${refWO.drNumber}` : refWO?.orderNumber;
+      return res.status(409).json({ error: { message: `Invoice #${newNum} is already in use${drRef ? ` on ${drRef}` : ''}` } });
+    }
+
+    // Update WO invoice number
+    const oldNum = wo.invoiceNumber;
+    await wo.update({ invoiceNumber: newNum });
+
+    // Update InvoiceNumber record if exists
+    await InvoiceNumber.update(
+      { invoiceNumber: parseInt(newNum) || newNum },
+      { where: { workOrderId: wo.id } }
+    );
+
+    res.json({ data: wo.toJSON(), message: `Invoice number changed from #${oldNum || '?'} to #${newNum}` });
+  } catch (error) { next(error); }
+});
+
 module.exports = router;
 module.exports.regenerateInvoicePDF = regenerateInvoicePDF;

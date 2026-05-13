@@ -2028,6 +2028,8 @@ router.post('/:id/mark-complete', async (req, res, next) => {
           );
           const fn = `USMCA-COO-${freshWO.drNumber||freshWO.orderNumber}-${new Date().getFullYear()}-${suffix}.pdf`;
           const up = await fileStorage.uploadBuffer(Buffer.from(resp.data), { folder: `work-orders/${freshWO.id}/documents`, filename: fn, mimeType: 'application/pdf' });
+          // Delete previous USMCA with same suffix before saving new one
+          await WorkOrderDocument.destroy({ where: { workOrderId: freshWO.id, documentType: 'usmca', originalName: { [require('sequelize').Op.like]: '%-'+suffix+'.pdf' } } });
           await WorkOrderDocument.create({ workOrderId: freshWO.id, originalName: fn, mimeType: 'application/pdf', size: resp.data.byteLength, url: up.url, cloudinaryId: up.storageId, documentType: 'usmca', portalVisible: true });
         }
         console.log('[USMCA] Auto-generated Standard + Table on stored for WO:', freshWO.drNumber);
@@ -7140,6 +7142,8 @@ router.post('/:id/usmca', async (req, res, next) => {
       const formatSuffix = format === 'format2' ? 'Table' : 'Standard';
       const fn = 'USMCA-COO-'+(workOrder.drNumber||workOrder.orderNumber)+'-'+new Date().getFullYear()+'-'+formatSuffix+'.pdf';
       const up = await fileStorage.uploadBuffer(pdfBuffer,{folder:'work-orders/'+workOrder.id+'/documents',filename:fn,mimeType:'application/pdf'});
+      // Delete any previous USMCA doc with the same suffix (Standard or Table)
+      await WorkOrderDocument.destroy({ where: { workOrderId: workOrder.id, documentType: 'usmca', originalName: { [require('sequelize').Op.like]: '%-'+formatSuffix+'.pdf' } } });
       await WorkOrderDocument.create({workOrderId:workOrder.id,originalName:fn,mimeType:'application/pdf',size:pdfBuffer.length,url:up.url,cloudinaryId:up.storageId,documentType:'usmca',portalVisible:true});
     } catch(e){console.warn('[usmca] save:',e.message);}
 

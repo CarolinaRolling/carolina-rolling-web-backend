@@ -215,7 +215,13 @@ router.put('/clients/:id', async (req, res, next) => {
       accountingContactName: req.body.accountingContactName !== undefined ? (req.body.accountingContactName || null) : client.accountingContactName,
       accountingContactEmail: req.body.accountingContactEmail !== undefined ? (req.body.accountingContactEmail || null) : client.accountingContactEmail,
       accountingContactPhone: req.body.accountingContactPhone !== undefined ? (req.body.accountingContactPhone || null) : client.accountingContactPhone,
-      apEmail: req.body.apEmail !== undefined ? (req.body.apEmail || null) : client.apEmail
+      apEmail: req.body.apEmail !== undefined ? (req.body.apEmail || null) : client.apEmail,
+      autoGenerateUSMCA: req.body.autoGenerateUSMCA !== undefined ? !!req.body.autoGenerateUSMCA : client.autoGenerateUSMCA,
+      usmcaFormat: req.body.usmcaFormat !== undefined ? (req.body.usmcaFormat || 'format1') : client.usmcaFormat,
+      usmcaHtsCode: req.body.usmcaHtsCode !== undefined ? (req.body.usmcaHtsCode || null) : client.usmcaHtsCode,
+      usmcaImporterName: req.body.usmcaImporterName !== undefined ? (req.body.usmcaImporterName || null) : client.usmcaImporterName,
+      usmcaImporterAddress: req.body.usmcaImporterAddress !== undefined ? (req.body.usmcaImporterAddress || null) : client.usmcaImporterAddress,
+      usmcaOriginCriteria: req.body.usmcaOriginCriteria !== undefined ? (req.body.usmcaOriginCriteria || 'A') : client.usmcaOriginCriteria
     });
     
     // Propagate name change to all work orders and estimates

@@ -809,6 +809,14 @@ async function startServer() {
       )`);
     } catch (e) { console.log('work_order_payments table skip:', e.message); }
 
+    // Add USMCA per-order fields to work_orders table
+    try {
+      await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "usmcaImporterName" VARCHAR(255)`);
+      await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "usmcaImporterAddress" TEXT`);
+      await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "usmcaHtsCode" VARCHAR(50)`);
+      await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "usmcaOriginCriteria" VARCHAR(10)`);
+    } catch (e) { console.log('USMCA WO fields skip:', e.message); }
+
     // Add USMCA fields to clients table
     try {
       await sequelize.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS "autoGenerateUSMCA" BOOLEAN DEFAULT false`);

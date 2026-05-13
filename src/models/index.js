@@ -700,6 +700,23 @@ const WorkOrder = sequelize.define('WorkOrder', {
   voidReason: {
     type: DataTypes.TEXT,
     allowNull: true
+  },
+  // USMCA per-order overrides
+  usmcaImporterName: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  usmcaImporterAddress: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  usmcaHtsCode: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  usmcaOriginCriteria: {
+    type: DataTypes.STRING,
+    allowNull: true
   }
 }, {
   tableName: 'work_orders',

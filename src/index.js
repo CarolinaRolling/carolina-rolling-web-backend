@@ -437,11 +437,13 @@ portalRouter.get('/:drNumber/documents', async (req, res, next) => {
     const workOrder = await portalModels.WorkOrder.findOne({ where: { drNumber } });
     if (!workOrder) return res.status(404).json({ error: { message: 'Order not found' } });
     const { Op: portalOp } = require('sequelize');
+    // Whitelist: only show document types appropriate for clients
+    const PORTAL_ALLOWED_TYPES = ['coc', 'shipping_doc', 'mtr', 'usmca', 'invoice', 'general'];
     const documents = await portalModels.WorkOrderDocument.findAll({
       where: {
         workOrderId: workOrder.id,
         portalVisible: true,
-        documentType: { [portalOp.notIn]: ['mtr', 'purchase_order', 'outside_processing_po'] }
+        documentType: { [portalOp.in]: PORTAL_ALLOWED_TYPES }
       },
       order: [['createdAt', 'DESC']]
     });

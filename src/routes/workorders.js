@@ -2003,6 +2003,36 @@ router.post('/:id/mark-complete', async (req, res, next) => {
     });
     
     res.json({ data: workOrder, message: 'Order marked complete and moved to Stored' });
+
+    // Auto-generate USMCA if enabled on client
+    setImmediate(async () => {
+      try {
+        const freshWO = await WorkOrder.findByPk(workOrder.id, {
+          include: [{ model: WorkOrderPart, as: 'parts' }, { model: Client, as: 'client' }]
+        });
+        if (!freshWO?.client?.autoGenerateUSMCA) return;
+        const port = process.env.PORT || 3001;
+        const baseParams = {
+          htsCode: freshWO.client.usmcaHtsCode || '7215',
+          originCriteria: freshWO.client.usmcaOriginCriteria || 'A',
+          importerName: freshWO.client.usmcaImporterName || freshWO.clientName,
+          importerAddress: freshWO.client.usmcaImporterAddress || '',
+          blanketFrom: '01/01/' + new Date().getFullYear(),
+          blanketTo: '12/31/' + new Date().getFullYear()
+        };
+        const axios = require('axios');
+        for (const [fmt, suffix] of [['format1','Standard'],['format2','Table']]) {
+          const resp = await axios.post(`http://localhost:${port}/api/workorders/${freshWO.id}/usmca`,
+            { ...baseParams, format: fmt },
+            { responseType: 'arraybuffer', headers: { 'x-api-key': process.env.INTERNAL_API_KEY || 'internal' } }
+          );
+          const fn = `USMCA-COO-${freshWO.drNumber||freshWO.orderNumber}-${new Date().getFullYear()}-${suffix}.pdf`;
+          const up = await fileStorage.uploadBuffer(Buffer.from(resp.data), { folder: `work-orders/${freshWO.id}/documents`, filename: fn, mimeType: 'application/pdf' });
+          await WorkOrderDocument.create({ workOrderId: freshWO.id, originalName: fn, mimeType: 'application/pdf', size: resp.data.byteLength, url: up.url, cloudinaryId: up.storageId, documentType: 'usmca', portalVisible: true });
+        }
+        console.log('[USMCA] Auto-generated Standard + Table on stored for WO:', freshWO.drNumber);
+      } catch (e) { console.warn('[USMCA] Auto-generate on stored failed:', e.message); }
+    });
   } catch (error) {
     next(error);
   }
@@ -2124,21 +2154,6 @@ router.post('/:id/pickup', async (req, res, next) => {
         const newIdx = history.length - 1;
         if (newIdx >= 0) await saveShipmentDocument(freshWO, history[newIdx], newIdx);
 
-        // Auto-generate USMCA if enabled on client and this is a full shipment
-        if (type === 'full' && freshWO.client?.autoGenerateUSMCA) {
-          try {
-            const PDFDocument = require('pdfkit');
-            const usmcaReq = { body: { format: freshWO.client.usmcaFormat || 'format1', htsCode: freshWO.client.usmcaHtsCode || '7215', originCriteria: freshWO.client.usmcaOriginCriteria || 'A', importerName: freshWO.client.usmcaImporterName || freshWO.clientName, importerAddress: freshWO.client.usmcaImporterAddress || '', blanketFrom: '01/01/' + new Date().getFullYear(), blanketTo: '12/31/' + new Date().getFullYear() }, params: { id: freshWO.id } };
-            const fakeRes = { setHeader: ()=>{}, send: async (buf) => {
-              const fn = 'USMCA-COO-'+(freshWO.drNumber||freshWO.orderNumber)+'-'+new Date().getFullYear()+'.pdf';
-              const up = await fileStorage.uploadBuffer(buf, { folder:'work-orders/'+freshWO.id+'/documents', filename:fn, mimeType:'application/pdf' });
-              await WorkOrderDocument.create({ workOrderId:freshWO.id, originalName:fn, mimeType:'application/pdf', size:buf.length, url:up.url, cloudinaryId:up.storageId, documentType:'usmca', portalVisible:true });
-              console.log('[USMCA] Auto-generated for WO:', freshWO.drNumber);
-            }};
-            // Use internal function instead of HTTP call
-            const usmcaModule = require('./workorders');
-          } catch (uErr) { console.warn('[USMCA] Auto-generate failed:', uErr.message); }
-        }
       } catch (e) { console.error('[ShipmentDoc] record hook error:', e.message); }
     });
   } catch (error) {
@@ -6936,6 +6951,16 @@ router.post('/:id/usmca', async (req, res, next) => {
     const exEmail = 'keepitrolling@carolinarolling.com';
     const exTaxId = '95-3640342';
     const certName = 'Jason L. Thornton';
+
+    // Load certifier signature image from settings
+    let signatureImgBuffer = null;
+    try {
+      const sigSetting = await AppSettings.findOne({ where: { key: 'certifier_signature_url' } });
+      if (sigSetting?.value && sigSetting.value.startsWith('data:image')) {
+        const base64Data = sigSetting.value.split(',')[1];
+        if (base64Data) signatureImgBuffer = Buffer.from(base64Data, 'base64');
+      }
+    } catch (e) { console.warn('[USMCA] sig load:', e.message); }
     const certTitle = 'Owner';
     const certPhone = '562-633-1044';
     const certEmail = 'keepitrolling@carolinarolling.com';
@@ -6997,6 +7022,7 @@ router.post('/:id/usmca', async (req, res, next) => {
       doc.font('Helvetica').fontSize(7.5).fillColor(blk).text('*THE INFORMATION ON THIS DOCUMENT IS TRUE AND ACCURATE AND I ASSUME THE RESPONSIBILITY FOR PROVING SUCH REPRESENTATIONS. I UNDERSTAND THAT I AM LIABLE FOR ANY FALSE STATEMENTS OR MATERIAL OMISSIONS MADE ON OR IN CONNECTION WITH THIS DOCUMENT;\n\nI AGREE TO MAINTAIN, AND PRESENT UPON REQUEST, DOCUMENTATION NECESSARY TO SUPPORT THIS CERTIFICATE, AND TO INFORM, IN WRITING, ALL PERSONS TO WHOM THE CERTIFICATE WAS GIVEN OF ANY CHANGES THAT WOULD AFFECT THE ACCURACY OR VALIDITY OF THIS CERTIFICATE;\n\nTHE GOODS ORIGINATED IN THE TERRITORY OF ONE OR MORE OF THE PARTIES, AND COMPLY WITH THE ORIGIN REQUIREMENTS SPECIFIED FOR THOSE GOODS IN THE USMCA FREE TRADE AGREEMENT.',43,y+3,{width:W-6});
       y+=40;
       const third=W/3;
+      if (signatureImgBuffer) { try { doc.image(signatureImgBuffer, 40, y-28, { height: 26, fit: [140,26] }); } catch {} }
       ['COMPANY: Carolina Rolling Co. Inc.','NAME: '+certName,'TITLE: '+certTitle].forEach((t,i)=>{doc.font('Helvetica').fontSize(8.5).fillColor(blk).text(t,40+i*third,y+4,{width:third-4,lineBreak:false});});
       y+=16;
       doc.font('Helvetica').fontSize(8.5).fillColor(blk).text('DATE: (DD/MM/YYYY) '+certDate,40,y);
@@ -7058,6 +7084,9 @@ router.post('/:id/usmca', async (req, res, next) => {
       doc.rect(40,y,sW,78).lineWidth(0.5).strokeColor(blk).stroke();
       doc.font('Helvetica-Bold').fontSize(8).fillColor(blk).text('10.-',43,y+3,{continued:true});doc.font('Helvetica').text(" Authorized Certifier's Signature:",{lineBreak:false});
       doc.moveTo(43,y+58).lineTo(43+sW-6,y+58).lineWidth(0.5).strokeColor(gry).stroke();
+      if (signatureImgBuffer) {
+        try { doc.image(signatureImgBuffer, 44, y+28, { height: 28, fit: [sW-12, 28] }); } catch {}
+      }
       doc.rect(40+sW,y,sW,78).lineWidth(0.5).strokeColor(blk).stroke();
       doc.font('Helvetica-Bold').fontSize(8).fillColor(blk).text('11.-',43+sW,y+3,{continued:true});doc.font('Helvetica').text(' Certifying Company Name & Address (including country):',{lineBreak:false});
       doc.font('Helvetica').fontSize(9).fillColor(blk).text('Carolina Rolling Co. Inc.',43+sW,y+16);doc.text('9152 Sonrisa St.',43+sW,y+28);doc.text('Bellflower, CA 90706',43+sW,y+40);doc.text('USA',43+sW,y+52);
@@ -7082,13 +7111,14 @@ router.post('/:id/usmca', async (req, res, next) => {
 
     // Save as shipping_doc with portal visibility
     try {
-      const fn = 'USMCA-COO-'+(workOrder.drNumber||workOrder.orderNumber)+'-'+new Date().getFullYear()+'.pdf';
+      const formatSuffix = format === 'format2' ? 'Table' : 'Standard';
+      const fn = 'USMCA-COO-'+(workOrder.drNumber||workOrder.orderNumber)+'-'+new Date().getFullYear()+'-'+formatSuffix+'.pdf';
       const up = await fileStorage.uploadBuffer(pdfBuffer,{folder:'work-orders/'+workOrder.id+'/documents',filename:fn,mimeType:'application/pdf'});
       await WorkOrderDocument.create({workOrderId:workOrder.id,originalName:fn,mimeType:'application/pdf',size:pdfBuffer.length,url:up.url,cloudinaryId:up.storageId,documentType:'usmca',portalVisible:true});
     } catch(e){console.warn('[usmca] save:',e.message);}
 
     res.setHeader('Content-Type','application/pdf');
-    res.setHeader('Content-Disposition','attachment; filename="USMCA-COO-'+(workOrder.drNumber||'unknown')+'.pdf"');
+    res.setHeader('Content-Disposition','attachment; filename="USMCA-COO-'+(workOrder.drNumber||'unknown')+'-'+new Date().getFullYear()+'-'+(format==='format2'?'Table':'Standard')+'.pdf"');
     res.send(pdfBuffer);
   } catch(error){console.error('[usmca]',error.message);next(error);}
 });

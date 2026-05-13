@@ -14,7 +14,7 @@ class InboundOrderService {
     return InboundOrder.findByPk(id, {
       include: [
         { model: Vendor, as: 'vendor', attributes: ['id', 'name', 'contactName', 'contactPhone', 'contactEmail'] },
-        { model: WorkOrder, as: 'workOrder', attributes: ['id', 'orderNumber', 'drNumber', 'clientName', 'status'] }
+        { model: WorkOrder, as: 'workOrder', attributes: ['id', 'orderNumber', 'drNumber', 'clientName', 'clientPurchaseOrderNumber', 'status'] }
       ]
     });
   }
@@ -31,7 +31,7 @@ class InboundOrderService {
       where,
       include: [
         { model: Vendor, as: 'vendor', attributes: ['id', 'name', 'contactName', 'contactPhone', 'contactEmail'] },
-        { model: WorkOrder, as: 'workOrder', attributes: ['id', 'orderNumber', 'drNumber', 'clientName', 'status'] }
+        { model: WorkOrder, as: 'workOrder', attributes: ['id', 'orderNumber', 'drNumber', 'clientName', 'clientPurchaseOrderNumber', 'status'] }
       ],
       order: [['createdAt', 'DESC']],
       limit: parseInt(limit),

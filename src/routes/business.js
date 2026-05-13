@@ -601,13 +601,14 @@ router.put('/payroll/:id/entries/:entryId', async (req, res, next) => {
     updates.grossPay = (reg * rate) + (ot * rate * 1.5) + (vac * rate) + bonus;
 
     await entry.update(updates);
+    await entry.reload();
 
     // Update payroll week total
     const allEntries = await PayrollEntry.findAll({ where: { payrollWeekId: req.params.id } });
     const totalGross = allEntries.reduce((s, e) => s + (parseFloat(e.grossPay) || 0), 0);
     await PayrollWeek.update({ totalGross }, { where: { id: req.params.id } });
 
-    res.json({ data: entry, message: 'Updated' });
+    res.json({ data: entry.toJSON(), message: 'Updated' });
   } catch (error) { next(error); }
 });
 

@@ -39,6 +39,7 @@ function formatQBDate(dateStr) {
 function clean(s) {
   return (s || '')
     .replace(/[\t\r\n]/g, ' ')
+    .replace(/π/g, 'pi')
     .replace(/(\d)"(\s|$|x|X|\))/g, '$1in.$2')
     .replace(/"/g, "'")
     .trim();

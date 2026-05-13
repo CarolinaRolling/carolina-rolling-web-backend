@@ -6631,9 +6631,11 @@ router.post('/:id/coc', async (req, res, next) => {
       if (client.zip) cl += ' ' + client.zip;
       if (cl) { doc.text(cl, 50, y); y += 12; }
     }
-    y += 6;
-    doc.font('Helvetica').fontSize(11).fillColor(grayColor);
-    doc.text('Customer P.O: ' + (workOrder.clientPurchaseOrderNumber || '—'), 50, y);
+    y += 14;
+    doc.font('Helvetica').fontSize(9.5).fillColor(grayColor);
+    doc.text('Customer P.O:', 50, y);
+    doc.font('Helvetica-Bold').fontSize(10.5).fillColor(darkColor);
+    doc.text(workOrder.clientPurchaseOrderNumber || '—', 130, y);
     y += 20;
 
     // Parts table
@@ -6674,9 +6676,15 @@ router.post('/:id/coc', async (req, res, next) => {
         y += doc.heightOfString(matDesc, { width: 360 }) + 1;
       } else { y += 12; }
       if (rollDesc) {
+        // Clean special chars that Helvetica can't render
+        const cleanRollDesc = rollDesc
+          .replace(/°/g, 'deg')
+          .replace(/↻/g, '(CW)')
+          .replace(/↺/g, '(CCW)')
+          .replace(/[^ -]/g, '?');
         doc.font('Helvetica').fontSize(10.5).fillColor(grayColor);
-        doc.text(rollDesc, 200, y, { width: 360 });
-        y += doc.heightOfString(rollDesc, { width: 360 }) + 1;
+        doc.text(cleanRollDesc, 200, y, { width: 360 });
+        y += doc.heightOfString(cleanRollDesc, { width: 360 }) + 1;
       }
       if (p.specialInstructions) {
         doc.font('Helvetica-Oblique').fontSize(10).fillColor('#999');

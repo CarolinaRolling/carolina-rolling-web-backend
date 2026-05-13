@@ -7093,3 +7093,5 @@ router.post('/:id/usmca', async (req, res, next) => {
   } catch(error){console.error('[usmca]',error.message);next(error);}
 });
 
+
+module.exports = router;

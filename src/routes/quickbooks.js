@@ -1606,5 +1606,5 @@ router.put('/invoice-number/:id', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+router.regenerateInvoicePDF = regenerateInvoicePDF;
 module.exports = router;
-module.exports.regenerateInvoicePDF = regenerateInvoicePDF;

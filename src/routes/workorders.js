@@ -7001,33 +7001,54 @@ router.post('/:id/usmca', async (req, res, next) => {
       doc.font('Helvetica').fontSize(7).fillColor(gry).text('TAX IDENTIFICATION NUMBER:',43+half,y+50);
       y+=r2h;
       // Table header
-      const cw=[60,160,80,80,80,72]; const cx=[40,100,260,340,420,500];
-      const tHdrH=34;
-      const th=['5','6','7','8','HS TARIFF\nCLASSIFICATION\nNUMBER','COUNTRY\nOF ORIGIN'];
-      const ts=['Part\nNumber','Description of Good(s)','','Origin\nCriteria','',''];
-      cx.forEach((x,i)=>{
-        doc.rect(x,y,cw[i],tHdrH).lineWidth(0.5).strokeColor(blk).stroke();
-        doc.font('Helvetica-Bold').fontSize(8).fillColor(blk).text(th[i]||'',x+2,y+3,{width:cw[i]-4,align:'center',lineBreak:true});
-        if(ts[i]) doc.font('Helvetica').fontSize(7).fillColor(gry).text(ts[i],x+2,y+16,{width:cw[i]-4,align:'center'});
+      // 5 columns: Part# | Description | HS Tariff (col 7) | Origin Criteria (col 8) | Country of Origin
+      const cw=[55,185,90,70,60]; const cx=[40,95,280,370,440];
+      const tHdrH=36;
+      // Draw header borders first, then text on top
+      cx.forEach((x,i)=>{ doc.rect(x,y,cw[i],tHdrH).lineWidth(0.5).strokeColor(blk).stroke(); });
+      // Header labels
+      [
+        ['5','Part\nNumber'],
+        ['6','Description of Good(s)'],
+        ['7','HS TARIFF\nCLASSIFICATION\nNUMBER'],
+        ['8','Origin\nCriteria'],
+        ['','COUNTRY\nOF ORIGIN']
+      ].forEach(([num,sub],i)=>{
+        const x=cx[i];
+        if(num) { doc.font('Helvetica-Bold').fontSize(8).fillColor(blk).text(num,x+2,y+2,{width:cw[i]-4,align:'center',lineBreak:false}); }
+        doc.font('Helvetica').fontSize(6.5).fillColor(gry).text(sub,x+2,y+(num?11:8),{width:cw[i]-4,align:'center'});
       });
       y+=tHdrH;
       partDescriptions.forEach(p=>{
         const rh=32;
-        const pHts=p.htsCode||htsCode; const rv=[p.partNum||'',p.description,pHts,originCriteria,pHts,'USA'];
-        cx.forEach((x,i)=>{doc.rect(x,y,cw[i],rh).lineWidth(0.5).strokeColor(blk).stroke();doc.font('Helvetica').fontSize(8.5).fillColor(blk).text(rv[i]||'',x+3,y+9,{width:cw[i]-6,lineBreak:false});});
+        const pHts=p.htsCode||htsCode;
+        const rv=[p.partNum||'',p.description,pHts,originCriteria,'USA'];
+        cx.forEach((x,i)=>{
+          doc.rect(x,y,cw[i],rh).lineWidth(0.5).strokeColor(blk).stroke();
+          const align = i===1 ? 'left' : 'center';
+          doc.font('Helvetica').fontSize(8.5).fillColor(blk).text(rv[i]||'',x+3,y+9,{width:cw[i]-6,align,lineBreak:false});
+        });
         y+=rh;
       });
       y+=6;
-      doc.rect(40,y,W,38).lineWidth(0.5).strokeColor(blk).stroke();
-      doc.font('Helvetica').fontSize(7.5).fillColor(blk).text('*THE INFORMATION ON THIS DOCUMENT IS TRUE AND ACCURATE AND I ASSUME THE RESPONSIBILITY FOR PROVING SUCH REPRESENTATIONS. I UNDERSTAND THAT I AM LIABLE FOR ANY FALSE STATEMENTS OR MATERIAL OMISSIONS MADE ON OR IN CONNECTION WITH THIS DOCUMENT;\n\nI AGREE TO MAINTAIN, AND PRESENT UPON REQUEST, DOCUMENTATION NECESSARY TO SUPPORT THIS CERTIFICATE, AND TO INFORM, IN WRITING, ALL PERSONS TO WHOM THE CERTIFICATE WAS GIVEN OF ANY CHANGES THAT WOULD AFFECT THE ACCURACY OR VALIDITY OF THIS CERTIFICATE;\n\nTHE GOODS ORIGINATED IN THE TERRITORY OF ONE OR MORE OF THE PARTIES, AND COMPLY WITH THE ORIGIN REQUIREMENTS SPECIFIED FOR THOSE GOODS IN THE USMCA FREE TRADE AGREEMENT.',43,y+3,{width:W-6});
-      y+=40;
+      const certText = '*THE INFORMATION ON THIS DOCUMENT IS TRUE AND ACCURATE AND I ASSUME THE RESPONSIBILITY FOR PROVING SUCH REPRESENTATIONS. I UNDERSTAND THAT I AM LIABLE FOR ANY FALSE STATEMENTS OR MATERIAL OMISSIONS MADE ON OR IN CONNECTION WITH THIS DOCUMENT;\n\nI AGREE TO MAINTAIN, AND PRESENT UPON REQUEST, DOCUMENTATION NECESSARY TO SUPPORT THIS CERTIFICATE, AND TO INFORM, IN WRITING, ALL PERSONS TO WHOM THE CERTIFICATE WAS GIVEN OF ANY CHANGES THAT WOULD AFFECT THE ACCURACY OR VALIDITY OF THIS CERTIFICATE;\n\nTHE GOODS ORIGINATED IN THE TERRITORY OF ONE OR MORE OF THE PARTIES, AND COMPLY WITH THE ORIGIN REQUIREMENTS SPECIFIED FOR THOSE GOODS IN THE USMCA FREE TRADE AGREEMENT.';
+      const certTextH = doc.heightOfString(certText, { width: W-6, fontSize: 7.5 }) + 12;
+      doc.rect(40,y,W,certTextH).lineWidth(0.5).strokeColor(blk).stroke();
+      doc.font('Helvetica').fontSize(7.5).fillColor(blk).text(certText, 43, y+6, { width: W-6 });
+      y += certTextH + 6;
       const third=W/3;
-      if (signatureImgBuffer) { try { doc.image(signatureImgBuffer, 40, y-28, { height: 26, fit: [140,26] }); } catch {} }
-      ['COMPANY: Carolina Rolling Co. Inc.','NAME: '+certName,'TITLE: '+certTitle].forEach((t,i)=>{doc.font('Helvetica').fontSize(8.5).fillColor(blk).text(t,40+i*third,y+4,{width:third-4,lineBreak:false});});
-      y+=16;
+      // Signature + footer with proper spacing
+      if (signatureImgBuffer) {
+        try { doc.image(signatureImgBuffer, 40, y, { height: 30, fit: [150, 30] }); } catch {}
+        y += 34;
+      } else { y += 4; }
+      doc.moveTo(40,y).lineTo(40+third-4,y).lineWidth(0.3).strokeColor(gry).stroke();
+      y += 4;
+      ['COMPANY: Carolina Rolling Co. Inc.','NAME: '+certName,'TITLE: '+certTitle].forEach((t,i)=>{doc.font('Helvetica').fontSize(8.5).fillColor(blk).text(t,40+i*third,y,{width:third-4,lineBreak:false});});
+      y+=14;
       doc.font('Helvetica').fontSize(8.5).fillColor(blk).text('DATE: (DD/MM/YYYY) '+certDate,40,y);
       doc.text('TELEPHONE: '+certPhone,40+third,y);
-      y+=14;
+      y+=13;
       doc.font('Helvetica').fontSize(8).fillColor(gry).text('9152 Sonrisa Street, Bellflower CA, 90706',40,y);
 
     } else {
@@ -7059,13 +7080,17 @@ router.post('/:id/usmca', async (req, res, next) => {
       doc.font('Helvetica').fontSize(9).text('   o  Certifier is the Importer   o  Certifier is the Producer',{lineBreak:false});
       y+=26;
       const cw2=[60,160,80,80,72]; const cx2=[40,100,260,340,420];
-      const tH2=26;
-      doc.rect(40,y,60,tH2).lineWidth(0.5).strokeColor(blk).stroke();
-      doc.font('Helvetica-Bold').fontSize(8).fillColor(blk).text('6.- Description of the goods',43,y+8,{width:FW-6,lineBreak:false});
-      [['7.-HS Tariff\nClassification\nNumber','8.- Origin\nCriteria.','9.-Country of\nOrigin']].forEach((hdrs)=>{
-        hdrs.forEach((h,i)=>{doc.rect(cx2[i+2],y,cw2[i+2],tH2).lineWidth(0.5).strokeColor(blk).stroke();doc.font('Helvetica-Bold').fontSize(7.5).fillColor(blk).text(h,cx2[i+2]+2,y+3,{width:cw2[i+2]-4,align:'center'});});
-      });
-      doc.rect(cx2[1],y,cw2[1],tH2).lineWidth(0.5).strokeColor(blk).stroke();
+      const tH2=32; const descW=cw2[0]+cw2[1]; // 220px for description cell
+      // Draw all borders first, then text on top so nothing overlaps
+      doc.rect(40,y,descW,tH2).lineWidth(0.5).strokeColor(blk).stroke(); // description cell (cols 6)
+      doc.rect(cx2[2],y,cw2[2],tH2).lineWidth(0.5).strokeColor(blk).stroke(); // col 7
+      doc.rect(cx2[3],y,cw2[3],tH2).lineWidth(0.5).strokeColor(blk).stroke(); // col 8
+      doc.rect(cx2[4],y,cw2[4],tH2).lineWidth(0.5).strokeColor(blk).stroke(); // col 9
+      // Now draw text on top
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(blk).text('6.- Description of the goods',43,y+12,{width:descW-6,lineBreak:false});
+      doc.font('Helvetica-Bold').fontSize(7).fillColor(blk).text('7.-HS Tariff\nClassification\nNumber',cx2[2]+2,y+3,{width:cw2[2]-4,align:'center'});
+      doc.font('Helvetica-Bold').fontSize(7.5).fillColor(blk).text('8.- Origin\nCriteria.',cx2[3]+2,y+10,{width:cw2[3]-4,align:'center'});
+      doc.font('Helvetica-Bold').fontSize(7.5).fillColor(blk).text('9.-Country of\nOrigin',cx2[4]+2,y+10,{width:cw2[4]-4,align:'center'});
       y+=tH2;
       partDescriptions.forEach((p,idx)=>{
         const rh=p.description.length>50?36:24;
@@ -7073,7 +7098,8 @@ router.post('/:id/usmca', async (req, res, next) => {
         doc.font('Helvetica').fontSize(9).fillColor(blk).text(String(idx+1),43,y+6,{width:54,lineBreak:false});
         doc.rect(cx2[1],y,cw2[1],rh).lineWidth(0.5).strokeColor(blk).stroke();
         doc.font('Helvetica').fontSize(9).fillColor(blk).text(p.description,cx2[1]+3,y+4,{width:cw2[1]-6});
-        const ph=p.htsCode||htsCode; [ph,originCriteria,'USA'].forEach((v,i)=>{doc.rect(cx2[i+2],y,cw2[i+2],rh).lineWidth(0.5).strokeColor(blk).stroke();doc.font('Helvetica').fontSize(9).fillColor(blk).text(v,cx2[i+2]+3,y+6,{width:cw2[i+2]-6,align:'center',lineBreak:false});});
+        const ph=p.htsCode||htsCode; [ph,originCriteria,'USA'].forEach((v,i)=>{doc.rect(cx2[i+2],y,cw2[i+2],rh).lineWidth(0.5).strokeColor(blk).stroke();doc.font('Helvetica').fontSize(9).fillColor(blk).text(v,cx2[i+2]+3,y+6,{width:cw2[i+2]-6,align:'center',lineBreak:false});
+        });
         y+=rh;
       });
       y+=6;

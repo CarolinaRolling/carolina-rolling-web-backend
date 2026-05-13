@@ -807,6 +807,16 @@ async function startServer() {
       )`);
     } catch (e) { console.log('work_order_payments table skip:', e.message); }
 
+    // Add USMCA fields to clients table
+    try {
+      await sequelize.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS "autoGenerateUSMCA" BOOLEAN DEFAULT false`);
+      await sequelize.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS "usmcaFormat" VARCHAR(20) DEFAULT 'format1'`);
+      await sequelize.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS "usmcaHtsCode" VARCHAR(50)`);
+      await sequelize.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS "usmcaImporterName" VARCHAR(255)`);
+      await sequelize.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS "usmcaImporterAddress" TEXT`);
+      await sequelize.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS "usmcaOriginCriteria" VARCHAR(10) DEFAULT 'A'`);
+    } catch (e) { console.log('USMCA client fields skip:', e.message); }
+
     // Create work_order_invoice_sends table
     try {
       await sequelize.query(`CREATE TABLE IF NOT EXISTS work_order_invoice_sends (

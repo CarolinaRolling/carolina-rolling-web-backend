@@ -2214,6 +2214,30 @@ const Client = sequelize.define('Client', {
     type: DataTypes.STRING,
     allowNull: true
   },
+  autoGenerateUSMCA: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  usmcaFormat: {
+    type: DataTypes.STRING,
+    defaultValue: 'format1' // 'format1' (numbered fields) or 'format2' (excel style)
+  },
+  usmcaHtsCode: {
+    type: DataTypes.STRING,
+    allowNull: true // e.g. '7215', '7222', '7222.40'
+  },
+  usmcaImporterName: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  usmcaImporterAddress: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
+  usmcaOriginCriteria: {
+    type: DataTypes.STRING,
+    defaultValue: 'A' // 'A' = wholly obtained/produced in US
+  },
   quickbooksName: {
     type: DataTypes.STRING,
     allowNull: true

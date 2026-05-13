@@ -2119,10 +2119,26 @@ router.post('/:id/pickup', async (req, res, next) => {
     // Generate and save shipment doc in background
     setImmediate(async () => {
       try {
-        const freshWO = await WorkOrder.findByPk(workOrder.id, { include: [{ model: WorkOrderPart, as: 'parts' }] });
+        const freshWO = await WorkOrder.findByPk(workOrder.id, { include: [{ model: WorkOrderPart, as: 'parts' }, { model: Client, as: 'client' }] });
         const history = freshWO.pickupHistory || [];
         const newIdx = history.length - 1;
         if (newIdx >= 0) await saveShipmentDocument(freshWO, history[newIdx], newIdx);
+
+        // Auto-generate USMCA if enabled on client and this is a full shipment
+        if (type === 'full' && freshWO.client?.autoGenerateUSMCA) {
+          try {
+            const PDFDocument = require('pdfkit');
+            const usmcaReq = { body: { format: freshWO.client.usmcaFormat || 'format1', htsCode: freshWO.client.usmcaHtsCode || '7215', originCriteria: freshWO.client.usmcaOriginCriteria || 'A', importerName: freshWO.client.usmcaImporterName || freshWO.clientName, importerAddress: freshWO.client.usmcaImporterAddress || '', blanketFrom: '01/01/' + new Date().getFullYear(), blanketTo: '12/31/' + new Date().getFullYear() }, params: { id: freshWO.id } };
+            const fakeRes = { setHeader: ()=>{}, send: async (buf) => {
+              const fn = 'USMCA-COO-'+(freshWO.drNumber||freshWO.orderNumber)+'-'+new Date().getFullYear()+'.pdf';
+              const up = await fileStorage.uploadBuffer(buf, { folder:'work-orders/'+freshWO.id+'/documents', filename:fn, mimeType:'application/pdf' });
+              await WorkOrderDocument.create({ workOrderId:freshWO.id, originalName:fn, mimeType:'application/pdf', size:buf.length, url:up.url, cloudinaryId:up.storageId, documentType:'usmca', portalVisible:true });
+              console.log('[USMCA] Auto-generated for WO:', freshWO.drNumber);
+            }};
+            // Use internal function instead of HTTP call
+            const usmcaModule = require('./workorders');
+          } catch (uErr) { console.warn('[USMCA] Auto-generate failed:', uErr.message); }
+        }
       } catch (e) { console.error('[ShipmentDoc] record hook error:', e.message); }
     });
   } catch (error) {
@@ -6865,4 +6881,215 @@ router.put('/:id/vendor-issues/:issueId/acknowledge', async (req, res, next) => 
   }
 });
 
-module.exports = router;
+
+// ============================================================
+// POST /:id/usmca — Generate USMCA Certificate of Origin
+// ============================================================
+router.post('/:id/usmca', async (req, res, next) => {
+  try {
+    const workOrder = await WorkOrder.findByPk(req.params.id, {
+      include: [{ model: WorkOrderPart, as: 'parts' }, { model: Client, as: 'client' }]
+    });
+    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+    const client = workOrder.client || await Client.findOne({ where: { name: workOrder.clientName } });
+    const PDFDocument = require('pdfkit');
+    const chunks = [];
+    const doc = new PDFDocument({ margin: 40, size: 'letter' });
+    doc.on('data', c => chunks.push(c));
+    const pdfPromise = new Promise((resolve, reject) => { doc.on('end', () => resolve(Buffer.concat(chunks))); doc.on('error', reject); });
+
+    const {
+      format = client?.usmcaFormat || 'format1',
+      blanketFrom = '01/01/' + new Date().getFullYear(),
+      blanketTo = '12/31/' + new Date().getFullYear(),
+      htsCode = client?.usmcaHtsCode || '7215',
+      originCriteria = client?.usmcaOriginCriteria || 'A',
+      importerName = client?.usmcaImporterName || workOrder.clientName,
+      importerAddress = client?.usmcaImporterAddress || [client?.address, client?.city && client?.state ? client.city + ', ' + client.state + ' ' + (client.zip||'') : ''].filter(Boolean).join('\n'),
+      goodsDescription = '',
+      selectedPartIds
+    } = req.body;
+
+    const allParts = (workOrder.parts||[]).filter(p => !['fab_service','shop_rate','rush_service'].includes(p.partType));
+    const parts = selectedPartIds?.length ? allParts.filter(p => selectedPartIds.includes(p.id)) : allParts;
+
+    // Use provided lineItems (from outbound tab editor) or build from parts
+    let partDescriptions;
+    if (req.body.lineItems && req.body.lineItems.length > 0) {
+      partDescriptions = req.body.lineItems.map(li => ({
+        qty: li.qty || 1,
+        partNum: li.partNumber || '',
+        description: li.description || '',
+        htsCode: li.htsCode || htsCode
+      }));
+    } else {
+      partDescriptions = parts.map(p => {
+        const fd = (p.formData && typeof p.formData === 'object') ? p.formData : {};
+        const mat = (p._materialDescription||fd._materialDescription||p.materialDescription||'').replace(/^\d+pc:\s*/i,'');
+        return { qty: p.quantity||1, partNum: p.clientPartNumber||'', description: goodsDescription||mat, htsCode };
+      });
+    }
+
+    const certDate = new Date().toLocaleDateString('en-US', { month:'2-digit', day:'2-digit', year:'numeric' });
+    const exName = 'Carolina Rolling Company';
+    const exAddr = '9152 Sonrisa St. Bellflower, CA 90706';
+    const exEmail = 'keepitrolling@carolinarolling.com';
+    const exTaxId = '95-3640342';
+    const certName = 'Jason L. Thornton';
+    const certTitle = 'Owner';
+    const certPhone = '562-633-1044';
+    const certEmail = 'keepitrolling@carolinarolling.com';
+    const blk = '#000000';
+    const gry = '#555555';
+    const W = 532;
+
+    if (format === 'format2') {
+      // FORMAT 2: Excel/table style
+      doc.rect(40,40,W,28).fill('#1a1a2e');
+      doc.font('Helvetica-Bold').fontSize(16).fillColor('white').text('USMCA',40,44,{width:W,align:'center',lineBreak:false});
+      doc.font('Helvetica-Bold').fontSize(8).fillColor('white').text('CERTIFICATE OF ORIGIN',40,57,{width:W,align:'center',lineBreak:false});
+      let y=68; const half=W/2;
+      // Row1
+      const r1h=60;
+      doc.rect(40,y,half,r1h).lineWidth(0.5).strokeColor(blk).stroke();
+      doc.font('Helvetica').fontSize(7).fillColor(gry).text('1. EXPORTER NAME AND ADDRESS',43,y+3);
+      doc.font('Helvetica').fontSize(9).fillColor(blk).text(exName+', Inc.',43,y+14);
+      doc.font('Helvetica').fontSize(8).fillColor(blk).text('9152 Sonrisa St., Bellflower, CA 90706',43,y+26);
+      doc.font('Helvetica').fontSize(7).fillColor(gry).text('TAX IDENTIFICATION NUMBER: '+exTaxId,43,y+48);
+      doc.rect(40+half,y,half,r1h).lineWidth(0.5).strokeColor(blk).stroke();
+      doc.font('Helvetica').fontSize(7).fillColor(gry).text('2. BLANKET PERIOD (DD/MM/YY)',43+half,y+3);
+      doc.font('Helvetica').fontSize(8).fillColor(blk).text('FROM',43+half,y+14);
+      doc.font('Helvetica-Bold').fontSize(9).fillColor(blk).text(blanketFrom,43+half,y+24);
+      doc.font('Helvetica').fontSize(8).fillColor(blk).text('TO',43+half,y+36);
+      doc.font('Helvetica-Bold').fontSize(9).fillColor(blk).text(blanketTo,43+half,y+46);
+      y+=r1h;
+      // Row2
+      const r2h=62;
+      doc.rect(40,y,half,r2h).lineWidth(0.5).strokeColor(blk).stroke();
+      doc.font('Helvetica').fontSize(7).fillColor(gry).text('3. PRODUCER NAME AND ADDRESS',43,y+3);
+      doc.font('Helvetica').fontSize(9).fillColor(blk).text('AVAILABLE ON REQUEST',43,y+15);
+      doc.font('Helvetica').fontSize(7).fillColor(gry).text('TAX IDENTIFICATION NUMBER:',43,y+50);
+      doc.rect(40+half,y,half,r2h).lineWidth(0.5).strokeColor(blk).stroke();
+      doc.font('Helvetica').fontSize(7).fillColor(gry).text('4. IMPORTER NAME AND ADDRESS',43+half,y+3);
+      if (importerName) doc.font('Helvetica').fontSize(9).fillColor(blk).text(importerName,43+half,y+15);
+      let iy=y+27; (importerAddress||'').split('\n').forEach(l=>{if(l.trim()){doc.font('Helvetica').fontSize(8.5).fillColor(blk).text(l.trim(),43+half,iy);iy+=11;}});
+      doc.font('Helvetica').fontSize(7).fillColor(gry).text('TAX IDENTIFICATION NUMBER:',43+half,y+50);
+      y+=r2h;
+      // Table header
+      const cw=[60,160,80,80,80,72]; const cx=[40,100,260,340,420,500];
+      const tHdrH=34;
+      const th=['5','6','7','8','HS TARIFF\nCLASSIFICATION\nNUMBER','COUNTRY\nOF ORIGIN'];
+      const ts=['Part\nNumber','Description of Good(s)','','Origin\nCriteria','',''];
+      cx.forEach((x,i)=>{
+        doc.rect(x,y,cw[i],tHdrH).lineWidth(0.5).strokeColor(blk).stroke();
+        doc.font('Helvetica-Bold').fontSize(8).fillColor(blk).text(th[i]||'',x+2,y+3,{width:cw[i]-4,align:'center',lineBreak:true});
+        if(ts[i]) doc.font('Helvetica').fontSize(7).fillColor(gry).text(ts[i],x+2,y+16,{width:cw[i]-4,align:'center'});
+      });
+      y+=tHdrH;
+      partDescriptions.forEach(p=>{
+        const rh=32;
+        const pHts=p.htsCode||htsCode; const rv=[p.partNum||'',p.description,pHts,originCriteria,pHts,'USA'];
+        cx.forEach((x,i)=>{doc.rect(x,y,cw[i],rh).lineWidth(0.5).strokeColor(blk).stroke();doc.font('Helvetica').fontSize(8.5).fillColor(blk).text(rv[i]||'',x+3,y+9,{width:cw[i]-6,lineBreak:false});});
+        y+=rh;
+      });
+      y+=6;
+      doc.rect(40,y,W,38).lineWidth(0.5).strokeColor(blk).stroke();
+      doc.font('Helvetica').fontSize(7.5).fillColor(blk).text('*THE INFORMATION ON THIS DOCUMENT IS TRUE AND ACCURATE AND I ASSUME THE RESPONSIBILITY FOR PROVING SUCH REPRESENTATIONS. I UNDERSTAND THAT I AM LIABLE FOR ANY FALSE STATEMENTS OR MATERIAL OMISSIONS MADE ON OR IN CONNECTION WITH THIS DOCUMENT;\n\nI AGREE TO MAINTAIN, AND PRESENT UPON REQUEST, DOCUMENTATION NECESSARY TO SUPPORT THIS CERTIFICATE, AND TO INFORM, IN WRITING, ALL PERSONS TO WHOM THE CERTIFICATE WAS GIVEN OF ANY CHANGES THAT WOULD AFFECT THE ACCURACY OR VALIDITY OF THIS CERTIFICATE;\n\nTHE GOODS ORIGINATED IN THE TERRITORY OF ONE OR MORE OF THE PARTIES, AND COMPLY WITH THE ORIGIN REQUIREMENTS SPECIFIED FOR THOSE GOODS IN THE USMCA FREE TRADE AGREEMENT.',43,y+3,{width:W-6});
+      y+=40;
+      const third=W/3;
+      ['COMPANY: Carolina Rolling Co. Inc.','NAME: '+certName,'TITLE: '+certTitle].forEach((t,i)=>{doc.font('Helvetica').fontSize(8.5).fillColor(blk).text(t,40+i*third,y+4,{width:third-4,lineBreak:false});});
+      y+=16;
+      doc.font('Helvetica').fontSize(8.5).fillColor(blk).text('DATE: (DD/MM/YYYY) '+certDate,40,y);
+      doc.text('TELEPHONE: '+certPhone,40+third,y);
+      y+=14;
+      doc.font('Helvetica').fontSize(8).fillColor(gry).text('9152 Sonrisa Street, Bellflower CA, 90706',40,y);
+
+    } else {
+      // FORMAT 1: Numbered fields
+      let y=40; const FW=W; const half=FW/2;
+      doc.font('Helvetica-Bold').fontSize(13).fillColor(blk).text('USMCA CERTIFICATION OF ORIGIN',40,y,{width:FW,align:'center',lineBreak:false});
+      y+=18;
+      const expW=Math.round(FW*0.65); const bpW=FW-expW;
+      doc.rect(40,y,expW,65).lineWidth(0.5).strokeColor(blk).stroke();
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(blk).text('1.-',43,y+3,{continued:true});doc.font('Helvetica').fontSize(8).text(' EXPORTER NAME, ADDRESS AND EMAIL',{lineBreak:false});
+      doc.font('Helvetica').fontSize(9).fillColor(blk).text('('+exName+')',43,y+14);doc.text(exAddr,43,y+26);doc.text(exEmail,43,y+37);doc.text('Tax Identification Number: '+exTaxId,43,y+49);
+      doc.rect(40+expW,y,bpW,65).lineWidth(0.5).strokeColor(blk).stroke();
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(blk).text('2.-',43+expW,y+3,{continued:true});doc.font('Helvetica').fontSize(8).text(' BLANKET PERIOD',{lineBreak:false});
+      doc.font('Helvetica').fontSize(9).fillColor(blk).text('FROM: ['+blanketFrom+']',43+expW,y+18);doc.text('TO: ['+blanketTo+']',43+expW,y+32);
+      y+=65;
+      doc.rect(40,y,half,58).lineWidth(0.5).strokeColor(blk).stroke();
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(blk).text('3.-',43,y+3,{continued:true});doc.font('Helvetica').fontSize(8).text(' PRODUCER NAME, ADDRESS AND EMAIL',{lineBreak:false});
+      doc.font('Helvetica').fontSize(9).fillColor(blk).text('Available Upon\nRequest',43,y+14);
+      doc.font('Helvetica').fontSize(7.5).fillColor(gry).text('Tax Identification Number: (Tax ID)',43,y+44);
+      doc.rect(40+half,y,half,58).lineWidth(0.5).strokeColor(blk).stroke();
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(blk).text('4.-',43+half,y+3,{continued:true});doc.font('Helvetica').fontSize(8).text(' IMPORTER NAME, ADDRESS AND EMAIL',{lineBreak:false});
+      if(importerName) doc.font('Helvetica').fontSize(9).fillColor(blk).text(importerName,43+half,y+14);
+      let iy2=y+26; (importerAddress||'').split('\n').forEach(l=>{if(l.trim()){doc.font('Helvetica').fontSize(8.5).fillColor(blk).text(l.trim(),43+half,iy2);iy2+=11;}});
+      doc.font('Helvetica').fontSize(7.5).fillColor(gry).text('Registro Federal de Contribuyentes: (RFC)',43+half,y+44);
+      y+=58;
+      doc.rect(40,y,FW,26).lineWidth(0.5).strokeColor(blk).stroke();
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(blk).text('5.-',43,y+3,{continued:true});doc.font('Helvetica').fontSize(8).text(' CERTIFIER TYPE',{lineBreak:false});
+      doc.font('Helvetica-Bold').fontSize(9).fillColor(blk).text('X  Certifier is the Exporter',60,y+14,{continued:true});
+      doc.font('Helvetica').fontSize(9).text('   o  Certifier is the Importer   o  Certifier is the Producer',{lineBreak:false});
+      y+=26;
+      const cw2=[60,160,80,80,72]; const cx2=[40,100,260,340,420];
+      const tH2=26;
+      doc.rect(40,y,60,tH2).lineWidth(0.5).strokeColor(blk).stroke();
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(blk).text('6.- Description of the goods',43,y+8,{width:FW-6,lineBreak:false});
+      [['7.-HS Tariff\nClassification\nNumber','8.- Origin\nCriteria.','9.-Country of\nOrigin']].forEach((hdrs)=>{
+        hdrs.forEach((h,i)=>{doc.rect(cx2[i+2],y,cw2[i+2],tH2).lineWidth(0.5).strokeColor(blk).stroke();doc.font('Helvetica-Bold').fontSize(7.5).fillColor(blk).text(h,cx2[i+2]+2,y+3,{width:cw2[i+2]-4,align:'center'});});
+      });
+      doc.rect(cx2[1],y,cw2[1],tH2).lineWidth(0.5).strokeColor(blk).stroke();
+      y+=tH2;
+      partDescriptions.forEach((p,idx)=>{
+        const rh=p.description.length>50?36:24;
+        doc.rect(40,y,60,rh).lineWidth(0.5).strokeColor(blk).stroke();
+        doc.font('Helvetica').fontSize(9).fillColor(blk).text(String(idx+1),43,y+6,{width:54,lineBreak:false});
+        doc.rect(cx2[1],y,cw2[1],rh).lineWidth(0.5).strokeColor(blk).stroke();
+        doc.font('Helvetica').fontSize(9).fillColor(blk).text(p.description,cx2[1]+3,y+4,{width:cw2[1]-6});
+        const ph=p.htsCode||htsCode; [ph,originCriteria,'USA'].forEach((v,i)=>{doc.rect(cx2[i+2],y,cw2[i+2],rh).lineWidth(0.5).strokeColor(blk).stroke();doc.font('Helvetica').fontSize(9).fillColor(blk).text(v,cx2[i+2]+3,y+6,{width:cw2[i+2]-6,align:'center',lineBreak:false});});
+        y+=rh;
+      });
+      y+=6;
+      doc.rect(40,y,FW,34).lineWidth(0.5).strokeColor(blk).stroke();
+      doc.font('Helvetica').fontSize(8).fillColor(blk).text('I certify that the goods described in this document qualify as originating and the information contained in this document is true and accurate. I assume responsibility for proving such representations and agree to maintain and present upon request or to make available during a verification visit, documentation necessary to support this certification.',43,y+4,{width:FW-6});
+      y+=36;
+      const sW=FW/2;
+      doc.rect(40,y,sW,78).lineWidth(0.5).strokeColor(blk).stroke();
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(blk).text('10.-',43,y+3,{continued:true});doc.font('Helvetica').text(" Authorized Certifier's Signature:",{lineBreak:false});
+      doc.moveTo(43,y+58).lineTo(43+sW-6,y+58).lineWidth(0.5).strokeColor(gry).stroke();
+      doc.rect(40+sW,y,sW,78).lineWidth(0.5).strokeColor(blk).stroke();
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(blk).text('11.-',43+sW,y+3,{continued:true});doc.font('Helvetica').text(' Certifying Company Name & Address (including country):',{lineBreak:false});
+      doc.font('Helvetica').fontSize(9).fillColor(blk).text('Carolina Rolling Co. Inc.',43+sW,y+16);doc.text('9152 Sonrisa St.',43+sW,y+28);doc.text('Bellflower, CA 90706',43+sW,y+40);doc.text('USA',43+sW,y+52);
+      y+=78;
+      const fW2=FW/3;
+      [[12,'Authorized Certifier Name:',certName],[13,'Authorized Certifier Title:',certTitle],[14,'Date (MM/DD/YYYY):',certDate]].forEach((r,i)=>{
+        doc.rect(40+i*fW2,y,fW2,28).lineWidth(0.5).strokeColor(blk).stroke();
+        doc.font('Helvetica-Bold').fontSize(8).fillColor(blk).text(r[0]+'.-',43+i*fW2,y+3,{continued:true});doc.font('Helvetica').text(' '+r[1],{lineBreak:false});
+        doc.font('Helvetica').fontSize(9.5).fillColor(blk).text(r[2],43+i*fW2,y+15);
+      });
+      y+=28;
+      doc.rect(40,y,FW/2,24).lineWidth(0.5).strokeColor(blk).stroke();
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(blk).text('15.-',43,y+3,{continued:true});doc.font('Helvetica').text(' Telephone:',{lineBreak:false});
+      doc.font('Helvetica').fontSize(9.5).fillColor(blk).text(certPhone,43,y+14);
+      doc.rect(40+FW/2,y,FW/2,24).lineWidth(0.5).strokeColor(blk).stroke();
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(blk).text('16.-',43+FW/2,y+3,{continued:true});doc.font('Helvetica').text(' Email:',{lineBreak:false});
+      doc.font('Helvetica').fontSize(9.5).fillColor(blk).text(certEmail,43+FW/2,y+14);
+    }
+
+    doc.end();
+    const pdfBuffer = await pdfPromise;
+
+    // Save as shipping_doc with portal visibility
+    try {
+      const fn = 'USMCA-COO-'+(workOrder.drNumber||workOrder.orderNumber)+'-'+new Date().getFullYear()+'.pdf';
+      const up = await fileStorage.uploadBuffer(pdfBuffer,{folder:'work-orders/'+workOrder.id+'/documents',filename:fn,mimeType:'application/pdf'});
+      await WorkOrderDocument.create({workOrderId:workOrder.id,originalName:fn,mimeType:'application/pdf',size:pdfBuffer.length,url:up.url,cloudinaryId:up.storageId,documentType:'usmca',portalVisible:true});
+    } catch(e){console.warn('[usmca] save:',e.message);}
+
+    res.setHeader('Content-Type','application/pdf');
+    res.setHeader('Content-Disposition','attachment; filename="USMCA-COO-'+(workOrder.drNumber||'unknown')+'.pdf"');
+    res.send(pdfBuffer);
+  } catch(error){console.error('[usmca]',error.message);next(error);}
+});
+

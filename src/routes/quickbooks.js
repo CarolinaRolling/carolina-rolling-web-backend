@@ -2,7 +2,7 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const fileStorage = require('../utils/storage');
-const { WorkOrder, WorkOrderPart, WorkOrderDocument, Client, InvoiceNumber, AppSettings, sequelize } = require('../models');
+const { WorkOrder, WorkOrderPart, WorkOrderDocument, Client, InvoiceNumber, AppSettings, ShipmentCharge, sequelize } = require('../models');
 
 const router = express.Router();
 
@@ -398,7 +398,7 @@ async function buildInvoiceIIF(wo, parts, client, invoiceNum) {
 
 // ==================== INVOICE PDF GENERATOR ====================
 
-async function generateInvoicePDFBuffer(wo, parts, client, payments = []) {
+async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipmentCharges = []) {
   const PDFDocument = require('pdfkit');
 
   return new Promise(async (resolve, reject) => {
@@ -548,7 +548,7 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = []) {
         }
 
         doc.font('Helvetica').fontSize(10).fillColor(grayColor).text(String(itemNum), 50, yPos, { width: 30, lineBreak: false });
-        doc.font('Helvetica-Bold').fontSize(10).fillColor(darkColor).text(matDesc.substring(0, 48), 85, yPos, { width: 310, lineBreak: false });
+        doc.font('Helvetica-Bold').fontSize(10).fillColor(darkColor).text(matDesc, 85, yPos, { width: 310, lineBreak: false });
         if (rollDesc) {
           doc.font('Helvetica').fontSize(9).fillColor(grayColor).text(rollDesc.substring(0, 58), 85, yPos + 13, { width: 310, lineBreak: false });
         }
@@ -619,7 +619,7 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = []) {
           label = clean(fd._serviceNotes || fd._serviceType || PART_LABELS[svc.partType] || 'Service');
         }
         doc.font('Helvetica').fontSize(10).fillColor(grayColor).text(String(itemNum), 50, yPos, { width: 30, lineBreak: false });
-        doc.font('Helvetica').fontSize(10).fillColor(darkColor).text(label.substring(0, 48), 85, yPos, { width: 310, lineBreak: false });
+        doc.font('Helvetica').fontSize(10).fillColor(darkColor).text(label, 85, yPos, { width: 310, lineBreak: false });
         doc.text('1', 400, yPos, { width: 30, align: 'center', lineBreak: false });
         doc.text(fmtCur(amt), 438, yPos, { width: 52, align: 'right', lineBreak: false });
         doc.font('Helvetica-Bold').text(fmtCur(amt), 498, yPos, { width: 64, align: 'right', lineBreak: false });
@@ -629,10 +629,18 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = []) {
         itemNum++;
       }
 
-      // Trucking
-      const trucking = parseFloat(wo.truckingCost) || 0;
-      if (trucking > 0) {
-        subtotal += trucking;
+      // ── Shipping & Handling charges (tax exempt) ──
+      let shippingTotal = 0;
+      const activeCharges = shipmentCharges.filter(c => {
+        const s = (parseFloat(c.shippingCost)||0)*(1+(parseFloat(c.shippingMarkup)||0)/100);
+        const m = (parseFloat(c.materialsCost)||0)*(1+(parseFloat(c.materialsMarkup)||0)/100);
+        return (s + m) > 0;
+      });
+      // Also include legacy truckingCost field if no new charges
+      if (activeCharges.length === 0 && (parseFloat(wo.truckingCost) || 0) > 0) {
+        const trucking = parseFloat(wo.truckingCost);
+        shippingTotal += trucking;
+        if (yPos > 700) { doc.addPage(); yPos = 50; }
         doc.font('Helvetica').fontSize(10).fillColor(grayColor).text(String(itemNum), 50, yPos, { width: 30, lineBreak: false });
         doc.font('Helvetica').fontSize(10).fillColor(darkColor).text(clean(wo.truckingDescription || 'Trucking / Delivery'), 85, yPos, { width: 310, lineBreak: false });
         doc.text('1', 400, yPos, { width: 30, align: 'center', lineBreak: false });
@@ -641,6 +649,48 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = []) {
         yPos += 20;
         doc.strokeColor(lightGray).lineWidth(0.3).moveTo(50, yPos).lineTo(562, yPos).stroke();
         yPos += 6;
+        itemNum++;
+      }
+      for (const sc of activeCharges) {
+        if (yPos > 680) { doc.addPage(); yPos = 50; }
+        const shippingAmt = (parseFloat(sc.shippingCost)||0)*(1+(parseFloat(sc.shippingMarkup)||0)/100);
+        const materialsAmt = (parseFloat(sc.materialsCost)||0)*(1+(parseFloat(sc.materialsMarkup)||0)/100);
+        const lineTotal = shippingAmt + materialsAmt;
+        shippingTotal += lineTotal;
+
+        const vendorLabel = sc.carrierType === 'our_truck' ? 'Our Truck' : (sc.vendorName || 'Contracted Carrier');
+        const pickupAddr = sc.pickupIsShop ? '9152 Sonrisa St., Bellflower, CA 90706' : (sc.pickupLocation || '');
+        const dropoffAddr = sc.dropoffIsShop ? '9152 Sonrisa St., Bellflower, CA 90706' : (sc.dropoffLocation || '');
+
+        // Main charge row
+        const rowH = (pickupAddr || dropoffAddr) ? 20 : 20;
+        doc.font('Helvetica').fontSize(10).fillColor(grayColor).text(String(itemNum), 50, yPos, { width: 30, lineBreak: false });
+        doc.font('Helvetica-Bold').fontSize(10).fillColor(darkColor).text('Shipping & Handling', 85, yPos, { width: 220, lineBreak: false });
+        doc.font('Helvetica').fontSize(9).fillColor(grayColor).text(vendorLabel, 310, yPos, { width: 80, lineBreak: false });
+        doc.font('Helvetica').fontSize(10).fillColor(darkColor);
+        doc.text('1', 400, yPos, { width: 30, align: 'center', lineBreak: false });
+        doc.text(fmtCur(lineTotal), 438, yPos, { width: 52, align: 'right', lineBreak: false });
+        doc.font('Helvetica-Bold').fontSize(10).text(fmtCur(lineTotal), 498, yPos, { width: 64, align: 'right', lineBreak: false });
+        yPos += 18;
+
+        // Pickup address sub-line
+        if (pickupAddr) {
+          doc.font('Helvetica').fontSize(9).fillColor(grayColor).text(`  Pickup: ${pickupAddr}`, 85, yPos, { width: 400, lineBreak: false });
+          yPos += 12;
+        }
+        // Dropoff address sub-line
+        if (dropoffAddr) {
+          doc.font('Helvetica').fontSize(9).fillColor(grayColor).text(`  Dropoff: ${dropoffAddr}`, 85, yPos, { width: 400, lineBreak: false });
+          yPos += 12;
+        }
+        // Notes sub-line
+        if (sc.notes) {
+          doc.font('Helvetica').fontSize(9).fillColor(grayColor).text(`  ${clean(sc.notes)}`, 85, yPos, { width: 400, lineBreak: false });
+          yPos += 12;
+        }
+        doc.strokeColor(lightGray).lineWidth(0.3).moveTo(50, yPos).lineTo(562, yPos).stroke();
+        yPos += 6;
+        itemNum++;
       }
 
       // ── Totals ──
@@ -666,7 +716,7 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = []) {
         subtotal -= discountTotal;
       }
 
-      totRow('Subtotal', subtotal);
+      totRow('Parts Subtotal', subtotal);
       const taxRate = isResale ? 0 : (parseFloat(wo.taxRate) || 0);
       const taxAmt = Math.round(subtotal * taxRate / 100 * 100) / 100;
       if (isResale) {
@@ -675,7 +725,12 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = []) {
       } else {
         totRow(`Tax (${taxRate}%)`, taxAmt);
       }
-      const grandTotal = Math.round((subtotal + taxAmt) * 100) / 100;
+      // Shipping is always tax exempt — added after tax
+      if (shippingTotal > 0) {
+        totRow('Shipping & Handling', shippingTotal);
+        doc.font('Helvetica').fontSize(8).fillColor(grayColor).text('(tax exempt)', 350, yPos - 10, { width: 140, align: 'right', lineBreak: false });
+      }
+      const grandTotal = Math.round((subtotal + taxAmt + shippingTotal) * 100) / 100;
 
       // Grand total box
       yPos += 4;
@@ -1232,7 +1287,9 @@ router.get('/invoice-pdf/:id', async (req, res, next) => {
       wo.invoiceDate = new Date();
     }
     const client = await resolveClient(wo);
-    const pdfBuffer = await generateInvoicePDFBuffer(wo, wo.parts || [], client, payments);
+    let shipmentCharges1 = [];
+    try { const sc = await ShipmentCharge.findAll({ where: { workOrderId: wo.id }, order: [['sortOrder','ASC']] }); shipmentCharges1 = sc.map(c => c.toJSON()); } catch(e) {}
+    const pdfBuffer = await generateInvoicePDFBuffer(wo, wo.parts || [], client, payments, shipmentCharges1);
     const filename = `Invoice-${wo.invoiceNumber}-${(wo.clientName || '').replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
 
     // Upload to storage and save as WO document
@@ -1390,7 +1447,9 @@ async function regenerateInvoicePDF(workOrderId) {
   }
 
   const client = await resolveClient(wo);
-  const pdfBuffer = await generateInvoicePDFBuffer(wo, wo.parts || [], client, payments);
+  let shipmentCharges = [];
+  try { const sc = await ShipmentCharge.findAll({ where: { workOrderId }, order: [['sortOrder','ASC']] }); shipmentCharges = sc.map(c => c.toJSON()); } catch (e) { /* table may not exist yet */ }
+  const pdfBuffer = await generateInvoicePDFBuffer(wo, wo.parts || [], client, payments, shipmentCharges);
   const filename = `Invoice-${wo.invoiceNumber}-${(wo.clientName || '').replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
   const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, { folder: `work-orders/${workOrderId}/documents`, filename, mimeType: 'application/pdf' });
   await WorkOrderDocument.destroy({ where: { workOrderId, documentType: 'invoice' } });
@@ -1448,7 +1507,9 @@ router.post('/invoice-email/:id', async (req, res, next) => {
           payments = pmts.map(p => p.toJSON());
         } catch {}
       }
-      const pdfBuffer = await generateInvoicePDFBuffer(wo, wo.parts || [], client, payments);
+      let shipmentCharges2 = [];
+      try { const sc = await ShipmentCharge.findAll({ where: { workOrderId: wo.id }, order: [['sortOrder','ASC']] }); shipmentCharges2 = sc.map(c => c.toJSON()); } catch(e) {}
+      const pdfBuffer = await generateInvoicePDFBuffer(wo, wo.parts || [], client, payments, shipmentCharges2);
       const raw = pdfBuffer.toString('base64');
       pdfBase64 = raw.match(/.{1,76}/g).join('\r\n');
       console.log('[invoice-email] PDF generated in memory, size:', pdfBuffer.length);

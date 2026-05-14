@@ -294,6 +294,17 @@ function buildWorkOrderPartFromEstimate(estimatePart) {
     const laborEach = effectiveBase + opProfitPerPart;
     data.laborTotal = parseFloat(laborEach.toFixed(2));
     data.partTotal = parseFloat(((matEach + laborEach + opCostPerPart) * qty).toFixed(2));
+
+    // Safety fallback: if calculation gives $0 but the source estimate part has pricing,
+    // use the source partTotal directly (handles press_brake and other forms that store
+    // pricing only in formData without populating top-level laborTotal column)
+    if (data.partTotal <= 0) {
+      const sourcePT = parseFloat(estimatePart.partTotal) || parseFloat(fd.partTotal) || 0;
+      if (sourcePT > 0) {
+        data.partTotal = sourcePT;
+        data.laborTotal = qty > 0 ? parseFloat((sourcePT / qty).toFixed(2)) : sourcePT;
+      }
+    }
   }
 
   // Default status

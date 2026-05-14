@@ -2412,7 +2412,16 @@ router.get('/:id/pdf', async (req, res, next) => {
           } else {
             let pct = parseFloat(rfd._expediteType) || 0;
             if (rfd._expediteType === 'custom_pct') pct = parseFloat(rfd._expediteCustomPct) || 0;
-            rushExpediteAmt = (estimate.partsSubtotal || 0) * (pct / 100);
+            // Calculate base (pre-rush) subtotal from non-rush parts to avoid circular inflation
+            let baseSubtotal = 0;
+            for (const bp of sortedParts) {
+              if (bp.partType === 'rush_service') continue;
+              const bqty = parseInt(bp.quantity) || 1;
+              const bmat = (parseFloat(bp.materialTotal) || 0) * (1 + (parseFloat(bp.materialMarkupPercent) || 0) / 100);
+              const blab = parseFloat(bp._baseLaborTotal ?? bp.formData?._baseLaborTotal ?? bp.laborTotal) || 0;
+              baseSubtotal += (bmat + blab) * bqty;
+            }
+            rushExpediteAmt = baseSubtotal * (pct / 100);
           }
         }
         if (rfd._emergencyEnabled) rushEmergencyAmt = emergOpts[rfd._emergencyDay] || 0;
@@ -2681,9 +2690,30 @@ router.get('/:id/pdf', async (req, res, next) => {
       yPos += 16;
     }
 
+    // Recalculate displayed subtotal from rendered line items to ensure it matches
+    let displaySubtotal = 0;
+    for (const part of sortedParts) {
+      const qty = parseInt(part.quantity) || 1;
+      if (part.partType === 'rush_service') {
+        // Use stored partTotal if available, else partsSubtotal approach
+        displaySubtotal += parseFloat(part.partTotal) || 0;
+      } else if (['fab_service', 'shop_rate'].includes(part.partType)) {
+        displaySubtotal += parseFloat(part.partTotal) || 0;
+      } else {
+        const mat = (parseFloat(part.materialTotal) || 0) * (1 + (parseFloat(part.materialMarkupPercent) || 0) / 100);
+        const lab = parseFloat(part._baseLaborTotal ?? part.formData?._baseLaborTotal ?? part.laborTotal) || 0;
+        const ops = part.outsideProcessing || part.formData?.outsideProcessing || [];
+        let opCost = 0;
+        ops.forEach(op => { opCost += ((parseFloat(op.costPerPart) || 0) + (parseFloat(op.expediteCost) || 0)) * qty; });
+        displaySubtotal += (mat + lab) * qty + opCost;
+      }
+    }
+    // Use recalculated value; fall back to stored if calculation gives 0
+    const subtotalDisplay = displaySubtotal > 0 ? displaySubtotal : (parseFloat(estimate.partsSubtotal) || 0);
+
     // Subtotal
     doc.fontSize(10).fillColor(grayColor).text('Subtotal:', 350, yPos, { lineBreak: false });
-    doc.fillColor(darkColor).text(formatCurrency(estimate.partsSubtotal), 480, yPos, { align: 'right', width: 82, lineBreak: false });
+    doc.fillColor(darkColor).text(formatCurrency(subtotalDisplay), 480, yPos, { align: 'right', width: 82, lineBreak: false });
     yPos += 18;
 
     // Discount

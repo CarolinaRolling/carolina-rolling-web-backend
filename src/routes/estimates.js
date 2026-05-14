@@ -602,7 +602,6 @@ router.get('/', async (req, res, next) => {
     const estimates = await Estimate.findAndCountAll({
       where,
       include: [
-        { model: ShipmentCharge, as: 'shipmentCharges', include: [{ model: Vendor, as: 'vendor', attributes: ['id', 'name'] }], order: [['sortOrder', 'ASC']] },
         { model: EstimatePart, as: 'parts', order: [['partNumber', 'ASC']] },
         { model: EstimateFile, as: 'files' }
       ],
@@ -3448,7 +3447,12 @@ router.get('/:id/shipment-charges', async (req, res, next) => {
       order: [['sortOrder', 'ASC']]
     });
     res.json({ data: charges });
-  } catch (error) { next(error); }
+  } catch (error) {
+    if (error.message && (error.message.includes('does not exist') || error.message.includes('operator does not exist'))) {
+      return res.json({ data: [] });
+    }
+    next(error);
+  }
 });
 
 router.post('/:id/shipment-charges', async (req, res, next) => {

@@ -3479,7 +3479,15 @@ router.get('/:id/shipment-charges', async (req, res, next) => {
     res.json({ data: charges });
   } catch (error) {
     if (error.message && (error.message.includes('does not exist') || error.message.includes('operator does not exist'))) {
-      return res.json({ data: [] });
+      try {
+        const charges = await ShipmentCharge.findAll({
+          where: { estimateId: req.params.id },
+          order: [['sortOrder', 'ASC']]
+        });
+        return res.json({ data: charges });
+      } catch (e2) {
+        return res.json({ data: [] });
+      }
     }
     next(error);
   }

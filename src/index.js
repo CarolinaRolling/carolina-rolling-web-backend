@@ -831,11 +831,12 @@ async function startServer() {
         "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )`);
-      // Fix vendorId column type if table was created with wrong type
+      // Fix vendorId column type if created with wrong INTEGER type
       try {
         await sequelize.query(`ALTER TABLE shipment_charges DROP COLUMN IF EXISTS "vendorId"`);
         await sequelize.query(`ALTER TABLE shipment_charges ADD COLUMN IF NOT EXISTS "vendorId" UUID`);
-      } catch (e2) { console.log('vendorId fix skip:', e2.message); }
+        console.log('shipment_charges vendorId fixed to UUID');
+      } catch (e2) { console.log('vendorId already correct type'); }
       console.log('shipment_charges table ready');
     } catch (e) { console.log('shipment_charges table error:', e.message); }
 

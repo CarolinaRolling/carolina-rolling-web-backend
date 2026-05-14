@@ -541,8 +541,12 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
         const rollDesc = fd._rollingDescription ? clean(fd._rollingDescription.split(/\n/)[0]) : '';
         const partLabel = wo.drNumber ? `${wo.drNumber}-${part.partNumber}` : String(part.partNumber || itemNum);
 
+        // Calculate dynamic row height based on actual content
+        const descH = doc.font('Helvetica-Bold').fontSize(10).heightOfString(matDesc, { width: 310 });
+        const rollH = rollDesc ? doc.font('Helvetica').fontSize(9).heightOfString(rollDesc, { width: 310 }) + 2 : 0;
+        const rowH = Math.max(20, descH + rollH + 4);
+
         // Row background alternate
-        const rowH = rollDesc ? 34 : 20;
         if (itemNum % 2 === 0) {
           doc.rect(50, yPos - 2, 512, rowH).fill('#f8f9fa').stroke();
         }
@@ -550,7 +554,7 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
         doc.font('Helvetica').fontSize(10).fillColor(grayColor).text(String(itemNum), 50, yPos, { width: 30, lineBreak: false });
         doc.font('Helvetica-Bold').fontSize(10).fillColor(darkColor).text(matDesc, 85, yPos, { width: 310, lineBreak: false });
         if (rollDesc) {
-          doc.font('Helvetica').fontSize(9).fillColor(grayColor).text(rollDesc.substring(0, 58), 85, yPos + 13, { width: 310, lineBreak: false });
+          doc.font('Helvetica').fontSize(9).fillColor(grayColor).text(rollDesc, 85, yPos + descH + 1, { width: 310, lineBreak: false });
         }
         doc.font('Helvetica').fontSize(10).fillColor(darkColor);
         doc.text(String(qty), 400, yPos, { width: 30, align: 'center', lineBreak: false });
@@ -727,8 +731,11 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
       }
       // Shipping is always tax exempt — added after tax
       if (shippingTotal > 0) {
-        totRow('Shipping & Handling', shippingTotal);
-        doc.font('Helvetica').fontSize(8).fillColor(grayColor).text('(tax exempt)', 350, yPos - 10, { width: 140, align: 'right', lineBreak: false });
+        doc.font('Helvetica').fontSize(10).fillColor(grayColor).text('Shipping & Handling', 350, yPos, { width: 140, align: 'right', lineBreak: false });
+        doc.font('Helvetica').fontSize(10).fillColor(darkColor).text(fmtCur(shippingTotal), 498, yPos, { width: 64, align: 'right', lineBreak: false });
+        yPos += 14;
+        doc.font('Helvetica').fontSize(8).fillColor(grayColor).text('(tax exempt)', 350, yPos, { width: 212, align: 'right', lineBreak: false });
+        yPos += 10;
       }
       const grandTotal = Math.round((subtotal + taxAmt + shippingTotal) * 100) / 100;
 

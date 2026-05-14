@@ -833,8 +833,9 @@ async function startServer() {
       )`);
       // Fix vendorId column type if table was created with wrong type
       try {
-        await sequelize.query(`ALTER TABLE shipment_charges ALTER COLUMN "vendorId" TYPE UUID USING NULL`);
-      } catch (e2) { /* already correct type */ }
+        await sequelize.query(`ALTER TABLE shipment_charges DROP COLUMN IF EXISTS "vendorId"`);
+        await sequelize.query(`ALTER TABLE shipment_charges ADD COLUMN IF NOT EXISTS "vendorId" UUID`);
+      } catch (e2) { console.log('vendorId fix skip:', e2.message); }
       console.log('shipment_charges table ready');
     } catch (e) { console.log('shipment_charges table error:', e.message); }
 

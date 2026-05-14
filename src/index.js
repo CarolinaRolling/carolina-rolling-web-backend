@@ -817,7 +817,7 @@ async function startServer() {
         "workOrderId" UUID REFERENCES work_orders(id) ON DELETE CASCADE,
         "sortOrder" INTEGER DEFAULT 0,
         "carrierType" VARCHAR(50) DEFAULT 'contracted',
-        "vendorId" INTEGER,
+        "vendorId" UUID,
         "vendorName" VARCHAR(255),
         "pickupLocation" TEXT,
         "pickupIsShop" BOOLEAN DEFAULT false,
@@ -831,6 +831,10 @@ async function startServer() {
         "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )`);
+      // Fix vendorId column type if table was created with wrong type
+      try {
+        await sequelize.query(`ALTER TABLE shipment_charges ALTER COLUMN "vendorId" TYPE UUID USING NULL`);
+      } catch (e2) { /* already correct type */ }
       console.log('shipment_charges table ready');
     } catch (e) { console.log('shipment_charges table error:', e.message); }
 
@@ -1647,6 +1651,7 @@ Please confirm with the operator and mark the order complete if ready.`,
         });
 
         const accounts = await GmailAccount.findAll({ where: { isActive: true } });
+        const ownEmailsCron = new Set(accounts.map(a => (a.email || '').toLowerCase().trim()).filter(Boolean));
         for (const account of accounts) {
           try {
             const oauth2 = new google.auth.OAuth2(process.env.GMAIL_CLIENT_ID, process.env.GMAIL_CLIENT_SECRET);

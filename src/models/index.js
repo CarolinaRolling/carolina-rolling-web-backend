@@ -3402,7 +3402,7 @@ const ShipmentCharge = sequelize.define('ShipmentCharge', {
   workOrderId: { type: DataTypes.UUID, allowNull: true },
   sortOrder: { type: DataTypes.INTEGER, defaultValue: 0 },
   carrierType: { type: DataTypes.STRING, defaultValue: 'contracted' },
-  vendorId: { type: DataTypes.INTEGER, allowNull: true },
+  vendorId: { type: DataTypes.UUID, allowNull: true },
   vendorName: { type: DataTypes.STRING, allowNull: true },
   pickupLocation: { type: DataTypes.TEXT, allowNull: true },
   pickupIsShop: { type: DataTypes.BOOLEAN, defaultValue: false },

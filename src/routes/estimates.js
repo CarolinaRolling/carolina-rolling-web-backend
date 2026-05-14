@@ -8,7 +8,7 @@ const { v4: uuidv4 } = require('uuid');
 const cloudinary = require('cloudinary').v2;
 const fileStorage = require('../utils/storage');
 const { Op } = require('sequelize');
-const { Estimate, EstimatePart, EstimatePartFile, EstimateFile, WorkOrder, WorkOrderPart, WorkOrderPartFile, InboundOrder, AppSettings, DRNumber, PONumber, DailyActivity, Client, sequelize } = require('../models');
+const { Estimate, EstimatePart, EstimatePartFile, EstimateFile, WorkOrder, WorkOrderPart, WorkOrderPartFile, InboundOrder, AppSettings, DRNumber, PONumber, DailyActivity, Client, Vendor, ShipmentCharge, sequelize } = require('../models');
 
 const router = express.Router();
 
@@ -602,6 +602,7 @@ router.get('/', async (req, res, next) => {
     const estimates = await Estimate.findAndCountAll({
       where,
       include: [
+        { model: ShipmentCharge, as: 'shipmentCharges', include: [{ model: Vendor, as: 'vendor', attributes: ['id', 'name'] }], order: [['sortOrder', 'ASC']] },
         { model: EstimatePart, as: 'parts', order: [['partNumber', 'ASC']] },
         { model: EstimateFile, as: 'files' }
       ],
@@ -2988,6 +2989,27 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
     if (!estimate.acceptedAt) statusUpdates.acceptedAt = new Date();
     await estimate.update(statusUpdates, { transaction });
 
+    // Copy shipment charges from estimate to work order
+    const estimateCharges = await ShipmentCharge.findAll({ where: { estimateId: estimate.id } });
+    for (const sc of estimateCharges) {
+      await ShipmentCharge.create({
+        workOrderId: workOrder.id,
+        sortOrder: sc.sortOrder,
+        carrierType: sc.carrierType,
+        vendorId: sc.vendorId,
+        vendorName: sc.vendorName,
+        pickupLocation: sc.pickupLocation,
+        pickupIsShop: sc.pickupIsShop,
+        dropoffLocation: sc.dropoffLocation,
+        dropoffIsShop: sc.dropoffIsShop,
+        shippingCost: sc.shippingCost,
+        shippingMarkup: sc.shippingMarkup,
+        materialsCost: sc.materialsCost,
+        materialsMarkup: sc.materialsMarkup,
+        notes: sc.notes,
+      }, { transaction });
+    }
+
     await transaction.commit();
 
     // Log activity
@@ -3414,6 +3436,77 @@ Carolina Rolling Co.`;
     console.error('[OutsidePO Email] Error:', error.message);
     next(error);
   }
+});
+
+
+// ── ShipmentCharge CRUD for Estimates ──
+router.get('/:id/shipment-charges', async (req, res, next) => {
+  try {
+    const charges = await ShipmentCharge.findAll({
+      where: { estimateId: req.params.id },
+      include: [{ model: Vendor, as: 'vendor', attributes: ['id', 'name'] }],
+      order: [['sortOrder', 'ASC']]
+    });
+    res.json({ data: charges });
+  } catch (error) { next(error); }
+});
+
+router.post('/:id/shipment-charges', async (req, res, next) => {
+  try {
+    const estimate = await Estimate.findByPk(req.params.id);
+    if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
+    const maxOrder = await ShipmentCharge.max('sortOrder', { where: { estimateId: req.params.id } }) || 0;
+    const charge = await ShipmentCharge.create({
+      estimateId: req.params.id,
+      sortOrder: maxOrder + 1,
+      carrierType: req.body.carrierType || 'contracted',
+      vendorId: req.body.vendorId || null,
+      vendorName: req.body.vendorName || null,
+      pickupLocation: req.body.pickupLocation || '',
+      pickupIsShop: req.body.pickupIsShop || false,
+      dropoffLocation: req.body.dropoffLocation || '',
+      dropoffIsShop: req.body.dropoffIsShop || false,
+      shippingCost: parseFloat(req.body.shippingCost) || 0,
+      shippingMarkup: parseFloat(req.body.shippingMarkup) || 0,
+      materialsCost: parseFloat(req.body.materialsCost) || 0,
+      materialsMarkup: parseFloat(req.body.materialsMarkup) || 0,
+      notes: req.body.notes || null,
+    });
+    const result = await ShipmentCharge.findByPk(charge.id, { include: [{ model: Vendor, as: 'vendor', attributes: ['id', 'name'] }] });
+    res.json({ data: result });
+  } catch (error) { next(error); }
+});
+
+router.put('/:id/shipment-charges/:chargeId', async (req, res, next) => {
+  try {
+    const charge = await ShipmentCharge.findOne({ where: { id: req.params.chargeId, estimateId: req.params.id } });
+    if (!charge) return res.status(404).json({ error: { message: 'Shipment charge not found' } });
+    await charge.update({
+      carrierType: req.body.carrierType ?? charge.carrierType,
+      vendorId: req.body.vendorId !== undefined ? (req.body.vendorId || null) : charge.vendorId,
+      vendorName: req.body.vendorName !== undefined ? (req.body.vendorName || null) : charge.vendorName,
+      pickupLocation: req.body.pickupLocation ?? charge.pickupLocation,
+      pickupIsShop: req.body.pickupIsShop ?? charge.pickupIsShop,
+      dropoffLocation: req.body.dropoffLocation ?? charge.dropoffLocation,
+      dropoffIsShop: req.body.dropoffIsShop ?? charge.dropoffIsShop,
+      shippingCost: req.body.shippingCost !== undefined ? parseFloat(req.body.shippingCost) : charge.shippingCost,
+      shippingMarkup: req.body.shippingMarkup !== undefined ? parseFloat(req.body.shippingMarkup) : charge.shippingMarkup,
+      materialsCost: req.body.materialsCost !== undefined ? parseFloat(req.body.materialsCost) : charge.materialsCost,
+      materialsMarkup: req.body.materialsMarkup !== undefined ? parseFloat(req.body.materialsMarkup) : charge.materialsMarkup,
+      notes: req.body.notes !== undefined ? (req.body.notes || null) : charge.notes,
+    });
+    const result = await ShipmentCharge.findByPk(charge.id, { include: [{ model: Vendor, as: 'vendor', attributes: ['id', 'name'] }] });
+    res.json({ data: result });
+  } catch (error) { next(error); }
+});
+
+router.delete('/:id/shipment-charges/:chargeId', async (req, res, next) => {
+  try {
+    const charge = await ShipmentCharge.findOne({ where: { id: req.params.chargeId, estimateId: req.params.id } });
+    if (!charge) return res.status(404).json({ error: { message: 'Shipment charge not found' } });
+    await charge.destroy();
+    res.json({ data: { deleted: true } });
+  } catch (error) { next(error); }
 });
 
 module.exports = router;

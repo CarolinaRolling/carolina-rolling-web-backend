@@ -809,6 +809,30 @@ async function startServer() {
       )`);
     } catch (e) { console.log('work_order_payments table skip:', e.message); }
 
+    // Create shipment_charges table
+    try {
+      await sequelize.query(`CREATE TABLE IF NOT EXISTS shipment_charges (
+        id SERIAL PRIMARY KEY,
+        "estimateId" INTEGER REFERENCES estimates(id) ON DELETE CASCADE,
+        "workOrderId" INTEGER REFERENCES work_orders(id) ON DELETE CASCADE,
+        "sortOrder" INTEGER DEFAULT 0,
+        "carrierType" VARCHAR(50) DEFAULT 'contracted',
+        "vendorId" INTEGER,
+        "vendorName" VARCHAR(255),
+        "pickupLocation" TEXT,
+        "pickupIsShop" BOOLEAN DEFAULT false,
+        "dropoffLocation" TEXT,
+        "dropoffIsShop" BOOLEAN DEFAULT false,
+        "shippingCost" DECIMAL(10,2) DEFAULT 0,
+        "shippingMarkup" DECIMAL(5,2) DEFAULT 0,
+        "materialsCost" DECIMAL(10,2) DEFAULT 0,
+        "materialsMarkup" DECIMAL(5,2) DEFAULT 0,
+        notes TEXT,
+        "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      )`);
+    } catch (e) { console.log('shipment_charges table skip:', e.message); }
+
     // Add USMCA per-order fields to work_orders table
     try {
       await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "usmcaImporterName" VARCHAR(255)`);

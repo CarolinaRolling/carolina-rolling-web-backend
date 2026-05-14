@@ -3394,6 +3394,32 @@ const WorkOrderInvoiceSend = sequelize.define('WorkOrderInvoiceSend', {
 WorkOrder.hasMany(WorkOrderInvoiceSend, { foreignKey: 'workOrderId', as: 'invoiceSends' });
 WorkOrderInvoiceSend.belongsTo(WorkOrder, { foreignKey: 'workOrderId', as: 'workOrder' });
 
+
+// ── ShipmentCharge Model — shipping charges on estimates and work orders ──
+const ShipmentCharge = sequelize.define('ShipmentCharge', {
+  estimateId: { type: DataTypes.INTEGER, allowNull: true },
+  workOrderId: { type: DataTypes.INTEGER, allowNull: true },
+  sortOrder: { type: DataTypes.INTEGER, defaultValue: 0 },
+  carrierType: { type: DataTypes.STRING, defaultValue: 'contracted' }, // 'our_truck' | 'contracted'
+  vendorId: { type: DataTypes.INTEGER, allowNull: true },
+  vendorName: { type: DataTypes.STRING, allowNull: true },
+  pickupLocation: { type: DataTypes.TEXT, allowNull: true },
+  pickupIsShop: { type: DataTypes.BOOLEAN, defaultValue: false },
+  dropoffLocation: { type: DataTypes.TEXT, allowNull: true },
+  dropoffIsShop: { type: DataTypes.BOOLEAN, defaultValue: false },
+  shippingCost: { type: DataTypes.DECIMAL(10, 2), defaultValue: 0 },
+  shippingMarkup: { type: DataTypes.DECIMAL(5, 2), defaultValue: 0 },
+  materialsCost: { type: DataTypes.DECIMAL(10, 2), defaultValue: 0 },
+  materialsMarkup: { type: DataTypes.DECIMAL(5, 2), defaultValue: 0 },
+  notes: { type: DataTypes.TEXT, allowNull: true },
+}, { tableName: 'shipment_charges', timestamps: true });
+
+Estimate.hasMany(ShipmentCharge, { foreignKey: 'estimateId', as: 'shipmentCharges' });
+ShipmentCharge.belongsTo(Estimate, { foreignKey: 'estimateId' });
+WorkOrder.hasMany(ShipmentCharge, { foreignKey: 'workOrderId', as: 'shipmentCharges' });
+ShipmentCharge.belongsTo(WorkOrder, { foreignKey: 'workOrderId' });
+ShipmentCharge.belongsTo(Vendor, { foreignKey: 'vendorId', as: 'vendor' });
+
 module.exports = {
   sequelize,
   User,
@@ -3431,5 +3457,6 @@ module.exports = {
   PayrollEntry,
   BusinessEvent,
   WeldProcedure,
-  VendorIssue
+  VendorIssue,
+  ShipmentCharge
 };

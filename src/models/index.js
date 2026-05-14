@@ -3397,10 +3397,11 @@ WorkOrderInvoiceSend.belongsTo(WorkOrder, { foreignKey: 'workOrderId', as: 'work
 
 // ── ShipmentCharge Model — shipping charges on estimates and work orders ──
 const ShipmentCharge = sequelize.define('ShipmentCharge', {
-  estimateId: { type: DataTypes.INTEGER, allowNull: true },
-  workOrderId: { type: DataTypes.INTEGER, allowNull: true },
+  id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+  estimateId: { type: DataTypes.UUID, allowNull: true },
+  workOrderId: { type: DataTypes.UUID, allowNull: true },
   sortOrder: { type: DataTypes.INTEGER, defaultValue: 0 },
-  carrierType: { type: DataTypes.STRING, defaultValue: 'contracted' }, // 'our_truck' | 'contracted'
+  carrierType: { type: DataTypes.STRING, defaultValue: 'contracted' },
   vendorId: { type: DataTypes.INTEGER, allowNull: true },
   vendorName: { type: DataTypes.STRING, allowNull: true },
   pickupLocation: { type: DataTypes.TEXT, allowNull: true },

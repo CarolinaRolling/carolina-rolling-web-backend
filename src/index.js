@@ -812,9 +812,9 @@ async function startServer() {
     // Create shipment_charges table
     try {
       await sequelize.query(`CREATE TABLE IF NOT EXISTS shipment_charges (
-        id SERIAL PRIMARY KEY,
-        "estimateId" INTEGER REFERENCES estimates(id) ON DELETE CASCADE,
-        "workOrderId" INTEGER REFERENCES work_orders(id) ON DELETE CASCADE,
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        "estimateId" UUID REFERENCES estimates(id) ON DELETE CASCADE,
+        "workOrderId" UUID REFERENCES work_orders(id) ON DELETE CASCADE,
         "sortOrder" INTEGER DEFAULT 0,
         "carrierType" VARCHAR(50) DEFAULT 'contracted',
         "vendorId" INTEGER,
@@ -831,7 +831,8 @@ async function startServer() {
         "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )`);
-    } catch (e) { console.log('shipment_charges table skip:', e.message); }
+      console.log('shipment_charges table ready');
+    } catch (e) { console.log('shipment_charges table error:', e.message); }
 
     // Add USMCA per-order fields to work_orders table
     try {

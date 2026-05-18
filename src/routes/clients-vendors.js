@@ -259,6 +259,65 @@ router.put('/clients/:id', async (req, res, next) => {
   }
 });
 
+// POST /api/clients/:id/merge — Merge source client into this (target) client
+// All records from sourceId are reassigned to targetId (this), source client is deleted
+router.post('/clients/:id/merge', async (req, res, next) => {
+  const { sourceId } = req.body;
+  const targetId = req.params.id;
+  if (!sourceId) return res.status(400).json({ error: { message: 'sourceId is required' } });
+  if (sourceId === targetId) return res.status(400).json({ error: { message: 'Source and target cannot be the same client' } });
+
+  const { sequelize } = require('../models');
+  const t = await sequelize.transaction();
+  try {
+    const [target, source] = await Promise.all([
+      Client.findByPk(targetId),
+      Client.findByPk(sourceId)
+    ]);
+    if (!target) return res.status(404).json({ error: { message: 'Target client not found' } });
+    if (!source) return res.status(404).json({ error: { message: 'Source client not found' } });
+
+    const targetName = target.name;
+
+    // Reassign all linked records
+    const tables = [
+      { table: 'work_orders', idCol: '"clientId"', nameCol: '"clientName"' },
+      { table: 'estimates', idCol: '"clientId"', nameCol: '"clientName"' },
+      { table: 'inbound_orders', idCol: '"clientId"', nameCol: '"clientName"' },
+      { table: 'dr_numbers', idCol: '"clientId"', nameCol: null },
+      { table: 'po_numbers', idCol: '"clientId"', nameCol: null },
+      { table: 'invoice_numbers', idCol: '"clientId"', nameCol: null },
+      { table: 'scanned_emails', idCol: '"clientId"', nameCol: null },
+      { table: 'pending_orders', idCol: '"clientId"', nameCol: null },
+    ];
+
+    for (const { table, idCol, nameCol } of tables) {
+      try {
+        if (nameCol) {
+          await sequelize.query(
+            `UPDATE ${table} SET ${idCol} = :targetId, ${nameCol} = :targetName WHERE ${idCol} = :sourceId`,
+            { replacements: { targetId, targetName, sourceId }, transaction: t }
+          );
+        } else {
+          await sequelize.query(
+            `UPDATE ${table} SET ${idCol} = :targetId WHERE ${idCol} = :sourceId`,
+            { replacements: { targetId, sourceId }, transaction: t }
+          );
+        }
+      } catch (e) { /* table may not exist — skip */ }
+    }
+
+    // Delete source client
+    await source.destroy({ transaction: t });
+    await t.commit();
+
+    res.json({ data: target, message: `Merged "${source.name}" into "${targetName}" — all records transferred` });
+  } catch (err) {
+    await t.rollback();
+    next(err);
+  }
+}); 
+
 // DELETE /api/clients/:id - Delete client (soft delete - set inactive)
 router.delete('/clients/:id', async (req, res, next) => {
   try {

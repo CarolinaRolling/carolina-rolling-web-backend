@@ -291,6 +291,14 @@ router.post('/clients/:id/merge', async (req, res, next) => {
       { table: 'pending_orders', idCol: '"clientId"', nameCol: null },
     ];
 
+    // Shipments only store clientName (no clientId FK) — update by matching source name
+    try {
+      await sequelize.query(
+        `UPDATE shipments SET "clientName" = :targetName WHERE "clientName" = :sourceName`,
+        { replacements: { targetName, sourceName: source.name }, transaction: t }
+      );
+    } catch (e) { /* skip */ }
+
     for (const { table, idCol, nameCol } of tables) {
       try {
         if (nameCol) {

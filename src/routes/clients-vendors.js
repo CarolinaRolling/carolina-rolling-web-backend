@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { Client, Vendor, WorkOrder, Estimate } = require('../models');
+const { Client, Vendor, WorkOrder, WorkOrderPart, Estimate, ClientPayment, PaymentApplication, CreditMemo, Refund, ShipmentCharge, sequelize } = require('../models');
 const { Op } = require('sequelize');
 
 // ============= CLIENTS =============
@@ -516,6 +516,230 @@ router.delete('/vendors/:id', async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+// Helper: parse paymentTerms string into days (0 = COD/immediate)
+function termsToDays(terms) {
+  if (!terms) return null;
+  const t = terms.toUpperCase();
+  if (t === 'C.O.D.' || t === 'COD') return 0;
+  const m = t.match(/NET\s*(\d+)/);
+  if (m) return parseInt(m[1]);
+  const m2 = t.match(/^(\d+)\s*DAYS?$/);
+  if (m2) return parseInt(m2[1]);
+  return null;
+}
+
+// GET /api/clients/:id/history — full client history: WOs, payments, credits, refunds
+router.get('/clients/:id/history', async (req, res, next) => {
+  try {
+    const client = await Client.findByPk(req.params.id, { attributes: ['id','name','paymentTerms'] });
+    if (!client) return res.status(404).json({ error: { message: 'Client not found' } });
+    const termDays = termsToDays(client.paymentTerms);
+
+    // Work orders
+    const { Op } = require('sequelize');
+    const wos = await WorkOrder.findAll({
+      where: { clientId: req.params.id },
+      attributes: ['id','drNumber','orderNumber','status','grandTotal','truckingCost','invoiceNumber','invoiceDate','shippedAt','createdAt','paymentDate','isVoided'],
+      include: [{ model: WorkOrderPart, as: 'parts', attributes: ['partTotal'] }],
+      order: [['drNumber','DESC NULLS LAST'],['createdAt','DESC']]
+    });
+
+    // Calculate balance per WO
+    const woData = [];
+    for (const wo of wos) {
+      if (wo.isVoided) continue;
+      const j = wo.toJSON();
+      const partsTotal = (j.parts||[]).reduce((s,p) => s + (parseFloat(p.partTotal)||0), 0);
+      const base = parseFloat(j.grandTotal) > 0 ? parseFloat(j.grandTotal) : partsTotal + (parseFloat(wo.truckingCost)||0);
+      let shipping = 0;
+      try {
+        const charges = await ShipmentCharge.findAll({ where: { workOrderId: j.id } });
+        charges.forEach(c => {
+          shipping += (parseFloat(c.shippingCost)||0)*(1+(parseFloat(c.shippingMarkup)||0)/100)
+                    + (parseFloat(c.materialsCost)||0)*(1+(parseFloat(c.materialsMarkup)||0)/100);
+        });
+      } catch(e) {}
+      const total = base + shipping;
+
+      // Payments applied
+      let paid = 0;
+      try {
+        const apps = await PaymentApplication.findAll({ where: { workOrderId: j.id } });
+        for (const app of apps) {
+          const cp = await ClientPayment.findByPk(app.clientPaymentId, { attributes: ['voidedAt'] });
+          if (cp && !cp.voidedAt) paid += parseFloat(app.amount)||0;
+        }
+        const legacyPmts = await (require('../models').WorkOrderPayment || sequelize.models.WorkOrderPayment).findAll({ where: { workOrderId: j.id, voidedAt: null } });
+        paid += legacyPmts.reduce((s,p) => s + (parseFloat(p.amount)||0), 0);
+      } catch(e) {}
+
+      const balance = Math.max(0, total - paid);
+
+      // Due date
+      let dueDate = null;
+      let daysOverdue = null;
+      if (j.invoiceDate && termDays !== null) {
+        const inv = new Date(j.invoiceDate);
+        dueDate = new Date(inv.getTime() + termDays * 86400000).toISOString().split('T')[0];
+        if (balance > 0.01) {
+          daysOverdue = Math.floor((Date.now() - new Date(dueDate).getTime()) / 86400000);
+        }
+      }
+
+      woData.push({ ...j, total: total.toFixed(2), paid: paid.toFixed(2), balance: balance.toFixed(2), dueDate, daysOverdue });
+    }
+
+    // Client payments
+    let payments = [];
+    try {
+      const pmts = await ClientPayment.findAll({
+        where: { clientId: req.params.id, voidedAt: null },
+        include: [{ model: PaymentApplication, as: 'applications' }],
+        order: [['paymentDate','DESC']]
+      });
+      payments = pmts.map(p => p.toJSON());
+    } catch(e) {}
+
+    // Credit memos
+    let creditMemos = [];
+    try {
+      const cms = await CreditMemo.findAll({ where: { clientId: req.params.id, voidedAt: null }, order: [['date','DESC']] });
+      creditMemos = cms.map(c => c.toJSON());
+    } catch(e) {}
+
+    // Refunds
+    let refunds = [];
+    try {
+      const refs = await Refund.findAll({ where: { clientId: req.params.id, voidedAt: null }, order: [['date','DESC']] });
+      refunds = refs.map(r => r.toJSON());
+    } catch(e) {}
+
+    const openBalance = woData.filter(w => parseFloat(w.balance) > 0.01).reduce((s,w) => s + parseFloat(w.balance), 0);
+
+    res.json({ data: { workOrders: woData, payments, creditMemos, refunds, openBalance: openBalance.toFixed(2), termDays, client: client.toJSON() } });
+  } catch(error) { next(error); }
+});
+
+// GET /api/clients/:id/statement-pdf — generate account statement PDF
+router.get('/clients/:id/statement-pdf', async (req, res, next) => {
+  try {
+    const PDFDocument = require('pdfkit');
+    const client = await Client.findByPk(req.params.id);
+    if (!client) return res.status(404).json({ error: { message: 'Client not found' } });
+
+    // Reuse history endpoint logic inline
+    const histRes = await new Promise((resolve, reject) => {
+      const fakeReq = { params: { id: req.params.id } };
+      const fakeRes = { json: (data) => resolve(data), status: () => ({ json: reject }) };
+      router.handle ? router.handle(fakeReq, fakeRes, reject) : reject(new Error('not supported'));
+    }).catch(() => null);
+
+    // Fallback: just get WOs directly
+    const { Op } = require('sequelize');
+    const wos = await WorkOrder.findAll({
+      where: { clientId: req.params.id, invoiceNumber: { [Op.ne]: null }, isVoided: { [Op.ne]: true } },
+      attributes: ['id','drNumber','orderNumber','invoiceNumber','invoiceDate','grandTotal','truckingCost','shippedAt','paymentDate'],
+      include: [{ model: WorkOrderPart, as: 'parts', attributes: ['partTotal'] }],
+      order: [['drNumber','DESC NULLS LAST']]
+    });
+
+    const termDays = termsToDays(client.paymentTerms);
+    const now = new Date();
+
+    const doc = new PDFDocument({ margin: 50, size: 'letter' });
+    const chunks = [];
+    doc.on('data', chunk => chunks.push(chunk));
+    await new Promise(resolve => doc.on('end', resolve));
+
+    // Header
+    doc.font('Helvetica-Bold').fontSize(22).fillColor('#1565c0').text('ACCOUNT STATEMENT', 350, 50, { width: 200, align: 'right' });
+    doc.font('Helvetica').fontSize(10).fillColor('#555').text(`Generated: ${now.toLocaleDateString()}`, 350, 78, { width: 200, align: 'right' });
+    doc.font('Helvetica').fontSize(10).fillColor('#333').text('Carolina Rolling Co. Inc.', 50, 50);
+    doc.text('9152 Sonrisa St., Bellflower, CA 90706', 50, 63);
+    doc.text('(562) 633-1044 | keepitrolling@carolinarolling.com', 50, 76);
+
+    doc.moveTo(50, 100).lineTo(562, 100).lineWidth(2).strokeColor('#1565c0').stroke();
+
+    doc.font('Helvetica-Bold').fontSize(12).fillColor('#333').text('BILL TO:', 50, 115);
+    doc.font('Helvetica-Bold').fontSize(13).fillColor('#1565c0').text(client.name, 50, 130);
+    if (client.address) doc.font('Helvetica').fontSize(10).fillColor('#555').text(client.address, 50, 146);
+    if (client.paymentTerms) {
+      doc.font('Helvetica').fontSize(10).fillColor('#333').text(`Payment Terms: ${client.paymentTerms}`, 350, 130, { width: 200, align: 'right' });
+    }
+
+    doc.moveTo(50, 175).lineTo(562, 175).lineWidth(0.5).strokeColor('#ccc').stroke();
+
+    // Column headers
+    let y = 190;
+    const cols = { dr: 50, inv: 115, date: 195, due: 275, total: 360, paid: 430, balance: 500 };
+    doc.font('Helvetica-Bold').fontSize(9).fillColor('#888');
+    doc.text('WORK ORDER', cols.dr, y);
+    doc.text('INVOICE', cols.inv, y);
+    doc.text('INV DATE', cols.date, y);
+    doc.text('DUE DATE', cols.due, y);
+    doc.text('TOTAL', cols.total, y, { width: 60, align: 'right' });
+    doc.text('PAID', cols.paid, y, { width: 60, align: 'right' });
+    doc.text('BALANCE', cols.balance, y, { width: 62, align: 'right' });
+
+    y += 14;
+    doc.moveTo(50, y).lineTo(562, y).lineWidth(1).strokeColor('#1565c0').stroke();
+    y += 10;
+
+    let grandBalance = 0;
+    for (const wo of wos) {
+      const j = wo.toJSON();
+      const partsTotal = (j.parts||[]).reduce((s,p) => s+(parseFloat(p.partTotal)||0),0);
+      const total = parseFloat(j.grandTotal)>0 ? parseFloat(j.grandTotal) : partsTotal + (parseFloat(wo.truckingCost)||0);
+      const paid = j.paymentDate ? total : 0;
+      const balance = Math.max(0, total - paid);
+      grandBalance += balance;
+
+      let dueDate = '';
+      let isOverdue = false;
+      if (j.invoiceDate && termDays !== null) {
+        const dd = new Date(new Date(j.invoiceDate).getTime() + termDays * 86400000);
+        dueDate = dd.toLocaleDateString();
+        if (balance > 0.01 && dd < now) isOverdue = true;
+      } else if (termDays === 0) {
+        dueDate = 'Upon Receipt';
+      }
+
+      if (y > 700) { doc.addPage(); y = 50; }
+
+      const rowColor = isOverdue ? '#c62828' : balance <= 0.01 ? '#2e7d32' : '#333';
+      doc.font('Helvetica').fontSize(9.5).fillColor(rowColor);
+      doc.text(j.drNumber ? `DR-${j.drNumber}` : j.orderNumber, cols.dr, y);
+      doc.text(j.invoiceNumber || '—', cols.inv, y);
+      doc.text(j.invoiceDate ? new Date(j.invoiceDate).toLocaleDateString() : '—', cols.date, y);
+      doc.text(dueDate || '—', cols.due, y);
+      doc.text('$' + total.toFixed(2), cols.total, y, { width: 60, align: 'right' });
+      doc.text('$' + paid.toFixed(2), cols.paid, y, { width: 60, align: 'right' });
+      if (isOverdue) {
+        doc.font('Helvetica-Bold');
+      }
+      doc.text('$' + balance.toFixed(2), cols.balance, y, { width: 62, align: 'right' });
+      doc.font('Helvetica');
+      y += 18;
+      doc.moveTo(50, y - 4).lineTo(562, y - 4).lineWidth(0.3).strokeColor('#eee').stroke();
+    }
+
+    // Total row
+    y += 6;
+    doc.moveTo(50, y).lineTo(562, y).lineWidth(1.5).strokeColor('#1565c0').stroke();
+    y += 10;
+    doc.font('Helvetica-Bold').fontSize(12).fillColor('#1565c0');
+    doc.text('TOTAL OUTSTANDING', cols.dr, y);
+    doc.text('$' + grandBalance.toFixed(2), cols.balance, y, { width: 62, align: 'right' });
+
+    doc.end();
+    const buffer = Buffer.concat(chunks);
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="Statement-${client.name.replace(/[^a-zA-Z0-9]/g,'_')}-${now.toISOString().split('T')[0]}.pdf"`);
+    res.send(buffer);
+  } catch(error) { next(error); }
 });
 
 module.exports = router;

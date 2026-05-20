@@ -4,7 +4,7 @@ const { Op } = require('sequelize');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const { Liability, Employee, PayrollWeek, PayrollEntry, WorkOrder, WorkOrderPart, WorkOrderPayment, Vendor, PONumber, InboundOrder, sequelize } = require('../models');
+const { Liability, Employee, PayrollWeek, PayrollEntry, WorkOrder, WorkOrderPart, WorkOrderPayment, Vendor, PONumber, InboundOrder, Client, ShipmentCharge, ClientPayment, PaymentApplication, CreditMemo, CreditMemoApplication, Refund, sequelize } = require('../models');
 const fileStorage = require('../utils/storage');
 
 // Multer config for bill attachments
@@ -137,16 +137,31 @@ router.get('/ledger', async (req, res, next) => {
       }
     } catch (payErr) { console.warn('[ledger] payments load skip:', payErr.message); }
 
+    // Load shipping charges in one query
+    let shippingMap = {};
+    try {
+      const { ShipmentCharge } = require('../models');
+      const allCharges = await ShipmentCharge.findAll({ where: { workOrderId: wos.map(w => w.id) } });
+      allCharges.forEach(c => {
+        const wid = c.workOrderId;
+        if (!shippingMap[wid]) shippingMap[wid] = 0;
+        shippingMap[wid] += (parseFloat(c.shippingCost)||0) * (1 + (parseFloat(c.shippingMarkup)||0)/100)
+                          + (parseFloat(c.materialsCost)||0) * (1 + (parseFloat(c.materialsMarkup)||0)/100);
+      });
+    } catch(e) { /* shipment_charges may not exist yet */ }
+
     const now = new Date();
     const data = wos.map(wo => {
       const j = wo.toJSON();
 
-      // Calculate total same way InvoiceCenterPage does — sum partTotals + trucking
+      // Calculate total — sum partTotals + trucking + shipping charges
       const partsTotal = (j.parts||[]).reduce((s, p) => s + (parseFloat(p.partTotal)||0), 0);
       const trucking = parseFloat(j.truckingCost) || 0;
       const calculatedTotal = partsTotal + trucking;
-      // Use calculated total if grandTotal not set or is 0
-      const total = (parseFloat(j.grandTotal) > 0 ? parseFloat(j.grandTotal) : calculatedTotal);
+      const shippingTotal = shippingMap[j.id] || 0;
+      // Use grandTotal from WO if set and > 0, then add shipping charges on top
+      const baseTotal = (parseFloat(j.grandTotal) > 0 ? parseFloat(j.grandTotal) : calculatedTotal);
+      const total = baseTotal + shippingTotal;
 
       const payments = paymentsMap[j.id] || [];
       const totalPaid = payments.reduce((s,p) => s + parseFloat(p.amount||0), 0);
@@ -1189,6 +1204,217 @@ Carolina Rolling Co., Inc.`;
     console.error('[Payroll Email] Send failed:', error.message);
     next(error);
   }
+});
+
+
+// ══════════════════════════════════════════════════════════
+// NEW PAYMENT SYSTEM
+// ══════════════════════════════════════════════════════════
+
+// Helper: calculate WO balance including shipping charges
+async function getWOBalance(woId) {
+  const wo = await WorkOrder.findByPk(woId, {
+    attributes: ['id','drNumber','orderNumber','clientId','clientName','grandTotal','truckingCost','invoiceNumber'],
+    include: [{ model: WorkOrderPart, as: 'parts', attributes: ['partTotal'] }]
+  });
+  if (!wo) return null;
+  const partsTotal = (wo.parts||[]).reduce((s,p) => s + (parseFloat(p.partTotal)||0), 0);
+  const trucking = parseFloat(wo.truckingCost) || 0;
+  const base = parseFloat(wo.grandTotal) > 0 ? parseFloat(wo.grandTotal) : partsTotal + trucking;
+  let shipping = 0;
+  try {
+    const charges = await ShipmentCharge.findAll({ where: { workOrderId: woId } });
+    charges.forEach(c => {
+      shipping += (parseFloat(c.shippingCost)||0)*(1+(parseFloat(c.shippingMarkup)||0)/100)
+                + (parseFloat(c.materialsCost)||0)*(1+(parseFloat(c.materialsMarkup)||0)/100);
+    });
+  } catch(e) {}
+  const total = base + shipping;
+  // Sum all non-voided payments applied to this WO
+  let paid = 0;
+  try {
+    const apps = await PaymentApplication.findAll({
+      where: { workOrderId: woId },
+      include: [{ model: ClientPayment, as: undefined, attributes: ['voidedAt'] }]
+    });
+    // Also legacy WOPayments
+    const legacyPmts = await WorkOrderPayment.findAll({ where: { workOrderId: woId, voidedAt: null } });
+    paid += legacyPmts.reduce((s,p) => s + (parseFloat(p.amount)||0), 0);
+    // PaymentApplications — need to check if parent payment is voided
+    for (const app of apps) {
+      const cp = await ClientPayment.findByPk(app.clientPaymentId, { attributes: ['voidedAt'] });
+      if (!cp || cp.voidedAt) continue;
+      paid += parseFloat(app.amount) || 0;
+    }
+  } catch(e) {}
+  return { wo: wo.toJSON(), total, paid, balance: Math.max(0, total - paid) };
+}
+
+// GET /api/business/client-payments — list all client payments
+router.get('/client-payments', async (req, res, next) => {
+  try {
+    const { clientId, clientName, limit = 50 } = req.query;
+    const where = { voidedAt: null };
+    if (clientId) where.clientId = clientId;
+    if (clientName) where.clientName = { [Op.iLike]: `%${clientName}%` };
+    const payments = await ClientPayment.findAll({
+      where, limit: parseInt(limit),
+      include: [{ model: PaymentApplication, as: 'applications' }],
+      order: [['paymentDate','DESC'],['createdAt','DESC']]
+    });
+    res.json({ data: payments });
+  } catch(error) { next(error); }
+});
+
+// GET /api/business/client-open-invoices/:clientId — open WOs for a client
+router.get('/client-open-invoices/:clientId', async (req, res, next) => {
+  try {
+    const wos = await WorkOrder.findAll({
+      where: { clientId: req.params.clientId, invoiceNumber: { [Op.ne]: null } },
+      attributes: ['id','drNumber','orderNumber','clientName','invoiceNumber','grandTotal','truckingCost','invoiceDate'],
+      include: [{ model: WorkOrderPart, as: 'parts', attributes: ['partTotal'] }],
+      order: [['invoiceDate','ASC NULLS LAST']]
+    });
+    const results = [];
+    for (const wo of wos) {
+      const info = await getWOBalance(wo.id);
+      if (info && info.balance > 0.01) results.push(info);
+    }
+    res.json({ data: results });
+  } catch(error) { next(error); }
+});
+
+// POST /api/business/client-payments — record a new payment with applications
+router.post('/client-payments', async (req, res, next) => {
+  const t = await sequelize.transaction();
+  try {
+    const { clientId, clientName, paymentDate, amount, method, reference, notes, recordedBy, applications, creditMemoRemainder } = req.body;
+    const totalAmount = parseFloat(amount);
+    if (!totalAmount || totalAmount <= 0) throw new Error('Invalid payment amount');
+
+    // Create the parent payment
+    const payment = await ClientPayment.create({
+      clientId: clientId || null, clientName, paymentDate: paymentDate || new Date(),
+      amount: totalAmount, method: method || 'check', reference: reference || null,
+      notes: notes || null, recordedBy: recordedBy || 'admin'
+    }, { transaction: t });
+
+    // Create applications
+    let totalApplied = 0;
+    for (const app of (applications || [])) {
+      const appAmt = parseFloat(app.amount);
+      if (!appAmt || appAmt <= 0) continue;
+      await PaymentApplication.create({
+        clientPaymentId: payment.id, workOrderId: app.workOrderId, amount: appAmt
+      }, { transaction: t });
+      // Also create legacy WOPayment for backwards compatibility
+      await WorkOrderPayment.create({
+        workOrderId: app.workOrderId, amount: appAmt,
+        paymentDate: paymentDate || new Date(), paymentMethod: method || 'check',
+        paymentReference: reference || null, paymentType: 'partial', recordedBy: recordedBy || 'admin'
+      }, { transaction: t });
+      totalApplied += appAmt;
+    }
+
+    // If remainder and creditMemoRemainder flag, create credit memo
+    const remainder = totalAmount - totalApplied;
+    let creditMemo = null;
+    if (creditMemoRemainder && remainder > 0.01) {
+      creditMemo = await CreditMemo.create({
+        clientId: clientId || null, clientName,
+        date: paymentDate || new Date(),
+        amount: remainder, remainingAmount: remainder,
+        reason: `Overpayment credit from payment of ${totalAmount.toFixed(2)}`,
+        sourceClientPaymentId: payment.id
+      }, { transaction: t });
+    }
+
+    await t.commit();
+    res.json({ data: { payment, creditMemo }, message: 'Payment recorded' });
+  } catch(err) { await t.rollback(); next(err); }
+});
+
+// ── Credit Memos ──
+
+// GET /api/business/credit-memos
+router.get('/credit-memos', async (req, res, next) => {
+  try {
+    const { clientId, clientName } = req.query;
+    const where = { voidedAt: null };
+    if (clientId) where.clientId = clientId;
+    if (clientName) where.clientName = { [Op.iLike]: `%${clientName}%` };
+    const memos = await CreditMemo.findAll({
+      where, include: [{ model: CreditMemoApplication, as: 'applications' }],
+      order: [['date','DESC'],['createdAt','DESC']]
+    });
+    res.json({ data: memos });
+  } catch(error) { next(error); }
+});
+
+// POST /api/business/credit-memos — create manually
+router.post('/credit-memos', async (req, res, next) => {
+  try {
+    const { clientId, clientName, date, amount, reason } = req.body;
+    if (!parseFloat(amount) || !clientName) return res.status(400).json({ error: { message: 'clientName and amount required' } });
+    const memo = await CreditMemo.create({
+      clientId: clientId || null, clientName,
+      date: date || new Date(), amount: parseFloat(amount),
+      remainingAmount: parseFloat(amount), reason: reason || null
+    });
+    res.json({ data: memo, message: 'Credit memo created' });
+  } catch(error) { next(error); }
+});
+
+// DELETE /api/business/credit-memos/:id — void
+router.delete('/credit-memos/:id', async (req, res, next) => {
+  try {
+    const memo = await CreditMemo.findByPk(req.params.id);
+    if (!memo) return res.status(404).json({ error: { message: 'Not found' } });
+    await memo.update({ voidedAt: new Date() });
+    res.json({ data: memo, message: 'Credit memo voided' });
+  } catch(error) { next(error); }
+});
+
+// ── Refunds ──
+
+// GET /api/business/refunds
+router.get('/refunds', async (req, res, next) => {
+  try {
+    const { clientId, clientName } = req.query;
+    const where = { voidedAt: null };
+    if (clientId) where.clientId = clientId;
+    if (clientName) where.clientName = { [Op.iLike]: `%${clientName}%` };
+    const refunds = await Refund.findAll({ where, order: [['date','DESC'],['createdAt','DESC']] });
+    res.json({ data: refunds });
+  } catch(error) { next(error); }
+});
+
+// POST /api/business/refunds — record a refund
+router.post('/refunds', async (req, res, next) => {
+  try {
+    const { clientId, clientName, date, amount, method, reference, reason, sourceWorkOrderId, sourceClientPaymentId, recordedBy } = req.body;
+    if (!parseFloat(amount) || !clientName) return res.status(400).json({ error: { message: 'clientName and amount required' } });
+    const refund = await Refund.create({
+      clientId: clientId || null, clientName,
+      date: date || new Date(), amount: parseFloat(amount),
+      method: method || 'check', reference: reference || null,
+      reason: reason || null,
+      sourceWorkOrderId: sourceWorkOrderId || null,
+      sourceClientPaymentId: sourceClientPaymentId || null,
+      recordedBy: recordedBy || 'admin'
+    });
+    res.json({ data: refund, message: 'Refund recorded' });
+  } catch(error) { next(error); }
+});
+
+// DELETE /api/business/refunds/:id — void
+router.delete('/refunds/:id', async (req, res, next) => {
+  try {
+    const refund = await Refund.findByPk(req.params.id);
+    if (!refund) return res.status(404).json({ error: { message: 'Not found' } });
+    await refund.update({ voidedAt: new Date() });
+    res.json({ data: refund, message: 'Refund voided' });
+  } catch(error) { next(error); }
 });
 
 module.exports = router;

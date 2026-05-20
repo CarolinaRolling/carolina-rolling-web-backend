@@ -840,6 +840,72 @@ async function startServer() {
       console.log('shipment_charges table ready');
     } catch (e) { console.log('shipment_charges table error:', e.message); }
 
+    // Create new payment system tables
+    try {
+      await sequelize.query(`CREATE TABLE IF NOT EXISTS client_payments (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        "clientId" UUID,
+        "clientName" VARCHAR(255) NOT NULL,
+        "paymentDate" DATE NOT NULL,
+        amount DECIMAL(10,2) NOT NULL,
+        method VARCHAR(50) DEFAULT 'check',
+        reference VARCHAR(255),
+        notes TEXT,
+        "recordedBy" VARCHAR(255),
+        "voidedAt" TIMESTAMP WITH TIME ZONE,
+        "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      )`);
+      await sequelize.query(`CREATE TABLE IF NOT EXISTS payment_applications (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        "clientPaymentId" UUID REFERENCES client_payments(id) ON DELETE CASCADE,
+        "workOrderId" UUID REFERENCES work_orders(id) ON DELETE CASCADE,
+        amount DECIMAL(10,2) NOT NULL,
+        "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      )`);
+      await sequelize.query(`CREATE TABLE IF NOT EXISTS credit_memos (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        "clientId" UUID,
+        "clientName" VARCHAR(255) NOT NULL,
+        date DATE NOT NULL,
+        amount DECIMAL(10,2) NOT NULL,
+        "remainingAmount" DECIMAL(10,2) NOT NULL,
+        reason TEXT,
+        "sourceClientPaymentId" UUID,
+        "voidedAt" TIMESTAMP WITH TIME ZONE,
+        "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      )`);
+      await sequelize.query(`CREATE TABLE IF NOT EXISTS credit_memo_applications (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        "creditMemoId" UUID REFERENCES credit_memos(id) ON DELETE CASCADE,
+        "workOrderId" UUID,
+        "clientPaymentId" UUID,
+        amount DECIMAL(10,2) NOT NULL,
+        "appliedAt" DATE NOT NULL,
+        "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      )`);
+      await sequelize.query(`CREATE TABLE IF NOT EXISTS refunds (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        "clientId" UUID,
+        "clientName" VARCHAR(255) NOT NULL,
+        date DATE NOT NULL,
+        amount DECIMAL(10,2) NOT NULL,
+        method VARCHAR(50) DEFAULT 'check',
+        reference VARCHAR(255),
+        reason TEXT,
+        "sourceWorkOrderId" UUID,
+        "sourceClientPaymentId" UUID,
+        "recordedBy" VARCHAR(255),
+        "voidedAt" TIMESTAMP WITH TIME ZONE,
+        "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      )`);
+      console.log('Payment system tables ready');
+    } catch (e) { console.log('Payment tables error:', e.message); }
+
     // Add USMCA per-order fields to work_orders table
     try {
       await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "usmcaImporterName" VARCHAR(255)`);

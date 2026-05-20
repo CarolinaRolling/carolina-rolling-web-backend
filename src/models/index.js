@@ -3421,6 +3421,79 @@ WorkOrder.hasMany(ShipmentCharge, { foreignKey: 'workOrderId', as: 'shipmentChar
 ShipmentCharge.belongsTo(WorkOrder, { foreignKey: 'workOrderId' });
 ShipmentCharge.belongsTo(Vendor, { foreignKey: 'vendorId', as: 'vendor' });
 
+
+// ── ClientPayment — a single payment received (check, card, cash, etc.) ──
+const ClientPayment = sequelize.define('ClientPayment', {
+  id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+  clientId: { type: DataTypes.UUID, allowNull: true },
+  clientName: { type: DataTypes.STRING, allowNull: false },
+  paymentDate: { type: DataTypes.DATEONLY, allowNull: false },
+  amount: { type: DataTypes.DECIMAL(10, 2), allowNull: false },
+  method: { type: DataTypes.STRING, defaultValue: 'check' }, // cash, check, credit_card, ach, other
+  reference: { type: DataTypes.STRING, allowNull: true },
+  notes: { type: DataTypes.TEXT, allowNull: true },
+  recordedBy: { type: DataTypes.STRING, allowNull: true },
+  voidedAt: { type: DataTypes.DATE, allowNull: true },
+}, { tableName: 'client_payments', timestamps: true });
+
+// ── PaymentApplication — links a ClientPayment to one or more WorkOrders ──
+const PaymentApplication = sequelize.define('PaymentApplication', {
+  id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+  clientPaymentId: { type: DataTypes.UUID, allowNull: false },
+  workOrderId: { type: DataTypes.UUID, allowNull: false },
+  amount: { type: DataTypes.DECIMAL(10, 2), allowNull: false },
+}, { tableName: 'payment_applications', timestamps: true });
+
+// ── CreditMemo — client credit on account ──
+const CreditMemo = sequelize.define('CreditMemo', {
+  id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+  clientId: { type: DataTypes.UUID, allowNull: true },
+  clientName: { type: DataTypes.STRING, allowNull: false },
+  date: { type: DataTypes.DATEONLY, allowNull: false },
+  amount: { type: DataTypes.DECIMAL(10, 2), allowNull: false },
+  remainingAmount: { type: DataTypes.DECIMAL(10, 2), allowNull: false },
+  reason: { type: DataTypes.TEXT, allowNull: true },
+  sourceClientPaymentId: { type: DataTypes.UUID, allowNull: true }, // if auto-created from overpayment
+  voidedAt: { type: DataTypes.DATE, allowNull: true },
+}, { tableName: 'credit_memos', timestamps: true });
+
+// ── CreditMemoApplication — tracks how credit memos are applied to invoices ──
+const CreditMemoApplication = sequelize.define('CreditMemoApplication', {
+  id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+  creditMemoId: { type: DataTypes.UUID, allowNull: false },
+  workOrderId: { type: DataTypes.UUID, allowNull: true },
+  clientPaymentId: { type: DataTypes.UUID, allowNull: true },
+  amount: { type: DataTypes.DECIMAL(10, 2), allowNull: false },
+  appliedAt: { type: DataTypes.DATEONLY, allowNull: false },
+}, { tableName: 'credit_memo_applications', timestamps: true });
+
+// ── Refund — cash returned to client ──
+const Refund = sequelize.define('Refund', {
+  id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+  clientId: { type: DataTypes.UUID, allowNull: true },
+  clientName: { type: DataTypes.STRING, allowNull: false },
+  date: { type: DataTypes.DATEONLY, allowNull: false },
+  amount: { type: DataTypes.DECIMAL(10, 2), allowNull: false },
+  method: { type: DataTypes.STRING, defaultValue: 'check' },
+  reference: { type: DataTypes.STRING, allowNull: true },
+  reason: { type: DataTypes.TEXT, allowNull: true },
+  sourceWorkOrderId: { type: DataTypes.UUID, allowNull: true },
+  sourceClientPaymentId: { type: DataTypes.UUID, allowNull: true },
+  recordedBy: { type: DataTypes.STRING, allowNull: true },
+  voidedAt: { type: DataTypes.DATE, allowNull: true },
+}, { tableName: 'refunds', timestamps: true });
+
+// Associations
+ClientPayment.hasMany(PaymentApplication, { foreignKey: 'clientPaymentId', as: 'applications' });
+PaymentApplication.belongsTo(ClientPayment, { foreignKey: 'clientPaymentId' });
+PaymentApplication.belongsTo(WorkOrder, { foreignKey: 'workOrderId', as: 'workOrder' });
+WorkOrder.hasMany(PaymentApplication, { foreignKey: 'workOrderId', as: 'paymentApplications' });
+
+CreditMemo.hasMany(CreditMemoApplication, { foreignKey: 'creditMemoId', as: 'applications' });
+CreditMemoApplication.belongsTo(CreditMemo, { foreignKey: 'creditMemoId' });
+Client.hasMany(CreditMemo, { foreignKey: 'clientId', as: 'creditMemos' });
+Client.hasMany(Refund, { foreignKey: 'clientId', as: 'refunds' });
+
 module.exports = {
   sequelize,
   User,
@@ -3459,5 +3532,10 @@ module.exports = {
   BusinessEvent,
   WeldProcedure,
   VendorIssue,
-  ShipmentCharge
+  ShipmentCharge,
+  ClientPayment,
+  PaymentApplication,
+  CreditMemo,
+  CreditMemoApplication,
+  Refund
 };

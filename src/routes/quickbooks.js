@@ -746,7 +746,22 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
       doc.font('Helvetica-Bold').fontSize(12).fillColor('white');
       doc.text(hasPayments ? 'INVOICE TOTAL' : 'TOTAL DUE', 355, yPos + 7, { width: 100, lineBreak: false });
       doc.text(fmtCur(grandTotal), 458, yPos + 7, { width: 100, align: 'right', lineBreak: false });
-      yPos += 40;
+      yPos += 34;
+
+      // ── Credit Card Fee Totals ──
+      if (!hasPayments) {
+        const ccInPersonTotal = Math.round((grandTotal * 1.026 + 0.15) * 100) / 100;
+        const ccManualTotal = Math.round((grandTotal * 1.035 + 0.15) * 100) / 100;
+        doc.font('Helvetica-Bold').fontSize(9).fillColor(grayColor)
+          .text('Total with Credit Card Fees', 350, yPos, { width: 212, align: 'right', lineBreak: false });
+        yPos += 12;
+        doc.font('Helvetica').fontSize(9).fillColor(grayColor)
+          .text(`In-Person (2.6% + $0.15): ${fmtCur(ccInPersonTotal)}`, 350, yPos, { width: 212, align: 'right', lineBreak: false });
+        yPos += 11;
+        doc.font('Helvetica').fontSize(9).fillColor(grayColor)
+          .text(`Manual (3.5% + $0.15): ${fmtCur(ccManualTotal)}`, 350, yPos, { width: 212, align: 'right', lineBreak: false });
+        yPos += 14;
+      }
 
       // ── Payment History ──
       const activePayments = payments.filter(p => !p.voidedAt);

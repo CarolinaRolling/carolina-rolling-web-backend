@@ -267,6 +267,19 @@ app.post('/api/com-center/coverage/scan', authenticate, async (req, res) => {
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
+// Re-sort the existing backlog with the latest classifier (runs in the background)
+app.post('/api/com-center/reclassify', authenticate, async (req, res) => {
+  try {
+    const { reclassifyExisting, runCoverageScan } = require('./services/commCenter');
+    // Fire-and-forget — Heroku caps requests at 30s, so don't await the full pass
+    (async () => {
+      try { await reclassifyExisting(); await runCoverageScan(); }
+      catch (e) { console.error('[CommCenter] reclassify error:', e.message); }
+    })();
+    res.json({ data: { started: true } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
 app.get('/api/com-center/logs', authenticate, (req, res) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
   res.set('Pragma', 'no-cache');

@@ -52,18 +52,25 @@ async function classifyEmail({ from, subject, snippet, knownClient }) {
   if (!process.env.ANTHROPIC_API_KEY) {
     return { category: knownClient ? 'client_inquiry' : 'general', isQuoteRequest: false, needsResponse: !!knownClient };
   }
-  const sys = `You triage incoming email for Carolina Rolling Company, a metal rolling/forming shop.
-Classify the email and decide if it needs a response. Reply with ONLY JSON (no markdown):
-{"category":"<one of: client_inquiry, vendor, bill, marketing, spam, business, general>","isQuoteRequest":<bool>,"needsResponse":<bool>}
-Guidance:
-- client_inquiry: a real person asking about work, pricing, status, scheduling, or sending a request.
-- isQuoteRequest=true ONLY if they are asking us to quote/price rolling, forming, or fabrication work, or sending specs/drawings for a quote.
-- vendor: a supplier/subcontractor (material, outside processing, freight).
-- bill: an invoice, statement, or payment request addressed to us.
-- business: taxes, government/regulatory notices, certifications, annual reports, insurance, licensing.
-- marketing: promotions, newsletters, sales outreach, ads. needsResponse=false.
-- spam: junk/phishing. needsResponse=false.
-- needsResponse=true if a human at the shop should reply or act. Marketing/spam/auto-receipts = false.${knownClient ? `\nNote: this sender is a known client (${knownClient}).` : ''}`;
+  const sys = `You triage incoming email for Carolina Rolling Company, a metal ROLLING / FORMING / FABRICATION shop. Customers send US steel to roll and form; we BUY material and services from vendors.
+Reply with ONLY JSON (no markdown):
+{"category":"<client_inquiry|vendor|bill|marketing|spam|business|general>","isQuoteRequest":<bool>,"needsResponse":<bool>}
+
+Decide who the sender is RELATIVE TO US:
+- client_inquiry = someone who wants US to do work FOR them: asking us to roll/form/fabricate, requesting a quote, sending drawings or specs, or asking about pricing, lead time, or the status of their job. They are BUYING from us. This holds even if the sender is itself a company, shop, or fabricator. When unsure between client_inquiry and vendor and they are asking us to DO or QUOTE work, choose client_inquiry.
+  - isQuoteRequest=true when they ask us to quote/price work or send specs/drawings for a quote.
+- vendor = a supplier or subcontractor WE BUY FROM: steel/material suppliers, outside processing (galvanizing, machining, heat treat), or freight/trucking. Usually order confirmations, shipping notices, material quotes WE requested, or their invoices. Only use vendor when they are clearly selling material/services we purchase to fulfill jobs.
+- bill = an invoice, statement, or payment request addressed to us.
+- business = taxes, government/regulatory notices, certifications, annual reports, insurance, licensing.
+- marketing = UNSOLICITED sales pitches, promotions, newsletters, cold outreach, ads — INCLUDING equipment-financing offers, "lines of credit", business loans, leasing, SEO/website services, insurance sales. needsResponse=false.
+- spam = junk, phishing, scams. needsResponse=false.
+- general = anything else.
+
+CRITICAL RULES:
+- An unsolicited offer of financing, credit, a "line of credit", loans, leasing, or equipment sales is marketing or spam — NEVER vendor.
+- Do NOT default to vendor just because an email sounds business-like. Vendor means a supplier we actually buy material or services from.
+- A request to quote or perform rolling/forming/fab work is client_inquiry, not vendor.
+- needsResponse=true only if a human at the shop should reply or act. marketing / spam / automated receipts = false.${knownClient ? `\nNote: the sender (${knownClient}) is a known CLIENT — treat as client_inquiry unless it is clearly a bill.` : ''}`;
   const body = JSON.stringify({
     model: 'claude-haiku-4-5-20251001',
     max_tokens: 80,
@@ -168,4 +175,45 @@ async function runCoverageScan() {
   return { checked, awaiting };
 }
 
-module.exports = { classifyEmail, isAck, computeCoverageForThread, runCoverageScan, VALID_CATEGORIES };
+// Re-run classification on already-scanned comm emails (fixes backlog after a prompt change).
+// Uses stored subject/snippet/fromEmail — no Gmail re-fetch. Runs sequentially; call in background.
+async function reclassifyExisting({ limit = 400 } = {}) {
+  const { Client, Vendor } = require('../models');
+  const vendors = await Vendor.findAll({ where: { isActive: true }, attributes: ['name', 'emailScanAddresses', 'contactEmail'] });
+  const vendorAddrs = {};
+  vendors.forEach(v => {
+    const a = [...(v.emailScanAddresses || [])];
+    if (v.contactEmail) a.push(v.contactEmail);
+    a.forEach(x => { vendorAddrs[(x || '').toLowerCase().trim()] = v.name; });
+  });
+  const clients = await Client.findAll({ where: { isActive: true }, attributes: ['name', 'emailScanAddresses', 'contacts', 'emailScanEnabled'] });
+  const clientAddrs = {};
+  clients.filter(c => !c.emailScanEnabled).forEach(c => {
+    (c.emailScanAddresses || []).forEach(x => { clientAddrs[(x || '').toLowerCase().trim()] = c.name; });
+    (c.contacts || []).forEach(ct => { if (ct.email) clientAddrs[ct.email.toLowerCase().trim()] = c.name; });
+  });
+
+  const since = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000);
+  const emails = await ScannedEmail.findAll({
+    where: { emailType: 'comm_center', receivedAt: { [Op.gte]: since } },
+    order: [['receivedAt', 'DESC']], limit,
+  });
+  let updated = 0;
+  for (const e of emails) {
+    const fromEmail = (e.fromEmail || '').toLowerCase().trim();
+    let triage;
+    if (vendorAddrs[fromEmail]) {
+      triage = { category: 'vendor', isQuoteRequest: false, needsResponse: false };
+    } else {
+      triage = await classifyEmail({ from: e.fromName || e.fromEmail, subject: e.subject, snippet: e.commSnippet, knownClient: clientAddrs[fromEmail] || null });
+    }
+    try {
+      await e.update({ commCategory: triage.category, commIsQuoteRequest: triage.isQuoteRequest, commNeedsResponse: triage.needsResponse });
+      updated++;
+    } catch { /* skip individual failures */ }
+  }
+  console.log(`[CommCenter] Reclassified ${updated} email(s)`);
+  return { updated };
+}
+
+module.exports = { classifyEmail, isAck, computeCoverageForThread, runCoverageScan, reclassifyExisting, VALID_CATEGORIES };

@@ -215,6 +215,58 @@ app.patch('/api/com-center/emails/:id/category', authenticate, async (req, res) 
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
+// Quote coverage: tracked quote-requests / needs-response with responded state
+app.get('/api/com-center/coverage', authenticate, async (req, res) => {
+  try {
+    const { ScannedEmail } = require('./models');
+    const { Op } = require('sequelize');
+    const since = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000);
+    const where = {
+      emailType: 'comm_center', commArchived: false,
+      receivedAt: { [Op.gte]: since },
+      [Op.or]: [{ commIsQuoteRequest: true }, { commNeedsResponse: true }],
+    };
+    if (req.query.quotesOnly === 'true') { delete where[Op.or]; where.commIsQuoteRequest = true; }
+    const emails = await ScannedEmail.findAll({ where, order: [['receivedAt', 'DESC']], limit: 300 });
+    // Keep the newest record per thread
+    const byThread = new Map();
+    for (const e of emails) {
+      const key = e.gmailThreadId || e.id;
+      const prev = byThread.get(key);
+      if (!prev || new Date(e.receivedAt) > new Date(prev.receivedAt)) byThread.set(key, e);
+    }
+    const list = [...byThread.values()];
+    const awaiting = list.filter(e => !e.commResponded && !e.commHandledManually).length;
+    res.json({ data: list, awaiting });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+// Manually mark a thread handled (forces green)
+app.patch('/api/com-center/emails/:id/handled', authenticate, async (req, res) => {
+  try {
+    const { ScannedEmail } = require('./models');
+    const email = await ScannedEmail.findByPk(req.params.id);
+    if (!email) return res.status(404).json({ error: { message: 'Not found' } });
+    const handled = req.body.handled !== false;
+    const updates = { commHandledManually: handled, commResponded: handled ? true : email.commResponded };
+    if (email.gmailThreadId) {
+      await ScannedEmail.update(updates, { where: { gmailThreadId: email.gmailThreadId } });
+    } else {
+      await email.update(updates);
+    }
+    res.json({ data: { ...email.toJSON(), ...updates } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+// Run the coverage scan on demand
+app.post('/api/com-center/coverage/scan', authenticate, async (req, res) => {
+  try {
+    const { runCoverageScan } = require('./services/commCenter');
+    const result = await runCoverageScan();
+    res.json({ data: result });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
 app.get('/api/com-center/logs', authenticate, (req, res) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
   res.set('Pragma', 'no-cache');
@@ -948,6 +1000,17 @@ async function startServer() {
       )`);
       console.log('Inspection tables ready');
     } catch(e) { console.log('Inspection tables error:', e.message); }
+
+    // Comm Center — quote coverage tracking columns
+    try {
+      await sequelize.query(`ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commIsQuoteRequest" BOOLEAN DEFAULT false`);
+      await sequelize.query(`ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commNeedsResponse" BOOLEAN DEFAULT false`);
+      await sequelize.query(`ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commResponded" BOOLEAN DEFAULT false`);
+      await sequelize.query(`ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commLastMessageAt" TIMESTAMP WITH TIME ZONE`);
+      await sequelize.query(`ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commCoverageCheckedAt" TIMESTAMP WITH TIME ZONE`);
+      await sequelize.query(`ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commHandledManually" BOOLEAN DEFAULT false`);
+      console.log('Comm coverage columns ready');
+    } catch(e) { console.log('Comm coverage columns error:', e.message); }
 
     // Add USMCA per-order fields to work_orders table
     try {
@@ -1824,43 +1887,23 @@ Please confirm with the operator and mark the order complete if ready.`,
                   continue;
                 }
 
-                // Determine category
-                let category = 'general';
+                // Classify (body-aware via snippet) — category + quote/needs-response flags
+                let triage;
                 if (vendorAddrs[fromEmail]) {
-                  category = 'vendor';
-                } else if (clientAddrs[fromEmail]) {
-                  category = 'client_inquiry';
+                  triage = { category: 'vendor', isQuoteRequest: false, needsResponse: false };
                 } else {
-                  // AI classification
-                  // Classify using raw https (no SDK needed)
-                  try {
-                    const https = require('https');
-                    const classifyBody = JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 20, messages: [{ role: 'user', content: 'Classify this email into one category. Reply with ONLY the category word. Categories: client_inquiry, vendor, bill, marketing, spam, general. From: ' + fromHeader + ' Subject: ' + subject }] });
-                    const classifyResult = await new Promise((resolve, reject) => {
-                      const req = https.request({ hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(classifyBody) } }, (res) => {
-                        let data = ''; res.on('data', c => data += c); res.on('end', () => resolve(data));
-                      });
-                      req.on('error', reject);
-                      setTimeout(() => reject(new Error('AI classify timeout')), 10000);
-                      req.write(classifyBody); req.end();
-                    });
-                    const parsed = JSON.parse(classifyResult);
-                    const raw = (parsed.content?.[0]?.text || '').trim().toLowerCase();
-                    const validCats = ['client_inquiry', 'vendor', 'bill', 'marketing', 'spam', 'general'];
-                    category = validCats.includes(raw) ? raw : 'general';
-                  } catch (aiErr) {
-                    console.warn('[CommScanner] AI classify failed, defaulting to general: ' + aiErr.message);
-                    category = 'general';
-                  }
+                  const { classifyEmail } = require('./services/commCenter');
+                  triage = await classifyEmail({ from: fromHeader, subject, snippet, knownClient: clientAddrs[fromEmail] || null });
                 }
+                const category = triage.category;
 
                 // Save to ScannedEmail
                 const gmailLink = 'https://mail.google.com/mail/u/0/#all/' + msg.id;
                 const [emailRec2, created2] = await ScannedEmail.findOrCreate({
                   where: { gmailMessageId: msg.id },
-                  defaults: { gmailAccountId: account.id, gmailThreadId: detail.data.threadId, fromEmail, fromName: fromName || fromEmail, subject, receivedAt: dateHeader ? new Date(dateHeader) : new Date(), commCategory: category, commProcessed: true, commSnippet: snippet.substring(0, 500), commArchived: false, gmailLink, status: 'processed', emailType: 'comm_center' }
+                  defaults: { gmailAccountId: account.id, gmailThreadId: detail.data.threadId, fromEmail, fromName: fromName || fromEmail, subject, receivedAt: dateHeader ? new Date(dateHeader) : new Date(), commCategory: category, commIsQuoteRequest: triage.isQuoteRequest, commNeedsResponse: triage.needsResponse, commProcessed: true, commSnippet: snippet.substring(0, 500), commArchived: false, gmailLink, status: 'processed', emailType: 'comm_center' }
                 });
-                if (!created2) await emailRec2.update({ commCategory: category, commProcessed: true, commSnippet: snippet.substring(0, 500), gmailLink });
+                if (!created2) await emailRec2.update({ commCategory: category, commIsQuoteRequest: triage.isQuoteRequest, commNeedsResponse: triage.needsResponse, commProcessed: true, commSnippet: snippet.substring(0, 500), gmailLink });
 
                 // Apply label
                 await gmail.users.messages.modify({ userId: 'me', id: msg.id, requestBody: { addLabelIds: [commLabelId] } });
@@ -1871,6 +1914,14 @@ Please confirm with the operator and mark the order complete if ready.`,
           } catch (accErr) {
             logComm('error', 'Account error (cron): ' + (account.email || account.id), accErr.message);
           }
+        }
+
+        // Refresh quote-coverage (responded vs awaiting) for tracked threads
+        try {
+          const { runCoverageScan } = require('./services/commCenter');
+          await runCoverageScan();
+        } catch (covErr) {
+          console.error('[CommCenter] coverage scan error:', covErr.message);
         }
       } catch (e) {
         console.error('[CommScanner] Fatal error:', e.message);

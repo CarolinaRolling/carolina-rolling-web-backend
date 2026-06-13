@@ -2431,6 +2431,31 @@ const ScannedEmail = sequelize.define('ScannedEmail', {
   commArchived: {
     type: DataTypes.BOOLEAN,
     defaultValue: false
+  },
+  // --- Quote coverage tracking ---
+  commIsQuoteRequest: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  commNeedsResponse: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  commResponded: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
+  commLastMessageAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  commCoverageCheckedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  commHandledManually: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
   }
 }, {
   tableName: 'scanned_emails',

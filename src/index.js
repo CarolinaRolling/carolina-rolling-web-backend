@@ -227,8 +227,9 @@ app.get('/api/com-center/emails/:id/gmail-url', authenticate, async (req, res) =
         const headers = detail.data.payload?.headers || [];
         const mid = (headers.find(h => (h.name || '').toLowerCase() === 'message-id')?.value || '').replace(/[<>]/g, '').trim();
         if (mid && account.email) {
-          // Open the specific message via rfc822msgid search, in the correct account (AccountChooser)
-          const inner = 'https://mail.google.com/mail/u/0/#search/rfc822msgid:' + encodeURIComponent(mid);
+          // Open the specific message: rfc822msgid search (reliable find) + the message id to auto-open it
+          const query = encodeURIComponent('rfc822msgid:' + mid);
+          const inner = 'https://mail.google.com/mail/u/0/#search/' + query + '/' + email.gmailMessageId;
           url = 'https://accounts.google.com/AccountChooser?Email=' + encodeURIComponent(account.email) + '&continue=' + encodeURIComponent(inner);
         }
       } catch (gErr) { console.warn('[CommCenter] gmail-url resolve failed:', gErr.message); }
@@ -482,7 +483,7 @@ app.post('/api/com-center/scan-now', authenticate, async (req, res) => {
                 const existing = await ScannedEmail.findOne({ where: { gmailMessageId: msg.id, commProcessed: true } });
                 if (existing) continue;
                 logComm('info', 'Processing message ' + msg.id.substring(0, 8) + '...');
-                const detail = await gmailWithTimeout(() => gmail.users.messages.get({ userId: 'me', id: msg.id, format: 'metadata', metadataHeaders: ['From', 'Subject', 'Date'] }));
+                const detail = await gmailWithTimeout(() => gmail.users.messages.get({ userId: 'me', id: msg.id, format: 'full' }));
                 const headers = detail.data.payload?.headers || [];
                 const fromHeader = headers.find(h => h.name === 'From')?.value || '';
                 const subject = headers.find(h => h.name === 'Subject')?.value || '(no subject)';
@@ -495,37 +496,21 @@ app.post('/api/com-center/scan-now', authenticate, async (req, res) => {
                   await gmail.users.messages.modify({ userId: 'me', id: msg.id, requestBody: { addLabelIds: [commLabelId] } });
                   continue;
                 }
-                let category = 'general';
-                if (vendorAddrs[fromEmail]) { category = 'vendor'; }
-                else if (clientAddrs[fromEmail]) { category = 'client_inquiry'; }
-                else {
-                  // Classify using raw https (no SDK needed)
-                  try {
-                    const https = require('https');
-                    const classifyBody = JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 20, messages: [{ role: 'user', content: 'Classify this email into one category. Reply with ONLY the category word. Categories: client_inquiry, vendor, bill, marketing, spam, general. From: ' + fromHeader + ' Subject: ' + subject }] });
-                    const classifyResult = await new Promise((resolve, reject) => {
-                      const req = https.request({ hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(classifyBody) } }, (res) => {
-                        let data = ''; res.on('data', c => data += c); res.on('end', () => resolve(data));
-                      });
-                      req.on('error', reject);
-                      setTimeout(() => reject(new Error('AI classify timeout')), 10000);
-                      req.write(classifyBody); req.end();
-                    });
-                    const parsed = JSON.parse(classifyResult);
-                    const raw = (parsed.content?.[0]?.text || '').trim().toLowerCase();
-                    const validCats = ['client_inquiry', 'vendor', 'bill', 'marketing', 'spam', 'general'];
-                    category = validCats.includes(raw) ? raw : 'general';
-                  } catch (aiErr) {
-                    logComm('warn', 'AI classify failed, defaulting to general: ' + aiErr.message);
-                    category = 'general';
-                  }
+                let triage;
+                if (vendorAddrs[fromEmail]) {
+                  triage = { category: 'vendor', isQuoteRequest: false, needsResponse: false };
+                } else {
+                  const { classifyEmail, extractEmailBody } = require('./services/commCenter');
+                  const fullBody = extractEmailBody(detail.data.payload);
+                  triage = await classifyEmail({ from: fromHeader, subject, snippet, body: fullBody, knownClient: clientAddrs[fromEmail] || null });
                 }
+                const category = triage.category;
                 const gmailLink = 'https://mail.google.com/mail/?authuser=' + encodeURIComponent(account.email || '') + '#all/' + msg.id;
                 const [emailRecord, created] = await ScannedEmail.findOrCreate({
                   where: { gmailMessageId: msg.id },
-                  defaults: { gmailAccountId: account.id, gmailThreadId: detail.data.threadId, fromEmail, fromName: fromName || fromEmail, subject, receivedAt: dateHeader ? new Date(dateHeader) : new Date(), commCategory: category, commProcessed: true, commSnippet: snippet.substring(0, 500), commArchived: false, gmailLink, status: 'processed', emailType: 'comm_center' }
+                  defaults: { gmailAccountId: account.id, gmailThreadId: detail.data.threadId, fromEmail, fromName: fromName || fromEmail, subject, receivedAt: dateHeader ? new Date(dateHeader) : new Date(), commCategory: category, commIsQuoteRequest: triage.isQuoteRequest, commNeedsResponse: triage.needsResponse, commProcessed: true, commSnippet: snippet.substring(0, 500), commArchived: false, gmailLink, status: 'processed', emailType: 'comm_center' }
                 });
-                if (!created) await emailRecord.update({ commCategory: category, commProcessed: true, commSnippet: snippet.substring(0, 500), gmailLink });
+                if (!created) await emailRecord.update({ commCategory: category, commIsQuoteRequest: triage.isQuoteRequest, commNeedsResponse: triage.needsResponse, commProcessed: true, commSnippet: snippet.substring(0, 500), gmailLink });
                 await gmail.users.messages.modify({ userId: 'me', id: msg.id, requestBody: { addLabelIds: [commLabelId] } });
               } catch (msgErr) { console.error('[CommScanner] msg error:', msgErr.message); }
             }
@@ -1932,7 +1917,7 @@ Please confirm with the operator and mark the order complete if ready.`,
                 const existing = await ScannedEmail.findOne({ where: { gmailMessageId: msg.id, commProcessed: true } });
                 if (existing) continue;
 
-                const detail = await gmail.users.messages.get({ userId: 'me', id: msg.id, format: 'metadata', metadataHeaders: ['From', 'Subject', 'Date'] });
+                const detail = await gmail.users.messages.get({ userId: 'me', id: msg.id, format: 'full' });
                 const headers = detail.data.payload?.headers || [];
                 const fromHeader = headers.find(h => h.name === 'From')?.value || '';
                 const subject = headers.find(h => h.name === 'Subject')?.value || '(no subject)';
@@ -1967,8 +1952,9 @@ Please confirm with the operator and mark the order complete if ready.`,
                 if (vendorAddrs[fromEmail]) {
                   triage = { category: 'vendor', isQuoteRequest: false, needsResponse: false };
                 } else {
-                  const { classifyEmail } = require('./services/commCenter');
-                  triage = await classifyEmail({ from: fromHeader, subject, snippet, knownClient: clientAddrs[fromEmail] || null });
+                  const { classifyEmail, extractEmailBody } = require('./services/commCenter');
+                  const fullBody = extractEmailBody(detail.data.payload);
+                  triage = await classifyEmail({ from: fromHeader, subject, snippet, body: fullBody, knownClient: clientAddrs[fromEmail] || null });
                 }
                 const category = triage.category;
 

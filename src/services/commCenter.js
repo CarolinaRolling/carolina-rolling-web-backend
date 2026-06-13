@@ -47,7 +47,7 @@ function emailFromHeader(fromHeader) {
 }
 
 // --- Stage 1: body-aware triage ---
-async function classifyEmail({ from, subject, snippet, knownClient }) {
+async function classifyEmail({ from, subject, snippet, body, knownClient }) {
   // No AI key → safe default
   if (!process.env.ANTHROPIC_API_KEY) {
     return { category: knownClient ? 'client_inquiry' : 'general', isQuoteRequest: false, needsResponse: !!knownClient };
@@ -71,22 +71,24 @@ CRITICAL RULES:
 - Do NOT default to vendor just because an email sounds business-like. Vendor means a supplier we actually buy material or services from.
 - A request to quote or perform rolling/forming/fab work is client_inquiry, not vendor.
 - needsResponse=true only if a human at the shop should reply or act. marketing / spam / automated receipts = false.${knownClient ? `\nNote: the sender (${knownClient}) is a known CLIENT — treat as client_inquiry unless it is clearly a bill.` : ''}`;
-  const body = JSON.stringify({
+  // Prefer the full body; fall back to the short preview. Strip quoted reply chains and cap length for cost.
+  const emailText = stripQuoted(body || snippet || '').slice(0, 6000);
+  const reqBody = JSON.stringify({
     model: 'claude-haiku-4-5-20251001',
     max_tokens: 80,
     system: sys,
-    messages: [{ role: 'user', content: `From: ${from}\nSubject: ${subject}\nPreview: ${snippet || ''}` }],
+    messages: [{ role: 'user', content: `From: ${from}\nSubject: ${subject}\nBody:\n${emailText}` }],
   });
   try {
     const https = require('https');
     const raw = await new Promise((resolve, reject) => {
       const req = https.request({
         hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(body) },
+        headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(reqBody) },
       }, (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve(d)); });
       req.on('error', reject);
       req.setTimeout(12000, () => req.destroy(new Error('classify timeout')));
-      req.write(body); req.end();
+      req.write(reqBody); req.end();
     });
     const data = JSON.parse(raw);
     const text = (data.content?.[0]?.text || '').replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
@@ -221,4 +223,49 @@ async function reclassifyExisting({ limit = 400 } = {}) {
   return { updated };
 }
 
-module.exports = { classifyEmail, isAck, computeCoverageForThread, runCoverageScan, reclassifyExisting, VALID_CATEGORIES };
+// Strip quoted reply chains / signatures so triage judges only the new content (and saves tokens)
+function stripQuoted(text) {
+  if (!text) return '';
+  return String(text)
+    .replace(/\r/g, '')
+    .replace(/^On .*wrote:[\s\S]*$/im, '')
+    .replace(/^-{2,}\s*Original Message\s*-{2,}[\s\S]*$/im, '')
+    .replace(/^_{5,}[\s\S]*$/m, '')
+    .replace(/^From:.*$[\s\S]*?^(Sent|Date):.*$/im, '')
+    .replace(/^>.*$/gm, '')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+// Pull readable text out of a Gmail message payload (prefers text/plain, falls back to stripped HTML)
+function extractEmailBody(payload) {
+  if (!payload) return '';
+  let plain = '';
+  let html = '';
+  const decode = (data) => {
+    try { return Buffer.from(String(data).replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'); }
+    catch { return ''; }
+  };
+  const walk = (p) => {
+    if (!p) return;
+    if (p.mimeType === 'text/plain' && p.body && p.body.data) plain += decode(p.body.data) + '\n';
+    else if (p.mimeType === 'text/html' && p.body && p.body.data) html += decode(p.body.data) + '\n';
+    (p.parts || []).forEach(walk);
+  };
+  walk(payload);
+  if (plain.trim()) return plain;
+  // strip HTML tags as a fallback
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+module.exports = { classifyEmail, isAck, computeCoverageForThread, runCoverageScan, reclassifyExisting, extractEmailBody, stripQuoted, VALID_CATEGORIES };

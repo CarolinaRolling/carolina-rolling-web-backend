@@ -163,7 +163,12 @@ async function runCoverageScan() {
       checked++;
       // If the user manually marked any record in the thread handled, keep it green.
       const manual = tracked.some(t => t.gmailThreadId === threadId && t.commHandledManually);
-      const responded = manual || cov.responded;
+      let responded = manual || cov.responded;
+      // Auto-close abandoned threads: no new activity in 3 weeks → treat as handled
+      const STALE_MS = 21 * 24 * 60 * 60 * 1000;
+      if (!responded && cov.lastMessageAt && (Date.now() - new Date(cov.lastMessageAt).getTime()) > STALE_MS) {
+        responded = true;
+      }
       if (!responded) awaiting++;
       await ScannedEmail.update(
         { commResponded: responded, commLastMessageAt: cov.lastMessageAt, commCoverageCheckedAt: new Date() },

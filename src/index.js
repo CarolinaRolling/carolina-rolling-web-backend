@@ -179,9 +179,20 @@ async function gmailWithTimeout(fn, timeoutMs = 20000) {
 }
 
 // Communication Center API
+// Rebuild the Gmail deep link so it opens in the correct account (authuser) — fixes old links too
+function withGmailLink(emailInstance, accMap) {
+  const j = emailInstance.toJSON ? emailInstance.toJSON() : emailInstance;
+  const authuser = accMap[j.gmailAccountId];
+  const id = j.gmailMessageId;
+  if (authuser && id) {
+    j.gmailLink = 'https://mail.google.com/mail/?authuser=' + encodeURIComponent(authuser) + '#all/' + id;
+  }
+  return j;
+}
+
 app.get('/api/com-center/emails', authenticate, async (req, res) => {
   try {
-    const { ScannedEmail } = require('./models');
+    const { ScannedEmail, GmailAccount } = require('./models');
     const { Op } = require('sequelize');
     const { category, archived, limit = 100, offset = 0 } = req.query;
     const where = { commProcessed: true, emailType: 'comm_center' };
@@ -191,7 +202,56 @@ app.get('/api/com-center/emails', authenticate, async (req, res) => {
       where, order: [['receivedAt', 'DESC']], limit: parseInt(limit), offset: parseInt(offset)
     });
     const total = await ScannedEmail.count({ where });
-    res.json({ data: emails, total });
+    const accts = await GmailAccount.findAll({ attributes: ['id', 'email'] });
+    const accMap = Object.fromEntries(accts.map(a => [a.id, a.email]));
+    const data = emails.map(e => withGmailLink(e, accMap));
+    res.json({ data, total });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+// Resolve a reliable Gmail deep link on demand (fetches the RFC Message-ID and targets the right account)
+app.get('/api/com-center/emails/:id/gmail-url', authenticate, async (req, res) => {
+  try {
+    const { ScannedEmail, GmailAccount } = require('./models');
+    const { google } = require('googleapis');
+    const email = await ScannedEmail.findByPk(req.params.id);
+    if (!email) return res.status(404).json({ error: { message: 'Not found' } });
+    const account = await GmailAccount.findByPk(email.gmailAccountId);
+    let url = email.gmailLink; // fallback to stored link
+    if (account && email.gmailMessageId) {
+      try {
+        const oauth2 = new google.auth.OAuth2(process.env.GMAIL_CLIENT_ID, process.env.GMAIL_CLIENT_SECRET);
+        oauth2.setCredentials({ access_token: account.accessToken, refresh_token: account.refreshToken, expiry_date: account.tokenExpiry });
+        const gmail = google.gmail({ version: 'v1', auth: oauth2 });
+        const detail = await gmail.users.messages.get({ userId: 'me', id: email.gmailMessageId, format: 'metadata', metadataHeaders: ['Message-ID', 'Message-Id'] });
+        const headers = detail.data.payload?.headers || [];
+        const mid = (headers.find(h => (h.name || '').toLowerCase() === 'message-id')?.value || '').replace(/[<>]/g, '').trim();
+        if (mid && account.email) {
+          // Open the specific message via rfc822msgid search, in the correct account (AccountChooser)
+          const inner = 'https://mail.google.com/mail/u/0/#search/rfc822msgid:' + encodeURIComponent(mid);
+          url = 'https://accounts.google.com/AccountChooser?Email=' + encodeURIComponent(account.email) + '&continue=' + encodeURIComponent(inner);
+        }
+      } catch (gErr) { console.warn('[CommCenter] gmail-url resolve failed:', gErr.message); }
+    }
+    res.json({ data: { url } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+// One-time cleanup: mark conversations with no activity in N days (default 21) as responded
+app.post('/api/com-center/cleanup-stale', authenticate, async (req, res) => {
+  try {
+    const { sequelize } = require('./models');
+    const days = parseInt(req.body && req.body.days) || 21;
+    const [, meta] = await sequelize.query(
+      `UPDATE scanned_emails
+         SET "commResponded" = true, "commHandledManually" = true
+       WHERE "emailType" = 'comm_center'
+         AND "commArchived" = false
+         AND "commResponded" = false
+         AND COALESCE("commLastMessageAt", "receivedAt") < NOW() - make_interval(days => :days)`,
+      { replacements: { days } }
+    );
+    res.json({ data: { updated: (meta && meta.rowCount) || 0 } });
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
@@ -218,7 +278,7 @@ app.patch('/api/com-center/emails/:id/category', authenticate, async (req, res) 
 // Quote coverage: tracked quote-requests / needs-response with responded state
 app.get('/api/com-center/coverage', authenticate, async (req, res) => {
   try {
-    const { ScannedEmail } = require('./models');
+    const { ScannedEmail, GmailAccount } = require('./models');
     const { Op } = require('sequelize');
     const since = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000);
     const where = {
@@ -235,7 +295,9 @@ app.get('/api/com-center/coverage', authenticate, async (req, res) => {
       const prev = byThread.get(key);
       if (!prev || new Date(e.receivedAt) > new Date(prev.receivedAt)) byThread.set(key, e);
     }
-    const list = [...byThread.values()];
+    const accts = await GmailAccount.findAll({ attributes: ['id', 'email'] });
+    const accMap = Object.fromEntries(accts.map(a => [a.id, a.email]));
+    const list = [...byThread.values()].map(e => withGmailLink(e, accMap));
     const awaiting = list.filter(e => !e.commResponded && !e.commHandledManually).length;
     res.json({ data: list, awaiting });
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
@@ -458,7 +520,7 @@ app.post('/api/com-center/scan-now', authenticate, async (req, res) => {
                     category = 'general';
                   }
                 }
-                const gmailLink = 'https://mail.google.com/mail/u/0/#all/' + msg.id;
+                const gmailLink = 'https://mail.google.com/mail/?authuser=' + encodeURIComponent(account.email || '') + '#all/' + msg.id;
                 const [emailRecord, created] = await ScannedEmail.findOrCreate({
                   where: { gmailMessageId: msg.id },
                   defaults: { gmailAccountId: account.id, gmailThreadId: detail.data.threadId, fromEmail, fromName: fromName || fromEmail, subject, receivedAt: dateHeader ? new Date(dateHeader) : new Date(), commCategory: category, commProcessed: true, commSnippet: snippet.substring(0, 500), commArchived: false, gmailLink, status: 'processed', emailType: 'comm_center' }
@@ -1911,7 +1973,7 @@ Please confirm with the operator and mark the order complete if ready.`,
                 const category = triage.category;
 
                 // Save to ScannedEmail
-                const gmailLink = 'https://mail.google.com/mail/u/0/#all/' + msg.id;
+                const gmailLink = 'https://mail.google.com/mail/?authuser=' + encodeURIComponent(account.email || '') + '#all/' + msg.id;
                 const [emailRec2, created2] = await ScannedEmail.findOrCreate({
                   where: { gmailMessageId: msg.id },
                   defaults: { gmailAccountId: account.id, gmailThreadId: detail.data.threadId, fromEmail, fromName: fromName || fromEmail, subject, receivedAt: dateHeader ? new Date(dateHeader) : new Date(), commCategory: category, commIsQuoteRequest: triage.isQuoteRequest, commNeedsResponse: triage.needsResponse, commProcessed: true, commSnippet: snippet.substring(0, 500), commArchived: false, gmailLink, status: 'processed', emailType: 'comm_center' }

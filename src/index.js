@@ -149,6 +149,8 @@ app.use('/api/estimates', authenticate, blockPortalKeys, estimatesRoutes);
 app.use('/api/backup', authenticate, backupRoutes);
 const businessRoutes = require('./routes/business');
 app.use('/api/business', authenticate, blockPortalKeys, businessRoutes);
+app.use('/api/inspections', authenticate, blockPortalKeys, require('./routes/inspection'));
+app.use('/api/ginger', authenticate, blockPortalKeys, require('./routes/ginger'));
 app.use('/api/dr-numbers', authenticate, drNumbersRoutes);
 app.use('/api/po-numbers', authenticate, poNumbersRoutes);
 app.use('/api/email', authenticate, emailRoutes);
@@ -905,6 +907,47 @@ async function startServer() {
       )`);
       console.log('Payment system tables ready');
     } catch (e) { console.log('Payment tables error:', e.message); }
+
+
+
+    // Add 'inspection' to part type ENUMs
+    try {
+      await sequelize.query(`ALTER TYPE "enum_work_order_parts_partType" ADD VALUE IF NOT EXISTS 'inspection'`);
+      await sequelize.query(`ALTER TYPE "enum_estimate_parts_partType" ADD VALUE IF NOT EXISTS 'inspection'`);
+    } catch(e) { /* may already exist */ }
+
+    // Create inspection tables
+    try {
+      await sequelize.query(`CREATE TABLE IF NOT EXISTS inspection_jobs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        "workOrderId" UUID REFERENCES work_orders(id) ON DELETE CASCADE,
+        "workOrderPartId" UUID,
+        "inspectionPartId" UUID,
+        "inspectionType" VARCHAR(50) DEFAULT 'cylinder',
+        "unitCount" INTEGER DEFAULT 1,
+        status VARCHAR(50) DEFAULT 'not_started',
+        "completedAt" TIMESTAMP WITH TIME ZONE,
+        "operatorName" VARCHAR(255),
+        notes TEXT,
+        "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      )`);
+      await sequelize.query(`CREATE TABLE IF NOT EXISTS inspection_units (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        "inspectionJobId" UUID REFERENCES inspection_jobs(id) ON DELETE CASCADE,
+        "unitId" VARCHAR(100) NOT NULL,
+        sequence INTEGER NOT NULL,
+        "preRoll" JSONB DEFAULT '{}',
+        "postRoll" JSONB DEFAULT '{}',
+        "preRollComplete" BOOLEAN DEFAULT false,
+        "postRollComplete" BOOLEAN DEFAULT false,
+        "labelPrinted" BOOLEAN DEFAULT false,
+        "clientNotes" TEXT,
+        "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      )`);
+      console.log('Inspection tables ready');
+    } catch(e) { console.log('Inspection tables error:', e.message); }
 
     // Add USMCA per-order fields to work_orders table
     try {
@@ -1863,6 +1906,19 @@ Please confirm with the operator and mark the order complete if ready.`,
       }
     });
     console.log('Email scanner cron configured for every 5 minutes');
+
+    // Ginger — daily 5:00 AM scheduling/priority scan
+    cron.schedule('0 5 * * *', async () => {
+      console.log('Running 5:00 AM Ginger priority scan...');
+      try {
+        const { runGingerScan } = require('./services/gingerScan');
+        const result = await runGingerScan();
+        console.log(`[Ginger] 5AM scan: ${result.total} finding(s)`);
+      } catch (err) {
+        console.error('[Ginger] 5AM scan error:', err.message);
+      }
+    });
+    console.log('Ginger priority scan cron configured for 5:00 AM daily');
 
     // AI Parse Retry — check every minute for emails needing retry
     cron.schedule('* * * * *', async () => {

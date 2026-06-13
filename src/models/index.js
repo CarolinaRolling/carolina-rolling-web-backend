@@ -743,7 +743,7 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
     allowNull: false
   },
   partType: {
-    type: DataTypes.ENUM('plate_roll', 'shaped_plate', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'tube_roll', 'channel_roll', 'flat_bar', 'cone_roll', 'tee_bar', 'press_brake', 'flat_stock', 'fab_service', 'shop_rate', 'rush_service', 'other'),
+    type: DataTypes.ENUM('plate_roll', 'shaped_plate', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'tube_roll', 'channel_roll', 'flat_bar', 'cone_roll', 'tee_bar', 'press_brake', 'flat_stock', 'fab_service', 'shop_rate', 'rush_service', 'inspection', 'other'),
     allowNull: false
   },
   clientPartNumber: {
@@ -1404,7 +1404,7 @@ const EstimatePart = sequelize.define('EstimatePart', {
     allowNull: false
   },
   partType: {
-    type: DataTypes.ENUM('plate_roll', 'shaped_plate', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'tube_roll', 'channel_roll', 'flat_bar', 'cone_roll', 'tee_bar', 'press_brake', 'flat_stock', 'fab_service', 'shop_rate', 'rush_service', 'other'),
+    type: DataTypes.ENUM('plate_roll', 'shaped_plate', 'section_roll', 'angle_roll', 'beam_roll', 'pipe_roll', 'tube_roll', 'channel_roll', 'flat_bar', 'cone_roll', 'tee_bar', 'press_brake', 'flat_stock', 'fab_service', 'shop_rate', 'rush_service', 'inspection', 'other'),
     allowNull: false
   },
   clientPartNumber: {
@@ -3395,6 +3395,48 @@ WorkOrder.hasMany(WorkOrderInvoiceSend, { foreignKey: 'workOrderId', as: 'invoic
 WorkOrderInvoiceSend.belongsTo(WorkOrder, { foreignKey: 'workOrderId', as: 'workOrder' });
 
 
+// ── InspectionJob — one per inspection service line item, linked to a WO part ──
+const InspectionJob = sequelize.define('InspectionJob', {
+  id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+  workOrderId: { type: DataTypes.UUID, allowNull: false },
+  workOrderPartId: { type: DataTypes.UUID, allowNull: false }, // the part being inspected
+  inspectionPartId: { type: DataTypes.UUID, allowNull: true }, // the inspection service line item
+  inspectionType: { type: DataTypes.STRING, defaultValue: 'cylinder' },
+  unitCount: { type: DataTypes.INTEGER, defaultValue: 1 },
+  status: { type: DataTypes.STRING, defaultValue: 'not_started' }, // not_started | in_progress | complete
+  completedAt: { type: DataTypes.DATE, allowNull: true },
+  operatorName: { type: DataTypes.STRING, allowNull: true },
+  notes: { type: DataTypes.TEXT, allowNull: true },
+}, { tableName: 'inspection_jobs', timestamps: true });
+
+// ── InspectionUnit — one per cylinder/unit, ID = DR-LINE-LETTER ──
+const InspectionUnit = sequelize.define('InspectionUnit', {
+  id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+  inspectionJobId: { type: DataTypes.UUID, allowNull: false },
+  unitId: { type: DataTypes.STRING, allowNull: false }, // e.g. "58747-2C"
+  sequence: { type: DataTypes.INTEGER, allowNull: false }, // 0=A, 1=B, etc.
+  // Pre-roll measurements
+  preRoll: { type: DataTypes.JSONB, defaultValue: {} },
+  // { thickness, gradeConfirmed, heatNumberConfirmed,
+  //   widthEnd1, widthEnd2, lengthEnd1, lengthEnd2,
+  //   diagA, diagB, outOfSquare (bool, auto-calc) }
+  // Post-roll measurements
+  postRoll: { type: DataTypes.JSONB, defaultValue: {} },
+  // { circumEnd1, circumEnd2, diamSeam, diam45, diamNeg45,
+  //   outOfTolerance (bool, auto-calc) }
+  preRollComplete: { type: DataTypes.BOOLEAN, defaultValue: false },
+  postRollComplete: { type: DataTypes.BOOLEAN, defaultValue: false },
+  labelPrinted: { type: DataTypes.BOOLEAN, defaultValue: false },
+  clientNotes: { type: DataTypes.TEXT, allowNull: true }, // e.g. "client approved out-of-square"
+}, { tableName: 'inspection_units', timestamps: true });
+
+// Associations
+InspectionJob.hasMany(InspectionUnit, { foreignKey: 'inspectionJobId', as: 'units' });
+InspectionUnit.belongsTo(InspectionJob, { foreignKey: 'inspectionJobId' });
+WorkOrder.hasMany(InspectionJob, { foreignKey: 'workOrderId', as: 'inspectionJobs' });
+InspectionJob.belongsTo(WorkOrder, { foreignKey: 'workOrderId' });
+
+
 // ── ShipmentCharge Model — shipping charges on estimates and work orders ──
 const ShipmentCharge = sequelize.define('ShipmentCharge', {
   id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
@@ -3533,6 +3575,8 @@ module.exports = {
   WeldProcedure,
   VendorIssue,
   ShipmentCharge,
+  InspectionJob,
+  InspectionUnit,
   ClientPayment,
   PaymentApplication,
   CreditMemo,

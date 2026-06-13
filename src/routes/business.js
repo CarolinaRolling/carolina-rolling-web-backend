@@ -1417,4 +1417,152 @@ router.delete('/refunds/:id', async (req, res, next) => {
   } catch(error) { next(error); }
 });
 
+// GET /api/business/general-ledger — unified chronological ledger of all transactions
+router.get('/general-ledger', async (req, res, next) => {
+  try {
+    const { Op } = require('sequelize');
+    const { startDate, endDate, type } = req.query;
+    const { WorkOrderPayment, ShipmentCharge, ClientPayment, PaymentApplication, CreditMemo, Refund, Liability, Employee, PayrollWeek, PayrollEntry } = require('../models');
+
+    const entries = [];
+
+    // ── Revenue: Client Payments ──
+    try {
+      const payments = await ClientPayment.findAll({
+        where: { voidedAt: null, ...(startDate && { paymentDate: { [Op.gte]: startDate } }), ...(endDate && { paymentDate: { [Op.lte]: endDate } }) },
+        include: [{ model: PaymentApplication, as: 'applications' }],
+        order: [['paymentDate', 'DESC']]
+      });
+      payments.forEach(p => {
+        entries.push({
+          id: p.id, date: p.paymentDate, type: 'payment',
+          category: 'Revenue', description: `Payment — ${p.clientName}`,
+          detail: `${p.method?.replace('_',' ')}${p.reference ? ' #' + p.reference : ''}`,
+          credit: parseFloat(p.amount), debit: 0,
+          clientName: p.clientName, source: 'client_payment'
+        });
+      });
+    } catch(e) {}
+
+    // ── Revenue: Legacy WO Payments (not already in ClientPayments) ──
+    try {
+      const legacyPmts = await WorkOrderPayment.findAll({
+        where: { voidedAt: null, ...(startDate && { paymentDate: { [Op.gte]: startDate } }), ...(endDate && { paymentDate: { [Op.lte]: endDate } }) },
+        order: [['paymentDate', 'DESC']]
+      });
+      // Only include if no ClientPayment application covers this WO
+      const coveredWOIds = new Set();
+      try {
+        const apps = await PaymentApplication.findAll({ attributes: ['workOrderId'] });
+        apps.forEach(a => coveredWOIds.add(a.workOrderId));
+      } catch {}
+      legacyPmts.forEach(p => {
+        if (coveredWOIds.has(p.workOrderId)) return;
+        entries.push({
+          id: p.id, date: p.paymentDate, type: 'payment',
+          category: 'Revenue', description: `Payment received`,
+          detail: `${p.paymentMethod || ''}${p.paymentReference ? ' #' + p.paymentReference : ''}`,
+          credit: parseFloat(p.amount), debit: 0,
+          source: 'legacy_payment'
+        });
+      });
+    } catch(e) {}
+
+    // ── Expense: Paid Liabilities ──
+    try {
+      const liabs = await Liability.findAll({
+        where: { status: 'paid', ...(startDate && { paidAt: { [Op.gte]: startDate } }), ...(endDate && { paidAt: { [Op.lte]: endDate } }) },
+        order: [['paidAt', 'DESC']]
+      });
+      liabs.forEach(b => {
+        entries.push({
+          id: b.id, date: b.paidAt || b.dueDate || b.createdAt, type: 'expense',
+          category: b.category || 'other', description: b.name,
+          detail: b.vendor || '',
+          debit: parseFloat(b.paidAmount || b.amount), credit: 0,
+          source: 'liability'
+        });
+      });
+    } catch(e) {}
+
+    // ── Expense: Submitted Payroll ──
+    try {
+      const payrollWeeks = await PayrollWeek.findAll({
+        where: { status: 'submitted', ...(startDate && { weekEnd: { [Op.gte]: startDate } }), ...(endDate && { weekEnd: { [Op.lte]: endDate } }) },
+        order: [['weekEnd', 'DESC']]
+      });
+      payrollWeeks.forEach(pr => {
+        if (!pr.totalGross || parseFloat(pr.totalGross) === 0) return;
+        const sd = pr.weekStart ? new Date(pr.weekStart + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '';
+        const ed = pr.weekEnd ? new Date(pr.weekEnd + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '';
+        entries.push({
+          id: pr.id, date: pr.weekEnd, type: 'expense',
+          category: 'payroll', description: `Payroll — ${sd} – ${ed}`,
+          detail: `${pr.employeeCount || ''} employees`,
+          debit: parseFloat(pr.totalGross), credit: 0,
+          source: 'payroll'
+        });
+      });
+    } catch(e) {}
+
+    // ── Expense: Contracted Shipping ──
+    try {
+      const charges = await ShipmentCharge.findAll({
+        where: { carrierType: 'contracted' },
+        order: [['createdAt', 'DESC']]
+      });
+      charges.forEach(c => {
+        const cost = (parseFloat(c.shippingCost)||0) + (parseFloat(c.materialsCost)||0);
+        if (cost === 0) return;
+        entries.push({
+          id: c.id, date: c.createdAt, type: 'expense',
+          category: 'shipping', description: `Contracted Shipping — ${c.vendorName || 'Carrier'}`,
+          detail: [c.pickupIsShop ? 'From Shop' : c.pickupLocation, c.dropoffIsShop ? 'To Shop' : c.dropoffLocation].filter(Boolean).join(' → '),
+          debit: cost, credit: 0,
+          source: 'shipment_charge'
+        });
+      });
+    } catch(e) {}
+
+    // ── Contra: Refunds ──
+    try {
+      const refunds = await Refund.findAll({
+        where: { voidedAt: null, ...(startDate && { date: { [Op.gte]: startDate } }), ...(endDate && { date: { [Op.lte]: endDate } }) },
+        order: [['date', 'DESC']]
+      });
+      refunds.forEach(r => {
+        entries.push({
+          id: r.id, date: r.date, type: 'refund',
+          category: 'Refund', description: `Refund — ${r.clientName}`,
+          detail: r.reason || '',
+          debit: parseFloat(r.amount), credit: 0,
+          source: 'refund'
+        });
+      });
+    } catch(e) {}
+
+    // Sort by date descending
+    entries.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    // Apply type filter
+    const filtered = type ? entries.filter(e => e.type === type || e.source === type) : entries;
+
+    // Calculate running balance (oldest first, then reverse)
+    const chronological = [...filtered].reverse();
+    let running = 0;
+    chronological.forEach(e => { running += e.credit - e.debit; e.runningBalance = running; });
+    filtered.forEach(e => {
+      // find matching running balance
+      const match = chronological.find(c => c.id === e.id && c.source === e.source);
+      if (match) e.runningBalance = match.runningBalance;
+    });
+
+    const totalRevenue = filtered.filter(e => e.credit > 0).reduce((s, e) => s + e.credit, 0);
+    const totalExpenses = filtered.filter(e => e.debit > 0 && e.type !== 'refund').reduce((s, e) => s + e.debit, 0);
+    const totalRefunds = filtered.filter(e => e.type === 'refund').reduce((s, e) => s + e.debit, 0);
+
+    res.json({ data: { entries: filtered, totalRevenue, totalExpenses, totalRefunds, netIncome: totalRevenue - totalExpenses - totalRefunds } });
+  } catch (error) { next(error); }
+});
+
 module.exports = router;

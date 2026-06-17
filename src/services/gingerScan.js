@@ -228,7 +228,21 @@ async function runGingerScan({ useAI = true } = {}) {
     return ad - bd;
   });
 
-  if (useAI) findings = await enhanceWithAI(findings);
+  // Load the previous scan — used to carry over AI-voiced lines and read state on free refreshes
+  let prev = null;
+  try { prev = await getFindings(); } catch {}
+
+  if (useAI) {
+    findings = await enhanceWithAI(findings);
+  } else if (prev && prev.findings) {
+    // Free (no-AI) refresh: keep the previously-voiced line for any finding that hasn't changed
+    const prevByWo = {};
+    prev.findings.forEach((p) => { prevByWo[p.workOrderId] = p; });
+    findings.forEach((f) => {
+      const p = prevByWo[f.workOrderId];
+      if (p && p.severity === f.severity && p.gingerSays) f.gingerSays = p.gingerSays;
+    });
+  }
 
   const counts = {
     overdue: findings.filter(f => f.severity === 'overdue').length,
@@ -237,12 +251,26 @@ async function runGingerScan({ useAI = true } = {}) {
     due_soon: findings.filter(f => f.severity === 'due_soon').length,
   };
 
+  // Read/alert state:
+  //  - nothing at risk → calm (read)
+  //  - daily AI scan with findings → alert (unread)
+  //  - free refresh → only re-alert if a brand-new at-risk work order appeared; otherwise keep prior state
+  let read;
+  if (findings.length === 0) {
+    read = true;
+  } else if (useAI) {
+    read = false;
+  } else {
+    const prevIds = new Set((prev && prev.findings ? prev.findings : []).map((p) => p.workOrderId));
+    const hasNew = findings.some((f) => !prevIds.has(f.workOrderId));
+    read = hasNew ? false : (prev ? !!prev.read : false);
+  }
+
   const blob = {
     generatedAt: new Date().toISOString(),
-    // A fresh scan with findings is unread (alert icon). No findings = nothing to read.
-    read: findings.length === 0,
-    readAt: null,
-    readBy: null,
+    read,
+    readAt: read && prev ? prev.readAt : null,
+    readBy: read && prev ? prev.readBy : null,
     counts,
     total: findings.length,
     findings,

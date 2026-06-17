@@ -2456,6 +2456,15 @@ const ScannedEmail = sequelize.define('ScannedEmail', {
   commHandledManually: {
     type: DataTypes.BOOLEAN,
     defaultValue: false
+  },
+  // --- Bills automation ---
+  billData: {
+    type: DataTypes.JSONB,
+    allowNull: true
+  },
+  billStatus: {
+    type: DataTypes.STRING,
+    allowNull: true   // null = not extracted yet; 'pending' | 'approved' | 'rejected'
   }
 }, {
   tableName: 'scanned_emails',

@@ -13,6 +13,7 @@
 const { google } = require('googleapis');
 const { Op } = require('sequelize');
 const { GmailAccount, ScannedEmail } = require('../models');
+const { getParsingModel, getTriageModel } = require('./aiConfig');
 
 const VALID_CATEGORIES = ['client_inquiry', 'vendor', 'bill', 'marketing', 'spam', 'business', 'general'];
 
@@ -74,7 +75,7 @@ CRITICAL RULES:
   // Prefer the full body; fall back to the short preview. Strip quoted reply chains and cap length for cost.
   const emailText = stripQuoted(body || snippet || '').slice(0, 6000);
   const reqBody = JSON.stringify({
-    model: 'claude-haiku-4-5-20251001',
+    model: getTriageModel(),
     max_tokens: 80,
     system: sys,
     messages: [{ role: 'user', content: `From: ${from}\nSubject: ${subject}\nBody:\n${emailText}` }],
@@ -268,4 +269,90 @@ function extractEmailBody(payload) {
     .trim();
 }
 
-module.exports = { classifyEmail, isAck, computeCoverageForThread, runCoverageScan, reclassifyExisting, extractEmailBody, stripQuoted, VALID_CATEGORIES };
+// --- Bills: extract structured fields from a PDF invoice using a vision model ---
+async function extractBill(gmail, messageId) {
+  // Find the first PDF attachment on the message
+  const msg = await gmail.users.messages.get({ userId: 'me', id: messageId, format: 'full' });
+  const pdfs = [];
+  const walk = (p) => {
+    if (!p) return;
+    const fn = (p.filename || '').toLowerCase();
+    if (fn.endsWith('.pdf') && p.body) pdfs.push(p);
+    (p.parts || []).forEach(walk);
+  };
+  walk(msg.data.payload);
+  if (!pdfs.length) return { error: 'no_pdf' };
+
+  const att = pdfs[0];
+  let dataB64;
+  if (att.body.attachmentId) {
+    const a = await gmail.users.messages.attachments.get({ userId: 'me', messageId, id: att.body.attachmentId });
+    dataB64 = a.data.data;
+  } else if (att.body.data) {
+    dataB64 = att.body.data;
+  }
+  if (!dataB64) return { error: 'no_pdf' };
+  const pdfB64 = String(dataB64).replace(/-/g, '+').replace(/_/g, '/');
+
+  if (!process.env.ANTHROPIC_API_KEY) return { error: 'no_api_key' };
+  const reqBody = JSON.stringify({
+    model: getParsingModel(),
+    max_tokens: 700,
+    system: 'You extract fields from a vendor invoice/bill PDF for a metal fabrication shop. Reply with ONLY JSON, no markdown:\n{"vendorName":string|null,"invoiceNumber":string|null,"invoiceDate":"YYYY-MM-DD"|null,"dueDate":"YYYY-MM-DD"|null,"amount":number|null,"currency":string,"poNumber":string|null,"summary":string}\nAmount = total amount due as a number (no symbols). summary = one short line of what it is for. Use null when a field is not present.',
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfB64 } },
+        { type: 'text', text: 'Extract the invoice fields as specified.' },
+      ],
+    }],
+  });
+  try {
+    const https = require('https');
+    const raw = await new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(reqBody) },
+      }, (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve(d)); });
+      req.on('error', reject);
+      req.setTimeout(45000, () => req.destroy(new Error('bill extract timeout')));
+      req.write(reqBody); req.end();
+    });
+    const data = JSON.parse(raw);
+    const text = (data.content?.[0]?.text || '').replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+    const parsed = JSON.parse(text);
+    parsed.fileName = att.filename || 'invoice.pdf';
+    return parsed;
+  } catch (err) {
+    console.warn('[Bills] extract failed:', err.message);
+    return { error: 'extract_failed' };
+  }
+}
+
+// Extract any bill-category emails that don't have data yet
+async function runBillScan({ limit = 25 } = {}) {
+  const accounts = await GmailAccount.findAll({ where: { isActive: true } });
+  if (!accounts.length) return { extracted: 0 };
+  const since = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000);
+  let extracted = 0;
+  for (const account of accounts) {
+    const bills = await ScannedEmail.findAll({
+      where: { gmailAccountId: account.id, emailType: 'comm_center', commCategory: 'bill', commArchived: false, receivedAt: { [Op.gte]: since }, billData: null },
+      order: [['receivedAt', 'DESC']], limit,
+    });
+    if (!bills.length) continue;
+    let gmail;
+    try { gmail = buildGmailClient(account); } catch { continue; }
+    for (const b of bills) {
+      try {
+        const data = await extractBill(gmail, b.gmailMessageId);
+        await b.update({ billData: data || { error: 'unknown' }, billStatus: b.billStatus || 'pending' });
+        if (data && !data.error) extracted++;
+      } catch (e) { console.warn('[Bills] row failed:', e.message); }
+    }
+  }
+  console.log(`[Bills] Bill scan: ${extracted} extracted`);
+  return { extracted };
+}
+
+module.exports = { classifyEmail, isAck, computeCoverageForThread, runCoverageScan, reclassifyExisting, extractEmailBody, stripQuoted, extractBill, runBillScan, VALID_CATEGORIES };

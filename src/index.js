@@ -343,6 +343,67 @@ app.post('/api/com-center/reclassify', authenticate, async (req, res) => {
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
+// Bills queue: bill-category emails with extracted invoice data
+app.get('/api/com-center/bills', authenticate, async (req, res) => {
+  try {
+    const { ScannedEmail, GmailAccount } = require('./models');
+    const { Op } = require('sequelize');
+    const since = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000);
+    const emails = await ScannedEmail.findAll({
+      where: { emailType: 'comm_center', commCategory: 'bill', commArchived: false, receivedAt: { [Op.gte]: since } },
+      order: [['receivedAt', 'DESC']], limit: 200,
+    });
+    const accts = await GmailAccount.findAll({ attributes: ['id', 'email'] });
+    const accMap = Object.fromEntries(accts.map(a => [a.id, a.email]));
+    const data = emails.map(e => withGmailLink(e, accMap));
+    const pending = data.filter(e => (e.billStatus || 'pending') === 'pending').length;
+    res.json({ data, pending });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+// Approve / reject a bill
+app.patch('/api/com-center/bills/:id/status', authenticate, async (req, res) => {
+  try {
+    const { ScannedEmail } = require('./models');
+    const email = await ScannedEmail.findByPk(req.params.id);
+    if (!email) return res.status(404).json({ error: { message: 'Not found' } });
+    const status = ['pending', 'approved', 'rejected'].includes(req.body.status) ? req.body.status : 'pending';
+    await email.update({ billStatus: status });
+    res.json({ data: { id: email.id, billStatus: status } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+// Run bill extraction now (background — vision calls are slow)
+app.post('/api/com-center/bills/scan', authenticate, async (req, res) => {
+  try {
+    const { runBillScan } = require('./services/commCenter');
+    (async () => { try { await runBillScan(); } catch (e) { console.error('[Bills] scan error:', e.message); } })();
+    res.json({ data: { started: true } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+// AI model settings — editable so a retired model can be swapped without a redeploy
+app.get('/api/settings/ai-models', authenticate, (req, res) => {
+  try {
+    const { getAiModels, DEFAULTS } = require('./services/aiConfig');
+    res.json({ data: { ...getAiModels(), defaults: DEFAULTS } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+app.put('/api/settings/ai-models', authenticate, async (req, res) => {
+  try {
+    const { AppSettings } = require('./models');
+    const { setAiModels, getAiModels } = require('./services/aiConfig');
+    const parsingModel = (req.body.parsingModel || '').trim();
+    const triageModel = (req.body.triageModel || '').trim();
+    if (!parsingModel || !triageModel) return res.status(400).json({ error: { message: 'Both model names are required' } });
+    const value = { parsingModel, triageModel };
+    await AppSettings.upsert({ key: 'ai_models', value });
+    setAiModels(value);
+    res.json({ data: getAiModels() });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
 app.get('/api/com-center/logs', authenticate, (req, res) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
   res.set('Pragma', 'no-cache');
@@ -1069,8 +1130,13 @@ async function startServer() {
       await sequelize.query(`ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commLastMessageAt" TIMESTAMP WITH TIME ZONE`);
       await sequelize.query(`ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commCoverageCheckedAt" TIMESTAMP WITH TIME ZONE`);
       await sequelize.query(`ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commHandledManually" BOOLEAN DEFAULT false`);
+      await sequelize.query(`ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "billData" JSONB`);
+      await sequelize.query(`ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "billStatus" VARCHAR(20)`);
       console.log('Comm coverage columns ready');
     } catch(e) { console.log('Comm coverage columns error:', e.message); }
+
+    // Load editable AI model config (admin can change models when one is retired)
+    try { await require('./services/aiConfig').loadAiModels(); } catch(e) { console.log('aiConfig load error:', e.message); }
 
     // Add USMCA per-order fields to work_orders table
     try {
@@ -1983,6 +2049,14 @@ Please confirm with the operator and mark the order complete if ready.`,
           await runCoverageScan();
         } catch (covErr) {
           console.error('[CommCenter] coverage scan error:', covErr.message);
+        }
+
+        // Extract any new bills (PDF invoices) into the review queue
+        try {
+          const { runBillScan } = require('./services/commCenter');
+          await runBillScan();
+        } catch (billErr) {
+          console.error('[CommCenter] bill scan error:', billErr.message);
         }
       } catch (e) {
         console.error('[CommScanner] Fatal error:', e.message);

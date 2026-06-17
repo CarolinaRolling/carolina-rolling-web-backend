@@ -1,5 +1,6 @@
 const { google } = require('googleapis');
 const { GmailAccount, ScannedEmail, PendingOrder, Client, Vendor, Estimate, EstimatePart, EstimateFile, EstimatePartFile, TodoItem, User, AppSettings } = require('../models');
+const { getParsingModel } = require('./aiConfig');
 const { Op } = require('sequelize');
 const fileStorage = require('../utils/storage');
 
@@ -149,7 +150,7 @@ async function parseEmailWithAI(emailBody, subject, clientName, parsingNotes, ge
     console.log(`[EmailScanner] API key present: ${!!process.env.ANTHROPIC_API_KEY} (${(process.env.ANTHROPIC_API_KEY || '').substring(0, 10)}...)`);
     
     const requestBody = JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
+      model: getParsingModel(),
       max_tokens: 4000,
       system: `You are an expert at parsing emails from clients requesting quotes for metal rolling, forming, and fabrication services. 
 You work for Carolina Rolling Company, a metal rolling shop.
@@ -1278,7 +1279,7 @@ async function _runScanInternal() {
               try {
                 const https = require('https');
                 const summaryBody = JSON.stringify({
-                  model: 'claude-sonnet-4-20250514',
+                  model: getParsingModel(),
                   max_tokens: 500,
                   system: 'Extract material pricing from this vendor quote email. Format as a SHORT list:\nMaterial pricing:\nPart #1: $XX ea (brief description)\nPart #2: $XX ea (brief description)\n\nIf lead time or availability is mentioned, add one line for that. Keep it very concise. No other text.',
                   messages: [{ role: 'user', content: bodyText.substring(0, 3000) }]
@@ -1421,7 +1422,7 @@ async function _runScanInternal() {
                 });
 
                 const parseBody = JSON.stringify({
-                  model: 'claude-sonnet-4-20250514', max_tokens: 1000,
+                  model: getParsingModel(), max_tokens: 1000,
                   system: `Extract invoice/bill information. Return ONLY valid JSON:\n{\n  "vendorInvoiceNumber": "vendor's invoice/reference number or null",\n  "poNumber": "our PO number referenced (PO followed by digits) or null",\n  "amount": 0.00,\n  "dueDate": "YYYY-MM-DD or null",\n  "description": "brief description of what the invoice is for",\n  "lineItems": [{"description": "item", "amount": 0.00}]\n}`,
                   messages
                 });
@@ -1647,7 +1648,7 @@ async function _runScanInternal() {
                   try {
                     const https = require('https');
                     const sumBody = JSON.stringify({
-                      model: 'claude-sonnet-4-20250514', max_tokens: 200,
+                      model: getParsingModel(), max_tokens: 200,
                       system: 'Summarize this email in 1-2 sentences. Be concise. Just the key point.',
                       messages: [{ role: 'user', content: bodyText.substring(0, 2000) }]
                     });
@@ -2135,7 +2136,7 @@ async function parseDocumentWithAI(fileBuffer, mimeType, clientName, parsingNote
     const systemPrompt = buildParsingSystemPrompt(generalNotes, parsingNotes || '');
 
     const requestBody = JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
+      model: getParsingModel(),
       max_tokens: 4000,
       system: systemPrompt,
       messages: [{ role: 'user', content: userContent }]

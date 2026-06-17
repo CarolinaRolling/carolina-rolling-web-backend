@@ -1,3 +1,4 @@
+const { getParsingModel } = require('./aiConfig');
 /**
  * Ginger — daily scheduling / priority scan.
  *
@@ -153,7 +154,7 @@ async function enhanceWithAI(findings) {
       reasons: f.reasons.map(r => r.kind),
     }));
     const body = JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
+      model: getParsingModel(),
       max_tokens: 1200,
       system: `You are "Ginger", the no-nonsense office manager of Carolina Rolling Company — a bossy but caring golden retriever who makes sure deadlines don't get missed. You are blunt, a little sassy, and protective of the shop. Given a JSON array of at-risk work orders, write ONE short punchy line for each (max ~22 words) telling the boss what to do about it. Reference the DR number and client. Reply with ONLY a JSON array of objects: [{"i": <index>, "line": "<your line>"}]. No markdown, no extra text.`,
       messages: [{ role: 'user', content: JSON.stringify(compact) }],

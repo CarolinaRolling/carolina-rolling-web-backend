@@ -404,6 +404,42 @@ app.put('/api/settings/ai-models', authenticate, async (req, res) => {
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
+// Operations — parts completed in a given week, attributed to whoever's tablet marked them done
+app.get('/api/operations/production', authenticate, async (req, res) => {
+  try {
+    const { WorkOrderPart, WorkOrder } = require('./models');
+    const { Op } = require('sequelize');
+    let start;
+    if (req.query.start) {
+      start = new Date(req.query.start + 'T00:00:00');
+    } else {
+      start = new Date(); start.setHours(0, 0, 0, 0);
+      const dow = start.getDay();
+      start.setDate(start.getDate() + (dow === 0 ? -6 : 1 - dow)); // Monday
+    }
+    if (isNaN(start.getTime())) return res.status(400).json({ error: { message: 'Invalid start date' } });
+    const end = new Date(start); end.setDate(end.getDate() + 7);
+
+    const rows = await WorkOrderPart.findAll({
+      where: { status: 'completed', completedAt: { [Op.gte]: start, [Op.lt]: end } },
+      include: [{ model: WorkOrder, as: 'workOrder', attributes: ['drNumber', 'orderNumber', 'clientName'] }],
+      order: [['completedAt', 'ASC']],
+    });
+    const parts = rows.map(p => ({
+      id: p.id,
+      completedBy: p.completedBy || 'Unassigned',
+      completedAt: p.completedAt,
+      description: p.description || p.partType || 'Part',
+      partType: p.partType || null,
+      quantity: p.quantity != null ? p.quantity : null,
+      laborHours: p.laborHours != null ? parseFloat(p.laborHours) : null,
+      dr: p.workOrder ? (p.workOrder.drNumber || p.workOrder.orderNumber) : null,
+      clientName: p.workOrder ? p.workOrder.clientName : null,
+    }));
+    res.json({ data: { weekStart: start.toISOString(), weekEnd: end.toISOString(), parts } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
 app.get('/api/com-center/logs', authenticate, (req, res) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
   res.set('Pragma', 'no-cache');

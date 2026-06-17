@@ -72,15 +72,27 @@ function evaluateWorkOrder(wo) {
   const parts = wo.parts || [];
   let remainingHours = 0;
   let haveHours = false;
-  let materialOutstanding = false;
   for (const p of parts) {
     if (p.status !== 'completed') {
       const h = parseFloat(p.laborHours);
       if (!isNaN(h)) { remainingHours += h; haveHours = true; }
     }
-    if (p.materialReceived === false) materialOutstanding = true;
   }
-  if (wo.allMaterialReceived === false) materialOutstanding = true;
+
+  // Material is "in" once the order is marked all-received OR has advanced past
+  // waiting-for-materials in its lifecycle. The per-part materialReceived flags were
+  // noisy — customer-supplied / shop-stock parts stay false even when nothing is on
+  // order — so we trust the order-level state and the receiving status instead.
+  let materialOutstanding;
+  if (wo.allMaterialReceived === true) {
+    materialOutstanding = false;
+  } else if (wo.status === 'waiting_for_materials') {
+    materialOutstanding = true;
+  } else if (wo.status && wo.status !== 'waiting_for_materials') {
+    materialOutstanding = false; // received / processing / etc. — material is in
+  } else {
+    materialOutstanding = wo.allMaterialReceived === false;
+  }
 
   // 1) Overdue
   if (daysUntil !== null && daysUntil < 0) {

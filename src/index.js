@@ -420,6 +420,14 @@ app.get('/api/operations/production', authenticate, async (req, res) => {
     if (isNaN(start.getTime())) return res.status(400).json({ error: { message: 'Invalid start date' } });
     const end = new Date(start); end.setDate(end.getDate() + 7);
 
+    // Collapse "Ray (Ray Tablet)" and "Ray" to the same person for grouping
+    const normalizeOperator = (s) => {
+      if (!s) return 'Unassigned';
+      const m = String(s).match(/^(.*?)\s*\([^)]*\)\s*$/);
+      const base = (m ? m[1] : String(s)).trim();
+      return base || String(s).trim() || 'Unassigned';
+    };
+
     const rows = await WorkOrderPart.findAll({
       where: { status: 'completed', completedAt: { [Op.gte]: start, [Op.lt]: end } },
       include: [{ model: WorkOrder, as: 'workOrder', attributes: ['drNumber', 'orderNumber', 'clientName'] }],
@@ -427,7 +435,7 @@ app.get('/api/operations/production', authenticate, async (req, res) => {
     });
     const parts = rows.map(p => ({
       id: p.id,
-      completedBy: p.completedBy || 'Unassigned',
+      completedBy: normalizeOperator(p.completedBy),
       completedAt: p.completedAt,
       description: p.description || p.partType || 'Part',
       partType: p.partType || null,

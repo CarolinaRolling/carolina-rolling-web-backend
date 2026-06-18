@@ -3583,11 +3583,6 @@ CreditMemoApplication.belongsTo(CreditMemo, { foreignKey: 'creditMemoId' });
 Client.hasMany(CreditMemo, { foreignKey: 'clientId', as: 'creditMemos' });
 Client.hasMany(Refund, { foreignKey: 'clientId', as: 'refunds' });
 
-CreditMemo.hasMany(CreditMemoApplication, { foreignKey: 'creditMemoId', as: 'applications' });
-CreditMemoApplication.belongsTo(CreditMemo, { foreignKey: 'creditMemoId' });
-Client.hasMany(CreditMemo, { foreignKey: 'clientId', as: 'creditMemos' });
-Client.hasMany(Refund, { foreignKey: 'clientId', as: 'refunds' });
-
 // Free-text reminders/tasks assigned to an operator (not tied to a work order)
 const OperatorTask = sequelize.define('OperatorTask', {
   id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },

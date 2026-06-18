@@ -717,6 +717,19 @@ const WorkOrder = sequelize.define('WorkOrder', {
   usmcaOriginCriteria: {
     type: DataTypes.STRING,
     allowNull: true
+  },
+  // --- Job assignment (push to a specific operator/tablet) ---
+  assignedOperator: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  assignedSequence: {
+    type: DataTypes.INTEGER,
+    allowNull: true
+  },
+  assignedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
   }
 }, {
   tableName: 'work_orders',
@@ -3570,6 +3583,25 @@ CreditMemoApplication.belongsTo(CreditMemo, { foreignKey: 'creditMemoId' });
 Client.hasMany(CreditMemo, { foreignKey: 'clientId', as: 'creditMemos' });
 Client.hasMany(Refund, { foreignKey: 'clientId', as: 'refunds' });
 
+CreditMemo.hasMany(CreditMemoApplication, { foreignKey: 'creditMemoId', as: 'applications' });
+CreditMemoApplication.belongsTo(CreditMemo, { foreignKey: 'creditMemoId' });
+Client.hasMany(CreditMemo, { foreignKey: 'clientId', as: 'creditMemos' });
+Client.hasMany(Refund, { foreignKey: 'clientId', as: 'refunds' });
+
+// Free-text reminders/tasks assigned to an operator (not tied to a work order)
+const OperatorTask = sequelize.define('OperatorTask', {
+  id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+  operator: { type: DataTypes.STRING, allowNull: false },
+  text: { type: DataTypes.TEXT, allowNull: false },
+  sequence: { type: DataTypes.INTEGER, allowNull: true },
+  done: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+  completedAt: { type: DataTypes.DATE, allowNull: true },
+  createdBy: { type: DataTypes.STRING, allowNull: true }
+}, {
+  tableName: 'operator_tasks',
+  timestamps: true
+});
+
 module.exports = {
   sequelize,
   User,
@@ -3609,6 +3641,7 @@ module.exports = {
   WeldProcedure,
   VendorIssue,
   ShipmentCharge,
+  OperatorTask,
   InspectionJob,
   InspectionUnit,
   ClientPayment,

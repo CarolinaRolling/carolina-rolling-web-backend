@@ -440,6 +440,178 @@ app.get('/api/operations/production', authenticate, async (req, res) => {
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
+// Office override — change who a completed part is credited to
+app.patch('/api/operations/parts/:partId/completed-by', authenticate, async (req, res) => {
+  try {
+    const { WorkOrderPart } = require('./models');
+    const part = await WorkOrderPart.findByPk(req.params.partId);
+    if (!part) return res.status(404).json({ error: { message: 'Part not found' } });
+    let completedBy = req.body.completedBy;
+    if (completedBy === '' || completedBy === undefined) completedBy = null;
+    const updates = { completedBy };
+    // If crediting someone but the part was never marked done, treat it as completed now
+    if (completedBy && part.status !== 'completed') { updates.status = 'completed'; if (!part.completedAt) updates.completedAt = new Date(); }
+    await part.update(updates);
+    res.json({ data: { id: part.id, completedBy: part.completedBy } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+// --- Job assignment (push jobs to specific operators/tablets) ---
+const ASSIGN_DONE = ['completed', 'stored', 'shipped', 'archived'];
+
+// Operators come from the tablet API keys (operator name set per device)
+app.get('/api/operations/operators', authenticate, async (req, res) => {
+  try {
+    const { ApiKey } = require('./models');
+    const keys = await ApiKey.findAll({ where: { isActive: true }, attributes: ['operatorName', 'deviceName'] });
+    const seen = new Set();
+    const operators = [];
+    keys.forEach(k => {
+      const name = (k.operatorName || '').trim();
+      if (name && !seen.has(name)) { seen.add(name); operators.push({ operatorName: name, deviceName: k.deviceName || null }); }
+    });
+    operators.sort((a, b) => a.operatorName.localeCompare(b.operatorName));
+    res.json({ data: operators });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+// Search active work orders to assign
+app.get('/api/operations/workorders', authenticate, async (req, res) => {
+  try {
+    const { WorkOrder } = require('./models');
+    const { Op } = require('sequelize');
+    const q = (req.query.q || '').trim();
+    const where = { status: { [Op.notIn]: ASSIGN_DONE }, isVoided: { [Op.not]: true } };
+    if (q) where[Op.or] = [{ drNumber: { [Op.iLike]: `%${q}%` } }, { clientName: { [Op.iLike]: `%${q}%` } }, { orderNumber: { [Op.iLike]: `%${q}%` } }];
+    const rows = await WorkOrder.findAll({ where, attributes: ['id', 'drNumber', 'orderNumber', 'clientName', 'status', 'promisedDate', 'assignedOperator'], order: [['promisedDate', 'ASC']], limit: 25 });
+    res.json({ data: rows.map(w => ({ id: w.id, dr: w.drNumber || w.orderNumber, clientName: w.clientName, status: w.status, promisedDate: w.promisedDate, assignedOperator: w.assignedOperator || null })) });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+// Current assignments (optionally filtered to one operator), ordered by queue position
+app.get('/api/operations/assignments', authenticate, async (req, res) => {
+  try {
+    const { WorkOrder } = require('./models');
+    const { Op } = require('sequelize');
+    const where = { assignedOperator: { [Op.ne]: null }, status: { [Op.notIn]: ASSIGN_DONE }, isVoided: { [Op.not]: true } };
+    if (req.query.operator) where.assignedOperator = req.query.operator;
+    const rows = await WorkOrder.findAll({ where, attributes: ['id', 'drNumber', 'orderNumber', 'clientName', 'status', 'promisedDate', 'assignedOperator', 'assignedSequence'], order: [['assignedOperator', 'ASC'], ['assignedSequence', 'ASC']] });
+    res.json({ data: rows.map(w => ({ id: w.id, dr: w.drNumber || w.orderNumber, clientName: w.clientName, status: w.status, promisedDate: w.promisedDate, assignedOperator: w.assignedOperator, assignedSequence: w.assignedSequence })) });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+// Assign a work order to an operator (appends to the end of their queue)
+app.post('/api/operations/assign', authenticate, async (req, res) => {
+  try {
+    const { WorkOrder } = require('./models');
+    const { Sequelize } = require('sequelize');
+    const { workOrderId, operator } = req.body;
+    if (!workOrderId || !operator) return res.status(400).json({ error: { message: 'workOrderId and operator are required' } });
+    const wo = await WorkOrder.findByPk(workOrderId);
+    if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
+    const maxSeq = await WorkOrder.max('assignedSequence', { where: { assignedOperator: operator } });
+    const nextSeq = (Number.isFinite(maxSeq) ? maxSeq : -1) + 1;
+    await wo.update({ assignedOperator: operator, assignedSequence: nextSeq, assignedAt: new Date() });
+    res.json({ data: { id: wo.id, assignedOperator: operator, assignedSequence: nextSeq } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+// Reorder an operator's queue
+app.post('/api/operations/assign/reorder', authenticate, async (req, res) => {
+  try {
+    const { WorkOrder } = require('./models');
+    const { operator, orderedIds } = req.body;
+    if (!operator || !Array.isArray(orderedIds)) return res.status(400).json({ error: { message: 'operator and orderedIds[] required' } });
+    for (let i = 0; i < orderedIds.length; i++) {
+      await WorkOrder.update({ assignedSequence: i, assignedOperator: operator }, { where: { id: orderedIds[i] } });
+    }
+    res.json({ data: { ok: true } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+// Remove an assignment
+app.delete('/api/operations/assign/:workOrderId', authenticate, async (req, res) => {
+  try {
+    const { WorkOrder } = require('./models');
+    const wo = await WorkOrder.findByPk(req.params.workOrderId);
+    if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
+    await wo.update({ assignedOperator: null, assignedSequence: null, assignedAt: null });
+    res.json({ data: { ok: true } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+// A tablet's own queue — uses the operator tied to the calling API key (Android tab)
+app.get('/api/operations/my-queue', authenticate, async (req, res) => {
+  try {
+    const { WorkOrder, OperatorTask } = require('./models');
+    const { Op } = require('sequelize');
+    const operator = req.operatorName || req.query.operator;
+    if (!operator) return res.json({ data: { operator: null, queue: [], tasks: [] } });
+    const rows = await WorkOrder.findAll({
+      where: { assignedOperator: operator, status: { [Op.notIn]: ASSIGN_DONE }, isVoided: { [Op.not]: true } },
+      attributes: ['id', 'drNumber', 'orderNumber', 'clientName', 'status', 'promisedDate', 'assignedSequence'],
+      order: [['assignedSequence', 'ASC']],
+    });
+    const tasks = await OperatorTask.findAll({
+      where: { operator, done: false },
+      attributes: ['id', 'text', 'done'],
+      order: [['sequence', 'ASC'], ['createdAt', 'ASC']],
+    });
+    res.json({ data: {
+      operator,
+      queue: rows.map(w => ({ id: w.id, dr: (w.drNumber != null && w.drNumber !== '') ? String(w.drNumber) : (w.orderNumber || null), clientName: w.clientName, status: w.status, promisedDate: w.promisedDate, sequence: w.assignedSequence })),
+      tasks: tasks.map(t => ({ id: t.id, text: t.text, done: t.done })),
+    } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+// Operator tasks (free-text reminders)
+app.get('/api/operations/tasks', authenticate, async (req, res) => {
+  try {
+    const { OperatorTask } = require('./models');
+    const where = {};
+    if (req.query.operator) where.operator = req.query.operator;
+    const tasks = await OperatorTask.findAll({ where, order: [['done', 'ASC'], ['sequence', 'ASC'], ['createdAt', 'ASC']] });
+    res.json({ data: tasks.map(t => ({ id: t.id, operator: t.operator, text: t.text, done: t.done, completedAt: t.completedAt, createdAt: t.createdAt })) });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+app.post('/api/operations/tasks', authenticate, async (req, res) => {
+  try {
+    const { OperatorTask } = require('./models');
+    const operator = (req.body.operator || '').trim();
+    const text = (req.body.text || '').trim();
+    if (!operator || !text) return res.status(400).json({ error: { message: 'operator and text are required' } });
+    const maxSeq = await OperatorTask.max('sequence', { where: { operator } });
+    const nextSeq = (Number.isFinite(maxSeq) ? maxSeq : -1) + 1;
+    const task = await OperatorTask.create({ operator, text, sequence: nextSeq, createdBy: req.operatorName || (req.user && req.user.username) || null });
+    res.json({ data: { id: task.id, operator: task.operator, text: task.text, done: task.done } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+app.patch('/api/operations/tasks/:id', authenticate, async (req, res) => {
+  try {
+    const { OperatorTask } = require('./models');
+    const task = await OperatorTask.findByPk(req.params.id);
+    if (!task) return res.status(404).json({ error: { message: 'Task not found' } });
+    const updates = {};
+    if (req.body.text !== undefined) updates.text = String(req.body.text).trim();
+    if (req.body.done !== undefined) { updates.done = !!req.body.done; updates.completedAt = req.body.done ? new Date() : null; }
+    await task.update(updates);
+    res.json({ data: { id: task.id, text: task.text, done: task.done } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+app.delete('/api/operations/tasks/:id', authenticate, async (req, res) => {
+  try {
+    const { OperatorTask } = require('./models');
+    const task = await OperatorTask.findByPk(req.params.id);
+    if (!task) return res.status(404).json({ error: { message: 'Task not found' } });
+    await task.destroy();
+    res.json({ data: { ok: true } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
 app.get('/api/com-center/logs', authenticate, (req, res) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
   res.set('Pragma', 'no-cache');
@@ -1173,6 +1345,30 @@ async function startServer() {
 
     // Load editable AI model config (admin can change models when one is retired)
     try { await require('./services/aiConfig').loadAiModels(); } catch(e) { console.log('aiConfig load error:', e.message); }
+
+    // Job assignment columns
+    try {
+      await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "assignedOperator" VARCHAR(255)`);
+      await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "assignedSequence" INTEGER`);
+      await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "assignedAt" TIMESTAMP WITH TIME ZONE`);
+      console.log('Job assignment columns ready');
+    } catch(e) { console.log('Job assignment columns error:', e.message); }
+
+    // Operator tasks table (free-text reminders)
+    try {
+      await sequelize.query(`CREATE TABLE IF NOT EXISTS operator_tasks (
+        id UUID PRIMARY KEY,
+        operator VARCHAR(255) NOT NULL,
+        text TEXT NOT NULL,
+        sequence INTEGER,
+        done BOOLEAN NOT NULL DEFAULT false,
+        "completedAt" TIMESTAMP WITH TIME ZONE,
+        "createdBy" VARCHAR(255),
+        "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+        "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+      )`);
+      console.log('operator_tasks table ready');
+    } catch(e) { console.log('operator_tasks table error:', e.message); }
 
     // Add USMCA per-order fields to work_orders table
     try {

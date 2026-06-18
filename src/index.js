@@ -597,6 +597,18 @@ app.post('/api/operations/tasks', authenticate, async (req, res) => {
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
+app.post('/api/operations/tasks/reorder', authenticate, async (req, res) => {
+  try {
+    const { OperatorTask } = require('./models');
+    const { operator, orderedIds } = req.body;
+    if (!operator || !Array.isArray(orderedIds)) return res.status(400).json({ error: { message: 'operator and orderedIds[] required' } });
+    for (let i = 0; i < orderedIds.length; i++) {
+      await OperatorTask.update({ sequence: i }, { where: { id: orderedIds[i], operator } });
+    }
+    res.json({ data: { ok: true } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
 app.patch('/api/operations/tasks/:id', authenticate, async (req, res) => {
   try {
     const { OperatorTask } = require('./models');

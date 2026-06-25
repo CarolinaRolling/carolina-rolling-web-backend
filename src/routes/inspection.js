@@ -1,4 +1,6 @@
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 const router = express.Router();
 const { Op } = require('sequelize');
 const PDFDocument = require('pdfkit');
@@ -7,10 +9,9 @@ const {
 } = require('../models');
 
 // Helper: generate unit ID from WO context
-// e.g. drNumber=58747, partLine=2, sequence=2 → "58747-2C"
+// e.g. drNumber=58747, partLine=2, sequence=2 → "58747-2-3" (DR - line - piece index)
 function makeUnitId(drNumber, partLine, sequence) {
-  const letter = String.fromCharCode(65 + sequence); // 0→A, 1→B, etc.
-  return `${drNumber}-${partLine}${letter}`;
+  return `${drNumber}-${partLine}-${sequence + 1}`;
 }
 
 // Helper: calculate out-of-square (returns inches difference)
@@ -204,14 +205,18 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
     const fmtDate = d => d ? new Date(d).toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' }) : '—';
 
     // ── HEADER ──
+    const irNumber = `IR-${wo?.drNumber || wo?.orderNumber || ''}-${part?.partNumber ?? ''}`;
+    const logoPath = [path.join(__dirname, '../assets/logo.png'), path.join(__dirname, '../assets/logo.jpg')].find(p => fs.existsSync(p));
+    try { if (logoPath && fs.existsSync(logoPath)) doc.image(logoPath, 50, 28, { width: 60 }); } catch (e) { /* no logo */ }
     doc.font('Helvetica-Bold').fontSize(22).fillColor(primaryColor).text('INSPECTION REPORT', 300, 50, { width:262, align:'right' });
     doc.font('Helvetica').fontSize(10).fillColor(grayColor).text(`Date: ${fmtDate(new Date())}`, 300, 76, { width:262, align:'right' });
-    doc.font('Helvetica-Bold').fontSize(11).fillColor(darkColor).text('Carolina Rolling Co. Inc.', 50, 50);
+    doc.font('Helvetica-Bold').fontSize(10).fillColor(primaryColor).text(`Report #: ${irNumber}`, 300, 88, { width:262, align:'right' });
+    doc.font('Helvetica-Bold').fontSize(11).fillColor(darkColor).text('Carolina Rolling Co. Inc.', 120, 50);
     doc.font('Helvetica').fontSize(9).fillColor(grayColor)
-      .text('9152 Sonrisa St., Bellflower, CA 90706', 50, 63)
-      .text('(562) 633-1044 | keepitrolling@carolinarolling.com', 50, 74);
+      .text('9152 Sonrisa St., Bellflower, CA 90706', 120, 63)
+      .text('(562) 633-1044 | keepitrolling@carolinarolling.com', 120, 74);
 
-    doc.moveTo(50, 96).lineTo(562, 96).lineWidth(2).strokeColor(primaryColor).stroke();
+    doc.moveTo(50, 100).lineTo(562, 100).lineWidth(2).strokeColor(primaryColor).stroke();
 
     // ── JOB INFO ──
     let y = 108;

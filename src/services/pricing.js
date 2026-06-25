@@ -15,6 +15,16 @@ function roundUpMaterial(value, rounding) {
   return value;
 }
 
+// Read a part's base labor-each consistently. Labor may live in formData._baseLaborTotal
+// before a part has its top-level laborTotal column populated (e.g. legacy parts, or parts
+// whose forms only wrote _baseLaborTotal). Mirrors the frontend basePartLabor + buildWorkOrderPartFromEstimate.
+function basePartLaborEach(part) {
+  const fd = part.formData && typeof part.formData === 'object' ? part.formData : {};
+  const stored = parseFloat(fd._baseLaborTotal);
+  if (!isNaN(stored) && stored > 0) return stored;
+  return parseFloat(part.laborTotal) || parseFloat(fd.laborTotal) || 0;
+}
+
 // Calculate a single part's total cost
 function calculatePartTotal(part) {
   const fd = part.formData && typeof part.formData === 'object' ? part.formData : {};
@@ -25,9 +35,10 @@ function calculatePartTotal(part) {
 
   // Calculate from components
   const matCost = parseFloat(part.materialTotal) || parseFloat(fd.materialTotal) || 0;
-  const matMarkup = parseFloat(part.materialMarkupPercent) || parseFloat(fd.materialMarkupPercent) || 0;
+  const matMarkupRaw = parseFloat(part.materialMarkupPercent);
+  const matMarkup = isNaN(matMarkupRaw) ? (parseFloat(fd.materialMarkupPercent) || (matCost > 0 ? 20 : 0)) : matMarkupRaw;
   const matEach = roundUpMaterial(matCost * (1 + matMarkup / 100), fd._materialRounding);
-  const labEach = parseFloat(part.laborTotal) || parseFloat(fd.laborTotal) || 0;
+  const labEach = basePartLaborEach(part);
   const setup = parseFloat(part.setupCharge) || parseFloat(fd.setupCharge) || 0;
   const other = parseFloat(part.otherCharges) || parseFloat(fd.otherCharges) || 0;
   // Outside processing with markup
@@ -61,8 +72,7 @@ function calculateMinimumAdjustment(parts, minimumOverride, laborMinimums) {
 
   for (const part of parts) {
     if (['fab_service', 'shop_rate'].includes(part.partType)) continue;
-    const fd = part.formData && typeof part.formData === 'object' ? part.formData : {};
-    totalLabor += parseFloat(part.laborTotal) || parseFloat(fd.laborTotal) || 0;
+    totalLabor += basePartLaborEach(part);
     
     for (const rule of laborMinimums) {
       if (rule.partTypes && rule.partTypes.includes(part.partType)) {

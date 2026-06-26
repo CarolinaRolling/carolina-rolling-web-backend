@@ -41,7 +41,7 @@ router.get('/job/:workOrderId', async (req, res, next) => {
 // POST /api/inspections/job — create inspection job when inspection part is added
 router.post('/job', async (req, res, next) => {
   try {
-    const { workOrderId, workOrderPartId, inspectionPartId, inspectionType, unitCount, operatorName } = req.body;
+    const { workOrderId, workOrderPartId, inspectionPartId, inspectionType, unitCount, operatorName, skipPreRoll } = req.body;
     if (!workOrderId || !workOrderPartId) {
       return res.status(400).json({ error: { message: 'workOrderId and workOrderPartId required' } });
     }
@@ -58,6 +58,7 @@ router.post('/job', async (req, res, next) => {
       workOrderId, workOrderPartId, inspectionPartId: inspectionPartId || null,
       inspectionType: inspectionType || 'cylinder',
       unitCount: count, operatorName: operatorName || null,
+      skipPreRoll: !!skipPreRoll,
     });
 
     // Create unit records
@@ -69,6 +70,35 @@ router.post('/job', async (req, res, next) => {
         sequence: i,
       }));
     }
+
+    const result = await InspectionJob.findByPk(job.id, {
+      include: [{ model: InspectionUnit, as: 'units', order: [['sequence', 'ASC']] }]
+    });
+    res.json({ data: result });
+  } catch(error) { next(error); }
+});
+
+// PATCH /api/inspections/job/:id — update job settings (skipPreRoll, operator, notes)
+router.patch('/job/:id', async (req, res, next) => {
+  try {
+    const job = await InspectionJob.findByPk(req.params.id, {
+      include: [{ model: InspectionUnit, as: 'units' }]
+    });
+    if (!job) return res.status(404).json({ error: { message: 'Job not found' } });
+
+    const updates = {};
+    if (req.body.skipPreRoll !== undefined) updates.skipPreRoll = !!req.body.skipPreRoll;
+    if (req.body.operatorName !== undefined) updates.operatorName = req.body.operatorName;
+    if (req.body.notes !== undefined) updates.notes = req.body.notes;
+    await job.update(updates);
+
+    // Recompute job status with the (possibly new) skip flag
+    const skip = updates.skipPreRoll !== undefined ? updates.skipPreRoll : job.skipPreRoll;
+    const allUnits = job.units || [];
+    const allComplete = allUnits.length > 0 && allUnits.every(u => (skip || u.preRollComplete) && u.postRollComplete);
+    const anyStarted = allUnits.some(u => u.preRollComplete || u.postRollComplete ||
+      Object.keys(u.preRoll || {}).length > 0 || Object.keys(u.postRoll || {}).length > 0);
+    await job.update({ status: allComplete ? 'complete' : anyStarted ? 'in_progress' : 'not_started', completedAt: allComplete ? new Date() : null });
 
     const result = await InspectionJob.findByPk(job.id, {
       include: [{ model: InspectionUnit, as: 'units', order: [['sequence', 'ASC']] }]
@@ -124,7 +154,7 @@ router.patch('/unit/:id', async (req, res, next) => {
     });
     if (job) {
       const allUnits = job.units || [];
-      const allComplete = allUnits.every(u => u.preRollComplete && u.postRollComplete);
+      const allComplete = allUnits.length > 0 && allUnits.every(u => (job.skipPreRoll || u.preRollComplete) && u.postRollComplete);
       const anyStarted = allUnits.some(u => u.preRollComplete || u.postRollComplete ||
         Object.keys(u.preRoll || {}).length > 0 || Object.keys(u.postRoll || {}).length > 0);
       const newStatus = allComplete ? 'complete' : anyStarted ? 'in_progress' : 'not_started';
@@ -191,7 +221,7 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
     const doc = new PDFDocument({ margin: 50, size: 'letter' });
     const chunks = [];
     doc.on('data', c => chunks.push(c));
-    await new Promise(r => doc.on('end', r));
+    const endPromise = new Promise(r => doc.on('end', r));
 
     const primaryColor = '#1565c0';
     const darkColor = '#1a1a1a';
@@ -257,12 +287,14 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
       doc.rect(50, y, 512, 22).fill(primaryColor).stroke();
       doc.font('Helvetica-Bold').fontSize(12).fillColor('white')
         .text(`Cylinder ID: ${unit.unitId}`, 58, y + 5, { lineBreak: false });
-      const unitStatus = unit.preRollComplete && unit.postRollComplete ? '✓ COMPLETE' : 'IN PROGRESS';
-      const unitStatusColor = unit.preRollComplete && unit.postRollComplete ? '#a5d6a7' : '#ffe082';
+      const unitDone = (job.skipPreRoll || unit.preRollComplete) && unit.postRollComplete;
+      const unitStatus = unitDone ? '✓ COMPLETE' : 'IN PROGRESS';
+      const unitStatusColor = unitDone ? '#a5d6a7' : '#ffe082';
       doc.font('Helvetica-Bold').fontSize(10).fillColor(unitStatusColor)
         .text(unitStatus, 400, y + 7, { width: 154, align: 'right', lineBreak: false });
       y += 28;
 
+      if (!job.skipPreRoll) {
       // PRE-ROLL section
       doc.font('Helvetica-Bold').fontSize(10).fillColor(primaryColor).text('PRE-ROLL MEASUREMENTS', 50, y);
       y += 14;
@@ -295,6 +327,7 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
           .text(`Client note: ${unit.clientNotes}`, 56, y + 4, { width: 500, lineBreak: false });
         y += 16;
       }
+      } // end skipPreRoll guard
 
       y += 8;
 
@@ -337,6 +370,7 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
     doc.text(`Date: ${fmtDate(new Date())}`, 350, y);
 
     doc.end();
+    await endPromise;
     const buffer = Buffer.concat(chunks);
     const drLabel = wo?.drNumber ? 'DR-' + wo.drNumber : wo?.orderNumber || job.id.slice(0,8);
     res.setHeader('Content-Type', 'application/pdf');
@@ -373,7 +407,7 @@ router.get('/unit/:id/label-pdf', async (req, res, next) => {
     const doc = new PDFDocument({ size: [288, 144], margin: 8 });
     const chunks = [];
     doc.on('data', c => chunks.push(c));
-    await new Promise(r => doc.on('end', r));
+    const endPromise = new Promise(r => doc.on('end', r));
 
     // Company name bar
     doc.rect(0, 0, 288, 18).fill('#1565c0').stroke();
@@ -404,6 +438,7 @@ router.get('/unit/:id/label-pdf', async (req, res, next) => {
       .text('carolinarolling.com', 8, 138, { lineBreak: false });
 
     doc.end();
+    await endPromise;
     const buffer = Buffer.concat(chunks);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="Label-${unit.unitId}.pdf"`);

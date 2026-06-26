@@ -1336,9 +1336,11 @@ async function startServer() {
         "completedAt" TIMESTAMP WITH TIME ZONE,
         "operatorName" VARCHAR(255),
         notes TEXT,
+        "skipPreRoll" BOOLEAN DEFAULT false,
         "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )`);
+      await sequelize.query(`ALTER TABLE inspection_jobs ADD COLUMN IF NOT EXISTS "skipPreRoll" BOOLEAN DEFAULT false`);
       await sequelize.query(`CREATE TABLE IF NOT EXISTS inspection_units (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         "inspectionJobId" UUID REFERENCES inspection_jobs(id) ON DELETE CASCADE,

@@ -3478,6 +3478,7 @@ const InspectionJob = sequelize.define('InspectionJob', {
   completedAt: { type: DataTypes.DATE, allowNull: true },
   operatorName: { type: DataTypes.STRING, allowNull: true },
   notes: { type: DataTypes.TEXT, allowNull: true },
+  skipPreRoll: { type: DataTypes.BOOLEAN, defaultValue: false }, // client supplied already-rolled cylinders → no flat-sheet stage
 }, { tableName: 'inspection_jobs', timestamps: true });
 
 // ── InspectionUnit — one per cylinder/unit, ID = DR-LINE-LETTER ──

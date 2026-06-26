@@ -14,6 +14,12 @@ function makeUnitId(drNumber, partLine, sequence) {
   return `${drNumber}-${partLine}-${sequence + 1}`;
 }
 
+// Next free sequence in a job (max+1, so it never collides after a move/delete leaves a gap)
+function nextSequence(units) {
+  if (!units || !units.length) return 0;
+  return Math.max(...units.map(u => u.sequence || 0)) + 1;
+}
+
 // Helper: calculate out-of-square (returns inches difference)
 function calcOutOfSquare(diagA, diagB) {
   return Math.abs((parseFloat(diagA) || 0) - (parseFloat(diagB) || 0));
@@ -241,7 +247,7 @@ router.post('/job/:id/add-unit', async (req, res, next) => {
     const wo = await WorkOrder.findByPk(job.workOrderId, { attributes: ['id','drNumber','orderNumber'] });
     const part = await WorkOrderPart.findByPk(job.workOrderPartId, { attributes: ['id','partNumber'] });
     const drNum = wo?.drNumber || wo?.orderNumber || job.workOrderId.slice(0,8);
-    const sequence = (job.units?.length) || 0;
+    const sequence = nextSequence(job.units);
 
     const unit = await InspectionUnit.create({
       inspectionJobId: job.id,
@@ -249,8 +255,89 @@ router.post('/job/:id/add-unit', async (req, res, next) => {
       sequence,
     });
 
-    await job.update({ unitCount: sequence + 1 });
+    await job.update({ unitCount: (job.units?.length || 0) + 1 });
     res.json({ data: unit });
+  } catch(error) { next(error); }
+});
+
+// Helper: recompute a job's unitCount + status from its units
+async function recomputeJob(jobId) {
+  const j = await InspectionJob.findByPk(jobId, { include: [{ model: InspectionUnit, as: 'units' }] });
+  if (!j) return;
+  const us = j.units || [];
+  const allComplete = us.length > 0 && us.every(u => (j.skipPreRoll || u.preRollComplete) && u.postRollComplete);
+  const anyStarted = us.some(u => u.preRollComplete || u.postRollComplete ||
+    Object.keys(u.preRoll || {}).length > 0 || Object.keys(u.postRoll || {}).length > 0);
+  await j.update({
+    unitCount: us.length,
+    status: allComplete ? 'complete' : anyStarted ? 'in_progress' : 'not_started',
+    completedAt: allComplete ? new Date() : null,
+  });
+}
+
+// PATCH /api/inspections/unit/:id/move — move a cylinder (data intact) to another line's inspection
+router.patch('/unit/:id/move', async (req, res, next) => {
+  try {
+    const { targetWorkOrderPartId } = req.body;
+    if (!targetWorkOrderPartId) return res.status(400).json({ error: { message: 'targetWorkOrderPartId required' } });
+
+    const unit = await InspectionUnit.findByPk(req.params.id);
+    if (!unit) return res.status(404).json({ error: { message: 'Cylinder not found' } });
+
+    const sourceJob = await InspectionJob.findByPk(unit.inspectionJobId);
+    if (!sourceJob) return res.status(404).json({ error: { message: 'Source inspection not found' } });
+    if (sourceJob.workOrderPartId === targetWorkOrderPartId) {
+      return res.status(400).json({ error: { message: 'Cylinder is already on that line' } });
+    }
+
+    const wo = await WorkOrder.findByPk(sourceJob.workOrderId, { attributes: ['id','drNumber','orderNumber'] });
+    const targetPart = await WorkOrderPart.findByPk(targetWorkOrderPartId, { attributes: ['id','partNumber','workOrderId'] });
+    if (!targetPart || targetPart.workOrderId !== sourceJob.workOrderId) {
+      return res.status(400).json({ error: { message: 'Target line not found on this work order' } });
+    }
+    const drNum = wo?.drNumber || wo?.orderNumber || sourceJob.workOrderId.slice(0,8);
+
+    // Find or create the target inspection job (no auto-created blank cylinders)
+    let targetJob = await InspectionJob.findOne({
+      where: { workOrderId: sourceJob.workOrderId, workOrderPartId: targetWorkOrderPartId },
+      include: [{ model: InspectionUnit, as: 'units' }]
+    });
+    if (!targetJob) {
+      targetJob = await InspectionJob.create({
+        workOrderId: sourceJob.workOrderId,
+        workOrderPartId: targetWorkOrderPartId,
+        inspectionType: sourceJob.inspectionType || 'cylinder',
+        unitCount: 0,
+        skipPreRoll: sourceJob.skipPreRoll,
+      });
+      targetJob.units = [];
+    }
+
+    // Reassign + renumber to the target line; force a label reprint
+    const newSeq = nextSequence(targetJob.units);
+    await unit.update({
+      inspectionJobId: targetJob.id,
+      sequence: newSeq,
+      unitId: makeUnitId(drNum, targetPart.partNumber, newSeq),
+      labelPrinted: false,
+    });
+
+    await recomputeJob(sourceJob.id);
+    await recomputeJob(targetJob.id);
+
+    res.json({ data: { id: unit.id, unitId: unit.unitId, targetJobId: targetJob.id } });
+  } catch(error) { next(error); }
+});
+
+// DELETE /api/inspections/unit/:id — remove a single cylinder
+router.delete('/unit/:id', async (req, res, next) => {
+  try {
+    const unit = await InspectionUnit.findByPk(req.params.id);
+    if (!unit) return res.status(404).json({ error: { message: 'Cylinder not found' } });
+    const jobId = unit.inspectionJobId;
+    await unit.destroy();
+    await recomputeJob(jobId);
+    res.json({ data: { id: req.params.id, deleted: true } });
   } catch(error) { next(error); }
 });
 

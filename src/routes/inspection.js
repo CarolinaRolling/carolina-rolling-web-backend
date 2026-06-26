@@ -20,8 +20,8 @@ function calcOutOfSquare(diagA, diagB) {
 }
 
 // Helper: calculate max diameter variance
-function calcDiamVariance(seam, d45, dNeg45) {
-  const vals = [parseFloat(seam)||0, parseFloat(d45)||0, parseFloat(dNeg45)||0].filter(v => v > 0);
+function calcDiamVariance(seam, d90, d45, dNeg45) {
+  const vals = [parseFloat(seam)||0, parseFloat(d90)||0, parseFloat(d45)||0, parseFloat(dNeg45)||0].filter(v => v > 0);
   if (vals.length < 2) return 0;
   return Math.max(...vals) - Math.min(...vals);
 }
@@ -180,13 +180,13 @@ router.patch('/unit/:id', async (req, res, next) => {
     if (req.body.postRoll !== undefined) {
       const po = req.body.postRoll;
       // Auto-calculate diameter tolerance
-      const variance = calcDiamVariance(po.diamSeam, po.diam45, po.diamNeg45);
+      const variance = calcDiamVariance(po.diamSeam, po.diam90, po.diam45, po.diamNeg45);
       po.outOfTolerance = variance > 0.125;
       po.diamVariance = Math.round(variance * 10000) / 10000;
       updates.postRoll = po;
       updates.postRollComplete = !!(
         po.circumEnd1 && po.circumEnd2 &&
-        po.diamSeam && po.diam45 && po.diamNeg45
+        po.diamSeam && po.diam90 && po.diam45 && po.diamNeg45
       );
     }
 
@@ -365,10 +365,17 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
 
     // ── UNITS ──
     for (const unit of (job.units || [])) {
-      if (y > 660) { doc.addPage(); y = 50; }
-
       const pr = unit.preRoll || {};
       const po = unit.postRoll || {};
+
+      // Measure this cylinder's whole block so it never splits across a page —
+      // but only break when it genuinely won't fit, so pages stay packed (no big gaps).
+      let unitH = 28 + 8 + 14 + 7 * 16 + 20; // header bar + gap + post-roll header + 7 rows + trailer
+      if (!job.skipPreRoll) {
+        unitH += 14 + 10 * 16; // pre-roll header + 10 rows
+        if (pr.outOfSquare && unit.clientNotes) unitH += 16;
+      }
+      if (y > 60 && y + unitH > 742) { doc.addPage(); y = 50; }
 
       // Unit header bar
       doc.rect(50, y, 512, 22).fill(primaryColor).stroke();
@@ -420,7 +427,6 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
       y += 8;
 
       // POST-ROLL section
-      if (y > 600) { doc.addPage(); y = 50; }
       doc.font('Helvetica-Bold').fontSize(10).fillColor(primaryColor).text('POST-ROLL MEASUREMENTS', 50, y);
       y += 14;
 
@@ -428,6 +434,7 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
         ['Circumference — End 1', fmtMeas(po.circumEnd1), null],
         ['Circumference — End 2', fmtMeas(po.circumEnd2), null],
         ['Diameter at Seam (0°)', fmtMeas(po.diamSeam), null],
+        ['Diameter at 90°', fmtMeas(po.diam90), null],
         ['Diameter at 45°', fmtMeas(po.diam45), null],
         ['Diameter at -45°', fmtMeas(po.diamNeg45), null],
         ['Diameter Variance', po.diamVariance !== undefined ? fmtMeas(po.diamVariance) + (po.outOfTolerance ? ' ⚠ EXCEEDS ±1/8"' : ' ✓ PASS') : '—', po.outOfTolerance ? 'FAIL' : null],

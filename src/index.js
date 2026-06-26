@@ -1341,6 +1341,19 @@ async function startServer() {
         "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )`);
       await sequelize.query(`ALTER TABLE inspection_jobs ADD COLUMN IF NOT EXISTS "skipPreRoll" BOOLEAN DEFAULT false`);
+      await sequelize.query(`ALTER TABLE inspection_jobs ADD COLUMN IF NOT EXISTS "toolsUsed" JSONB DEFAULT '[]'`);
+      await sequelize.query(`CREATE TABLE IF NOT EXISTS inspection_tools (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name VARCHAR(255) NOT NULL,
+        "toolType" VARCHAR(80),
+        "serialNumber" VARCHAR(120),
+        "calibrationDate" DATE,
+        "calibrationDueDate" DATE,
+        notes TEXT,
+        "isActive" BOOLEAN DEFAULT true,
+        "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+        "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      )`);
       await sequelize.query(`CREATE TABLE IF NOT EXISTS inspection_units (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         "inspectionJobId" UUID REFERENCES inspection_jobs(id) ON DELETE CASCADE,

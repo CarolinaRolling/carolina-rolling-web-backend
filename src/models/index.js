@@ -3479,6 +3479,7 @@ const InspectionJob = sequelize.define('InspectionJob', {
   operatorName: { type: DataTypes.STRING, allowNull: true },
   notes: { type: DataTypes.TEXT, allowNull: true },
   skipPreRoll: { type: DataTypes.BOOLEAN, defaultValue: false }, // client supplied already-rolled cylinders → no flat-sheet stage
+  toolsUsed: { type: DataTypes.JSONB, defaultValue: [] }, // array of InspectionTool ids selected for this inspection
 }, { tableName: 'inspection_jobs', timestamps: true });
 
 // ── InspectionUnit — one per cylinder/unit, ID = DR-LINE-LETTER ──
@@ -3507,6 +3508,18 @@ InspectionJob.hasMany(InspectionUnit, { foreignKey: 'inspectionJobId', as: 'unit
 InspectionUnit.belongsTo(InspectionJob, { foreignKey: 'inspectionJobId' });
 WorkOrder.hasMany(InspectionJob, { foreignKey: 'workOrderId', as: 'inspectionJobs' });
 InspectionJob.belongsTo(WorkOrder, { foreignKey: 'workOrderId' });
+
+// ── InspectionTool — registry of measuring tools the shop uses for inspections ──
+const InspectionTool = sequelize.define('InspectionTool', {
+  id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+  name: { type: DataTypes.STRING, allowNull: false }, // e.g. "6\" Digital Caliper"
+  toolType: { type: DataTypes.STRING, allowNull: true }, // caliper, micrometer, tape, gauge, etc.
+  serialNumber: { type: DataTypes.STRING, allowNull: true }, // serial / asset ID
+  calibrationDate: { type: DataTypes.DATEONLY, allowNull: true },
+  calibrationDueDate: { type: DataTypes.DATEONLY, allowNull: true },
+  notes: { type: DataTypes.TEXT, allowNull: true },
+  isActive: { type: DataTypes.BOOLEAN, defaultValue: true },
+}, { tableName: 'inspection_tools', timestamps: true });
 
 
 // ── ShipmentCharge Model — shipping charges on estimates and work orders ──
@@ -3664,6 +3677,7 @@ module.exports = {
   OperatorTask,
   InspectionJob,
   InspectionUnit,
+  InspectionTool,
   ClientPayment,
   PaymentApplication,
   CreditMemo,

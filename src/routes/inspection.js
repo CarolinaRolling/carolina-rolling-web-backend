@@ -5,7 +5,7 @@ const router = express.Router();
 const { Op } = require('sequelize');
 const PDFDocument = require('pdfkit');
 const {
-  InspectionJob, InspectionUnit, WorkOrder, WorkOrderPart, sequelize
+  InspectionJob, InspectionUnit, InspectionTool, WorkOrder, WorkOrderPart, sequelize
 } = require('../models');
 
 // Helper: generate unit ID from WO context
@@ -25,6 +25,52 @@ function calcDiamVariance(seam, d45, dNeg45) {
   if (vals.length < 2) return 0;
   return Math.max(...vals) - Math.min(...vals);
 }
+
+// ── Inspection tools registry ──
+// GET /api/inspections/tools — list tools (active only unless ?all=true)
+router.get('/tools', async (req, res, next) => {
+  try {
+    const where = req.query.all === 'true' ? {} : { isActive: true };
+    const tools = await InspectionTool.findAll({ where, order: [['name', 'ASC']] });
+    res.json({ data: tools });
+  } catch(error) { next(error); }
+});
+
+// POST /api/inspections/tools — register a tool
+router.post('/tools', async (req, res, next) => {
+  try {
+    const { name, toolType, serialNumber, calibrationDate, calibrationDueDate, notes } = req.body;
+    if (!name || !String(name).trim()) return res.status(400).json({ error: { message: 'Tool name required' } });
+    const tool = await InspectionTool.create({
+      name: String(name).trim(), toolType: toolType || null, serialNumber: serialNumber || null,
+      calibrationDate: calibrationDate || null, calibrationDueDate: calibrationDueDate || null, notes: notes || null,
+    });
+    res.json({ data: tool });
+  } catch(error) { next(error); }
+});
+
+// PATCH /api/inspections/tools/:id — edit a tool
+router.patch('/tools/:id', async (req, res, next) => {
+  try {
+    const tool = await InspectionTool.findByPk(req.params.id);
+    if (!tool) return res.status(404).json({ error: { message: 'Tool not found' } });
+    const updates = {};
+    ['name','toolType','serialNumber','calibrationDate','calibrationDueDate','notes','isActive']
+      .forEach(f => { if (req.body[f] !== undefined) updates[f] = req.body[f]; });
+    await tool.update(updates);
+    res.json({ data: tool });
+  } catch(error) { next(error); }
+});
+
+// DELETE /api/inspections/tools/:id — deactivate (kept for historical reports)
+router.delete('/tools/:id', async (req, res, next) => {
+  try {
+    const tool = await InspectionTool.findByPk(req.params.id);
+    if (!tool) return res.status(404).json({ error: { message: 'Tool not found' } });
+    await tool.update({ isActive: false });
+    res.json({ data: { id: tool.id, deactivated: true } });
+  } catch(error) { next(error); }
+});
 
 // GET /api/inspections/job/:workOrderId — get all inspection jobs for a WO
 router.get('/job/:workOrderId', async (req, res, next) => {
@@ -90,6 +136,7 @@ router.patch('/job/:id', async (req, res, next) => {
     if (req.body.skipPreRoll !== undefined) updates.skipPreRoll = !!req.body.skipPreRoll;
     if (req.body.operatorName !== undefined) updates.operatorName = req.body.operatorName;
     if (req.body.notes !== undefined) updates.notes = req.body.notes;
+    if (req.body.toolsUsed !== undefined) updates.toolsUsed = Array.isArray(req.body.toolsUsed) ? req.body.toolsUsed : [];
     await job.update(updates);
 
     // Recompute job status with the (possibly new) skip flag
@@ -158,10 +205,14 @@ router.patch('/unit/:id', async (req, res, next) => {
       const anyStarted = allUnits.some(u => u.preRollComplete || u.postRollComplete ||
         Object.keys(u.preRoll || {}).length > 0 || Object.keys(u.postRoll || {}).length > 0);
       const newStatus = allComplete ? 'complete' : anyStarted ? 'in_progress' : 'not_started';
-      await job.update({
+      // Auto-fill the operator from the tablet's API key identity if not already set
+      const tabletOperator = req.apiKey ? (req.apiKey.operatorName || req.apiKey.name) : null;
+      const jobUpdate = {
         status: newStatus,
         completedAt: allComplete ? new Date() : null
-      });
+      };
+      if (!job.operatorName && tabletOperator) jobUpdate.operatorName = tabletOperator;
+      await job.update(jobUpdate);
     }
 
     const updated = await InspectionUnit.findByPk(unit.id);
@@ -215,8 +266,13 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
       attributes: ['id','drNumber','orderNumber','clientName','clientPurchaseOrderNumber','invoiceDate']
     });
     const part = await WorkOrderPart.findByPk(job.workOrderPartId, {
-      attributes: ['id','partNumber','clientPartNumber','heatNumber','materialDescription','formData','quantity']
+      attributes: ['id','partNumber','clientPartNumber','heatNumber','materialDescription','formData','quantity','rev','lotNumber']
     });
+
+    let toolsUsed = [];
+    if (Array.isArray(job.toolsUsed) && job.toolsUsed.length) {
+      toolsUsed = await InspectionTool.findAll({ where: { id: { [Op.in]: job.toolsUsed } }, order: [['name', 'ASC']] });
+    }
 
     const doc = new PDFDocument({ margin: 50, size: 'letter' });
     const chunks = [];
@@ -258,8 +314,10 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
     y += 16;
     doc.font('Helvetica-Bold').fontSize(10).text('CLIENT PO:', 50, y);
     doc.font('Helvetica').fontSize(10).text(wo?.clientPurchaseOrderNumber || '—', 120, y);
-    doc.font('Helvetica-Bold').fontSize(10).text('PART #:', 300, y);
-    doc.font('Helvetica').fontSize(10).text(part?.clientPartNumber || part?.partNumber || '—', 390, y);
+    doc.font('Helvetica-Bold').fontSize(10).text('LOT #:', 300, y);
+    const drForLot = wo?.drNumber || wo?.orderNumber || '';
+    const lotNumber = part?.lotNumber || (drForLot ? `${drForLot}-${part?.partNumber ?? ''}` : (part?.partNumber ?? '—'));
+    doc.font('Helvetica').fontSize(10).text(String(lotNumber || '—'), 390, y);
     y += 16;
     const matDesc = part?.materialDescription || (part?.formData?._materialDescription) || '—';
     doc.font('Helvetica-Bold').fontSize(10).text('DESCRIPTION:', 50, y);
@@ -269,12 +327,40 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
     doc.font('Helvetica').fontSize(10).text(part?.heatNumber || '—', 120, y);
     doc.font('Helvetica-Bold').fontSize(10).text('OPERATOR:', 300, y);
     doc.font('Helvetica').fontSize(10).text(job.operatorName || '—', 390, y);
+    if (part?.rev) {
+      y += 16;
+      doc.font('Helvetica-Bold').fontSize(10).text('REV:', 50, y);
+      doc.font('Helvetica').fontSize(10).text(String(part.rev), 120, y);
+    }
     y += 16;
     doc.font('Helvetica-Bold').fontSize(10).text('TOTAL UNITS:', 50, y);
     doc.font('Helvetica').fontSize(10).text(`${job.units?.length || 0} cylinders`, 140, y);
 
     doc.moveTo(50, y + 18).lineTo(562, y + 18).lineWidth(0.5).strokeColor(lightGray).stroke();
     y += 30;
+
+    // ── INSPECTION TOOLS USED ──
+    if (toolsUsed.length) {
+      if (y > 640) { doc.addPage(); y = 50; }
+      doc.font('Helvetica-Bold').fontSize(11).fillColor(primaryColor).text('INSPECTION TOOLS USED', 50, y);
+      y += 16;
+      doc.font('Helvetica-Bold').fontSize(9).fillColor(grayColor);
+      doc.text('Tool', 56, y, { width: 200, lineBreak: false });
+      doc.text('Serial / ID', 260, y, { width: 130, lineBreak: false });
+      doc.text('Cal. Due', 400, y, { width: 150, lineBreak: false });
+      y += 14;
+      toolsUsed.forEach((t, idx) => {
+        const rowBg = idx % 2 === 0 ? '#f8f9fa' : 'white';
+        doc.rect(50, y, 512, 16).fill(rowBg).stroke();
+        const label = t.toolType ? `${t.name} (${t.toolType})` : t.name;
+        doc.font('Helvetica').fontSize(9).fillColor(darkColor).text(label, 56, y + 4, { width: 200, lineBreak: false });
+        doc.fillColor(grayColor).text(t.serialNumber || '—', 260, y + 4, { width: 130, lineBreak: false });
+        doc.text(fmtDate(t.calibrationDueDate), 400, y + 4, { width: 150, lineBreak: false });
+        y += 16;
+      });
+      y += 14;
+      doc.moveTo(50, y - 8).lineTo(562, y - 8).lineWidth(0.5).strokeColor(lightGray).stroke();
+    }
 
     // ── UNITS ──
     for (const unit of (job.units || [])) {

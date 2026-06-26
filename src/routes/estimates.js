@@ -1928,6 +1928,10 @@ router.post('/:id/convert', async (req, res, next) => {
       try {
         const partData = buildWorkOrderPartFromEstimate(estPart);
         partData.workOrderId = workOrder.id;
+        // Auto-fill lot number as <DR number>-<line number> when not already set
+        if (!partData.lotNumber || !String(partData.lotNumber).trim()) {
+          if (drNumber) partData.lotNumber = `${drNumber}-${estPart.partNumber}`;
+        }
         // Override material received status for customer-supplied/in-stock parts
         if (['customer_supplied', 'in_stock'].includes(partData.materialSource)) {
           partData.materialReceived = true;

@@ -763,6 +763,18 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
     type: DataTypes.STRING,
     allowNull: true
   },
+  rev: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  poLineNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  lotNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
   heatNumber: {
     type: DataTypes.STRING,
     allowNull: true
@@ -1421,6 +1433,18 @@ const EstimatePart = sequelize.define('EstimatePart', {
     allowNull: false
   },
   clientPartNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  rev: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  poLineNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  lotNumber: {
     type: DataTypes.STRING,
     allowNull: true
   },

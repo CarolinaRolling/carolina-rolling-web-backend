@@ -1193,6 +1193,12 @@ async function startServer() {
         `ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commSnippet" TEXT`,
         `ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commArchived" BOOLEAN DEFAULT false`,
         `ALTER TABLE payroll_entries ADD COLUMN IF NOT EXISTS "sortOrder" INTEGER DEFAULT 999`,
+        `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "rev" VARCHAR(255)`,
+        `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "poLineNumber" VARCHAR(255)`,
+        `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "lotNumber" VARCHAR(255)`,
+        `ALTER TABLE estimate_parts ADD COLUMN IF NOT EXISTS "rev" VARCHAR(255)`,
+        `ALTER TABLE estimate_parts ADD COLUMN IF NOT EXISTS "poLineNumber" VARCHAR(255)`,
+        `ALTER TABLE estimate_parts ADD COLUMN IF NOT EXISTS "lotNumber" VARCHAR(255)`,
     ];
     // Create work_order_payments table
     try {

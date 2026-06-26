@@ -203,6 +203,7 @@ function buildWorkOrderFromEstimate(estimate, overrides = {}) {
 // Fields that copy from EstimatePart → WorkOrderPart
 const PART_SHARED_FIELDS = [
   'partNumber', 'partType', 'clientPartNumber', 'heatNumber', 'cutFileReference',
+  'rev', 'poLineNumber', 'lotNumber',
   'quantity', 'material', 'thickness', 'width', 'length',
   'outerDiameter', 'wallThickness', 'sectionSize', 'rollType',
   'radius', 'diameter', 'arcDegrees', 'flangeOut',

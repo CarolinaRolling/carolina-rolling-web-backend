@@ -350,6 +350,7 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
       doc.text('Cal. Due', 400, y, { width: 150, lineBreak: false });
       y += 14;
       toolsUsed.forEach((t, idx) => {
+        if (y > 700) { doc.addPage(); y = 50; }
         const rowBg = idx % 2 === 0 ? '#f8f9fa' : 'white';
         doc.rect(50, y, 512, 16).fill(rowBg).stroke();
         const label = t.toolType ? `${t.name} (${t.toolType})` : t.name;
@@ -399,6 +400,7 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
       ];
 
       preRows.forEach(([label, value, flag], idx) => {
+        if (y > 700) { doc.addPage(); y = 50; }
         const rowBg = idx % 2 === 0 ? '#f8f9fa' : 'white';
         doc.rect(50, y, 512, 16).fill(rowBg).stroke();
         doc.font('Helvetica').fontSize(9).fillColor(grayColor).text(label, 56, y + 4, { width: 200, lineBreak: false });
@@ -418,7 +420,7 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
       y += 8;
 
       // POST-ROLL section
-      if (y > 660) { doc.addPage(); y = 50; }
+      if (y > 600) { doc.addPage(); y = 50; }
       doc.font('Helvetica-Bold').fontSize(10).fillColor(primaryColor).text('POST-ROLL MEASUREMENTS', 50, y);
       y += 14;
 
@@ -432,6 +434,7 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
       ];
 
       postRows.forEach(([label, value, flag], idx) => {
+        if (y > 700) { doc.addPage(); y = 50; }
         const rowBg = idx % 2 === 0 ? '#f8f9fa' : 'white';
         doc.rect(50, y, 512, 16).fill(rowBg).stroke();
         doc.font('Helvetica').fontSize(9).fillColor(grayColor).text(label, 56, y + 4, { width: 200, lineBreak: false });

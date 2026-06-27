@@ -646,12 +646,18 @@ async function generateInspectionReportBuffer(jobId) {
     doc.font('Helvetica').fontSize(9).fillColor(darkColor).text('Operator Signature: ___________________________', 50, y);
     doc.text(`Date: ${fmtDate(new Date())}`, 350, y);
 
-    // Page numbers (footer, centered) — added across all buffered pages
+    // Footer on every page: IR number (left) + page number (right).
+    // margins.bottom=0 while stamping prevents PDFKit from auto-inserting a blank page.
     const range = doc.bufferedPageRange();
     for (let i = range.start; i < range.start + range.count; i++) {
       doc.switchToPage(i);
-      doc.font('Helvetica').fontSize(8).fillColor('#999')
-        .text(`Page ${i - range.start + 1} of ${range.count}`, 50, 770, { width: 512, align: 'center', lineBreak: false });
+      const savedBottom = doc.page.margins.bottom;
+      doc.page.margins.bottom = 0;
+      const footerY = doc.page.height - 35;
+      doc.font('Helvetica').fontSize(8).fillColor('#999');
+      doc.text(irNumber, 50, footerY, { lineBreak: false });
+      doc.text(`Page ${i - range.start + 1} of ${range.count}`, 50, footerY, { width: 512, align: 'right', lineBreak: false });
+      doc.page.margins.bottom = savedBottom;
     }
 
     doc.end();

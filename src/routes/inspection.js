@@ -6,7 +6,7 @@ const { Op } = require('sequelize');
 const PDFDocument = require('pdfkit');
 const { computeDisplayNumbers } = require('../services/partNumbering');
 const {
-  InspectionJob, InspectionUnit, InspectionTool, WorkOrder, WorkOrderPart, sequelize
+  InspectionJob, InspectionUnit, InspectionTool, WorkOrder, WorkOrderPart, WorkOrderDocument, sequelize
 } = require('../models');
 
 // Helper: generate unit ID from WO context
@@ -66,7 +66,11 @@ function parseSpec(v) {
 function specDiameter(part) {
   if (!part) return null;
   const fd = part.formData || {};
-  return parseSpec(part.diameter) ?? parseSpec(part.outerDiameter) ?? parseSpec(fd.diameter) ?? parseSpec(fd.outerDiameter);
+  const d = parseSpec(part.diameter) ?? parseSpec(part.outerDiameter) ?? parseSpec(fd.diameter) ?? parseSpec(fd.outerDiameter);
+  if (d != null) return d;
+  // Parts rolled to a radius store `radius` instead of a diameter — convert it
+  const r = parseSpec(part.radius) ?? parseSpec(fd.radius);
+  return r != null ? r * 2 : null;
 }
 
 // ASME UG-80(a)(1) out-of-roundness: (Dmax − Dmin) must be ≤ 1% of nominal diameter (internal pressure).
@@ -140,7 +144,7 @@ router.get('/job/:workOrderId', async (req, res, next) => {
     const out = [];
     for (const j of jobs) {
       const jj = j.toJSON();
-      const part = await WorkOrderPart.findByPk(j.workOrderPartId, { attributes: ['diameter','outerDiameter','formData'] });
+      const part = await WorkOrderPart.findByPk(j.workOrderPartId, { attributes: ['diameter','outerDiameter','radius','formData'] });
       jj.nominalDiameter = specDiameter(part);
       out.push(jj);
     }
@@ -248,7 +252,7 @@ router.patch('/unit/:id', async (req, res, next) => {
       let nominalD = null;
       const jobForSpec = await InspectionJob.findByPk(unit.inspectionJobId, { attributes: ['workOrderPartId'] });
       if (jobForSpec) {
-        const partForSpec = await WorkOrderPart.findByPk(jobForSpec.workOrderPartId, { attributes: ['diameter','outerDiameter','formData'] });
+        const partForSpec = await WorkOrderPart.findByPk(jobForSpec.workOrderPartId, { attributes: ['diameter','outerDiameter','radius','formData'] });
         nominalD = specDiameter(partForSpec);
       }
       const oor = evalOutOfRound(po, nominalD);
@@ -269,10 +273,12 @@ router.patch('/unit/:id', async (req, res, next) => {
     await unit.update(updates);
 
     // Update parent job status
+    let justCompletedJobId = null;
     const job = await InspectionJob.findByPk(unit.inspectionJobId, {
       include: [{ model: InspectionUnit, as: 'units' }]
     });
     if (job) {
+      const wasComplete = job.status === 'complete';
       const allUnits = job.units || [];
       const allComplete = allUnits.length > 0 && allUnits.every(u => (job.skipPreRoll || u.preRollComplete) && u.postRollComplete);
       const anyStarted = allUnits.some(u => u.preRollComplete || u.postRollComplete ||
@@ -286,10 +292,18 @@ router.patch('/unit/:id', async (req, res, next) => {
       };
       if (!job.operatorName && tabletOperator) jobUpdate.operatorName = tabletOperator;
       await job.update(jobUpdate);
+      if (newStatus === 'complete' && !wasComplete) justCompletedJobId = job.id;
     }
 
     const updated = await InspectionUnit.findByPk(unit.id);
     res.json({ data: updated });
+
+    // After responding: when the inspection just reached complete, auto-generate the report
+    // PDF and file it under the work order's documents (named the IR number).
+    if (justCompletedJobId) {
+      saveInspectionReportDocument(justCompletedJobId)
+        .catch(e => console.error('[InspectionReport] auto-save failed:', e.message));
+    }
   } catch(error) { next(error); }
 });
 
@@ -410,19 +424,18 @@ router.delete('/unit/:id', async (req, res, next) => {
   } catch(error) { next(error); }
 });
 
-// GET /api/inspections/job/:id/report-pdf — generate inspection report PDF
-router.get('/job/:id/report-pdf', async (req, res, next) => {
-  try {
-    const job = await InspectionJob.findByPk(req.params.id, {
+// Build the inspection report PDF for a job; returns { buffer, drLabel, irNumber }
+async function generateInspectionReportBuffer(jobId) {
+    const job = await InspectionJob.findByPk(jobId, {
       include: [{ model: InspectionUnit, as: 'units', order: [['sequence', 'ASC']] }]
     });
-    if (!job) return res.status(404).json({ error: { message: 'Job not found' } });
+    if (!job) throw new Error('Inspection job not found');
 
     const wo = await WorkOrder.findByPk(job.workOrderId, {
       attributes: ['id','drNumber','orderNumber','clientName','clientPurchaseOrderNumber','invoiceDate']
     });
     const part = await WorkOrderPart.findByPk(job.workOrderPartId, {
-      attributes: ['id','partNumber','clientPartNumber','heatNumber','materialDescription','formData','quantity','rev','lotNumber']
+      attributes: ['id','partNumber','clientPartNumber','heatNumber','materialDescription','formData','quantity','rev','lotNumber','diameter','outerDiameter','radius']
     });
     const reportLineNum = await cleanLineNumber(job.workOrderId, part?.id, part?.partNumber ?? '');
 
@@ -431,7 +444,7 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
       toolsUsed = await InspectionTool.findAll({ where: { id: { [Op.in]: job.toolsUsed } }, order: [['name', 'ASC']] });
     }
 
-    const doc = new PDFDocument({ margin: 50, size: 'letter' });
+    const doc = new PDFDocument({ margin: 50, size: 'letter', bufferPages: true });
     const chunks = [];
     doc.on('data', c => chunks.push(c));
     const endPromise = new Promise(r => doc.on('end', r));
@@ -633,15 +646,52 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
     doc.font('Helvetica').fontSize(9).fillColor(darkColor).text('Operator Signature: ___________________________', 50, y);
     doc.text(`Date: ${fmtDate(new Date())}`, 350, y);
 
+    // Page numbers (footer, centered) — added across all buffered pages
+    const range = doc.bufferedPageRange();
+    for (let i = range.start; i < range.start + range.count; i++) {
+      doc.switchToPage(i);
+      doc.font('Helvetica').fontSize(8).fillColor('#999')
+        .text(`Page ${i - range.start + 1} of ${range.count}`, 50, 770, { width: 512, align: 'center', lineBreak: false });
+    }
+
     doc.end();
     await endPromise;
     const buffer = Buffer.concat(chunks);
     const drLabel = wo?.drNumber ? 'DR-' + wo.drNumber : wo?.orderNumber || job.id.slice(0,8);
+    return { buffer, drLabel, irNumber };
+}
+
+// GET /api/inspections/job/:id/report-pdf — generate inspection report PDF
+router.get('/job/:id/report-pdf', async (req, res, next) => {
+  try {
+    const { buffer, drLabel } = await generateInspectionReportBuffer(req.params.id);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="Inspection-Report-${drLabel}.pdf"`);
     res.send(buffer);
   } catch(error) { next(error); }
 });
+
+// Generate the inspection report and save it to the work order's documents, named the IR number.
+// Replaces any prior copy with the same IR name so re-completion refreshes it.
+async function saveInspectionReportDocument(jobId) {
+  const fileStorage = require('../utils/storage');
+  const job = await InspectionJob.findByPk(jobId, { attributes: ['id', 'workOrderId'] });
+  if (!job) return;
+  const { buffer, irNumber } = await generateInspectionReportBuffer(jobId);
+  const filename = `${irNumber || 'Inspection-Report'}.pdf`.replace(/[\/\\:]/g, '-');
+  const existing = await WorkOrderDocument.findOne({ where: { workOrderId: job.workOrderId, originalName: filename } });
+  if (existing) {
+    if (existing.cloudinaryId) { try { await fileStorage.deleteFile(existing.cloudinaryId); } catch (e) {} }
+    await existing.destroy();
+  }
+  const uploadResult = await fileStorage.uploadBuffer(buffer, { folder: 'work-orders/' + job.workOrderId + '/documents', filename, mimeType: 'application/pdf' });
+  await WorkOrderDocument.create({
+    workOrderId: job.workOrderId, originalName: filename, mimeType: 'application/pdf',
+    size: buffer.length, url: uploadResult.url, cloudinaryId: uploadResult.storageId,
+    documentType: 'inspection_report', portalVisible: true
+  });
+  console.log('[InspectionReport] Saved ' + filename);
+}
 
 // GET /api/inspections/unit/:id/label-pdf — print label for one cylinder
 router.get('/unit/:id/label-pdf', async (req, res, next) => {

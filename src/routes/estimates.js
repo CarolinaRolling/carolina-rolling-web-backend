@@ -2,6 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const { computeDisplayNumbers } = require('../services/partNumbering');
 const https = require('https');
 const http = require('http');
 const { v4: uuidv4 } = require('uuid');
@@ -2395,6 +2396,7 @@ router.get('/:id/pdf', async (req, res, next) => {
       });
     });
     servicePartsArr.forEach(sp => { if (!usedSvcIds.has(sp.id)) sortedParts.push(sp); });
+    const { display: dispNum } = computeDisplayNumbers(sortedParts);
 
     for (const part of sortedParts) {
       if (yPos > 680) { doc.addPage(); yPos = 50; }
@@ -2438,7 +2440,7 @@ router.get('/:id/pdf', async (req, res, next) => {
         const rushDescHeight = doc.fontSize(10).heightOfString(rushDesc || 'Rush Service', { width: 300 });
         const rushRowHeight = Math.max(rushDescHeight, 12) + 8;
         if (yPos + rushRowHeight > 700) { doc.addPage(); yPos = 50; }
-        doc.fontSize(11).fillColor(primaryColor).font('Helvetica-Bold').text(`#${part.partNumber}`, 50, yPos, { lineBreak: false });
+        doc.fontSize(11).fillColor(primaryColor).font('Helvetica-Bold').text(`#${dispNum[part.id] || part.partNumber}`, 50, yPos, { lineBreak: false });
         doc.fontSize(10).fillColor(darkColor).font('Helvetica-Bold').text(PART_LABELS['rush_service'], 85, yPos, { lineBreak: false });
         doc.font('Helvetica').fillColor(grayColor).text(rushDesc, 85, yPos + 11, { width: 300 });
         doc.fillColor(darkColor).text('1', 400, yPos, { width: 30, align: 'center', lineBreak: false });
@@ -2590,37 +2592,35 @@ router.get('/:id/pdf', async (req, res, next) => {
         descLines.push('* Pricing based on estimated hours - actual cost may vary');
       }
 
-      // Special instructions (truncated)
+      // Special instructions — full text (wraps; row height grows to fit)
       if (part.specialInstructions) {
-        const instr = part.specialInstructions.length > 80 
-          ? part.specialInstructions.substring(0, 80) + '...' 
-          : part.specialInstructions;
-        descLines.push(`Note: ${instr}`);
+        descLines.push(`Note: ${part.specialInstructions}`);
       }
 
       const description = descLines.join('\n');
-      const descHeight = doc.fontSize(10).heightOfString(description, { width: 300 });
+      const isLinkedSvc = ['fab_service', 'shop_rate'].includes(part.partType) && part._linkedPartId;
+      const linkedParentPart = isLinkedSvc ? sortedParts.find(p => String(p.id) === String(part._linkedPartId)) : null;
+      const xOffset = isLinkedSvc ? 20 : 0;
+      const partDisp = dispNum[part.id] || String(part.partNumber);
+
+      const descHeight = doc.fontSize(10).heightOfString(description, { width: 300 - xOffset });
       const rowHeight = Math.max(descHeight, 12) + 8;
 
       // Check page break with full row height
       if (yPos + rowHeight > 700) { doc.addPage(); yPos = 50; }
-
-      const isLinkedSvc = ['fab_service', 'shop_rate'].includes(part.partType) && part._linkedPartId;
-      const linkedParentPart = isLinkedSvc ? sortedParts.find(p => String(p.id) === String(part._linkedPartId)) : null;
-      const xOffset = isLinkedSvc ? 20 : 0;
 
       // Service background tint
       if (isLinkedSvc) {
         doc.save().rect(50 + xOffset, yPos - 2, 512 - xOffset, rowHeight + 4).fill('#e0e0e0').restore();
       }
 
-      // Part number
+      // Part number (services show their sub-number, e.g. 1.1)
       doc.fontSize(11).fillColor(isLinkedSvc ? '#444' : primaryColor).font('Helvetica-Bold');
-      doc.text(isLinkedSvc ? '+' : `#${part.partNumber}`, 50 + xOffset, yPos, { lineBreak: false });
+      doc.text(isLinkedSvc ? partDisp : `#${partDisp}`, 50 + xOffset, yPos, { lineBreak: false });
 
       // Part type + description  
       doc.fontSize(10).fillColor(isLinkedSvc ? '#444' : darkColor).font('Helvetica-Bold');
-      doc.text(partLabel + (isLinkedSvc && linkedParentPart ? ` (for Part #${linkedParentPart.partNumber})` : ''), 85 + xOffset, yPos, { lineBreak: false });
+      doc.text(partLabel + (isLinkedSvc && linkedParentPart ? ` (for Part #${dispNum[linkedParentPart.id] || linkedParentPart.partNumber})` : ''), 85 + xOffset, yPos, { lineBreak: false });
       doc.font('Helvetica').fillColor(grayColor);
       doc.text(description, 85 + xOffset, yPos + 11, { width: 300 - xOffset });
       

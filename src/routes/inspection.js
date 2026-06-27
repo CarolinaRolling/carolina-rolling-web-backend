@@ -49,6 +49,39 @@ function calcDiamVariance(seam, d90, d45, dNeg45) {
   return Math.max(...vals) - Math.min(...vals);
 }
 
+// Parse a spec dimension that may be a fraction ("36 1/4"), decimal, or have units
+function parseSpec(v) {
+  if (v == null || v === '') return null;
+  if (typeof v === 'number') return isNaN(v) ? null : v;
+  const s = String(v).trim();
+  const mixed = s.match(/^(\d+)\s+(\d+)\/(\d+)/);
+  if (mixed) return parseInt(mixed[1]) + parseInt(mixed[2]) / parseInt(mixed[3]);
+  const frac = s.match(/^(\d+)\/(\d+)/);
+  if (frac) return parseInt(frac[1]) / parseInt(frac[2]);
+  const dec = parseFloat(s);
+  return isNaN(dec) ? null : dec;
+}
+
+// Nominal ordered diameter for a part (for ASME UG-80 out-of-round %)
+function specDiameter(part) {
+  if (!part) return null;
+  const fd = part.formData || {};
+  return parseSpec(part.diameter) ?? parseSpec(part.outerDiameter) ?? parseSpec(fd.diameter) ?? parseSpec(fd.outerDiameter);
+}
+
+// ASME UG-80(a)(1) out-of-roundness: (Dmax − Dmin) must be ≤ 1% of nominal diameter (internal pressure).
+// Returns { variance, ratioPct (or null), fail }. Falls back to a fixed 1/4" spread when no nominal Ø is known.
+const ASME_OOR_LIMIT = 0.01; // 1%
+const OOR_FALLBACK_SPREAD = 0.25; // 1/4" when nominal diameter unavailable
+function evalOutOfRound(po, nominalD) {
+  const variance = calcDiamVariance(po.diamSeam, po.diam90, po.diam45, po.diamNeg45);
+  if (nominalD && nominalD > 0) {
+    const ratio = variance / nominalD;
+    return { variance, ratioPct: Math.round(ratio * 100 * 100) / 100, fail: ratio > ASME_OOR_LIMIT + 1e-6 };
+  }
+  return { variance, ratioPct: null, fail: variance > OOR_FALLBACK_SPREAD + 0.001 };
+}
+
 // ── Inspection tools registry ──
 // GET /api/inspections/tools — list tools (active only unless ?all=true)
 router.get('/tools', async (req, res, next) => {
@@ -103,7 +136,15 @@ router.get('/job/:workOrderId', async (req, res, next) => {
       include: [{ model: InspectionUnit, as: 'units', order: [['sequence', 'ASC']] }],
       order: [['createdAt', 'ASC']]
     });
-    res.json({ data: jobs });
+    // Attach nominal diameter (for ASME UG-80 out-of-round %) so clients can flag live
+    const out = [];
+    for (const j of jobs) {
+      const jj = j.toJSON();
+      const part = await WorkOrderPart.findByPk(j.workOrderPartId, { attributes: ['diameter','outerDiameter','formData'] });
+      jj.nominalDiameter = specDiameter(part);
+      out.push(jj);
+    }
+    res.json({ data: out });
   } catch(error) { next(error); }
 });
 
@@ -203,10 +244,18 @@ router.patch('/unit/:id', async (req, res, next) => {
 
     if (req.body.postRoll !== undefined) {
       const po = req.body.postRoll;
-      // Auto-calculate diameter tolerance
-      const variance = calcDiamVariance(po.diamSeam, po.diam90, po.diam45, po.diamNeg45);
-      po.outOfTolerance = variance > 0.25;
-      po.diamVariance = Math.round(variance * 10000) / 10000;
+      // ASME UG-80 out-of-roundness: (Dmax−Dmin) ≤ 1% of nominal diameter
+      let nominalD = null;
+      const jobForSpec = await InspectionJob.findByPk(unit.inspectionJobId, { attributes: ['workOrderPartId'] });
+      if (jobForSpec) {
+        const partForSpec = await WorkOrderPart.findByPk(jobForSpec.workOrderPartId, { attributes: ['diameter','outerDiameter','formData'] });
+        nominalD = specDiameter(partForSpec);
+      }
+      const oor = evalOutOfRound(po, nominalD);
+      po.diamVariance = Math.round(oor.variance * 10000) / 10000;
+      po.diamRatio = oor.ratioPct;            // % of nominal diameter (null if no nominal Ø)
+      po.nominalDiameter = nominalD || null;  // snapshot for the report
+      po.outOfTolerance = oor.fail;
       updates.postRoll = po;
       updates.postRollComplete = !!(
         po.circumEnd1 && po.circumEnd2 &&
@@ -538,6 +587,16 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
       doc.font('Helvetica-Bold').fontSize(10).fillColor(primaryColor).text('POST-ROLL MEASUREMENTS', 50, y);
       y += 14;
 
+      // Out-of-round per ASME UG-80 (recomputed live for consistency with current rule)
+      const nominalD = po.nominalDiameter || specDiameter(part);
+      const oor = evalOutOfRound(po, nominalD);
+      const hasDiam = !!(po.diamSeam || po.diam90 || po.diam45 || po.diamNeg45);
+      const nomStr = nominalD ? (Math.round(nominalD * 1000) / 1000) + '"' : null;
+      const oorValue = !hasDiam ? '—'
+        : oor.ratioPct != null
+          ? `${oor.ratioPct.toFixed(2)}% of ${nomStr} Ø — ASME UG-80 limit 1.00%` + (oor.fail ? '  ⚠ EXCEEDS' : '  ✓ PASS')
+          : `${oor.variance.toFixed(4)}" spread — no nominal Ø on file (limit 1/4")` + (oor.fail ? '  ⚠ EXCEEDS' : '  ✓ PASS');
+
       const postRows = [
         ['Circumference — End 1', fmtMeas(po.circumEnd1), null],
         ['Circumference — End 2', fmtMeas(po.circumEnd2), null],
@@ -545,7 +604,8 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
         ['Diameter at 90°', fmtMeas(po.diam90), null],
         ['Diameter at 45°', fmtMeas(po.diam45), null],
         ['Diameter at -45°', fmtMeas(po.diamNeg45), null],
-        ['Diameter Variance', po.diamVariance !== undefined ? fmtMeas(po.diamVariance) + (po.outOfTolerance ? ' ⚠ EXCEEDS 1/4" spread' : ' ✓ PASS') : '—', po.outOfTolerance ? 'FAIL' : null],
+        ['Diameter Variance (max−min)', hasDiam ? oor.variance.toFixed(4) + '"' : '—', null],
+        ['Out-of-Round (ASME UG-80)', oorValue, oor.fail ? 'FAIL' : null],
       ];
 
       postRows.forEach(([label, value, flag], idx) => {
@@ -568,7 +628,7 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
     doc.moveTo(50, y).lineTo(562, y).lineWidth(1).strokeColor(primaryColor).stroke();
     y += 12;
     doc.font('Helvetica').fontSize(9).fillColor(grayColor)
-      .text('This inspection report certifies that the measurements recorded above were taken by Carolina Rolling Co. Inc. personnel. All measurements are in inches. Tolerances applied: Out-of-Square ≤ 3/16", Diameter spread ≤ 1/4" (each reading ±1/8").', 50, y, { width: 512 });
+      .text('This inspection report certifies that the measurements recorded above were taken by Carolina Rolling Co. Inc. personnel. All measurements are in inches. Tolerances applied: Out-of-Square ≤ 3/16"; Out-of-Round per ASME Section VIII Div. 1, UG-80(a)(1) — the difference between maximum and minimum diameters ≤ 1% of nominal diameter.', 50, y, { width: 512 });
     y += 32;
     doc.font('Helvetica').fontSize(9).fillColor(darkColor).text('Operator Signature: ___________________________', 50, y);
     doc.text(`Date: ${fmtDate(new Date())}`, 350, y);

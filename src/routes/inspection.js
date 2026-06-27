@@ -670,7 +670,10 @@ async function generateInspectionReportBuffer(jobId) {
 // GET /api/inspections/job/:id/report-pdf — generate inspection report PDF
 router.get('/job/:id/report-pdf', async (req, res, next) => {
   try {
-    const { buffer, drLabel } = await generateInspectionReportBuffer(req.params.id);
+    const { buffer, drLabel, irNumber } = await generateInspectionReportBuffer(req.params.id);
+    // Also file it under the work order's documents (best-effort — never blocks the view)
+    try { await saveInspectionReportDocument(req.params.id, { buffer, irNumber }); }
+    catch (e) { console.error('[InspectionReport] save-on-view failed:', e.message); }
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="Inspection-Report-${drLabel}.pdf"`);
     res.send(buffer);
@@ -679,11 +682,11 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
 
 // Generate the inspection report and save it to the work order's documents, named the IR number.
 // Replaces any prior copy with the same IR name so re-completion refreshes it.
-async function saveInspectionReportDocument(jobId) {
+async function saveInspectionReportDocument(jobId, pre) {
   const fileStorage = require('../utils/storage');
   const job = await InspectionJob.findByPk(jobId, { attributes: ['id', 'workOrderId'] });
   if (!job) return;
-  const { buffer, irNumber } = await generateInspectionReportBuffer(jobId);
+  const { buffer, irNumber } = pre || await generateInspectionReportBuffer(jobId);
   const filename = `${irNumber || 'Inspection-Report'}.pdf`.replace(/[\/\\:]/g, '-');
   const existing = await WorkOrderDocument.findOne({ where: { workOrderId: job.workOrderId, originalName: filename } });
   if (existing) {

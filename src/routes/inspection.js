@@ -205,7 +205,7 @@ router.patch('/unit/:id', async (req, res, next) => {
       const po = req.body.postRoll;
       // Auto-calculate diameter tolerance
       const variance = calcDiamVariance(po.diamSeam, po.diam90, po.diam45, po.diamNeg45);
-      po.outOfTolerance = variance > 0.125;
+      po.outOfTolerance = variance > 0.25;
       po.diamVariance = Math.round(variance * 10000) / 10000;
       updates.postRoll = po;
       updates.postRollComplete = !!(
@@ -545,7 +545,7 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
         ['Diameter at 90°', fmtMeas(po.diam90), null],
         ['Diameter at 45°', fmtMeas(po.diam45), null],
         ['Diameter at -45°', fmtMeas(po.diamNeg45), null],
-        ['Diameter Variance', po.diamVariance !== undefined ? fmtMeas(po.diamVariance) + (po.outOfTolerance ? ' ⚠ EXCEEDS ±1/8"' : ' ✓ PASS') : '—', po.outOfTolerance ? 'FAIL' : null],
+        ['Diameter Variance', po.diamVariance !== undefined ? fmtMeas(po.diamVariance) + (po.outOfTolerance ? ' ⚠ EXCEEDS 1/4" spread' : ' ✓ PASS') : '—', po.outOfTolerance ? 'FAIL' : null],
       ];
 
       postRows.forEach(([label, value, flag], idx) => {
@@ -568,7 +568,7 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
     doc.moveTo(50, y).lineTo(562, y).lineWidth(1).strokeColor(primaryColor).stroke();
     y += 12;
     doc.font('Helvetica').fontSize(9).fillColor(grayColor)
-      .text('This inspection report certifies that the measurements recorded above were taken by Carolina Rolling Co. Inc. personnel. All measurements are in inches. Tolerances applied: Out-of-Square ≤ 3/16", Diameter variance ≤ ±1/8".', 50, y, { width: 512 });
+      .text('This inspection report certifies that the measurements recorded above were taken by Carolina Rolling Co. Inc. personnel. All measurements are in inches. Tolerances applied: Out-of-Square ≤ 3/16", Diameter spread ≤ 1/4" (each reading ±1/8").', 50, y, { width: 512 });
     y += 32;
     doc.font('Helvetica').fontSize(9).fillColor(darkColor).text('Operator Signature: ___________________________', 50, y);
     doc.text(`Date: ${fmtDate(new Date())}`, 350, y);

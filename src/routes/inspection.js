@@ -4,6 +4,7 @@ const path = require('path');
 const router = express.Router();
 const { Op } = require('sequelize');
 const PDFDocument = require('pdfkit');
+const { computeDisplayNumbers } = require('../services/partNumbering');
 const {
   InspectionJob, InspectionUnit, InspectionTool, WorkOrder, WorkOrderPart, sequelize
 } = require('../models');
@@ -18,6 +19,22 @@ function makeUnitId(drNumber, partLine, sequence) {
 function nextSequence(units) {
   if (!units || !units.length) return 0;
   return Math.max(...units.map(u => u.sequence || 0)) + 1;
+}
+
+// Clean production line number for a part (1, 2, 3 — ignoring service line-items),
+// used so cylinder IDs / IR numbers read DR-1-1 instead of DR-3-1. Falls back to the
+// stored partNumber on any error.
+async function cleanLineNumber(workOrderId, partId, fallback) {
+  try {
+    const parts = await WorkOrderPart.findAll({
+      where: { workOrderId },
+      attributes: ['id', 'partNumber', 'partType', 'formData']
+    });
+    const { display } = computeDisplayNumbers(parts.map(p => ({
+      id: p.id, partNumber: p.partNumber, partType: p.partType, formData: p.formData
+    })));
+    return display[partId] || fallback;
+  } catch (e) { return fallback; }
 }
 
 // Helper: calculate out-of-square (returns inches difference)
@@ -105,6 +122,7 @@ router.post('/job', async (req, res, next) => {
 
     const count = parseInt(unitCount) || parseInt(part.quantity) || 1;
     const drNum = wo.drNumber || wo.orderNumber || workOrderId.slice(0,8);
+    const lineNum = await cleanLineNumber(workOrderId, part.id, part.partNumber);
 
     const job = await InspectionJob.create({
       workOrderId, workOrderPartId, inspectionPartId: inspectionPartId || null,
@@ -118,7 +136,7 @@ router.post('/job', async (req, res, next) => {
     for (let i = 0; i < count; i++) {
       units.push(await InspectionUnit.create({
         inspectionJobId: job.id,
-        unitId: makeUnitId(drNum, part.partNumber, i),
+        unitId: makeUnitId(drNum, lineNum, i),
         sequence: i,
       }));
     }
@@ -248,10 +266,11 @@ router.post('/job/:id/add-unit', async (req, res, next) => {
     const part = await WorkOrderPart.findByPk(job.workOrderPartId, { attributes: ['id','partNumber'] });
     const drNum = wo?.drNumber || wo?.orderNumber || job.workOrderId.slice(0,8);
     const sequence = nextSequence(job.units);
+    const lineNum = await cleanLineNumber(job.workOrderId, job.workOrderPartId, part?.partNumber || 1);
 
     const unit = await InspectionUnit.create({
       inspectionJobId: job.id,
-      unitId: makeUnitId(drNum, part?.partNumber || 1, sequence),
+      unitId: makeUnitId(drNum, lineNum, sequence),
       sequence,
     });
 
@@ -315,10 +334,11 @@ router.patch('/unit/:id/move', async (req, res, next) => {
 
     // Reassign + renumber to the target line; force a label reprint
     const newSeq = nextSequence(targetJob.units);
+    const lineNum = await cleanLineNumber(sourceJob.workOrderId, targetWorkOrderPartId, targetPart.partNumber);
     await unit.update({
       inspectionJobId: targetJob.id,
       sequence: newSeq,
-      unitId: makeUnitId(drNum, targetPart.partNumber, newSeq),
+      unitId: makeUnitId(drNum, lineNum, newSeq),
       labelPrinted: false,
     });
 
@@ -355,6 +375,7 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
     const part = await WorkOrderPart.findByPk(job.workOrderPartId, {
       attributes: ['id','partNumber','clientPartNumber','heatNumber','materialDescription','formData','quantity','rev','lotNumber']
     });
+    const reportLineNum = await cleanLineNumber(job.workOrderId, part?.id, part?.partNumber ?? '');
 
     let toolsUsed = [];
     if (Array.isArray(job.toolsUsed) && job.toolsUsed.length) {
@@ -378,7 +399,7 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
     const fmtDate = d => d ? new Date(d).toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' }) : '—';
 
     // ── HEADER ──
-    const irNumber = `IR-${wo?.drNumber || wo?.orderNumber || ''}-${part?.partNumber ?? ''}`;
+    const irNumber = `IR-${wo?.drNumber || wo?.orderNumber || ''}-${reportLineNum}`;
     const logoPath = [path.join(__dirname, '../assets/logo.png'), path.join(__dirname, '../assets/logo.jpg')].find(p => fs.existsSync(p));
     try { if (logoPath && fs.existsSync(logoPath)) doc.image(logoPath, 50, 28, { width: 60 }); } catch (e) { /* no logo */ }
     doc.font('Helvetica-Bold').fontSize(22).fillColor(primaryColor).text('INSPECTION REPORT', 300, 50, { width:262, align:'right' });
@@ -403,7 +424,7 @@ router.get('/job/:id/report-pdf', async (req, res, next) => {
     doc.font('Helvetica').fontSize(10).text(wo?.clientPurchaseOrderNumber || '—', 120, y);
     doc.font('Helvetica-Bold').fontSize(10).text('LOT #:', 300, y);
     const drForLot = wo?.drNumber || wo?.orderNumber || '';
-    const lotNumber = part?.lotNumber || (drForLot ? `${drForLot}-${part?.partNumber ?? ''}` : (part?.partNumber ?? '—'));
+    const lotNumber = part?.lotNumber || (drForLot ? `${drForLot}-${reportLineNum}` : (reportLineNum || '—'));
     doc.font('Helvetica').fontSize(10).text(String(lotNumber || '—'), 390, y);
     y += 16;
     const matDesc = part?.materialDescription || (part?.formData?._materialDescription) || '—';

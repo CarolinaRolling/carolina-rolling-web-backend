@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const fileStorage = require('../utils/storage');
 const { WorkOrder, WorkOrderPart, WorkOrderDocument, Client, InvoiceNumber, AppSettings, ShipmentCharge, sequelize } = require('../models');
+const { computeDisplayNumbers } = require('../services/partNumbering');
 
 const router = express.Router();
 
@@ -499,6 +500,7 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
       // Build part map for services
       const SERVICE_TYPES = ['fab_service', 'shop_rate', 'rush_service'];
       const sorted = [...parts].sort((a, b) => (a.partNumber || 0) - (b.partNumber || 0));
+      const { display: invDispNum } = computeDisplayNumbers(parts);
       const regularParts = sorted.filter(p => !SERVICE_TYPES.includes(p.partType));
       const serviceParts = sorted.filter(p => SERVICE_TYPES.includes(p.partType));
       const servicesByParent = new Map();
@@ -539,7 +541,7 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
         else if (!matDesc) matDesc = PART_LABELS[part.partType] || 'Service';
         const typeLabel = PART_LABELS[part.partType] || (part.partType || '').replace(/_/g, ' ');
         const rollDesc = fd._rollingDescription ? clean(fd._rollingDescription.split(/\n/)[0]) : '';
-        const partLabel = wo.drNumber ? `${wo.drNumber}-${part.partNumber}` : String(part.partNumber || itemNum);
+        const partLabel = wo.drNumber ? `${wo.drNumber}-${invDispNum[part.id] || part.partNumber}` : String(invDispNum[part.id] || part.partNumber || itemNum);
 
         // Calculate dynamic row height based on actual content
         const descH = doc.font('Helvetica-Bold').fontSize(10).heightOfString(matDesc, { width: 310 });

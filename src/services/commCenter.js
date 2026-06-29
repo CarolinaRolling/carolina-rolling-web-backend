@@ -271,8 +271,9 @@ function extractEmailBody(payload) {
 
 // --- Bills: extract structured fields from a PDF invoice using a vision model ---
 async function extractBill(gmail, messageId) {
-  // Find the first PDF attachment on the message
   const msg = await gmail.users.messages.get({ userId: 'me', id: messageId, format: 'full' });
+
+  // Find any PDF attachments (the bill of record — PDF is always preferred)
   const pdfs = [];
   const walk = (p) => {
     if (!p) return;
@@ -281,33 +282,13 @@ async function extractBill(gmail, messageId) {
     (p.parts || []).forEach(walk);
   };
   walk(msg.data.payload);
-  if (!pdfs.length) return { error: 'no_pdf' };
-
-  const att = pdfs[0];
-  let dataB64;
-  if (att.body.attachmentId) {
-    const a = await gmail.users.messages.attachments.get({ userId: 'me', messageId, id: att.body.attachmentId });
-    dataB64 = a.data.data;
-  } else if (att.body.data) {
-    dataB64 = att.body.data;
-  }
-  if (!dataB64) return { error: 'no_pdf' };
-  const pdfB64 = String(dataB64).replace(/-/g, '+').replace(/_/g, '/');
 
   if (!process.env.ANTHROPIC_API_KEY) return { error: 'no_api_key' };
-  const reqBody = JSON.stringify({
-    model: getParsingModel(),
-    max_tokens: 700,
-    system: 'You extract fields from a vendor invoice/bill PDF for a metal fabrication shop. Reply with ONLY JSON, no markdown:\n{"vendorName":string|null,"invoiceNumber":string|null,"invoiceDate":"YYYY-MM-DD"|null,"dueDate":"YYYY-MM-DD"|null,"amount":number|null,"currency":string,"poNumber":string|null,"summary":string}\nAmount = total amount due as a number (no symbols). summary = one short line of what it is for. Use null when a field is not present.',
-    messages: [{
-      role: 'user',
-      content: [
-        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfB64 } },
-        { type: 'text', text: 'Extract the invoice fields as specified.' },
-      ],
-    }],
-  });
-  try {
+
+  const SYS = 'You extract fields from a vendor invoice/bill for a metal fabrication shop. Reply with ONLY JSON, no markdown:\n{"vendorName":string|null,"invoiceNumber":string|null,"invoiceDate":"YYYY-MM-DD"|null,"dueDate":"YYYY-MM-DD"|null,"amount":number|null,"currency":string,"poNumber":string|null,"summary":string}\nAmount = total amount due as a number (no symbols). summary = one short line of what it is for. Use null when a field is not present.';
+
+  const callClaude = async (content) => {
+    const reqBody = JSON.stringify({ model: getParsingModel(), max_tokens: 700, system: SYS, messages: [{ role: 'user', content }] });
     const https = require('https');
     const raw = await new Promise((resolve, reject) => {
       const req = https.request({
@@ -320,11 +301,48 @@ async function extractBill(gmail, messageId) {
     });
     const data = JSON.parse(raw);
     const text = (data.content?.[0]?.text || '').replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-    const parsed = JSON.parse(text);
-    parsed.fileName = att.filename || 'invoice.pdf';
+    return JSON.parse(text);
+  };
+
+  // 1) PDF path — the default / source of truth when an attachment exists
+  if (pdfs.length) {
+    try {
+      const att = pdfs[0];
+      let dataB64;
+      if (att.body.attachmentId) {
+        const a = await gmail.users.messages.attachments.get({ userId: 'me', messageId, id: att.body.attachmentId });
+        dataB64 = a.data.data;
+      } else if (att.body.data) {
+        dataB64 = att.body.data;
+      }
+      if (dataB64) {
+        const pdfB64 = String(dataB64).replace(/-/g, '+').replace(/_/g, '/');
+        const parsed = await callClaude([
+          { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfB64 } },
+          { type: 'text', text: 'Extract the invoice fields as specified.' },
+        ]);
+        parsed.fileName = att.filename || 'invoice.pdf';
+        parsed.source = 'pdf';
+        return parsed;
+      }
+    } catch (err) {
+      console.warn('[Bills] PDF extract failed, falling back to email body:', err.message);
+      // fall through to body extraction
+    }
+  }
+
+  // 2) No usable PDF — extract from the email body (e.g. Spectrum puts amount + due date in the body)
+  try {
+    const body = extractEmailBody(msg.data.payload) || '';
+    const subject = (msg.data.payload.headers || []).find(h => (h.name || '').toLowerCase() === 'subject')?.value || '';
+    if (!body.trim()) return { error: 'no_pdf' };
+    const parsed = await callClaude([
+      { type: 'text', text: `This is a vendor bill/invoice sent in the body of an email (no PDF attached). Subject: ${subject}\n\nEmail body:\n${body.slice(0, 12000)}\n\nExtract the invoice fields as specified. If the email is only a notification that a statement is ready (no actual amount or due date present), return null for amount and dueDate.` },
+    ]);
+    parsed.source = 'email_body';
     return parsed;
   } catch (err) {
-    console.warn('[Bills] extract failed:', err.message);
+    console.warn('[Bills] body extract failed:', err.message);
     return { error: 'extract_failed' };
   }
 }
@@ -337,7 +355,12 @@ async function runBillScan({ limit = 25 } = {}) {
   let extracted = 0;
   for (const account of accounts) {
     const bills = await ScannedEmail.findAll({
-      where: { gmailAccountId: account.id, emailType: 'comm_center', commCategory: 'bill', commArchived: false, receivedAt: { [Op.gte]: since }, billData: null },
+      where: {
+        gmailAccountId: account.id, emailType: 'comm_center', commCategory: 'bill', commArchived: false,
+        receivedAt: { [Op.gte]: since },
+        // No data yet, OR a prior attempt failed only because there was no PDF — now we can read the email body
+        [Op.or]: [{ billData: null }, { 'billData.error': 'no_pdf' }],
+      },
       order: [['receivedAt', 'DESC']], limit,
     });
     if (!bills.length) continue;

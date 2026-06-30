@@ -5,7 +5,7 @@ const { getParsingModel } = require('./aiConfig');
  * Looks across active work orders and flags what's at risk of missing its promised
  * date (overdue, due soon, not enough shop time left for the remaining labor, or
  * material still not in). Produces a ranked list of findings, optionally re-voiced
- * by the AI in Ginger's no-nonsense tone, and stores them in AppSettings under
+ * by the AI in Ginger's gentle, Eeyore-ish tone, and stores them in AppSettings under
  * the key `ginger_findings` for the floating Ginger icon to read.
  *
  * The risk detection is fully deterministic (math) so it works with or without the
@@ -135,22 +135,22 @@ function evaluateWorkOrder(wo) {
   };
 }
 
-// Built-in Ginger voice (fallback when AI is unavailable)
+// Built-in Ginger voice (fallback when AI is unavailable) — gentle, Eeyore-ish
 function defaultLine(wo, severity, reasons, daysUntil) {
   const id = `DR ${dr(wo)} (${wo.clientName || 'client'})`;
   if (severity === 'overdue') {
     const late = Math.abs(daysUntil);
-    return `${id} is PAST DUE — it should've shipped ${late} day${late === 1 ? '' : 's'} ago. Deal with it before I do.`;
+    return `Oh dear... ${id} is past due — it was meant to ship ${late} day${late === 1 ? '' : 's'} ago. Could we look after it when you get a moment?`;
   }
   if (severity === 'capacity') {
     const r = reasons.find(x => x.kind === 'capacity');
-    return `${id}: ${r.remainingHours}h of work left and only about ${r.capacityHours}h of shop time before it's due. Start it now or it slips.`;
+    return `${id} has about ${r.remainingHours}h of work left and only ~${r.capacityHours}h of shop time before it's due. Might be wise to start soon, if we can.`;
   }
   if (severity === 'material') {
-    return `${id} is due soon and the material still isn't all in. Chase it today, not tomorrow.`;
+    return `${id} is due before long and the material isn't all in yet. Maybe worth a gentle nudge to the supplier today.`;
   }
   // due_soon
-  return `${id} is due in ${daysUntil} day${daysUntil === 1 ? '' : 's'}. Don't let it sneak up on you.`;
+  return `${id} is due in ${daysUntil} day${daysUntil === 1 ? '' : 's'}. Just didn't want it to slip by unnoticed.`;
 }
 
 // Optional: re-voice the findings through the AI in Ginger's tone.
@@ -168,7 +168,7 @@ async function enhanceWithAI(findings) {
     const body = JSON.stringify({
       model: getParsingModel(),
       max_tokens: 1200,
-      system: `You are "Ginger", the no-nonsense office manager of Carolina Rolling Company — a bossy but caring golden retriever who makes sure deadlines don't get missed. You are blunt, a little sassy, and protective of the shop. Given a JSON array of at-risk work orders, write ONE short punchy line for each (max ~22 words) telling the boss what to do about it. Reference the DR number and client. Reply with ONLY a JSON array of objects: [{"i": <index>, "line": "<your line>"}]. No markdown, no extra text.`,
+      system: `You are "Ginger", the soft-hearted office dog of Carolina Rolling Company — gentle, soft-spoken, and a little gloomy, in the spirit of Eeyore from Winnie the Pooh. You are NOT angry, bossy, or sassy. You worry quietly, tend to expect the worst, and gently nudge the boss to take care of things before they slip — always kind, patient, and supportive, and quietly grateful when something gets handled. Given a JSON array of at-risk work orders, write ONE short, gentle line for each (max ~22 words) softly pointing out what could use attention, with a little encouragement. Reference the DR number and client. Reply with ONLY a JSON array of objects: [{"i": <index>, "line": "<your line>"}]. No markdown, no extra text.`,
       messages: [{ role: 'user', content: JSON.stringify(compact) }],
     });
     const https = require('https');

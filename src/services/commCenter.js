@@ -47,8 +47,19 @@ function emailFromHeader(fromHeader) {
   return (m ? m[1] : fromHeader || '').toLowerCase().trim();
 }
 
+// Mail sent FROM our own domain is not an incoming bill or inquiry — e.g. invoices we send to
+// clients are accounts-receivable, not a bill we owe. Used to prevent that misclassification.
+const OWN_DOMAINS = ['carolinarolling.com'];
+// Specific legacy/individual addresses that are also us (can't be domain-matched, e.g. a gmail.com).
+const OWN_ADDRESSES = ['carolinarolling@gmail.com'];
+function isOwnSender(addr) {
+  const a = String(addr || '').toLowerCase().trim();
+  if (OWN_ADDRESSES.includes(a)) return true;
+  return OWN_DOMAINS.some(d => a.endsWith('@' + d) || a.endsWith('.' + d) || a === d);
+}
+
 // --- Stage 1: body-aware triage ---
-async function classifyEmail({ from, subject, snippet, body, knownClient }) {
+async function classifyEmail({ from, fromEmail, subject, snippet, body, knownClient }) {
   // No AI key → safe default
   if (!process.env.ANTHROPIC_API_KEY) {
     return { category: knownClient ? 'client_inquiry' : 'general', isQuoteRequest: false, needsResponse: !!knownClient };
@@ -94,12 +105,17 @@ CRITICAL RULES:
     const data = JSON.parse(raw);
     const text = (data.content?.[0]?.text || '').replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
     const parsed = JSON.parse(text);
-    const category = VALID_CATEGORIES.includes(parsed.category) ? parsed.category : 'general';
-    return {
-      category,
-      isQuoteRequest: !!parsed.isQuoteRequest,
-      needsResponse: parsed.needsResponse !== undefined ? !!parsed.needsResponse : !['marketing', 'spam'].includes(category),
-    };
+    let category = VALID_CATEGORIES.includes(parsed.category) ? parsed.category : 'general';
+    let isQuoteRequest = !!parsed.isQuoteRequest;
+    let needsResponse = parsed.needsResponse !== undefined ? !!parsed.needsResponse : !['marketing', 'spam'].includes(category);
+    // Guard: our own outgoing mail (invoices/quotes we send out) must never be treated as an
+    // incoming bill or client request.
+    const senderAddr = fromEmail || ((String(from || '').match(/<(.+?)>/) || [])[1]) || from || '';
+    if (isOwnSender(senderAddr)) {
+      if (['bill', 'client_inquiry', 'vendor'].includes(category)) category = 'general';
+      isQuoteRequest = false; needsResponse = false;
+    }
+    return { category, isQuoteRequest, needsResponse };
   } catch (err) {
     console.warn('[CommCenter] classify failed, default general:', err.message);
     return { category: knownClient ? 'client_inquiry' : 'general', isQuoteRequest: false, needsResponse: !!knownClient };
@@ -213,7 +229,7 @@ async function reclassifyExisting({ limit = 400 } = {}) {
     if (vendorAddrs[fromEmail]) {
       triage = { category: 'vendor', isQuoteRequest: false, needsResponse: false };
     } else {
-      triage = await classifyEmail({ from: e.fromName || e.fromEmail, subject: e.subject, snippet: e.commSnippet, knownClient: clientAddrs[fromEmail] || null });
+      triage = await classifyEmail({ from: e.fromName || e.fromEmail, fromEmail: e.fromEmail, subject: e.subject, snippet: e.commSnippet, knownClient: clientAddrs[fromEmail] || null });
     }
     try {
       await e.update({ commCategory: triage.category, commIsQuoteRequest: triage.isQuoteRequest, commNeedsResponse: triage.needsResponse });
@@ -285,7 +301,7 @@ async function extractBill(gmail, messageId) {
 
   if (!process.env.ANTHROPIC_API_KEY) return { error: 'no_api_key' };
 
-  const SYS = 'You extract fields from a vendor invoice/bill for a metal fabrication shop. Reply with ONLY JSON, no markdown:\n{"vendorName":string|null,"invoiceNumber":string|null,"invoiceDate":"YYYY-MM-DD"|null,"dueDate":"YYYY-MM-DD"|null,"amount":number|null,"currency":string,"poNumber":string|null,"summary":string}\nAmount = total amount due as a number (no symbols). summary = one short line of what it is for. Use null when a field is not present.';
+  const SYS = 'You extract fields from a vendor invoice/bill for a metal fabrication shop. Reply with ONLY JSON, no markdown:\n{"vendorName":string|null,"invoiceNumber":string|null,"invoiceDate":"YYYY-MM-DD"|null,"dueDate":"YYYY-MM-DD"|null,"amount":number|null,"currency":string,"poNumber":string|null,"category":"materials|insurance|supplies|utilities|rent|equipment|payroll|other","summary":string}\nAmount = total amount due as a number (no symbols). dueDate = the payment due date as YYYY-MM-DD; look hard for "due date", "payment due", "please pay by", "net 30", or a due line (if only terms like "Net 30" are given, compute from the invoice date); null only if truly absent. category = the best expense bucket for a metal fabrication shop: materials (steel/metal/consumables/gas), utilities (power/water/internet/phone), rent (building lease), supplies (shop supplies), equipment (machines/tools/repairs), insurance, payroll, or other. summary = one short line of what it is for. Use null when a field is not present.';
 
   const callClaude = async (content) => {
     const reqBody = JSON.stringify({ model: getParsingModel(), max_tokens: 700, system: SYS, messages: [{ role: 'user', content }] });

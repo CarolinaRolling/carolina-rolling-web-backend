@@ -369,6 +369,35 @@ app.patch('/api/com-center/bills/:id/status', authenticate, async (req, res) => 
     if (!email) return res.status(404).json({ error: { message: 'Not found' } });
     const status = ['pending', 'approved', 'rejected'].includes(req.body.status) ? req.body.status : 'pending';
     await email.update({ billStatus: status });
+    // Approving a bill sends it to Accounts Payable as an unpaid liability (built from the
+    // extracted vendor/amount/due date/category). Linked by scannedEmailId so re-approving
+    // never creates a duplicate.
+    if (status === 'approved') {
+      try {
+        const { Liability } = require('./models');
+        const d = email.billData || {};
+        const VALID_CATS = ['materials', 'insurance', 'supplies', 'utilities', 'rent', 'equipment', 'payroll', 'other'];
+        const existing = await Liability.findOne({ where: { scannedEmailId: email.id } });
+        if (existing) {
+          // Already in AP (e.g. from the older scanner) — just mark it ready to pay.
+          if (existing.status === 'pending_review' || existing.status === 'rejected') await existing.update({ status: 'unpaid' });
+        } else {
+          await Liability.create({
+            name: d.summary || (d.vendorName ? `Invoice from ${d.vendorName}` : (email.subject || 'Vendor bill')),
+            category: VALID_CATS.includes(d.category) ? d.category : 'other',
+            amount: d.amount || 0,
+            dueDate: d.dueDate || null,
+            vendor: d.vendorName || email.fromName || email.fromEmail || null,
+            vendorInvoiceNumber: d.invoiceNumber || null,
+            poNumber: d.poNumber || null,
+            status: 'unpaid',
+            createdBy: 'com_center',
+            scannedEmailId: email.id,
+            notes: `Approved from Com Center bill: "${email.subject || ''}"`,
+          });
+        }
+      } catch (e) { console.error('[Bills] approve->AP failed:', e.message); }
+    }
     res.json({ data: { id: email.id, billStatus: status } });
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
@@ -791,7 +820,7 @@ app.post('/api/com-center/scan-now', authenticate, async (req, res) => {
                 } else {
                   const { classifyEmail, extractEmailBody } = require('./services/commCenter');
                   const fullBody = extractEmailBody(detail.data.payload);
-                  triage = await classifyEmail({ from: fromHeader, subject, snippet, body: fullBody, knownClient: clientAddrs[fromEmail] || null });
+                  triage = await classifyEmail({ from: fromHeader, fromEmail, subject, snippet, body: fullBody, knownClient: clientAddrs[fromEmail] || null });
                 }
                 const category = triage.category;
                 const gmailLink = 'https://mail.google.com/mail/?authuser=' + encodeURIComponent(account.email || '') + '#all/' + msg.id;
@@ -2293,7 +2322,7 @@ Please confirm with the operator and mark the order complete if ready.`,
                 } else {
                   const { classifyEmail, extractEmailBody } = require('./services/commCenter');
                   const fullBody = extractEmailBody(detail.data.payload);
-                  triage = await classifyEmail({ from: fromHeader, subject, snippet, body: fullBody, knownClient: clientAddrs[fromEmail] || null });
+                  triage = await classifyEmail({ from: fromHeader, fromEmail, subject, snippet, body: fullBody, knownClient: clientAddrs[fromEmail] || null });
                 }
                 const category = triage.category;
 

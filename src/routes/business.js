@@ -567,6 +567,7 @@ router.post('/payroll', async (req, res, next) => {
     // Auto-populate with active employees
     const employees = await Employee.findAll({ where: { isActive: true }, order: [['sortOrder', 'ASC'], ['name', 'ASC']] });
     for (const emp of employees) {
+      const rate0 = parseFloat(emp.hourlyRate) || 0;
       await PayrollEntry.create({
         payrollWeekId: payroll.id,
         employeeId: emp.id,
@@ -577,7 +578,7 @@ router.post('/payroll', async (req, res, next) => {
         vacationHours: 0,
         bonus: 0,
         overtimeDetails: [],
-        grossPay: 0,
+        grossPay: 40 * rate0,
         sortOrder: emp.sortOrder ?? 999
       });
     }
@@ -627,6 +628,27 @@ router.put('/payroll/:id/entries/:entryId', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// POST /api/business/payroll/:id/recalc - recompute gross for every entry (fixes any $0)
+router.post('/payroll/:id/recalc', async (req, res, next) => {
+  try {
+    const entries = await PayrollEntry.findAll({ where: { payrollWeekId: req.params.id } });
+    let totalGross = 0;
+    for (const e of entries) {
+      const rate = parseFloat(e.hourlyRate) || 0;
+      const reg = parseFloat(e.regularHours) || 0;
+      const ot = parseFloat(e.overtimeHours) || 0;
+      const vac = parseFloat(e.vacationHours) || 0;
+      const bonus = parseFloat(e.bonus) || 0;
+      const gross = (reg * rate) + (ot * rate * 1.5) + (vac * rate) + bonus;
+      totalGross += gross;
+      if (parseFloat(e.grossPay) !== gross) await e.update({ grossPay: gross });
+    }
+    await PayrollWeek.update({ totalGross }, { where: { id: req.params.id } });
+    const full = await PayrollWeek.findByPk(req.params.id, { include: [{ model: PayrollEntry, as: 'entries' }] });
+    res.json({ data: full, message: 'Recalculated' });
+  } catch (error) { next(error); }
+});
+
 // PUT /api/business/payroll/:id - Update payroll week (dates, notes)
 router.put('/payroll/:id', async (req, res, next) => {
   try {
@@ -645,7 +667,16 @@ router.post('/payroll/:id/submit', async (req, res, next) => {
       include: [{ model: PayrollEntry, as: 'entries' }]
     });
     if (!payroll) return res.status(404).json({ error: { message: 'Not found' } });
-    await payroll.update({ status: 'submitted', submittedAt: new Date(), submittedBy: req.body.submittedBy || 'admin' });
+    // Finalize gross for every entry so nothing submits at $0
+    let totalGross = 0;
+    for (const e of (payroll.entries || [])) {
+      const rate = parseFloat(e.hourlyRate) || 0;
+      const reg = parseFloat(e.regularHours) || 0, ot = parseFloat(e.overtimeHours) || 0, vac = parseFloat(e.vacationHours) || 0, bonus = parseFloat(e.bonus) || 0;
+      const gross = (reg * rate) + (ot * rate * 1.5) + (vac * rate) + bonus;
+      totalGross += gross;
+      if (parseFloat(e.grossPay) !== gross) await e.update({ grossPay: gross });
+    }
+    await payroll.update({ status: 'submitted', submittedAt: new Date(), submittedBy: req.body.submittedBy || 'admin', totalGross });
     
     // Update vacation days used for each employee
     for (const entry of (payroll.entries || [])) {

@@ -522,6 +522,7 @@ app.get('/api/operations/workorders', authenticate, async (req, res) => {
     if (q) where[Op.or] = [
       seqWhere(cast(col('drNumber'), 'text'), { [Op.iLike]: `%${q}%` }),
       { clientName: { [Op.iLike]: `%${q}%` } },
+      { clientPurchaseOrderNumber: { [Op.iLike]: `%${q}%` } },
       { orderNumber: { [Op.iLike]: `%${q}%` } }
     ];
     const rows = await WorkOrder.findAll({ where, attributes: ['id', 'drNumber', 'orderNumber', 'clientName', 'status', 'promisedDate', 'assignedOperator'], order: [['promisedDate', 'ASC']], limit: q ? 300 : 50 });

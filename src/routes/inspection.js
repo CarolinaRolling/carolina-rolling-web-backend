@@ -656,15 +656,16 @@ async function generateInspectionReportBuffer(jobId) {
     if (y > 680) { doc.addPage(); y = 50; }
     doc.moveTo(50, y).lineTo(562, y).lineWidth(1).strokeColor(primaryColor).stroke();
     y += 12;
-    doc.font('Helvetica').fontSize(9).fillColor(grayColor)
-      .text('This inspection report certifies that the measurements recorded above were taken by Carolina Rolling Co. Inc. personnel. All measurements are in inches. Tolerances applied: Out-of-Square ≤ 3/16"; Out-of-Round per ASME Section VIII Div. 1, UG-80(a)(1) — the difference between maximum and minimum diameters ≤ 1% of nominal diameter.', 50, y, { width: 512 });
-    y += 32;
+    const certText = 'This inspection report certifies that the measurements recorded above were taken by Carolina Rolling Co. Inc. personnel. All measurements are in inches. Tolerances applied: Out-of-Square ≤ 3/16"; Out-of-Round per ASME Section VIII Div. 1, UG-80(a)(1) — the difference between maximum and minimum diameters ≤ 1% of nominal diameter.';
+    doc.font('Helvetica').fontSize(9).fillColor(grayColor).text(certText, 50, y, { width: 512 });
+    const certH = doc.heightOfString(certText, { width: 512 });
+    y += certH + 24; // clear gap below the paragraph so the signature has its own space
     doc.font('Helvetica').fontSize(9).fillColor(darkColor).text('Operator Signature: ___________________________', 50, y);
     doc.text(`Date: ${fmtDate(new Date())}`, 350, y);
     if (operatorSig) {
       try {
         const sigBuf = Buffer.from(operatorSig.split(',')[1], 'base64');
-        doc.image(sigBuf, 158, y - 26, { fit: [168, 26] });
+        doc.image(sigBuf, 165, y - 14, { fit: [150, 22] });
       } catch (e) {}
     }
 

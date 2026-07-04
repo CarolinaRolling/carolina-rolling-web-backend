@@ -737,6 +737,27 @@ router.delete('/api-keys/:id', authenticateToken, requireAdmin, async (req, res,
   }
 });
 
+// ===== Operator signatures (one per operator name; auto-applied to inspection reports) =====
+router.get('/operator-signatures', authenticateToken, requireAdmin, async (req, res, next) => {
+  try {
+    const { OperatorSignature } = require('../models');
+    const rows = await OperatorSignature.findAll({ order: [['operatorName', 'ASC']] });
+    res.json({ data: rows.map(r => ({ operatorName: r.operatorName, signatureData: r.signatureData || null })) });
+  } catch (error) { next(error); }
+});
+
+router.put('/operator-signatures', authenticateToken, requireAdmin, async (req, res, next) => {
+  try {
+    const { OperatorSignature } = require('../models');
+    const operatorName = (req.body.operatorName || '').trim();
+    const signatureData = req.body.signatureData || null;
+    if (!operatorName) return res.status(400).json({ error: { message: 'operatorName required' } });
+    const [row] = await OperatorSignature.findOrCreate({ where: { operatorName }, defaults: { signatureData } });
+    await row.update({ signatureData });
+    res.json({ data: { operatorName: row.operatorName, signatureData: row.signatureData || null } });
+  } catch (error) { next(error); }
+});
+
 // GET /api/auth/approved-ips - Get global approved IP list
 router.get('/approved-ips', authenticateToken, requireAdmin, async (req, res, next) => {
   try {

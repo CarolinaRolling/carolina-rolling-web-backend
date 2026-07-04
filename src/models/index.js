@@ -3653,6 +3653,16 @@ const OperatorTask = sequelize.define('OperatorTask', {
   timestamps: true
 });
 
+// One stored signature per operator (by name), applied automatically to inspection reports.
+const OperatorSignature = sequelize.define('OperatorSignature', {
+  id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+  operatorName: { type: DataTypes.STRING, allowNull: false, unique: true },
+  signatureData: { type: DataTypes.TEXT, allowNull: true } // base64 PNG data URL
+}, {
+  tableName: 'operator_signatures',
+  timestamps: true
+});
+
 module.exports = {
   sequelize,
   User,
@@ -3694,6 +3704,7 @@ module.exports = {
   VendorIssue,
   ShipmentCharge,
   OperatorTask,
+  OperatorSignature,
   InspectionJob,
   InspectionUnit,
   InspectionTool,

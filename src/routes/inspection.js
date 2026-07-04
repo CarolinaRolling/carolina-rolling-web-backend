@@ -439,6 +439,16 @@ async function generateInspectionReportBuffer(jobId) {
     });
     const reportLineNum = await cleanLineNumber(job.workOrderId, part?.id, part?.partNumber ?? '');
 
+    // Operator's stored signature (set once per operator in CRAdmin) — auto-applied below
+    let operatorSig = null;
+    try {
+      if (job.operatorName) {
+        const { OperatorSignature } = require('../models');
+        const sigRow = await OperatorSignature.findOne({ where: { operatorName: job.operatorName } });
+        if (sigRow?.signatureData && String(sigRow.signatureData).startsWith('data:image')) operatorSig = sigRow.signatureData;
+      }
+    } catch (e) {}
+
     let toolsUsed = [];
     if (Array.isArray(job.toolsUsed) && job.toolsUsed.length) {
       toolsUsed = await InspectionTool.findAll({ where: { id: { [Op.in]: job.toolsUsed } }, order: [['name', 'ASC']] });
@@ -651,6 +661,12 @@ async function generateInspectionReportBuffer(jobId) {
     y += 32;
     doc.font('Helvetica').fontSize(9).fillColor(darkColor).text('Operator Signature: ___________________________', 50, y);
     doc.text(`Date: ${fmtDate(new Date())}`, 350, y);
+    if (operatorSig) {
+      try {
+        const sigBuf = Buffer.from(operatorSig.split(',')[1], 'base64');
+        doc.image(sigBuf, 158, y - 26, { fit: [168, 26] });
+      } catch (e) {}
+    }
 
     // Footer on every page: IR number (left) + page number (right).
     // margins.bottom=0 while stamping prevents PDFKit from auto-inserting a blank page.

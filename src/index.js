@@ -516,10 +516,14 @@ app.get('/api/operations/operators', authenticate, async (req, res) => {
 app.get('/api/operations/workorders', authenticate, async (req, res) => {
   try {
     const { WorkOrder } = require('./models');
-    const { Op } = require('sequelize');
+    const { Op, where: seqWhere, cast, col } = require('sequelize');
     const q = (req.query.q || '').trim();
     const where = { status: { [Op.notIn]: ASSIGN_DONE }, isVoided: { [Op.not]: true } };
-    if (q) where[Op.or] = [{ drNumber: { [Op.iLike]: `%${q}%` } }, { clientName: { [Op.iLike]: `%${q}%` } }, { orderNumber: { [Op.iLike]: `%${q}%` } }];
+    if (q) where[Op.or] = [
+      seqWhere(cast(col('drNumber'), 'text'), { [Op.iLike]: `%${q}%` }),
+      { clientName: { [Op.iLike]: `%${q}%` } },
+      { orderNumber: { [Op.iLike]: `%${q}%` } }
+    ];
     const rows = await WorkOrder.findAll({ where, attributes: ['id', 'drNumber', 'orderNumber', 'clientName', 'status', 'promisedDate', 'assignedOperator'], order: [['promisedDate', 'ASC']], limit: q ? 300 : 50 });
     res.json({ data: rows.map(w => ({ id: w.id, dr: w.drNumber || w.orderNumber, clientName: w.clientName, status: w.status, promisedDate: w.promisedDate, assignedOperator: w.assignedOperator || null })) });
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }

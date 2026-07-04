@@ -1163,6 +1163,22 @@ const WorkOrderDocument = sequelize.define('WorkOrderDocument', {
   timestamps: true
 });
 
+// Per-work-order messages between the shop-floor operator (tablet) and the office (CRAdmin)
+const WorkOrderMessage = sequelize.define('WorkOrderMessage', {
+  id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+  workOrderId: { type: DataTypes.UUID, allowNull: false },
+  senderType: { type: DataTypes.ENUM('operator', 'office'), allowNull: false },
+  senderName: { type: DataTypes.STRING, allowNull: false },
+  body: { type: DataTypes.TEXT, allowNull: true },
+  imageUrl: { type: DataTypes.STRING, allowNull: true },
+  imageStorageId: { type: DataTypes.STRING, allowNull: true },
+  readByOffice: { type: DataTypes.BOOLEAN, defaultValue: false },
+  readByOperator: { type: DataTypes.BOOLEAN, defaultValue: false }
+}, {
+  tableName: 'work_order_messages',
+  timestamps: true
+});
+
 // WorkOrder associations
 WorkOrder.hasMany(WorkOrderPart, {
   foreignKey: 'workOrderId',
@@ -1194,6 +1210,8 @@ WorkOrderDocument.belongsTo(WorkOrder, {
   foreignKey: 'workOrderId',
   as: 'workOrder'
 });
+WorkOrder.hasMany(WorkOrderMessage, { foreignKey: 'workOrderId', as: 'messages', onDelete: 'CASCADE' });
+WorkOrderMessage.belongsTo(WorkOrder, { foreignKey: 'workOrderId', as: 'workOrder' });
 
 // WorkOrderPart file associations
 WorkOrderPart.hasMany(WorkOrderPartFile, {
@@ -3648,6 +3666,7 @@ module.exports = {
   WorkOrderPart,
   WorkOrderPartFile,
   WorkOrderDocument,
+  WorkOrderMessage,
   Estimate,
   EstimatePart,
   EstimatePartFile,

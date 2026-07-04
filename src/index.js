@@ -1445,6 +1445,17 @@ async function startServer() {
       console.log('operator_tasks table ready');
     } catch(e) { console.log('operator_tasks table error:', e.message); }
 
+    try {
+      await sequelize.query(`CREATE TABLE IF NOT EXISTS operator_signatures (
+        id UUID PRIMARY KEY,
+        "operatorName" VARCHAR(255) NOT NULL UNIQUE,
+        "signatureData" TEXT,
+        "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+        "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+      )`);
+      console.log('operator_signatures table ready');
+    } catch(e) { console.log('operator_signatures table error:', e.message); }
+
     // Add USMCA per-order fields to work_orders table
     try {
       await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "usmcaImporterName" VARCHAR(255)`);

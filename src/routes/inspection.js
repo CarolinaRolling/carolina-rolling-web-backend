@@ -489,10 +489,6 @@ async function generateInspectionReportBuffer(jobId) {
     const lotNumber = part?.lotNumber || (drForLot ? `${drForLot}-${reportLineNum}` : (reportLineNum || '—'));
     doc.font('Helvetica').fontSize(10).text(String(lotNumber || '—'), 390, y);
     y += 16;
-    const matDesc = part?.materialDescription || (part?.formData?._materialDescription) || '—';
-    doc.font('Helvetica-Bold').fontSize(10).text('DESCRIPTION:', 50, y);
-    doc.font('Helvetica').fontSize(10).text(matDesc, 140, y, { width:370 });
-    y += 16;
     doc.font('Helvetica-Bold').fontSize(10).text('HEAT #:', 50, y);
     doc.font('Helvetica').fontSize(10).text(part?.heatNumber || '—', 120, y);
     doc.font('Helvetica-Bold').fontSize(10).text('OPERATOR:', 300, y);
@@ -505,9 +501,19 @@ async function generateInspectionReportBuffer(jobId) {
     y += 16;
     doc.font('Helvetica-Bold').fontSize(10).text('TOTAL UNITS:', 50, y);
     doc.font('Helvetica').fontSize(10).text(`${job.units?.length || 0} cylinders`, 140, y);
+    y += 16;
+    // Description = size + roll instructions strung together, as a quick reference
+    const matDesc = part?.materialDescription || (part?.formData?._materialDescription) || '';
+    let rollDesc = part?.formData?._rollingDescription || '';
+    if (rollDesc) rollDesc = rollDesc.replace(/\\n/g, ' · ').replace(/\n/g, ' · ').replace(/\s*·\s*/g, ' · ').trim();
+    const fullDesc = [matDesc, rollDesc].filter(Boolean).join(' — ') || '—';
+    doc.font('Helvetica-Bold').fontSize(10).text('DESCRIPTION:', 50, y);
+    doc.font('Helvetica').fontSize(9).text(fullDesc, 140, y, { width: 400 });
+    const descH = doc.heightOfString(fullDesc, { width: 400 });
+    y += Math.max(16, descH);
 
-    doc.moveTo(50, y + 18).lineTo(562, y + 18).lineWidth(0.5).strokeColor(lightGray).stroke();
-    y += 30;
+    doc.moveTo(50, y + 6).lineTo(562, y + 6).lineWidth(0.5).strokeColor(lightGray).stroke();
+    y += 20;
 
     // ── INSPECTION TOOLS USED ──
     if (toolsUsed.length) {

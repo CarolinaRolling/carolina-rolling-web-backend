@@ -520,7 +520,7 @@ app.get('/api/operations/workorders', authenticate, async (req, res) => {
     const q = (req.query.q || '').trim();
     const where = { status: { [Op.notIn]: ASSIGN_DONE }, isVoided: { [Op.not]: true } };
     if (q) where[Op.or] = [{ drNumber: { [Op.iLike]: `%${q}%` } }, { clientName: { [Op.iLike]: `%${q}%` } }, { orderNumber: { [Op.iLike]: `%${q}%` } }];
-    const rows = await WorkOrder.findAll({ where, attributes: ['id', 'drNumber', 'orderNumber', 'clientName', 'status', 'promisedDate', 'assignedOperator'], order: [['promisedDate', 'ASC']], limit: 25 });
+    const rows = await WorkOrder.findAll({ where, attributes: ['id', 'drNumber', 'orderNumber', 'clientName', 'status', 'promisedDate', 'assignedOperator'], order: [['promisedDate', 'ASC']], limit: q ? 300 : 50 });
     res.json({ data: rows.map(w => ({ id: w.id, dr: w.drNumber || w.orderNumber, clientName: w.clientName, status: w.status, promisedDate: w.promisedDate, assignedOperator: w.assignedOperator || null })) });
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });

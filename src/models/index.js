@@ -1173,7 +1173,9 @@ const WorkOrderMessage = sequelize.define('WorkOrderMessage', {
   imageUrl: { type: DataTypes.STRING, allowNull: true },
   imageStorageId: { type: DataTypes.STRING, allowNull: true },
   readByOffice: { type: DataTypes.BOOLEAN, defaultValue: false },
-  readByOperator: { type: DataTypes.BOOLEAN, defaultValue: false }
+  readByOperator: { type: DataTypes.BOOLEAN, defaultValue: false },
+  // Per-operator read tracking: list of operator names who have read this message
+  readByOperators: { type: DataTypes.JSONB, allowNull: false, defaultValue: [] }
 }, {
   tableName: 'work_order_messages',
   timestamps: true

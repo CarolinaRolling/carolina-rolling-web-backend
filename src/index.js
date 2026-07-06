@@ -1209,6 +1209,7 @@ async function startServer() {
     const migrations = [
         `ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "contactExtension" VARCHAR(255)`,
         `ALTER TABLE estimates ADD COLUMN IF NOT EXISTS "contactExtension" VARCHAR(255)`,
+        `ALTER TABLE work_order_messages ADD COLUMN IF NOT EXISTS "readByOperators" JSONB NOT NULL DEFAULT '[]'`,
         `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "progressCount" INTEGER DEFAULT 0`,
         `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "progressLastUpdatedAt" TIMESTAMP WITH TIME ZONE`,
         `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "progressLog" JSONB DEFAULT '[]'`,

@@ -467,6 +467,10 @@ app.get('/api/settings/available-models', authenticate, async (req, res) => {
       .map(m => ({ id: m.id, name: m.display_name || m.id, created: m.created_at || '' }))
       .sort((a, b) => String(b.created).localeCompare(String(a.created)));
     console.log(`[available-models] fetched ${list.length} models (HTTP ${result.status})`);
+    if (!list.length) {
+      // Loud diagnostic — if you see THIS text, the v239 backend is live and this is what Anthropic actually returned.
+      return res.status(502).json({ error: { message: `v239 lookup ran. Anthropic HTTP ${result.status}, response keys: [${Object.keys(parsed).join(', ')}], snippet: ${String(result.body).slice(0, 220)}` } });
+    }
     res.json({ data: list });
   } catch (error) {
     console.error('[available-models] error:', error.message);

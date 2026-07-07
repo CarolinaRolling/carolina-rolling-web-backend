@@ -437,33 +437,36 @@ app.put('/api/settings/ai-models', authenticate, async (req, res) => {
 app.get('/api/settings/available-models', authenticate, async (req, res) => {
   try {
     const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return res.status(400).json({ error: { message: 'No Anthropic API key configured on the server' } });
+    if (!apiKey) return res.status(400).json({ error: { message: 'No Anthropic API key configured on the server (ANTHROPIC_API_KEY).' } });
     const https = require('https');
-    const models = await new Promise((resolve, reject) => {
+    const result = await new Promise((resolve, reject) => {
       const apiReq = https.request({
         hostname: 'api.anthropic.com',
-        path: '/v1/models?limit=100',
+        path: '/v1/models?limit=1000',
         method: 'GET',
         headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
       }, (resp) => {
         let data = '';
         resp.on('data', c => (data += c));
-        resp.on('end', () => {
-          try {
-            const parsed = JSON.parse(data);
-            if (parsed.error) return reject(new Error(parsed.error.message || 'Models API error'));
-            resolve(parsed.data || []);
-          } catch (e) { reject(new Error('Unexpected response from models API')); }
-        });
+        resp.on('end', () => resolve({ status: resp.statusCode, body: data }));
       });
       apiReq.on('error', reject);
       apiReq.setTimeout(15000, () => apiReq.destroy(new Error('Models API timed out')));
       apiReq.end();
     });
-    // id + friendly name, newest first
+    let parsed;
+    try { parsed = JSON.parse(result.body); }
+    catch { return res.status(502).json({ error: { message: `Anthropic models API returned an unreadable response (HTTP ${result.status}): ${String(result.body).slice(0, 160)}` } }); }
+    if (result.status !== 200 || parsed.error) {
+      const em = parsed.error?.message || `HTTP ${result.status}`;
+      console.error('[available-models] API error:', result.status, em);
+      return res.status(502).json({ error: { message: `Anthropic models API error (HTTP ${result.status}): ${em}` } });
+    }
+    const models = Array.isArray(parsed.data) ? parsed.data : [];
     const list = models
       .map(m => ({ id: m.id, name: m.display_name || m.id, created: m.created_at || '' }))
       .sort((a, b) => String(b.created).localeCompare(String(a.created)));
+    console.log(`[available-models] fetched ${list.length} models (HTTP ${result.status})`);
     res.json({ data: list });
   } catch (error) {
     console.error('[available-models] error:', error.message);

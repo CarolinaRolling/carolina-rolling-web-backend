@@ -3282,7 +3282,17 @@ Respond ONLY with valid JSON (no markdown, no backticks):
         apiRes.on('end', () => {
           if (apiRes.statusCode !== 200) {
             console.error(`[AI-Parse] API error ${apiRes.statusCode}: ${data.substring(0, 500)}`);
-            reject(new Error(`AI API ${apiRes.statusCode}: ${data.substring(0, 200)}`));
+            let apiMsg = `AI API error ${apiRes.statusCode}`;
+            try {
+              const errObj = JSON.parse(data);
+              const em = errObj.error?.message || '';
+              if (errObj.error?.type === 'not_found_error' || /^model:/.test(em)) {
+                apiMsg = `AI model not available (${em}). Fix it in Admin → AI Models — click "Look up available models" and pick a current one.`;
+              } else if (em) {
+                apiMsg = `AI API error: ${em}`;
+              }
+            } catch {}
+            reject(new Error(apiMsg));
           } else {
             resolve(data);
           }
@@ -3293,12 +3303,20 @@ Respond ONLY with valid JSON (no markdown, no backticks):
       apiReq.end();
     });
 
-    const data = JSON.parse(responseText);
+    let data;
+    try { data = JSON.parse(responseText); } catch { throw new Error('AI returned an unreadable response.'); }
     const text = data.content?.[0]?.text || '';
+    if (!text) throw new Error('AI returned an empty response — try re-uploading or a clearer scan.');
     console.log(`[AI-Parse] Response (first 300): ${text.substring(0, 300)}`);
 
     const clean = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-    const parsed = JSON.parse(clean);
+    let parsed;
+    try {
+      parsed = JSON.parse(clean);
+    } catch {
+      console.error('[AI-Parse] Non-JSON AI response (first 400):', clean.substring(0, 400));
+      throw new Error('The AI could not extract structured parts from this document (its reply was not valid data). This usually means a low-quality/rotated scan or the wrong model — try a clearer scan, or check Admin → AI Models.');
+    }
 
     // Use buildFormData from email scanner to convert to our form format
     const { buildFormData } = require('../services/emailScanner');

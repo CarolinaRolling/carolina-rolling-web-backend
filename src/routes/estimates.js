@@ -3256,8 +3256,9 @@ Respond ONLY with valid JSON (no markdown, no backticks):
   "aiNotes": "summary of what was found and any issues"
 }`;
 
+    const { getParsingModel } = require('../services/aiConfig');
     const requestBody = JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
+      model: getParsingModel(),
       max_tokens: 4000,
       system: systemPrompt,
       messages: [{ role: 'user', content: contentItems }]

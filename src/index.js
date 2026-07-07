@@ -433,6 +433,44 @@ app.put('/api/settings/ai-models', authenticate, async (req, res) => {
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
+// GET /api/settings/available-models - live lookup of currently-available Anthropic models (for the dropdown)
+app.get('/api/settings/available-models', authenticate, async (req, res) => {
+  try {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return res.status(400).json({ error: { message: 'No Anthropic API key configured on the server' } });
+    const https = require('https');
+    const models = await new Promise((resolve, reject) => {
+      const apiReq = https.request({
+        hostname: 'api.anthropic.com',
+        path: '/v1/models?limit=100',
+        method: 'GET',
+        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
+      }, (resp) => {
+        let data = '';
+        resp.on('data', c => (data += c));
+        resp.on('end', () => {
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed.error) return reject(new Error(parsed.error.message || 'Models API error'));
+            resolve(parsed.data || []);
+          } catch (e) { reject(new Error('Unexpected response from models API')); }
+        });
+      });
+      apiReq.on('error', reject);
+      apiReq.setTimeout(15000, () => apiReq.destroy(new Error('Models API timed out')));
+      apiReq.end();
+    });
+    // id + friendly name, newest first
+    const list = models
+      .map(m => ({ id: m.id, name: m.display_name || m.id, created: m.created_at || '' }))
+      .sort((a, b) => String(b.created).localeCompare(String(a.created)));
+    res.json({ data: list });
+  } catch (error) {
+    console.error('[available-models] error:', error.message);
+    res.status(500).json({ error: { message: error.message || 'Failed to fetch models' } });
+  }
+});
+
 // Operations — parts completed in a given week, attributed to whoever's tablet marked them done
 app.get('/api/operations/production', authenticate, async (req, res) => {
   try {

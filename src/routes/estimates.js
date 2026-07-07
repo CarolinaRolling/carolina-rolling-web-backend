@@ -2881,6 +2881,7 @@ router.get('/:id/pdf', async (req, res, next) => {
 // POST /api/estimates/:id/convert-to-workorder - Convert estimate to work order
 router.post('/:id/convert-to-workorder', async (req, res, next) => {
   const transaction = await sequelize.transaction();
+  let committed = false;
   
   try {
     const estimate = await Estimate.findByPk(req.params.id, {
@@ -3045,31 +3046,39 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
     }
 
     await transaction.commit();
+    committed = true;
 
-    // Log activity
-    await logActivity(
-      'created',
-      'work_order',
-      workOrder.id,
-      `DR-${drNumber}`,
-      estimate.clientName,
-      `Work order created from estimate ${estimate.estimateNumber}`,
-      { estimateNumber: estimate.estimateNumber, partsCount: estimate.parts.length }
-    );
+    // From here the work order already exists — post-commit steps must NEVER fail the request.
+    try {
+      await logActivity(
+        'created',
+        'work_order',
+        workOrder.id,
+        `DR-${drNumber}`,
+        estimate.clientName,
+        `Work order created from estimate ${estimate.estimateNumber}`,
+        { estimateNumber: estimate.estimateNumber, partsCount: estimate.parts.length }
+      );
+    } catch (logErr) { console.error('[convert] activity log failed (non-fatal):', logErr.message); }
 
-    // Fetch complete work order
-    const completeWorkOrder = await WorkOrder.findByPk(workOrder.id, {
-      include: [{ model: WorkOrderPart, as: 'parts' }]
-    });
+    // Fetch complete work order (fall back to the created instance if the re-fetch fails)
+    let completeWorkOrder = workOrder;
+    try {
+      completeWorkOrder = await WorkOrder.findByPk(workOrder.id, {
+        include: [{ model: WorkOrderPart, as: 'parts' }]
+      }) || workOrder;
+    } catch (fetchErr) { console.error('[convert] work order re-fetch failed (non-fatal):', fetchErr.message); }
 
-    res.status(201).json({
+    return res.status(201).json({
       data: {
         workOrder: completeWorkOrder
       },
       message: `Work order DR-${drNumber} created successfully`
     });
   } catch (error) {
-    await transaction.rollback();
+    if (!committed) {
+      try { await transaction.rollback(); } catch (rbErr) { console.error('[convert] rollback failed:', rbErr.message); }
+    }
     console.error('Convert to work order error:', error);
     // Include validation details if available
     const details = error.errors ? error.errors.map(e => `${e.path}: ${e.message}`).join(', ') : '';

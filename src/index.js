@@ -433,10 +433,41 @@ app.put('/api/settings/ai-models', authenticate, async (req, res) => {
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
+// GET /api/debug/models - no auth; hit in a browser to see the RAW Anthropic models result on this server
+app.get('/api/debug/models', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return res.json({ version: 'v242', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
+    const https = require('https');
+    const r = await new Promise((resolve) => {
+      const rq = https.request({
+        hostname: 'api.anthropic.com',
+        path: '/v1/models?limit=1000',
+        method: 'GET',
+        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
+      }, (resp) => { let d = ''; resp.on('data', c => (d += c)); resp.on('end', () => resolve({ status: resp.statusCode, body: d })); });
+      rq.on('error', (e) => resolve({ status: 0, body: String(e.message) }));
+      rq.setTimeout(15000, () => rq.destroy(new Error('timeout')));
+      rq.end();
+    });
+    let parsed = null; try { parsed = JSON.parse(r.body); } catch {}
+    res.json({
+      version: 'v242',
+      keyPresent: true,
+      keyPrefix: apiKey.slice(0, 10) + '…',
+      anthropicStatus: r.status,
+      modelCount: Array.isArray(parsed?.data) ? parsed.data.length : 0,
+      models: Array.isArray(parsed?.data) ? parsed.data.map(m => m.id) : [],
+      rawSnippet: String(r.body).slice(0, 300)
+    });
+  } catch (e) { res.json({ version: 'v242', error: e.message }); }
+});
+
 // GET /api/version - no auth; hit this in a browser to confirm which backend build is actually running
 app.get('/api/version', (req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.json({ version: 'v241', built: '2026-06-13', note: 'If you can read this, the updated backend is live.' });
+  res.json({ version: 'v242', built: '2026-06-13', note: 'If you can read this, the updated backend is live.' });
 });
 
 // GET /api/settings/available-models - live lookup of currently-available Anthropic models (for the dropdown)

@@ -433,8 +433,15 @@ app.put('/api/settings/ai-models', authenticate, async (req, res) => {
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
+// GET /api/version - no auth; hit this in a browser to confirm which backend build is actually running
+app.get('/api/version', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ version: 'v241', built: '2026-06-13', note: 'If you can read this, the updated backend is live.' });
+});
+
 // GET /api/settings/available-models - live lookup of currently-available Anthropic models (for the dropdown)
 app.get('/api/settings/available-models', authenticate, async (req, res) => {
+  res.set('Cache-Control', 'no-store');
   try {
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) return res.status(400).json({ error: { message: 'No Anthropic API key configured on the server (ANTHROPIC_API_KEY).' } });

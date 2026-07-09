@@ -3130,7 +3130,12 @@ router.post('/:id/reset-conversion', async (req, res, next) => {
 });
 
 // POST /api/estimates/:id/ai-parse-document - Upload image/PDF and parse with AI
+// In-memory AI-parse jobs so the long AI call runs in the background (Heroku kills any HTTP request at 30s).
+const aiParseJobs = new Map();
+setInterval(() => { const now = Date.now(); for (const [k, v] of aiParseJobs) if (now - v.createdAt > 15 * 60 * 1000) aiParseJobs.delete(k); }, 60 * 1000);
+
 router.post('/:id/ai-parse-document', upload.single('file'), async (req, res, next) => {
+  let jobId = null;
   try {
     if (!process.env.ANTHROPIC_API_KEY) {
       return res.status(400).json({ error: { message: 'ANTHROPIC_API_KEY not configured' } });
@@ -3142,6 +3147,11 @@ router.post('/:id/ai-parse-document', upload.single('file'), async (req, res, ne
     if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
 
     if (!req.file) return res.status(400).json({ error: { message: 'No file uploaded' } });
+
+    // Respond right away with a job id; the AI parse continues in the background and the client polls for the result.
+    jobId = require('crypto').randomBytes(8).toString('hex');
+    aiParseJobs.set(jobId, { status: 'pending', createdAt: Date.now() });
+    res.status(202).json({ data: { jobId }, message: 'Parsing started' });
 
     const filePath = req.file.path;
     const fileBuffer = fs.readFileSync(filePath);
@@ -3342,22 +3352,29 @@ Respond ONLY with valid JSON (no markdown, no backticks):
 
     console.log(`[AI-Parse] Parsed ${partsWithFormData.length} parts from ${req.file.originalname}`);
 
-    res.json({
-      data: {
-        parts: partsWithFormData,
-        notes: parsed.notes || '',
-        documentType: parsed.documentType || 'unknown',
-        aiNotes: parsed.aiNotes || '',
-        fileName: req.file.originalname
-      },
-      message: `Parsed ${partsWithFormData.length} parts from document`
-    });
+    aiParseJobs.set(jobId, { status: 'done', createdAt: Date.now(), result: {
+      parts: partsWithFormData,
+      notes: parsed.notes || '',
+      documentType: parsed.documentType || 'unknown',
+      aiNotes: parsed.aiNotes || '',
+      fileName: req.file.originalname
+    } });
   } catch (error) {
     // Cleanup on error
     if (req.file?.path) try { fs.unlinkSync(req.file.path); } catch {}
     console.error('[AI-Parse] Error:', error.message);
-    next(error);
+    if (jobId) aiParseJobs.set(jobId, { status: 'error', error: error.message, createdAt: Date.now() });
+    else next(error);
   }
+});
+
+// GET /api/estimates/:id/ai-parse-status/:jobId - poll the background parse job
+router.get('/:id/ai-parse-status/:jobId', async (req, res) => {
+  const job = aiParseJobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: { message: 'Parse job not found or expired — please try again.' } });
+  if (job.status === 'done') return res.json({ status: 'done', data: job.result });
+  if (job.status === 'error') return res.json({ status: 'error', error: job.error });
+  return res.json({ status: 'pending' });
 });
 
 // POST /api/estimates/:id/parts/:partId/outside-processing-po - Generate outside processing PO

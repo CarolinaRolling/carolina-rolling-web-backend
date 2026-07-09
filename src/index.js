@@ -126,6 +126,113 @@ app.get('/api/email-scanner/oauth/callback', async (req, res) => {
 // All other routes require authentication (JWT token or API key)
 const { authenticate } = require('./routes/auth');
 app.use('/api/shipments', authenticate, shipmentRoutes);
+
+// === AI model + available-model endpoints MUST be registered before the /api/settings catch-all router ===
+// AI model settings — editable so a retired model can be swapped without a redeploy
+app.get('/api/settings/ai-models', authenticate, (req, res) => {
+  try {
+    const { getAiModels, DEFAULTS } = require('./services/aiConfig');
+    res.json({ data: { ...getAiModels(), defaults: DEFAULTS } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+app.put('/api/settings/ai-models', authenticate, async (req, res) => {
+  try {
+    const { AppSettings } = require('./models');
+    const { setAiModels, getAiModels } = require('./services/aiConfig');
+    const parsingModel = (req.body.parsingModel || '').trim();
+    const triageModel = (req.body.triageModel || '').trim();
+    if (!parsingModel || !triageModel) return res.status(400).json({ error: { message: 'Both model names are required' } });
+    const value = { parsingModel, triageModel };
+    await AppSettings.upsert({ key: 'ai_models', value });
+    setAiModels(value);
+    res.json({ data: getAiModels() });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+// GET /api/debug/models - no auth; hit in a browser to see the RAW Anthropic models result on this server
+app.get('/api/debug/models', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return res.json({ version: 'v244', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
+    const https = require('https');
+    const r = await new Promise((resolve) => {
+      const rq = https.request({
+        hostname: 'api.anthropic.com',
+        path: '/v1/models?limit=1000',
+        method: 'GET',
+        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
+      }, (resp) => { let d = ''; resp.on('data', c => (d += c)); resp.on('end', () => resolve({ status: resp.statusCode, body: d })); });
+      rq.on('error', (e) => resolve({ status: 0, body: String(e.message) }));
+      rq.setTimeout(15000, () => rq.destroy(new Error('timeout')));
+      rq.end();
+    });
+    let parsed = null; try { parsed = JSON.parse(r.body); } catch {}
+    res.json({
+      version: 'v244',
+      keyPresent: true,
+      keyPrefix: apiKey.slice(0, 10) + '…',
+      anthropicStatus: r.status,
+      modelCount: Array.isArray(parsed?.data) ? parsed.data.length : 0,
+      models: Array.isArray(parsed?.data) ? parsed.data.map(m => m.id) : [],
+      rawSnippet: String(r.body).slice(0, 300)
+    });
+  } catch (e) { res.json({ version: 'v244', error: e.message }); }
+});
+
+// GET /api/version - no auth; hit this in a browser to confirm which backend build is actually running
+app.get('/api/version', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ version: 'v244', built: '2026-06-13', note: 'v244 — AI settings routing fixed.' });
+});
+
+// GET /api/settings/available-models - live lookup of currently-available Anthropic models (for the dropdown)
+app.get('/api/settings/available-models', authenticate, async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return res.status(400).json({ error: { message: 'No Anthropic API key configured on the server (ANTHROPIC_API_KEY).' } });
+    const https = require('https');
+    const result = await new Promise((resolve, reject) => {
+      const apiReq = https.request({
+        hostname: 'api.anthropic.com',
+        path: '/v1/models?limit=1000',
+        method: 'GET',
+        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
+      }, (resp) => {
+        let data = '';
+        resp.on('data', c => (data += c));
+        resp.on('end', () => resolve({ status: resp.statusCode, body: data }));
+      });
+      apiReq.on('error', reject);
+      apiReq.setTimeout(15000, () => apiReq.destroy(new Error('Models API timed out')));
+      apiReq.end();
+    });
+    let parsed;
+    try { parsed = JSON.parse(result.body); }
+    catch { return res.status(502).json({ error: { message: `Anthropic models API returned an unreadable response (HTTP ${result.status}): ${String(result.body).slice(0, 160)}` } }); }
+    if (result.status !== 200 || parsed.error) {
+      const em = parsed.error?.message || `HTTP ${result.status}`;
+      console.error('[available-models] API error:', result.status, em);
+      return res.status(502).json({ error: { message: `Anthropic models API error (HTTP ${result.status}): ${em}` } });
+    }
+    const models = Array.isArray(parsed.data) ? parsed.data : [];
+    const list = models
+      .map(m => ({ id: m.id, name: m.display_name || m.id, created: m.created_at || '' }))
+      .sort((a, b) => String(b.created).localeCompare(String(a.created)));
+    console.log(`[available-models] fetched ${list.length} models (HTTP ${result.status})`);
+    if (!list.length) {
+      // Loud diagnostic — if you see THIS text, the v239 backend is live and this is what Anthropic actually returned.
+      return res.status(502).json({ error: { message: `v239 lookup ran. Anthropic HTTP ${result.status}, response keys: [${Object.keys(parsed).join(', ')}], snippet: ${String(result.body).slice(0, 220)}` } });
+    }
+    res.json({ data: list });
+  } catch (error) {
+    console.error('[available-models] error:', error.message);
+    res.status(500).json({ error: { message: error.message || 'Failed to fetch models' } });
+  }
+});
+
 app.use('/api/settings', authenticate, settingsRoutes);
 app.use('/api/inbound', authenticate, inboundRoutes);
 // Middleware to block portal/vendor API keys from accessing internal routes
@@ -411,110 +518,6 @@ app.post('/api/com-center/bills/scan', authenticate, async (req, res) => {
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
-// AI model settings — editable so a retired model can be swapped without a redeploy
-app.get('/api/settings/ai-models', authenticate, (req, res) => {
-  try {
-    const { getAiModels, DEFAULTS } = require('./services/aiConfig');
-    res.json({ data: { ...getAiModels(), defaults: DEFAULTS } });
-  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
-});
-
-app.put('/api/settings/ai-models', authenticate, async (req, res) => {
-  try {
-    const { AppSettings } = require('./models');
-    const { setAiModels, getAiModels } = require('./services/aiConfig');
-    const parsingModel = (req.body.parsingModel || '').trim();
-    const triageModel = (req.body.triageModel || '').trim();
-    if (!parsingModel || !triageModel) return res.status(400).json({ error: { message: 'Both model names are required' } });
-    const value = { parsingModel, triageModel };
-    await AppSettings.upsert({ key: 'ai_models', value });
-    setAiModels(value);
-    res.json({ data: getAiModels() });
-  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
-});
-
-// GET /api/debug/models - no auth; hit in a browser to see the RAW Anthropic models result on this server
-app.get('/api/debug/models', async (req, res) => {
-  res.set('Cache-Control', 'no-store');
-  try {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return res.json({ version: 'v242', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
-    const https = require('https');
-    const r = await new Promise((resolve) => {
-      const rq = https.request({
-        hostname: 'api.anthropic.com',
-        path: '/v1/models?limit=1000',
-        method: 'GET',
-        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
-      }, (resp) => { let d = ''; resp.on('data', c => (d += c)); resp.on('end', () => resolve({ status: resp.statusCode, body: d })); });
-      rq.on('error', (e) => resolve({ status: 0, body: String(e.message) }));
-      rq.setTimeout(15000, () => rq.destroy(new Error('timeout')));
-      rq.end();
-    });
-    let parsed = null; try { parsed = JSON.parse(r.body); } catch {}
-    res.json({
-      version: 'v242',
-      keyPresent: true,
-      keyPrefix: apiKey.slice(0, 10) + '…',
-      anthropicStatus: r.status,
-      modelCount: Array.isArray(parsed?.data) ? parsed.data.length : 0,
-      models: Array.isArray(parsed?.data) ? parsed.data.map(m => m.id) : [],
-      rawSnippet: String(r.body).slice(0, 300)
-    });
-  } catch (e) { res.json({ version: 'v242', error: e.message }); }
-});
-
-// GET /api/version - no auth; hit this in a browser to confirm which backend build is actually running
-app.get('/api/version', (req, res) => {
-  res.set('Cache-Control', 'no-store');
-  res.json({ version: 'v242', built: '2026-06-13', note: 'If you can read this, the updated backend is live.' });
-});
-
-// GET /api/settings/available-models - live lookup of currently-available Anthropic models (for the dropdown)
-app.get('/api/settings/available-models', authenticate, async (req, res) => {
-  res.set('Cache-Control', 'no-store');
-  try {
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return res.status(400).json({ error: { message: 'No Anthropic API key configured on the server (ANTHROPIC_API_KEY).' } });
-    const https = require('https');
-    const result = await new Promise((resolve, reject) => {
-      const apiReq = https.request({
-        hostname: 'api.anthropic.com',
-        path: '/v1/models?limit=1000',
-        method: 'GET',
-        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
-      }, (resp) => {
-        let data = '';
-        resp.on('data', c => (data += c));
-        resp.on('end', () => resolve({ status: resp.statusCode, body: data }));
-      });
-      apiReq.on('error', reject);
-      apiReq.setTimeout(15000, () => apiReq.destroy(new Error('Models API timed out')));
-      apiReq.end();
-    });
-    let parsed;
-    try { parsed = JSON.parse(result.body); }
-    catch { return res.status(502).json({ error: { message: `Anthropic models API returned an unreadable response (HTTP ${result.status}): ${String(result.body).slice(0, 160)}` } }); }
-    if (result.status !== 200 || parsed.error) {
-      const em = parsed.error?.message || `HTTP ${result.status}`;
-      console.error('[available-models] API error:', result.status, em);
-      return res.status(502).json({ error: { message: `Anthropic models API error (HTTP ${result.status}): ${em}` } });
-    }
-    const models = Array.isArray(parsed.data) ? parsed.data : [];
-    const list = models
-      .map(m => ({ id: m.id, name: m.display_name || m.id, created: m.created_at || '' }))
-      .sort((a, b) => String(b.created).localeCompare(String(a.created)));
-    console.log(`[available-models] fetched ${list.length} models (HTTP ${result.status})`);
-    if (!list.length) {
-      // Loud diagnostic — if you see THIS text, the v239 backend is live and this is what Anthropic actually returned.
-      return res.status(502).json({ error: { message: `v239 lookup ran. Anthropic HTTP ${result.status}, response keys: [${Object.keys(parsed).join(', ')}], snippet: ${String(result.body).slice(0, 220)}` } });
-    }
-    res.json({ data: list });
-  } catch (error) {
-    console.error('[available-models] error:', error.message);
-    res.status(500).json({ error: { message: error.message || 'Failed to fetch models' } });
-  }
-});
 
 // Operations — parts completed in a given week, attributed to whoever's tablet marked them done
 app.get('/api/operations/production', authenticate, async (req, res) => {

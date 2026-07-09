@@ -155,7 +155,7 @@ app.get('/api/debug/models', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
     const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return res.json({ version: 'v244', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
+    if (!apiKey) return res.json({ version: 'v245', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
     const https = require('https');
     const r = await new Promise((resolve) => {
       const rq = https.request({
@@ -170,7 +170,7 @@ app.get('/api/debug/models', async (req, res) => {
     });
     let parsed = null; try { parsed = JSON.parse(r.body); } catch {}
     res.json({
-      version: 'v244',
+      version: 'v245',
       keyPresent: true,
       keyPrefix: apiKey.slice(0, 10) + '…',
       anthropicStatus: r.status,
@@ -178,16 +178,43 @@ app.get('/api/debug/models', async (req, res) => {
       models: Array.isArray(parsed?.data) ? parsed.data.map(m => m.id) : [],
       rawSnippet: String(r.body).slice(0, 300)
     });
-  } catch (e) { res.json({ version: 'v244', error: e.message }); }
+  } catch (e) { res.json({ version: 'v245', error: e.message }); }
 });
 
 // GET /api/version - no auth; hit this in a browser to confirm which backend build is actually running
 app.get('/api/version', (req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.json({ version: 'v244', built: '2026-06-13', note: 'v244 — AI settings routing fixed.' });
+  res.json({ version: 'v245', built: '2026-06-13', note: 'v245 — vision + AI recommendations.' });
 });
 
 // GET /api/settings/available-models - live lookup of currently-available Anthropic models (for the dropdown)
+// Ask Claude to pick the best model for each purpose (best-effort; caller falls back to a heuristic)
+async function recommendModelsWithAI(list, apiKey) {
+  const https = require('https');
+  const ids = list.map(m => `${m.id} (${m.name}, released ${String(m.created).slice(0, 10)})`).join('\n');
+  const system = 'You recommend the single best Claude model for each of two purposes at a small metal-rolling shop. Reply with ONLY a JSON object and nothing else.';
+  const user = `Available models:\n${ids}\n\nPick the best model id for each purpose:\n` +
+    `- "parsing": reading scanned purchase orders, drawings and invoices (image/PDF vision) and extracting structured line items. Prioritize strong vision + reasoning at reasonable cost (a Sonnet-class model is usually ideal; avoid the most expensive Opus unless clearly best, and avoid specialty models like Fable).\n` +
+    `- "triage": high-volume email categorization. Prioritize low cost and speed (a Haiku-class model is usually ideal).\n\n` +
+    `Return exactly: {"parsing":"<model-id>","triage":"<model-id>"} using ids from the list above.`;
+  const recModel = (list.find(m => /haiku/i.test(m.id)) || list[0]).id;
+  const body = JSON.stringify({ model: recModel, max_tokens: 200, system, messages: [{ role: 'user', content: user }] });
+  const respText = await new Promise((resolve, reject) => {
+    const r = https.request({
+      hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
+      headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }
+    }, (resp) => { let d = ''; resp.on('data', c => (d += c)); resp.on('end', () => resolve(d)); });
+    r.on('error', reject);
+    r.setTimeout(15000, () => r.destroy(new Error('recommend timed out')));
+    r.write(body); r.end();
+  });
+  const parsed = JSON.parse(respText);
+  const text = (parsed.content && parsed.content[0] && parsed.content[0].text) || '';
+  const rec = JSON.parse(text.replace(/```json|```/g, '').trim());
+  const ok = (id) => list.some(m => m.id === id);
+  return (rec && ok(rec.parsing) && ok(rec.triage)) ? { parsing: rec.parsing, triage: rec.triage } : null;
+}
+
 app.get('/api/settings/available-models', authenticate, async (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
@@ -218,15 +245,26 @@ app.get('/api/settings/available-models', authenticate, async (req, res) => {
       return res.status(502).json({ error: { message: `Anthropic models API error (HTTP ${result.status}): ${em}` } });
     }
     const models = Array.isArray(parsed.data) ? parsed.data : [];
+    // Vision-capable: current Claude families (sonnet/opus/haiku/fable/mythos) all read images + PDFs
+    const isVision = (id) => /claude-(3-5|3\.5|sonnet|opus|haiku|fable|mythos)/i.test(String(id));
     const list = models
-      .map(m => ({ id: m.id, name: m.display_name || m.id, created: m.created_at || '' }))
+      .map(m => ({ id: m.id, name: m.display_name || m.id, created: m.created_at || '', vision: isVision(m.id) }))
       .sort((a, b) => String(b.created).localeCompare(String(a.created)));
     console.log(`[available-models] fetched ${list.length} models (HTTP ${result.status})`);
     if (!list.length) {
-      // Loud diagnostic — if you see THIS text, the v239 backend is live and this is what Anthropic actually returned.
-      return res.status(502).json({ error: { message: `v239 lookup ran. Anthropic HTTP ${result.status}, response keys: [${Object.keys(parsed).join(', ')}], snippet: ${String(result.body).slice(0, 220)}` } });
+      return res.status(502).json({ error: { message: `v245 lookup ran. Anthropic HTTP ${result.status}, response keys: [${Object.keys(parsed).join(', ')}], snippet: ${String(result.body).slice(0, 220)}` } });
     }
-    res.json({ data: list });
+    // Recommendation per purpose — heuristic default, upgraded by an AI pick when possible
+    const newestBy = (re) => (list.find(m => re.test(m.id)) || {}).id || null;
+    let recommendations = {
+      parsing: newestBy(/sonnet/i) || list[0].id,
+      triage: newestBy(/haiku/i) || list[list.length - 1].id
+    };
+    try {
+      const aiRec = await recommendModelsWithAI(list, apiKey);
+      if (aiRec) recommendations = aiRec;
+    } catch (e) { console.warn('[available-models] AI recommend failed, using heuristic:', e.message); }
+    res.json({ data: list, recommendations });
   } catch (error) {
     console.error('[available-models] error:', error.message);
     res.status(500).json({ error: { message: error.message || 'Failed to fetch models' } });

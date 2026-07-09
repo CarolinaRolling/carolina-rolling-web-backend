@@ -3259,7 +3259,7 @@ Respond ONLY with valid JSON (no markdown, no backticks):
     const { getParsingModel } = require('../services/aiConfig');
     const requestBody = JSON.stringify({
       model: getParsingModel(),
-      max_tokens: 4000,
+      max_tokens: 8000,
       system: systemPrompt,
       messages: [{ role: 'user', content: contentItems }]
     });
@@ -3299,6 +3299,7 @@ Respond ONLY with valid JSON (no markdown, no backticks):
         });
       });
       apiReq.on('error', reject);
+      apiReq.setTimeout(90000, () => apiReq.destroy(new Error('The AI request timed out (90s) — the scan may be very large, or the service is slow. Try again or use a clearer/smaller scan.')));
       apiReq.write(requestBody);
       apiReq.end();
     });
@@ -3314,8 +3315,14 @@ Respond ONLY with valid JSON (no markdown, no backticks):
     try {
       parsed = JSON.parse(clean);
     } catch {
-      console.error('[AI-Parse] Non-JSON AI response (first 400):', clean.substring(0, 400));
-      throw new Error('The AI could not extract structured parts from this document (its reply was not valid data). This usually means a low-quality/rotated scan or the wrong model — try a clearer scan, or check Admin → AI Models.');
+      // The AI may have wrapped the JSON in prose — extract the object between the first { and last }
+      const s = clean.indexOf('{'); const e = clean.lastIndexOf('}');
+      if (s >= 0 && e > s) { try { parsed = JSON.parse(clean.slice(s, e + 1)); } catch {} }
+    }
+    if (!parsed || typeof parsed !== 'object') {
+      console.error('[AI-Parse] Non-JSON AI response (first 800):', clean.substring(0, 800));
+      const snippet = clean.substring(0, 400).replace(/\s+/g, ' ');
+      throw new Error(`The AI read the document but didn't return usable data. It replied: "${snippet}${clean.length > 400 ? '…' : ''}"`);
     }
 
     // Use buildFormData from email scanner to convert to our form format

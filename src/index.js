@@ -155,7 +155,7 @@ app.get('/api/debug/models', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
     const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return res.json({ version: 'v245', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
+    if (!apiKey) return res.json({ version: 'v246', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
     const https = require('https');
     const r = await new Promise((resolve) => {
       const rq = https.request({
@@ -170,7 +170,7 @@ app.get('/api/debug/models', async (req, res) => {
     });
     let parsed = null; try { parsed = JSON.parse(r.body); } catch {}
     res.json({
-      version: 'v245',
+      version: 'v246',
       keyPresent: true,
       keyPrefix: apiKey.slice(0, 10) + '…',
       anthropicStatus: r.status,
@@ -178,13 +178,13 @@ app.get('/api/debug/models', async (req, res) => {
       models: Array.isArray(parsed?.data) ? parsed.data.map(m => m.id) : [],
       rawSnippet: String(r.body).slice(0, 300)
     });
-  } catch (e) { res.json({ version: 'v245', error: e.message }); }
+  } catch (e) { res.json({ version: 'v246', error: e.message }); }
 });
 
 // GET /api/version - no auth; hit this in a browser to confirm which backend build is actually running
 app.get('/api/version', (req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.json({ version: 'v245', built: '2026-06-13', note: 'v245 — vision + AI recommendations.' });
+  res.json({ version: 'v246', built: '2026-06-13', note: 'v246 — parse errors now show the real reason.' });
 });
 
 // GET /api/settings/available-models - live lookup of currently-available Anthropic models (for the dropdown)

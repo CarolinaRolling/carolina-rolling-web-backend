@@ -3357,6 +3357,7 @@ Respond ONLY with valid JSON (no markdown, no backticks):
       notes: parsed.notes || '',
       documentType: parsed.documentType || 'unknown',
       aiNotes: parsed.aiNotes || '',
+      aiRawSnippet: (text || '').substring(0, 600),
       fileName: req.file.originalname
     } });
   } catch (error) {

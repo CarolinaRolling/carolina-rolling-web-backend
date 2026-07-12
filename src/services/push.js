@@ -97,4 +97,23 @@ function isPushConfigured() {
   return !!getServiceAccount();
 }
 
-module.exports = { sendPush, isPushConfigured };
+// Verify the service-account key actually works: can we authenticate with Google and get a token?
+// This proves the key is valid + has permission, without needing a device to send to.
+async function verifyPushCredentials() {
+  const sa = getServiceAccount();
+  if (!sa) return { configured: false, reason: 'FIREBASE_SERVICE_ACCOUNT is not set on this server' };
+  try {
+    cachedToken = null; // force a fresh check
+    const token = await getAccessToken(sa);
+    return {
+      configured: true,
+      authOk: !!token,
+      projectId: sa.project_id,
+      clientEmail: sa.client_email
+    };
+  } catch (e) {
+    return { configured: true, authOk: false, projectId: sa.project_id, clientEmail: sa.client_email, error: e.message };
+  }
+}
+
+module.exports = { sendPush, isPushConfigured, verifyPushCredentials };

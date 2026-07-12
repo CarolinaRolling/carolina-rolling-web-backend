@@ -127,6 +127,69 @@ app.get('/api/email-scanner/oauth/callback', async (req, res) => {
 const { authenticate } = require('./routes/auth');
 app.use('/api/shipments', authenticate, shipmentRoutes);
 
+// GET /api/debug/push - no auth; verify Firebase credentials + see registered devices + preview the reminder
+app.get('/api/debug/push', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const { verifyPushCredentials } = require('./services/push');
+    const { DeviceToken } = require('./models');
+    const creds = await verifyPushCredentials();
+    let devices = [];
+    try {
+      const rows = await DeviceToken.findAll({ where: { isActive: true } });
+      devices = rows.map(d => ({ label: d.label, platform: d.platform, isEstimator: d.isEstimator, lastSeenAt: d.lastSeenAt }));
+    } catch (e) { /* table may not exist until migration runs */ }
+
+    let quotes = [];
+    try {
+      const estimatesRouter = require('./routes/estimates');
+      quotes = await estimatesRouter.getAwaitingReplyQuotes();
+    } catch (e) {}
+
+    const ready = creds.configured && creds.authOk;
+    res.json({
+      version: 'v257',
+      firebase: creds,
+      registeredDevices: devices.length,
+      devices,
+      quotesAwaitingReply: quotes.length,
+      wouldSend: quotes.length
+        ? `${quotes.length} quote(s) awaiting reply: ` + quotes.slice(0, 3).map(q => `${q.clientName} (${q.ageDays != null ? q.ageDays + 'd' : 'sent'})`).join(', ')
+        : '(nothing awaiting reply right now)',
+      verdict: !creds.configured
+        ? '❌ FIREBASE_SERVICE_ACCOUNT not set on this server'
+        : !creds.authOk
+          ? '❌ Firebase key is set but authentication FAILED — see firebase.error'
+          : devices.length === 0
+            ? '✅ Firebase key works. No devices registered yet — install the Android app to receive pushes.'
+            : '✅ Firebase key works and devices are registered — pushes will send.'
+    });
+  } catch (e) {
+    res.status(500).json({ error: { message: e.message } });
+  }
+});
+
+// POST /api/debug/push/test - send a real test push to registered estimator devices
+app.post('/api/debug/push/test', authenticate, async (req, res) => {
+  try {
+    const { sendPush, isPushConfigured } = require('./services/push');
+    const { DeviceToken } = require('./models');
+    if (!isPushConfigured()) return res.status(400).json({ error: { message: 'FIREBASE_SERVICE_ACCOUNT not set' } });
+    const devices = await DeviceToken.findAll({ where: { isEstimator: true, isActive: true } });
+    if (!devices.length) return res.status(400).json({ error: { message: 'No estimator devices registered yet' } });
+    const results = [];
+    for (const d of devices) {
+      try {
+        await sendPush(d.token, 'Test notification', 'Quote reminders are working. 🎉', { type: 'test' });
+        results.push({ device: d.label, sent: true });
+      } catch (e) {
+        results.push({ device: d.label, sent: false, error: e.message });
+      }
+    }
+    res.json({ data: results });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
 // === Device tokens for push notifications (estimator phone) ===
 app.post('/api/devices/register', authenticate, async (req, res) => {
   try {
@@ -186,7 +249,7 @@ app.get('/api/debug/models', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
     const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return res.json({ version: 'v255', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
+    if (!apiKey) return res.json({ version: 'v257', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
     const https = require('https');
     const r = await new Promise((resolve) => {
       const rq = https.request({
@@ -201,7 +264,7 @@ app.get('/api/debug/models', async (req, res) => {
     });
     let parsed = null; try { parsed = JSON.parse(r.body); } catch {}
     res.json({
-      version: 'v255',
+      version: 'v257',
       keyPresent: true,
       keyPrefix: apiKey.slice(0, 10) + '…',
       anthropicStatus: r.status,
@@ -209,13 +272,13 @@ app.get('/api/debug/models', async (req, res) => {
       models: Array.isArray(parsed?.data) ? parsed.data.map(m => m.id) : [],
       rawSnippet: String(r.body).slice(0, 300)
     });
-  } catch (e) { res.json({ version: 'v255', error: e.message }); }
+  } catch (e) { res.json({ version: 'v257', error: e.message }); }
 });
 
 // GET /api/version - no auth; hit this in a browser to confirm which backend build is actually running
 app.get('/api/version', (req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.json({ version: 'v255', built: '2026-06-13', note: 'v248 — manual AI parse runs in background (fixes 30s timeout).' });
+  res.json({ version: 'v257', built: '2026-06-13', note: 'v248 — manual AI parse runs in background (fixes 30s timeout).' });
 });
 
 // GET /api/settings/available-models - live lookup of currently-available Anthropic models (for the dropdown)

@@ -558,6 +558,94 @@ router.get('/trash', async (req, res, next) => {
 });
 
 // GET /api/estimates - Get all estimates
+// ===== QUOTES AWAITING REPLY (head estimator only) =====
+// Registered BEFORE '/:id' so it isn't swallowed by the catch-all route.
+
+// Is this caller allowed to see quote reminders? Admin user, estimator user, or an estimator API key (phone).
+function isEstimatorCaller(req) {
+  if (req.user && (req.user.role === 'admin' || req.user.isEstimator)) return true;
+  if (req.apiKey && (req.apiKey.isEstimator || req.apiKey.permissions === 'admin')) return true;
+  return false;
+}
+
+// Build the list of sent quotes awaiting a reply, for email-monitored ("top") clients only.
+async function getAwaitingReplyQuotes() {
+  const monitored = await Client.findAll({ where: { emailScanEnabled: true }, attributes: ['name'] });
+  const names = monitored.map(c => c.name).filter(Boolean);
+  if (!names.length) return [];
+  const now = new Date();
+  const rows = await Estimate.findAll({
+    where: {
+      status: 'sent',
+      clientName: { [Op.in]: names },
+      reminderDismissedAt: null,
+      [Op.or]: [{ reminderSnoozeUntil: null }, { reminderSnoozeUntil: { [Op.lt]: now } }]
+    },
+    order: [['sentAt', 'ASC']]
+  });
+  return rows.map(e => {
+    const sent = e.sentAt ? new Date(e.sentAt) : null;
+    const ageDays = sent ? Math.floor((now - sent) / 86400000) : null;
+    return {
+      id: e.id,
+      estimateNumber: e.estimateNumber,
+      clientName: e.clientName,
+      total: e.total,
+      sentAt: e.sentAt,
+      ageDays,
+      snoozedUntil: e.reminderSnoozeUntil
+    };
+  }).sort((a, b) => (b.ageDays || 0) - (a.ageDays || 0));
+}
+
+// GET /api/estimates/awaiting-reply - sent quotes with no reply, for monitored clients
+router.get('/awaiting-reply', async (req, res, next) => {
+  try {
+    if (!isEstimatorCaller(req)) return res.status(403).json({ error: { message: 'Estimator access required' } });
+    const quotes = await getAwaitingReplyQuotes();
+    res.json({ data: quotes, count: quotes.length });
+  } catch (error) { next(error); }
+});
+
+// POST /api/estimates/:id/reminder-dismiss - stop reminding (client went dark)
+router.post('/:id/reminder-dismiss', async (req, res, next) => {
+  try {
+    if (!isEstimatorCaller(req)) return res.status(403).json({ error: { message: 'Estimator access required' } });
+    const estimate = await Estimate.findByPk(req.params.id);
+    if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
+    await estimate.update({ reminderDismissedAt: new Date() });
+    res.json({ data: { id: estimate.id, dismissed: true } });
+  } catch (error) { next(error); }
+});
+
+// POST /api/estimates/:id/reminder-snooze - quiet it for a while. Body: { days?: number, hours?: number }
+router.post('/:id/reminder-snooze', async (req, res, next) => {
+  try {
+    if (!isEstimatorCaller(req)) return res.status(403).json({ error: { message: 'Estimator access required' } });
+    const estimate = await Estimate.findByPk(req.params.id);
+    if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
+    const days = parseFloat(req.body.days) || 0;
+    const hours = parseFloat(req.body.hours) || 0;
+    const ms = (days * 86400000) + (hours * 3600000) || 86400000; // default 1 day
+    const until = new Date(Date.now() + ms);
+    await estimate.update({ reminderSnoozeUntil: until });
+    res.json({ data: { id: estimate.id, snoozedUntil: until } });
+  } catch (error) { next(error); }
+});
+
+// POST /api/estimates/:id/reminder-restore - undo dismiss/snooze
+router.post('/:id/reminder-restore', async (req, res, next) => {
+  try {
+    if (!isEstimatorCaller(req)) return res.status(403).json({ error: { message: 'Estimator access required' } });
+    const estimate = await Estimate.findByPk(req.params.id);
+    if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
+    await estimate.update({ reminderDismissedAt: null, reminderSnoozeUntil: null });
+    res.json({ data: { id: estimate.id, restored: true } });
+  } catch (error) { next(error); }
+});
+
+router.getAwaitingReplyQuotes = getAwaitingReplyQuotes; // attached to router so the cron/push job can reuse it
+
 router.get('/', async (req, res, next) => {
   try {
     const { status, archived, clientName, search, limit = 200, offset = 0 } = req.query;
@@ -3230,6 +3318,11 @@ MEASUREMENT POINTS — CRITICAL:
 
 Thickness format: Use fractions like '1/2"', '3/8"'. Only decimals if no fraction match.
 
+PRICING — if the document is a purchase order or quote that lists a price:
+- Set "unitPrice" to the price PER PIECE for that line (the rolling/forming/labor charge). E.g. "375.0000/PC" or "$375 each" → unitPrice = 375. "500.00/PC" → 500.
+- If only a line total (extended amount) is shown, divide by the quantity to get the per-piece price (e.g. amount 750.00 for 2 PCS → unitPrice = 375).
+- unitPrice is the CHARGE to the customer for the work (labor/rolling), not the raw material cost. Leave null if no price is shown.
+
 ${generalNotes ? `GENERAL SHOP NOTES:\n${generalNotes}\n` : ''}
 ${clientNotes ? `CLIENT-SPECIFIC NOTES:\n${clientNotes}\n` : ''}
 
@@ -3256,6 +3349,7 @@ Respond ONLY with valid JSON (no markdown, no backticks):
       "innerDiameter": null,
       "specialInstructions": "",
       "clientPartNumber": "",
+      "unitPrice": null,
       "description": "auto-generated material description",
       "missingFields": ["thickness"],
       "missingFieldNotes": "No thickness given"

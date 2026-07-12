@@ -127,6 +127,37 @@ app.get('/api/email-scanner/oauth/callback', async (req, res) => {
 const { authenticate } = require('./routes/auth');
 app.use('/api/shipments', authenticate, shipmentRoutes);
 
+// === Device tokens for push notifications (estimator phone) ===
+app.post('/api/devices/register', authenticate, async (req, res) => {
+  try {
+    const { token, label, platform } = req.body;
+    if (!token) return res.status(400).json({ error: { message: 'token is required' } });
+    const isEstimator = !!(
+      (req.user && (req.user.role === 'admin' || req.user.isEstimator)) ||
+      (req.apiKey && (req.apiKey.isEstimator || req.apiKey.permissions === 'admin'))
+    );
+    const { DeviceToken } = require('./models');
+    const existing = await DeviceToken.findOne({ where: { token } });
+    if (existing) {
+      await existing.update({ isEstimator, isActive: true, lastSeenAt: new Date(), label: label || existing.label });
+      return res.json({ data: { id: existing.id, isEstimator } });
+    }
+    const created = await DeviceToken.create({
+      token, label: label || null, platform: platform || 'android', isEstimator, isActive: true, lastSeenAt: new Date()
+    });
+    res.status(201).json({ data: { id: created.id, isEstimator } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+// Tells the app what this device is allowed to see (drives the Quotes tab)
+app.get('/api/devices/capabilities', authenticate, (req, res) => {
+  const isEstimator = !!(
+    (req.user && (req.user.role === 'admin' || req.user.isEstimator)) ||
+    (req.apiKey && (req.apiKey.isEstimator || req.apiKey.permissions === 'admin'))
+  );
+  res.json({ data: { isEstimator, quoteReminders: isEstimator } });
+});
+
 // === AI model + available-model endpoints MUST be registered before the /api/settings catch-all router ===
 // AI model settings — editable so a retired model can be swapped without a redeploy
 app.get('/api/settings/ai-models', authenticate, (req, res) => {
@@ -155,7 +186,7 @@ app.get('/api/debug/models', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
     const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return res.json({ version: 'v249', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
+    if (!apiKey) return res.json({ version: 'v255', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
     const https = require('https');
     const r = await new Promise((resolve) => {
       const rq = https.request({
@@ -170,7 +201,7 @@ app.get('/api/debug/models', async (req, res) => {
     });
     let parsed = null; try { parsed = JSON.parse(r.body); } catch {}
     res.json({
-      version: 'v249',
+      version: 'v255',
       keyPresent: true,
       keyPrefix: apiKey.slice(0, 10) + '…',
       anthropicStatus: r.status,
@@ -178,13 +209,13 @@ app.get('/api/debug/models', async (req, res) => {
       models: Array.isArray(parsed?.data) ? parsed.data.map(m => m.id) : [],
       rawSnippet: String(r.body).slice(0, 300)
     });
-  } catch (e) { res.json({ version: 'v249', error: e.message }); }
+  } catch (e) { res.json({ version: 'v255', error: e.message }); }
 });
 
 // GET /api/version - no auth; hit this in a browser to confirm which backend build is actually running
 app.get('/api/version', (req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.json({ version: 'v249', built: '2026-06-13', note: 'v248 — manual AI parse runs in background (fixes 30s timeout).' });
+  res.json({ version: 'v255', built: '2026-06-13', note: 'v248 — manual AI parse runs in background (fixes 30s timeout).' });
 });
 
 // GET /api/settings/available-models - live lookup of currently-available Anthropic models (for the dropdown)
@@ -2093,6 +2124,24 @@ async function startServer() {
       await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "opTransports" JSONB DEFAULT '[]'::jsonb`);
       // Vendor portal migrations
       await sequelize.query(`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS "vendorName" VARCHAR(255)`);
+      // Quote-reminder feature (head estimator): estimator flags, dismiss/snooze, FCM device tokens
+      await sequelize.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS "isEstimator" BOOLEAN DEFAULT false NOT NULL`);
+      await sequelize.query(`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS "isEstimator" BOOLEAN DEFAULT false NOT NULL`);
+      await sequelize.query(`ALTER TABLE estimates ADD COLUMN IF NOT EXISTS "reminderDismissedAt" TIMESTAMP WITH TIME ZONE`);
+      await sequelize.query(`ALTER TABLE estimates ADD COLUMN IF NOT EXISTS "reminderSnoozeUntil" TIMESTAMP WITH TIME ZONE`);
+      await sequelize.query(`
+        CREATE TABLE IF NOT EXISTS device_tokens (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          token TEXT NOT NULL UNIQUE,
+          label VARCHAR(255),
+          platform VARCHAR(50) DEFAULT 'android',
+          "isEstimator" BOOLEAN DEFAULT false NOT NULL,
+          "isActive" BOOLEAN DEFAULT true NOT NULL,
+          "lastSeenAt" TIMESTAMP WITH TIME ZONE,
+          "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+          "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+        )
+      `);
       await sequelize.query(`ALTER TABLE work_order_part_files ADD COLUMN IF NOT EXISTS "vendorPortalVisible" BOOLEAN DEFAULT false NOT NULL`);
       await sequelize.query(`
         CREATE TABLE IF NOT EXISTS vendor_issues (
@@ -2120,6 +2169,44 @@ async function startServer() {
       await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_vendor_issues_vendor ON vendor_issues("vendorId")`);
       console.log('Ensured outside processing tracking columns on work_order_parts');
     } catch (e) { console.log('outside processing tracking migration:', e.message); }
+
+    // Quote reminders — every 4 hours during business hours (7:30am–4pm Pacific), Mon–Fri.
+    // 7:30, 11:30, 3:30 — all inside the 7:30a–4p window.
+    cron.schedule('30 7,11,15 * * 1-5', async () => {
+      try {
+        const estimatesRouter = require('./routes/estimates');
+        const quotes = await estimatesRouter.getAwaitingReplyQuotes();
+        if (!quotes.length) { console.log('[quote-reminder] nothing awaiting reply'); return; }
+
+        const { sendPush, isPushConfigured } = require('./services/push');
+        const { DeviceToken } = require('./models');
+        const top = quotes.slice(0, 3)
+          .map(q => `${q.clientName} (${q.ageDays != null ? q.ageDays + 'd' : 'sent'})`)
+          .join(', ');
+        const title = `${quotes.length} quote${quotes.length === 1 ? '' : 's'} awaiting reply`;
+        const body = top + (quotes.length > 3 ? `, +${quotes.length - 3} more` : '');
+
+        if (!isPushConfigured()) {
+          console.log(`[quote-reminder] ${title}: ${body} (push not configured — set FIREBASE_SERVICE_ACCOUNT)`);
+          return;
+        }
+        const devices = await DeviceToken.findAll({ where: { isEstimator: true, isActive: true } });
+        for (const d of devices) {
+          try {
+            await sendPush(d.token, title, body, { type: 'quote_reminder', count: quotes.length });
+          } catch (e) {
+            console.error('[quote-reminder] push failed:', e.message);
+            // Token no longer valid — deactivate so we stop trying
+            if (e.status === 404 || e.status === 403) { try { await d.update({ isActive: false }); } catch {} }
+          }
+        }
+        console.log(`[quote-reminder] sent to ${devices.length} device(s): ${title}`);
+      } catch (e) {
+        console.error('[quote-reminder] cron error:', e.message);
+      }
+    }, {
+      timezone: 'America/Los_Angeles'
+    });
 
     // Comprehensive morning digest at 5:00 AM Pacific
     cron.schedule('0 5 * * *', async () => {

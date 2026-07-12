@@ -39,6 +39,11 @@ const User = sequelize.define('User', {
     type: DataTypes.ENUM('admin', 'user'),
     defaultValue: 'user'
   },
+  // Head estimator — sees the "Quotes Awaiting Reply" feature + reminders. Admins get this automatically.
+  isEstimator: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
   isActive: {
     type: DataTypes.BOOLEAN,
     defaultValue: true
@@ -1363,6 +1368,15 @@ const Estimate = sequelize.define('Estimate', {
   sentAt: {
     type: DataTypes.DATE,
     allowNull: true
+  },
+  // Quote-reminder controls (nags for sent quotes awaiting reply)
+  reminderDismissedAt: {
+    type: DataTypes.DATE,
+    allowNull: true // set = client went dark / stop reminding entirely
+  },
+  reminderSnoozeUntil: {
+    type: DataTypes.DATE,
+    allowNull: true // set = don't remind until this time
   },
   acceptedAt: {
     type: DataTypes.DATE,
@@ -2853,6 +2867,24 @@ DRNumber.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
 InvoiceNumber.belongsTo(WorkOrder, { foreignKey: 'workOrderId', as: 'workOrder' });
 InvoiceNumber.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
 
+// DeviceToken Model - FCM push tokens for estimator devices (owner's phone)
+const DeviceToken = sequelize.define('DeviceToken', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  token: { type: DataTypes.TEXT, allowNull: false, unique: true },
+  label: { type: DataTypes.STRING, allowNull: true }, // e.g. "Jason's phone"
+  platform: { type: DataTypes.STRING, defaultValue: 'android' },
+  isEstimator: { type: DataTypes.BOOLEAN, defaultValue: false },
+  isActive: { type: DataTypes.BOOLEAN, defaultValue: true },
+  lastSeenAt: { type: DataTypes.DATE, allowNull: true }
+}, {
+  tableName: 'device_tokens',
+  timestamps: true
+});
+
 // ApiKey Model - for portal/external API access
 const ApiKey = sequelize.define('ApiKey', {
   id: {
@@ -2880,6 +2912,11 @@ const ApiKey = sequelize.define('ApiKey', {
   permissions: {
     type: DataTypes.STRING,
     defaultValue: 'read' // 'read', 'read_write', 'admin'
+  },
+  // Estimator device (e.g. the owner's phone) — unlocks the Quotes tab + quote reminders. Operators leave this false.
+  isEstimator: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
   },
   isActive: {
     type: DataTypes.BOOLEAN,
@@ -3690,6 +3727,7 @@ module.exports = {
   Client,
   Vendor,
   ApiKey,
+  DeviceToken,
   ShopSupply,
   ShopSupplyLog,
   TodoItem,

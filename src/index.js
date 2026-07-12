@@ -140,37 +140,30 @@ app.get('/api/debug/push', async (req, res) => {
       devices = rows.map(d => ({ label: d.label, platform: d.platform, isEstimator: d.isEstimator, lastSeenAt: d.lastSeenAt }));
     } catch (e) { /* table may not exist until migration runs */ }
 
-    let quotes = [];
     let digest = null;
     let staleCount = 0;
-    let activeCount = 0;
     let staleDays = 30;
     let unsentDrafts = 0;
     let draftPreview = [];
     try {
       const estimatesRouter = require('./routes/estimates');
-      quotes = await estimatesRouter.getAwaitingReplyQuotes();
       staleDays = estimatesRouter.QUOTE_STALE_DAYS;
       const allDrafts = await estimatesRouter.getUnsentDrafts();
       const drafts = allDrafts.filter(d => !d.isStale);
+      staleCount = allDrafts.length - drafts.length;
       unsentDrafts = drafts.length;
       draftPreview = drafts.slice(0, 5).map(d => `${d.clientName}${d.isTopClient ? ' *TOP*' : ''} (${d.ageDays}d)`);
-      const active = quotes.filter(q => !q.isStale);
-      staleCount = quotes.length - active.length;
-      activeCount = active.length;
-      if (active.length || drafts.length) digest = estimatesRouter.buildQuoteDigest(active, drafts);
+      if (drafts.length) digest = estimatesRouter.buildQuoteDigest(drafts);
     } catch (e) {}
 
     const ready = creds.configured && creds.authOk;
     res.json({
-      version: 'v260',
+      version: 'v263',
       firebase: creds,
       registeredDevices: devices.length,
       devices,
       unsentDrafts,
       unsentDraftPreview: draftPreview,
-      quotesAwaitingReply: quotes.length,
-      nagging: activeCount,
       staleNotNagging: staleCount,
       staleAfterDays: staleDays,
       wouldSend: digest
@@ -269,7 +262,7 @@ app.get('/api/debug/models', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
     const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return res.json({ version: 'v260', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
+    if (!apiKey) return res.json({ version: 'v263', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
     const https = require('https');
     const r = await new Promise((resolve) => {
       const rq = https.request({
@@ -284,7 +277,7 @@ app.get('/api/debug/models', async (req, res) => {
     });
     let parsed = null; try { parsed = JSON.parse(r.body); } catch {}
     res.json({
-      version: 'v260',
+      version: 'v263',
       keyPresent: true,
       keyPrefix: apiKey.slice(0, 10) + '…',
       anthropicStatus: r.status,
@@ -292,13 +285,13 @@ app.get('/api/debug/models', async (req, res) => {
       models: Array.isArray(parsed?.data) ? parsed.data.map(m => m.id) : [],
       rawSnippet: String(r.body).slice(0, 300)
     });
-  } catch (e) { res.json({ version: 'v260', error: e.message }); }
+  } catch (e) { res.json({ version: 'v263', error: e.message }); }
 });
 
 // GET /api/version - no auth; hit this in a browser to confirm which backend build is actually running
 app.get('/api/version', (req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.json({ version: 'v260', built: '2026-06-13', note: 'v248 — manual AI parse runs in background (fixes 30s timeout).' });
+  res.json({ version: 'v263', built: '2026-06-13', note: 'v248 — manual AI parse runs in background (fixes 30s timeout).' });
 });
 
 // GET /api/settings/available-models - live lookup of currently-available Anthropic models (for the dropdown)
@@ -2258,19 +2251,17 @@ async function startServer() {
     cron.schedule('30 7,11,15 * * 1-5', async () => {
       try {
         const estimatesRouter = require('./routes/estimates');
-        const all = await estimatesRouter.getAwaitingReplyQuotes();
         const allDrafts = await estimatesRouter.getUnsentDrafts();
-        // Stale items (presumed dead) stay on the list but stop nagging
-        const quotes = all.filter(q => !q.isStale);
+        // Stale drafts (presumed dead) stay on the list but stop nagging
         const drafts = allDrafts.filter(d => !d.isStale);
-        if (!quotes.length && !drafts.length) {
-          console.log('[quote-reminder] nothing to nag about');
+        if (!drafts.length) {
+          console.log('[quote-reminder] no unsent quotes — all caught up');
           return;
         }
 
         const { sendPush, isPushConfigured } = require('./services/push');
         const { DeviceToken } = require('./models');
-        const { title, body } = estimatesRouter.buildQuoteDigest(quotes, drafts);
+        const { title, body } = estimatesRouter.buildQuoteDigest(drafts);
 
         if (!isPushConfigured()) {
           console.log(`[quote-reminder] ${title}: ${body} (push not configured — set FIREBASE_SERVICE_ACCOUNT)`);
@@ -2279,7 +2270,7 @@ async function startServer() {
         const devices = await DeviceToken.findAll({ where: { isEstimator: true, isActive: true } });
         for (const d of devices) {
           try {
-            await sendPush(d.token, title, body, { type: 'quote_reminder', drafts: drafts.length, awaiting: quotes.length });
+            await sendPush(d.token, title, body, { type: 'quote_reminder', drafts: drafts.length });
           } catch (e) {
             console.error('[quote-reminder] push failed:', e.message);
             // Token no longer valid — deactivate so we stop trying

@@ -568,6 +568,42 @@ function isEstimatorCaller(req) {
   return false;
 }
 
+// Quotes older than this stop nagging (still listed, just no longer pushed). Presumed dead.
+const QUOTE_STALE_DAYS = parseInt(process.env.QUOTE_STALE_DAYS) || 30;
+
+// Quotes still sitting in DRAFT — never sent. Higher priority than awaiting-reply:
+// the client is waiting and doesn't even have a number yet.
+async function getUnsentDrafts() {
+  const monitored = await Client.findAll({ where: { emailScanEnabled: true }, attributes: ['name'] });
+  const topNames = new Set(monitored.map(c => c.name).filter(Boolean));
+  const now = new Date();
+  const rows = await Estimate.findAll({
+    where: {
+      status: 'draft',
+      reminderDismissedAt: null,
+      [Op.or]: [{ reminderSnoozeUntil: null }, { reminderSnoozeUntil: { [Op.lt]: now } }]
+    },
+    order: [['createdAt', 'ASC']]
+  });
+  return rows.map(e => {
+    const created = e.createdAt ? new Date(e.createdAt) : null;
+    const ageDays = created ? Math.floor((now - created) / 86400000) : null;
+    return {
+      id: e.id,
+      estimateNumber: e.estimateNumber,
+      clientName: e.clientName,
+      total: e.total,
+      createdAt: e.createdAt,
+      ageDays,
+      isTopClient: topNames.has(e.clientName), // monitored client — the ones you can't afford to miss
+      isStale: ageDays != null && ageDays >= QUOTE_STALE_DAYS
+    };
+  }).sort((a, b) => {
+    if (a.isTopClient !== b.isTopClient) return a.isTopClient ? -1 : 1; // top clients first
+    return (b.ageDays || 0) - (a.ageDays || 0);
+  });
+}
+
 // Build the list of sent quotes awaiting a reply, for email-monitored ("top") clients only.
 async function getAwaitingReplyQuotes() {
   const monitored = await Client.findAll({ where: { emailScanEnabled: true }, attributes: ['name'] });
@@ -583,9 +619,32 @@ async function getAwaitingReplyQuotes() {
     },
     order: [['sentAt', 'ASC']]
   });
+
+  // Triage signal: did this client give us work AFTER the quote went out?
+  // (They may have come back another way — sent material, phoned an order in, etc.)
+  const oldestSent = rows.reduce((min, e) => {
+    const t = e.sentAt ? new Date(e.sentAt).getTime() : Infinity;
+    return Math.min(min, t);
+  }, Infinity);
+  let workOrders = [];
+  if (rows.length && isFinite(oldestSent)) {
+    try {
+      workOrders = await WorkOrder.findAll({
+        where: {
+          clientName: { [Op.in]: names },
+          createdAt: { [Op.gte]: new Date(oldestSent) }
+        },
+        attributes: ['clientName', 'createdAt', 'drNumber']
+      });
+    } catch (e) { /* non-fatal — triage hint only */ }
+  }
+
   return rows.map(e => {
     const sent = e.sentAt ? new Date(e.sentAt) : null;
     const ageDays = sent ? Math.floor((now - sent) / 86400000) : null;
+    const workSince = sent
+      ? workOrders.filter(w => w.clientName === e.clientName && new Date(w.createdAt) >= sent)
+      : [];
     return {
       id: e.id,
       estimateNumber: e.estimateNumber,
@@ -593,10 +652,58 @@ async function getAwaitingReplyQuotes() {
       total: e.total,
       sentAt: e.sentAt,
       ageDays,
+      isStale: ageDays != null && ageDays >= QUOTE_STALE_DAYS, // presumed dead — no longer nags
+      workSinceCount: workSince.length, // client gave us work after this quote — may already be handled
       snoozedUntil: e.reminderSnoozeUntil
     };
   }).sort((a, b) => (b.ageDays || 0) - (a.ageDays || 0));
 }
+
+// Digest text for the push. UNSENT DRAFTS lead — a quote never sent is worse than one awaiting reply.
+function buildQuoteDigest(quotes, drafts = []) {
+  const groupBy = (list) => {
+    const m = new Map();
+    for (const q of list) {
+      const key = q.clientName || 'Unknown client';
+      const cur = m.get(key) || { count: 0, oldest: 0 };
+      cur.count += 1;
+      cur.oldest = Math.max(cur.oldest, q.ageDays || 0);
+      m.set(key, cur);
+    }
+    return Array.from(m.entries()).map(([name, g]) => ({ name, ...g })).sort((a, b) => b.oldest - a.oldest);
+  };
+  const fmt = (groups, max = 3) => {
+    const parts = groups.slice(0, max).map(g =>
+      g.count > 1 ? `${g.name} (${g.count}, oldest ${g.oldest}d)` : `${g.name} (${g.oldest}d)`
+    );
+    let s = parts.join(', ');
+    if (groups.length > max) s += `, +${groups.length - max} more`;
+    return s;
+  };
+
+  const draftGroups = groupBy(drafts);
+  const quoteGroups = groupBy(quotes);
+
+  let title, body;
+  if (drafts.length) {
+    title = `⚠️ ${drafts.length} quote${drafts.length === 1 ? '' : 's'} NOT SENT`;
+    body = `Not sent: ${fmt(draftGroups)}`;
+    if (quotes.length) body += `\nAwaiting reply: ${quotes.length} (${fmt(quoteGroups, 2)})`;
+  } else {
+    title = `${quotes.length} quote${quotes.length === 1 ? '' : 's'} awaiting reply`;
+    body = fmt(quoteGroups);
+  }
+  return { title, body, draftCount: drafts.length, quoteCount: quotes.length };
+}
+
+// GET /api/estimates/unsent-drafts - quotes still in draft (never sent) — the real money leak
+router.get('/unsent-drafts', async (req, res, next) => {
+  try {
+    if (!isEstimatorCaller(req)) return res.status(403).json({ error: { message: 'Estimator access required' } });
+    const drafts = await getUnsentDrafts();
+    res.json({ data: drafts, count: drafts.length });
+  } catch (error) { next(error); }
+});
 
 // GET /api/estimates/awaiting-reply - sent quotes with no reply, for monitored clients
 router.get('/awaiting-reply', async (req, res, next) => {
@@ -604,6 +711,17 @@ router.get('/awaiting-reply', async (req, res, next) => {
     if (!isEstimatorCaller(req)) return res.status(403).json({ error: { message: 'Estimator access required' } });
     const quotes = await getAwaitingReplyQuotes();
     res.json({ data: quotes, count: quotes.length });
+  } catch (error) { next(error); }
+});
+
+// POST /api/estimates/:id/mark-declined - record the real outcome (dead lead). Removes it from reminders permanently.
+router.post('/:id/mark-declined', async (req, res, next) => {
+  try {
+    if (!isEstimatorCaller(req)) return res.status(403).json({ error: { message: 'Estimator access required' } });
+    const estimate = await Estimate.findByPk(req.params.id);
+    if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
+    await estimate.update({ status: 'declined' });
+    res.json({ data: { id: estimate.id, status: 'declined' } });
   } catch (error) { next(error); }
 });
 
@@ -645,6 +763,9 @@ router.post('/:id/reminder-restore', async (req, res, next) => {
 });
 
 router.getAwaitingReplyQuotes = getAwaitingReplyQuotes; // attached to router so the cron/push job can reuse it
+router.buildQuoteDigest = buildQuoteDigest;
+router.getUnsentDrafts = getUnsentDrafts;
+router.QUOTE_STALE_DAYS = QUOTE_STALE_DAYS;
 
 router.get('/', async (req, res, next) => {
   try {

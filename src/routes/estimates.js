@@ -635,7 +635,7 @@ router.get('/price-suggestion', async (req, res, next) => {
   try {
     const { suggestPrice } = require('../services/pricingSuggest');
     const { AppSettings } = require('../models');
-    let cfg = { newClientUpliftPct: 0 };
+    let cfg = { newClientUpliftPct: 0, minLaborCharge: 150 };
     try {
       const row = await AppSettings.findOne({ where: { key: 'pricing_config' } });
       if (row && row.value) cfg = { ...cfg, ...row.value };
@@ -648,7 +648,7 @@ router.get('/price-suggestion', async (req, res, next) => {
       length: req.query.length,
       diameter: req.query.diameter || req.query.innerDiameter || req.query.outerDiameter,
       clientName: req.query.clientName
-    }, { newClientUpliftPct: cfg.newClientUpliftPct });
+    }, { newClientUpliftPct: cfg.newClientUpliftPct, minLaborCharge: cfg.minLaborCharge });
     res.json({ data: result });
   } catch (error) { next(error); }
 });

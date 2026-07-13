@@ -271,6 +271,7 @@ ${parsingNotes ? `\nCLIENT-SPECIFIC NOTES:\n${parsingNotes}\n` : ''}
 Respond ONLY with valid JSON (no markdown, no backticks). Format:
 {
   "emailType": "rfq" or "po" or "general",
+  "isNewRequest": true or false,
   "referenceNumber": "OR number, quote reference, or null",
   "poNumber": "PO number if this is a purchase order, or null",
   "referencesQuote": "reference to previous quote/OR if PO, or null",
@@ -309,6 +310,15 @@ Respond ONLY with valid JSON (no markdown, no backticks). Format:
 }
 
 CRITICAL: For missingFields, list any field the client did NOT provide that is needed to complete the estimate. Common missing fields: thickness, material, diameter/radius, arcDegrees, length, rollType. Add a human-readable note in missingFieldNotes explaining what's missing.
+
+CRITICAL — isNewRequest (does this email warrant a NEW estimate?):
+- Set "isNewRequest": true ONLY if the client is asking us to quote work we have NOT already quoted.
+- Set "isNewRequest": false for ANY reply, acknowledgment, or follow-up about a quote we already sent:
+  thank-yous, "sounds good", "we'll get back to you", "no order yet", status checks, questions about an
+  existing quote, or a forwarded thread that merely repeats an earlier RFQ.
+- Replies OFTEN quote the original RFQ (including the drawings) further down the thread. The presence of
+  parts/drawings in a reply does NOT make it a new request. Judge by the NEW text at the top.
+- If in doubt, set false. A missed new request is recoverable; a phantom duplicate estimate is not.
 
 If this is a PO (purchase order) rather than an RFQ:
 - Set emailType to "po" ONLY if the email contains EXPLICIT order language such as:
@@ -1800,11 +1810,40 @@ async function _runScanInternal() {
           // Check if email has no parts (general inquiry, status update, etc.)
           const hasParts = (parsed.parts || []).length > 0;
 
-          // If drawings were parsed and found parts, upgrade to rfq before the general check fires
+          // If drawings were parsed and found parts, upgrade to rfq before the general check fires.
+          // BUT NOT when the email is clearly a reply/acknowledgment to a quote we already sent —
+          // those often quote the original RFQ (drawings and all) in the thread, and upgrading them
+          // creates a phantom duplicate estimate that then nags in "quotes not sent".
           const attachmentHasParts = attachmentParsedResults.some(r => (r.parts || []).length > 0);
+          const subjectIsReply = /^\s*(re|fw|fwd)\s*:/i.test(subject || '');
+          // Only judge the NEW text at the top — replies quote the whole original RFQ (drawings and all) below.
+          const replyText = String(bodyText || '')
+            .replace(/^>.*$/gm, '')
+            .replace(/On .*wrote:/g, '')
+            .replace(/-{2,}.*Original Message.*-{2,}[\s\S]*/i, '')
+            .replace(/From:.*Sent:.*To:.*Subject:[\s\S]*/i, '')
+            .trim()
+            .toLowerCase();
+          const looksLikeAcknowledgment = /\b(thank you|thanks|appreciate it|sounds good|looks good|got it|received|noted|will get back|no order|acknowledg)/i.test(replyText)
+            && !/\b(please quote|can you quote|rfq|request for quote|need a quote|quote the following|new (job|request|project))\b/i.test(replyText);
+          const isReplyToOurQuote = (subjectIsReply || looksLikeAcknowledgment) && !!parsed.referencesQuote;
+          // The AI's own verdict on whether this warrants a new estimate. It already gets this right
+          // (it literally wrote "No order has been placed — this is a general acknowledgment only") —
+          // we just never asked it before.
+          const aiSaysNotNew = parsed.isNewRequest === false;
+
+          if (aiSaysNotNew && parsed.emailType !== 'po') {
+            console.log(`[EmailScanner] AI says this is NOT a new request (reply/acknowledgment) — no estimate will be created`);
+            parsed.emailType = 'general';
+          }
+
           if (attachmentHasParts && (parsed.emailType === 'general' || !hasParts)) {
-            console.log(`[EmailScanner] Email body was general/no-parts but drawings found parts — upgrading to rfq`);
-            parsed.emailType = 'rfq';
+            if (aiSaysNotNew || isReplyToOurQuote || (subjectIsReply && looksLikeAcknowledgment)) {
+              console.log(`[EmailScanner] Drawings found parts, but this is a REPLY/acknowledgment to an existing quote — NOT creating an estimate`);
+            } else {
+              console.log(`[EmailScanner] Email body was general/no-parts but drawings found parts — upgrading to rfq`);
+              parsed.emailType = 'rfq';
+            }
           }
           
           if (parsed.emailType === 'general' || (!hasParts && !attachmentHasParts)) {

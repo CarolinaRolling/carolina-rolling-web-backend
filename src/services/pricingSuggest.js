@@ -1,24 +1,44 @@
 // Price recommendation from historical WON jobs.
 //
-// Design notes (important — see shop-knowledge-notes.txt):
-//  * We ONLY learn from quotes that were actually WON (accepted/converted). The shop does not mark
-//    losses, and jobs often come back 6-12 months later, so "no response" is NOT a loss. Any
-//    win-rate / loss-based model would be built on a lie.
-//  * Won jobs are real receipts: someone paid that price. That's the only ground truth we have.
-//  * We lead with the PROVEN HIGH end of the range, not the median — the owner believes he is
-//    underpriced, and the high end is a price he has already demonstrably won at.
-//  * This is deliberately plain statistics, not an LLM. It's more accurate and it's explainable.
+// Design notes (see shop-knowledge-notes.txt):
+//  * ONLY learn from jobs actually WON (accepted/converted). The shop doesn't mark losses and jobs
+//    come back 6-12 months later, so "no response" is NOT a loss.
+//  * Lead with the PROVEN HIGH end — the owner is underpriced, and the high end is a real receipt.
+//  * Plain statistics, not an LLM. More accurate and explainable.
+//
+// v278 REWRITE — the old version compared RAW PRICES and HARD-FILTERED by width band. That threw
+// away the best evidence: a won 5/8" x 120"w job ($750) was excluded from a 5/8" x 74"w quote purely
+// because the widths fell in different bands, leaving junk behind and suggesting $100.
+// Now we compare RATES and SCALE BY SIZE — a job with twice the steel costs roughly twice as much,
+// so a bigger or smaller comparable still informs the price instead of being discarded.
 
 const { Estimate, EstimatePart, Client } = require('../models');
 const { Op } = require('sequelize');
 
 const WON_STATUSES = ['accepted', 'converted'];
 
-// Parse "3/8", "0.375", "1-1/2", '36"' -> number
+const CRANE_CAPACITY_LBS = parseFloat(process.env.CRANE_CAPACITY_LBS) || 10000;
+const DENSITY = { carbon: 0.2836, stainless: 0.289, aluminum: 0.098, other: 0.2836, unknown: 0.2836 };
+
+// Machine capacity bands (width). Still meaningful — but a SOFT factor now, not a wall.
+const WIDTH_BANDS = [
+  { max: 24, label: '0-24"' },
+  { max: 60, label: '24-60"' },
+  { max: 96, label: '60-96"' },
+  { max: 120, label: '96-120"' },
+  { max: Infinity, label: 'over 120" (needs machine clearance - special pricing)' }
+];
+function widthBand(w) {
+  const v = parseFloat(w) || 0;
+  if (!v) return null;
+  for (let i = 0; i < WIDTH_BANDS.length; i++) if (v <= WIDTH_BANDS[i].max) return i;
+  return WIDTH_BANDS.length - 1;
+}
+
 function parseNum(s) {
   if (s === null || s === undefined || s === '') return null;
   if (typeof s === 'number') return s;
-  let str = String(s).replace(/["″]|in\.?|inch(es)?/gi, ' ').trim();
+  let str = String(s).replace(/["\u2033]|in\.?|inch(es)?/gi, ' ').trim();
   let m = str.match(/(\d+)[\s-]+(\d+)\s*\/\s*(\d+)/);
   if (m) return parseInt(m[1]) + parseInt(m[2]) / parseInt(m[3]);
   m = str.match(/(\d+)\s*\/\s*(\d+)/);
@@ -28,7 +48,6 @@ function parseNum(s) {
   return null;
 }
 
-// Group materials so A36 and A572 (both carbon) can inform each other, but never stainless.
 function materialFamily(s) {
   const v = String(s || '').toLowerCase();
   if (/s\s*\/\s*s|stainless|\b3[0-4][0-9]\b/.test(v)) return 'stainless';
@@ -37,38 +56,46 @@ function materialFamily(s) {
   return v ? 'other' : 'unknown';
 }
 
-// Width bands for plate rolling. Width is the DOMINANT cost driver — it's a machine-capacity
-// cliff, not a smooth curve. The roller maxes at 120"; 120-124" only sometimes clears and is
-// very expensive. Comparables must come from the SAME band or the price is meaningless.
-const WIDTH_BANDS = [
-  { max: 24, label: '0–24"' },
-  { max: 60, label: '24–60"' },
-  { max: 96, label: '60–96"' },
-  { max: 120, label: '96–120"' },
-  { max: Infinity, label: 'over 120" (needs machine clearance — special pricing)' }
-];
-function widthBand(w) {
-  const v = parseFloat(w) || 0;
-  if (!v) return null;
-  for (let i = 0; i < WIDTH_BANDS.length; i++) {
-    if (v <= WIDTH_BANDS[i].max) return i;
+// The flat plate that gets rolled. If length isn't given, derive it from the rolled diameter
+// (developed length = pi x diameter) - that's the plate actually fed through the roller.
+function plateDims(part) {
+  const t = parseNum(part.thickness);
+  const w = parseNum(part.width);
+  let l = parseNum(part.length);
+  if (!l) {
+    const d = parseNum(part.diameter) || parseNum(part.innerDiameter) || parseNum(part.outerDiameter);
+    if (d) l = Math.PI * d;
   }
-  return WIDTH_BANDS.length - 1;
+  return { t, w, l };
 }
 
-// Crane capacity — a hard physical limit. If a piece is heavier than this you can't lift it,
-// so it doesn't matter what it's priced at.
-const CRANE_CAPACITY_LBS = parseFloat(process.env.CRANE_CAPACITY_LBS) || 10000;
-
-// lb per cubic inch
-const DENSITY = { carbon: 0.2836, stainless: 0.289, aluminum: 0.098, other: 0.2836, unknown: 0.2836 };
-
-// Estimated weight of ONE piece of flat plate before rolling (what the crane actually lifts).
-function estimateWeightLbs({ thickness, width, length, material }) {
-  const t = parseNum(thickness), w = parseNum(width), l = parseNum(length);
+function weightLbs(part) {
+  const { t, w, l } = plateDims(part);
   if (!t || !w || !l) return null;
-  const d = DENSITY[materialFamily(material)] ?? DENSITY.carbon;
+  const d = DENSITY[materialFamily(part.material)] !== undefined ? DENSITY[materialFamily(part.material)] : DENSITY.carbon;
   return t * w * l * d;
+}
+
+// BILLABLE width = the top of the width band.
+// The roller doesn't care whether the plate is 74" or 96" wide — same setup, same machine tied up,
+// same handling. You're selling BAND CAPACITY, not inches. Calibrated against a real job: a won
+// 5/8" x 120"w job ($750) implies $0.0779/lb; pricing a 5/8" x 74.25"w job at its band max (96")
+// gives $440 — the owner actually bid $450. Scaling by the literal width gave $340 (too light).
+function billableWidth(w) {
+  const b = widthBand(w);
+  if (b === null) return null;
+  const max = WIDTH_BANDS[b].max;
+  return isFinite(max) ? max : parseFloat(w); // over 120": no band ceiling, use the real width
+}
+
+// Weight used for PRICING (band-max width). Physical weight (for the crane check) uses real width.
+function billableWeightLbs(part) {
+  const { t, w, l } = plateDims(part);
+  if (!t || !w || !l) return null;
+  const bw = billableWidth(w);
+  if (!bw) return null;
+  const d = DENSITY[materialFamily(part.material)] !== undefined ? DENSITY[materialFamily(part.material)] : DENSITY.carbon;
+  return t * bw * l * d;
 }
 
 const median = (arr) => {
@@ -80,141 +107,127 @@ const median = (arr) => {
 const percentile = (arr, p) => {
   if (!arr.length) return null;
   const s = [...arr].sort((a, b) => a - b);
-  const idx = Math.min(s.length - 1, Math.max(0, Math.round((p / 100) * (s.length - 1))));
-  return s[idx];
+  return s[Math.min(s.length - 1, Math.max(0, Math.round((p / 100) * (s.length - 1))))];
 };
 
-/**
- * Find comparable WON parts and suggest a price.
- * target: { partType, material, thickness, diameter, quantity, clientName }
- */
 async function suggestPrice(target, opts = {}) {
   const upliftPct = parseFloat(opts.newClientUpliftPct) || 0;
+  const minCharge = parseFloat(opts.minLaborCharge) || 150;
 
-  const tThk = parseNum(target.thickness);
-  const tDia = parseNum(target.diameter || target.innerDiameter || target.outerDiameter);
   const tFam = materialFamily(target.material);
-  const tWidth = parseNum(target.width);
-  const tBand = widthBand(tWidth);
-  const estWeight = estimateWeightLbs(target);
-  const overCrane = estWeight != null && estWeight > CRANE_CAPACITY_LBS;
+  const tDims = plateDims(target);
+  const tWeight = weightLbs(target);              // real weight — what the crane lifts
+  const tBillable = billableWeightLbs(target);    // band-max weight — what you charge for
+  const tBand = widthBand(tDims.w);
+  const tThk = tDims.t;
+  const tDia = parseNum(target.diameter || target.innerDiameter || target.outerDiameter);
+  const overCrane = tWeight != null && tWeight > CRANE_CAPACITY_LBS;
 
-  // Pull won parts of the same type
+  const base = {
+    widthBand: tBand !== null ? WIDTH_BANDS[tBand].label : null,
+    oversize: tBand === WIDTH_BANDS.length - 1,
+    estWeightLbs: tWeight != null ? Math.round(tWeight) : null,
+    craneCapacityLbs: CRANE_CAPACITY_LBS,
+    overCrane
+  };
+
   const rows = await EstimatePart.findAll({
     where: { partType: target.partType },
     include: [{
-      model: Estimate,
-      as: 'estimate',
-      required: true,
+      model: Estimate, as: 'estimate', required: true,
       where: { status: { [Op.in]: WON_STATUSES }, trashedAt: null },
-      attributes: ['id', 'status', 'clientName', 'createdAt', 'acceptedAt']
+      attributes: ['id', 'status', 'clientName', 'createdAt']
     }],
     limit: 4000
   });
 
   const now = Date.now();
-  const candidates = [];
+  const comps = [];
   for (const p of rows) {
     const labor = parseFloat(p.laborTotal);
     if (!labor || labor <= 0) continue;
-    const thk = parseNum(p.thickness);
-    const dia = parseNum(p.diameter || p.innerDiameter);
     const fam = materialFamily(p.material);
-    const band = widthBand(parseNum(p.width));
+    if (tFam !== 'unknown' && fam !== 'unknown' && fam !== tFam) continue; // never mix metals
 
-    // Score similarity. Lower = closer. Reject clearly different jobs.
+    const w = billableWeightLbs(p);          // rate is computed on BILLABLE weight, consistently
+    if (!w || w <= 0) continue;              // need size to compute a rate
+    const dims = plateDims(p);
+    const rate = labor / w;                  // $ per billable lb - the scale-free comparison
+    if (!isFinite(rate) || rate <= 0) continue;
+
+    // Similarity: thickness matters most, then width band, then diameter, then age.
     let score = 0;
-    if (tFam !== 'unknown' && fam !== 'unknown') {
-      if (fam !== tFam) continue;             // never mix carbon / stainless / aluminum
-    }
-    // HARD REQUIREMENT: same width band. A 12" ring and a 118" ring are different jobs
-    // on different machines at wildly different prices — averaging them is meaningless.
-    if (tBand !== null && band !== null && band !== tBand) continue;
-    if (tThk && thk) {
-      const rel = Math.abs(thk - tThk) / tThk;
-      if (rel > 0.5) continue;                 // >50% off in thickness isn't comparable
-      score += rel * 2;
-    }
-    if (tDia && dia) {
-      const rel = Math.abs(dia - tDia) / tDia;
-      if (rel > 0.6) continue;
-      score += rel;
-    }
-    // Prefer recent work — 2022 prices are not 2026 prices
+    if (tThk && dims.t) score += Math.abs(dims.t - tThk) / tThk * 3;
+    const band = widthBand(dims.w);
+    if (tBand !== null && band !== null) score += Math.abs(band - tBand) * 0.6; // SOFT, not a wall
+    const dia = parseNum(p.diameter) || parseNum(p.innerDiameter);
+    if (tDia && dia) score += Math.abs(dia - tDia) / tDia * 0.5;
     const ageDays = (now - new Date(p.estimate.createdAt).getTime()) / 86400000;
-    score += Math.min(ageDays / 365, 3) * 0.15;
+    score += Math.min(ageDays / 365, 3) * 0.3;
 
-    candidates.push({
-      labor,
-      thickness: thk,
-      diameter: dia,
-      width: parseNum(p.width),
-      material: p.material,
-      clientName: p.estimate.clientName,
-      when: p.estimate.createdAt,
-      ageDays: Math.floor(ageDays),
-      score
+    comps.push({
+      labor, weight: w, rate,
+      thickness: dims.t, width: dims.w, length: dims.l, diameter: dia,
+      material: p.material, clientName: p.estimate.clientName,
+      ageDays: Math.floor(ageDays), score
     });
   }
 
-  candidates.sort((a, b) => a.score - b.score);
-  const top = candidates.slice(0, 25);
-  const prices = top.map(c => c.labor);
-
-  if (!prices.length) {
-    return {
+  if (!comps.length || !tBillable) {
+    return Object.assign({}, base, {
       found: 0,
       confidence: 'none',
-      widthBand: tBand !== null ? WIDTH_BANDS[tBand].label : null,
-      oversize: tBand === WIDTH_BANDS.length - 1,
-      estWeightLbs: estWeight != null ? Math.round(estWeight) : null,
-      craneCapacityLbs: CRANE_CAPACITY_LBS,
-      overCrane,
-      message: tBand !== null
-        ? `No comparable won jobs yet at ${WIDTH_BANDS[tBand].label} width.`
-        : 'No comparable won jobs yet for this configuration.'
-    };
+      message: tWeight
+        ? 'No comparable won jobs with size data yet.'
+        : 'Enter thickness, width and length (or diameter) to get a recommendation.'
+    });
   }
 
-  const med = median(prices);
-  const high = percentile(prices, 90);   // proven high — you have actually won at this
-  const low = Math.min(...prices);
-  const max = Math.max(...prices);
-  const recent = top.filter(c => c.ageDays <= 365).map(c => c.labor);
-  const recentMed = recent.length ? median(recent) : null;
+  comps.sort((a, b) => a.score - b.score);
+  const top = comps.slice(0, 25);
+  const rates = top.map(c => c.rate);
 
-  // Lead with the proven-high end (owner is underpriced), floored at the recent median.
-  let suggested = Math.max(high || 0, recentMed || 0, med || 0);
+  const medRate = median(rates);
+  const highRate = percentile(rates, 85);   // proven high - he has won at this rate
+  const recent = top.filter(c => c.ageDays <= 365).map(c => c.rate);
+  const recentRate = recent.length ? median(recent) : null;
 
-  // New-client uplift — the one clean lever: no price anchor with a brand-new client.
+  const typical = medRate * tBillable;
+  const provenHigh = Math.max.apply(null, rates) * tBillable;
+  const recentTypical = recentRate ? recentRate * tBillable : null;
+
+  // Lead with the proven-high end, never below the minimum charge.
+  let suggested = Math.max(highRate * tBillable, recentTypical || 0, typical, minCharge);
+
   let isNewClient = false;
   if (target.clientName && upliftPct > 0) {
-    const priorWins = candidates.filter(c => c.clientName === target.clientName).length;
+    const priorWins = comps.filter(c => c.clientName === target.clientName).length;
     const client = await Client.findOne({ where: { name: target.clientName } });
-    const clientAgeDays = client?.createdAt ? (now - new Date(client.createdAt).getTime()) / 86400000 : 9999;
+    const clientAgeDays = client && client.createdAt ? (now - new Date(client.createdAt).getTime()) / 86400000 : 9999;
     isNewClient = priorWins === 0 || clientAgeDays < 180;
-    if (isNewClient) suggested = suggested * (1 + upliftPct / 100);
+    if (isNewClient) suggested *= (1 + upliftPct / 100);
   }
 
-  const confidence = prices.length >= 8 ? 'good' : prices.length >= 3 ? 'fair' : 'thin';
+  const confidence = rates.length >= 8 ? 'good' : rates.length >= 3 ? 'fair' : 'thin';
 
-  return {
-    found: prices.length,
+  return Object.assign({}, base, {
+    found: rates.length,
     confidence,
-    widthBand: tBand !== null ? WIDTH_BANDS[tBand].label : null,
-    oversize: tBand === WIDTH_BANDS.length - 1, // over 120" — needs clearance check, prices high
-    estWeightLbs: estWeight != null ? Math.round(estWeight) : null,
-    craneCapacityLbs: CRANE_CAPACITY_LBS,
-    overCrane, // heavier than the crane can lift — a hard physical limit
     suggested: Math.round(suggested * 100) / 100,
-    median: Math.round(med * 100) / 100,
-    provenHigh: Math.round(max * 100) / 100,
-    low: Math.round(low * 100) / 100,
-    recentMedian: recentMed ? Math.round(recentMed * 100) / 100 : null,
+    median: Math.round(typical * 100) / 100,
+    provenHigh: Math.round(provenHigh * 100) / 100,
+    low: Math.round(Math.min.apply(null, rates) * tBillable * 100) / 100,
+    recentMedian: recentTypical ? Math.round(recentTypical * 100) / 100 : null,
+    ratePerLb: Math.round(medRate * 10000) / 10000,
+    billableWeightLbs: Math.round(tBillable),
+    billableWidth: billableWidth(tDims.w),
+    minCharge,
     isNewClient,
     upliftPct: isNewClient ? upliftPct : 0,
     samples: top.slice(0, 6).map(c => ({
       labor: c.labor,
+      weight: Math.round(c.weight),
+      rate: Math.round(c.rate * 1000) / 1000,
       material: c.material,
       thickness: c.thickness,
       width: c.width,
@@ -222,7 +235,7 @@ async function suggestPrice(target, opts = {}) {
       client: c.clientName,
       ageDays: c.ageDays
     }))
-  };
+  });
 }
 
-module.exports = { suggestPrice, materialFamily, parseNum };
+module.exports = { suggestPrice, materialFamily, parseNum, weightLbs, widthBand };

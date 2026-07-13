@@ -852,25 +852,6 @@ async function createEstimateFromParsed(parsed, clientInfo, scannedEmail, attach
       scannedEmailId: scannedEmail.id
     });
 
-    // Ping the estimator's phone immediately — a new quote request just landed.
-    // (The 4-hourly digest still nags until it's actually sent.)
-    try {
-      const { notifyEstimatorDevices } = require('./push');
-      const { Client } = require('../models');
-      let isTop = false;
-      try {
-        const c = await Client.findOne({ where: { name: clientInfo.clientName } });
-        isTop = !!(c && c.emailScanEnabled);
-      } catch (e) {}
-      await notifyEstimatorDevices(
-        `${isTop ? '⭐ ' : ''}New quote request — ${clientInfo.clientName}`,
-        `${estNumber} created from email. Not sent yet.`,
-        { type: 'new_estimate', estimateId: String(estimate.id) }
-      );
-    } catch (e) {
-      console.error('[EmailScanner] new-estimate push failed (non-fatal):', e.message);
-    }
-
     // Create parts with proper formData — track IDs for fab service linking
     const createdPartIds = []; // index → part ID
     for (let i = 0; i < (parsed.parts || []).length; i++) {

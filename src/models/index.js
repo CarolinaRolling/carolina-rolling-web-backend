@@ -1440,7 +1440,32 @@ const Estimate = sequelize.define('Estimate', {
   }
 }, {
   tableName: 'estimates',
-  timestamps: true
+  timestamps: true,
+  hooks: {
+    // Catch-all: ping the estimator's phone whenever a NEW estimate arrives from email,
+    // no matter which code path created it (background scanner, review center, AI parse...).
+    // Only fires for email-sourced estimates — not ones the owner types up himself.
+    afterCreate: async (estimate) => {
+      try {
+        if (!estimate.scannedEmailId) return; // not an incoming request
+        const { notifyEstimatorDevices } = require('../services/push');
+        let isTop = false;
+        try {
+          const models = module.exports;
+          const c = models.Client ? await models.Client.findOne({ where: { name: estimate.clientName } }) : null;
+          isTop = !!(c && c.emailScanEnabled);
+        } catch (e) {}
+        console.log(`[new-estimate] pinging estimator devices for ${estimate.estimateNumber} (${estimate.clientName})`);
+        await notifyEstimatorDevices(
+          `${isTop ? '⭐ ' : ''}New quote request — ${estimate.clientName || 'Unknown client'}`,
+          `${estimate.estimateNumber} created from email. Not sent yet.`,
+          { type: 'new_estimate', estimateId: String(estimate.id) }
+        );
+      } catch (e) {
+        console.error('[new-estimate] push hook failed (non-fatal):', e.message);
+      }
+    }
+  }
 });
 
 // EstimatePart Model - parts within an estimate (replaces EstimateLineItem)

@@ -7,6 +7,12 @@ const crypto = require('crypto');
 const https = require('https');
 
 let cachedToken = null; // { accessToken, expiresAt }
+const pushLog = []; // last few push attempts, for /api/debug/push
+function logPush(entry) {
+  pushLog.unshift({ at: new Date().toISOString(), ...entry });
+  if (pushLog.length > 20) pushLog.pop();
+}
+function getPushLog() { return pushLog; }
 
 function getServiceAccount() {
   const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
@@ -121,22 +127,31 @@ async function verifyPushCredentials() {
 async function notifyEstimatorDevices(title, body, data = {}) {
   if (!isPushConfigured()) {
     console.log(`[push] (not configured) would send: ${title} — ${body}`);
+    logPush({ title, result: 'SKIPPED — FIREBASE_SERVICE_ACCOUNT not set' });
     return { sent: 0, skipped: true };
   }
   const { DeviceToken } = require('../models');
   const devices = await DeviceToken.findAll({ where: { isEstimator: true, isActive: true } });
+  if (!devices.length) {
+    console.warn(`[push] "${title}" — NO estimator devices registered, nothing sent`);
+    logPush({ title, result: 'NO ESTIMATOR DEVICES REGISTERED — the phone has not registered with an estimator API key' });
+    return { sent: 0 };
+  }
   let sent = 0;
+  const errors = [];
   for (const d of devices) {
     try {
       await sendPush(d.token, title, body, data);
       sent++;
     } catch (e) {
       console.error('[push] send failed:', e.message);
+      errors.push(`${d.label || 'device'}: ${e.message}`);
       if (e.status === 404 || e.status === 403) { try { await d.update({ isActive: false }); } catch {} }
     }
   }
-  console.log(`[push] "${title}" sent to ${sent} estimator device(s)`);
+  console.log(`[push] "${title}" sent to ${sent}/${devices.length} estimator device(s)`);
+  logPush({ title, devices: devices.length, sent, errors: errors.length ? errors : undefined });
   return { sent };
 }
 
-module.exports = { sendPush, isPushConfigured, verifyPushCredentials, notifyEstimatorDevices };
+module.exports = { sendPush, isPushConfigured, verifyPushCredentials, notifyEstimatorDevices, getPushLog };

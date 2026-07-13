@@ -628,7 +628,7 @@ router.post('/api-keys', authenticateToken, requireAdmin, async (req, res, next)
 router.get('/api-keys', authenticateToken, requireAdmin, async (req, res, next) => {
   try {
     const apiKeys = await ApiKey.findAll({
-      attributes: ['id', 'name', 'clientName', 'vendorName', 'permissions', 'isActive', 'lastUsedAt', 'lastIP', 'lastIPDate',
+      attributes: ['id', 'name', 'clientName', 'vendorName', 'permissions', 'isActive', 'isEstimator', 'lastUsedAt', 'lastIP', 'lastIPDate',
         'expiresAt', 'createdBy', 'createdAt', 'allowedIPs', 'operatorName', 'deviceName', 'revokedReason', 'revokedAt'],
       order: [['createdAt', 'DESC']]
     });
@@ -675,8 +675,9 @@ router.put('/api-keys/:id', authenticateToken, requireAdmin, async (req, res, ne
       return res.status(404).json({ error: { message: 'API key not found' } });
     }
     
-    const { name, clientName, vendorName, permissions, allowedIPs, operatorName, deviceName, expiresAt, isActive } = req.body;
+    const { name, clientName, vendorName, permissions, allowedIPs, operatorName, deviceName, expiresAt, isActive, isEstimator } = req.body;
     const updates = {};
+    if (isEstimator !== undefined) updates.isEstimator = !!isEstimator;
     if (name !== undefined) updates.name = name;
     if (clientName !== undefined) updates.clientName = clientName || null;
     if (vendorName !== undefined) updates.vendorName = vendorName || null;

@@ -142,7 +142,7 @@ app.get('/api/debug/estimator-keys', async (req, res) => {
       unlocksQuotesTab: !!(k.isEstimator || k.permissions === 'admin')
     }));
     res.json({
-      version: 'v285',
+      version: 'v287',
       keys: rows,
       qualifying: rows.filter(r => r.unlocksQuotesTab).map(r => r.name),
       hint: rows.some(r => r.unlocksQuotesTab)
@@ -206,7 +206,7 @@ app.get('/api/debug/push', async (req, res) => {
 
     const ready = creds.configured && creds.authOk;
     res.json({
-      version: 'v285',
+      version: 'v287',
       firebase: creds,
       registeredDevices: devices.length,
       devices,
@@ -236,7 +236,7 @@ app.get('/api/debug/push', async (req, res) => {
 app.get('/api/settings/pricing-config', authenticate, async (req, res) => {
   try {
     const row = await AppSettings.findOne({ where: { key: 'pricing_config' } });
-    res.json({ data: { newClientUpliftPct: 0, targetGrowthPct: 0, minLaborCharge: 150, ...(row?.value || {}) } });
+    res.json({ data: { newClientUpliftPct: 0, targetGrowthPct: 0, minLaborCharge: 150, partTypes: {}, materialFactors: {}, ...(row?.value || {}) } });
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
@@ -245,7 +245,10 @@ app.put('/api/settings/pricing-config', authenticate, async (req, res) => {
     const value = {
       newClientUpliftPct: parseFloat(req.body.newClientUpliftPct) || 0,
       targetGrowthPct: parseFloat(req.body.targetGrowthPct) || 0,
-      minLaborCharge: parseFloat(req.body.minLaborCharge) || 150
+      minLaborCharge: parseFloat(req.body.minLaborCharge) || 150,
+      // Per-part-type pricing guidance/overrides — the owner's judgement beats a curve fit.
+      partTypes: (req.body.partTypes && typeof req.body.partTypes === 'object') ? req.body.partTypes : {},
+      materialFactors: (req.body.materialFactors && typeof req.body.materialFactors === 'object') ? req.body.materialFactors : {}
     };
     await AppSettings.upsert({ key: 'pricing_config', value });
     res.json({ data: value });
@@ -274,6 +277,41 @@ const sendTestPush = async (req, res) => {
 };
 app.get('/api/debug/push/test', sendTestPush);
 app.post('/api/debug/push/test', authenticate, sendTestPush);
+
+// === Pricing calibration worksheet — bootstraps the recommender when data is thin ===
+app.get('/api/settings/pricing-worksheet', authenticate, async (req, res) => {
+  try {
+    const { buildWorksheet } = require('./services/pricingCalibration');
+    res.json({ data: buildWorksheet(req.query.partType || 'plate_roll') });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+app.post('/api/settings/pricing-worksheet', authenticate, async (req, res) => {
+  try {
+    const { buildWorksheet, fitFromWorksheet } = require('./services/pricingCalibration');
+    const partType = req.body.partType || 'plate_roll';
+    const ws = buildWorksheet(partType);
+    const fit = fitFromWorksheet(partType, ws.rows, req.body.answers || {});
+    if (!fit.ok) return res.status(400).json({ error: { message: fit.message } });
+
+    // Save the fitted numbers straight into the pricing config for this part type
+    const row = await AppSettings.findOne({ where: { key: 'pricing_config' } });
+    const cfg = (row && row.value) ? { ...row.value } : {};
+    cfg.partTypes = cfg.partTypes || {};
+    cfg.partTypes[partType] = {
+      ...(cfg.partTypes[partType] || {}),
+      enabled: true,
+      setupCost: fit.setupCost,
+      ratePerLb: fit.ratePerLb,
+      minCharge: fit.minCharge,
+      calibratedAt: new Date().toISOString()
+    };
+    cfg.materialFactors = { ...(cfg.materialFactors || {}), ...fit.materialFactors };
+    await AppSettings.upsert({ key: 'pricing_config', value: cfg });
+
+    res.json({ data: { ...fit, config: cfg.partTypes[partType], materialFactors: cfg.materialFactors } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
 
 // === Device tokens for push notifications (estimator phone) ===
 app.post('/api/devices/register', authenticate, async (req, res) => {
@@ -335,7 +373,7 @@ app.get('/api/debug/models', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
     const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return res.json({ version: 'v285', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
+    if (!apiKey) return res.json({ version: 'v287', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
     const https = require('https');
     const r = await new Promise((resolve) => {
       const rq = https.request({
@@ -350,7 +388,7 @@ app.get('/api/debug/models', async (req, res) => {
     });
     let parsed = null; try { parsed = JSON.parse(r.body); } catch {}
     res.json({
-      version: 'v285',
+      version: 'v287',
       keyPresent: true,
       keyPrefix: apiKey.slice(0, 10) + '…',
       anthropicStatus: r.status,
@@ -358,13 +396,13 @@ app.get('/api/debug/models', async (req, res) => {
       models: Array.isArray(parsed?.data) ? parsed.data.map(m => m.id) : [],
       rawSnippet: String(r.body).slice(0, 300)
     });
-  } catch (e) { res.json({ version: 'v285', error: e.message }); }
+  } catch (e) { res.json({ version: 'v287', error: e.message }); }
 });
 
 // GET /api/version - no auth; hit this in a browser to confirm which backend build is actually running
 app.get('/api/version', (req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.json({ version: 'v285', built: '2026-06-13', note: 'v248 — manual AI parse runs in background (fixes 30s timeout).' });
+  res.json({ version: 'v287', built: '2026-06-13', note: 'v248 — manual AI parse runs in background (fixes 30s timeout).' });
 });
 
 // GET /api/settings/available-models - live lookup of currently-available Anthropic models (for the dropdown)

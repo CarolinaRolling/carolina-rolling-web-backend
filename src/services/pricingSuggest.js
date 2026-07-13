@@ -20,6 +20,47 @@ const WON_STATUSES = ['accepted', 'converted'];
 const CRANE_CAPACITY_LBS = parseFloat(process.env.CRANE_CAPACITY_LBS) || 10000;
 const DENSITY = { carbon: 0.2836, stainless: 0.289, aluminum: 0.098, other: 0.2836, unknown: 0.2836 };
 
+// MATERIAL DIFFICULTY — how much harder a metal is to roll than A36 (the baseline = 1.0).
+// A cylinder in AR400 is nothing like the same cylinder in A36: higher yield, heavy springback,
+// more passes, harder on the rolls. These are STARTING GUESSES only — the calibration worksheet
+// replaces them with factors derived from the owner's own prices.
+const DEFAULT_MATERIAL_FACTORS = {
+  'a36': 1.0,
+  'a1011': 1.0,
+  'hrs': 1.0,
+  'a516': 1.05,
+  'a572': 1.15,
+  'a514': 1.9,
+  '304': 1.4,
+  '316': 1.5,
+  '321': 1.5,
+  '2205': 1.9,
+  'ar400': 2.2,
+  'ar450': 2.5,
+  'ar500': 2.9,
+  '6061': 0.9,
+  '5052': 0.85,
+  '5083': 0.95,
+  '3003': 0.8
+};
+
+// Match a material string to its difficulty factor (longest key wins, so 'ar500' beats 'ar4').
+function materialFactor(material, overrides = {}) {
+  const v = String(material || '').toLowerCase().replace(/[\s\-_/]/g, '');
+  const table = Object.assign({}, DEFAULT_MATERIAL_FACTORS, overrides || {});
+  let best = null, bestLen = 0;
+  for (const key of Object.keys(table)) {
+    const k = key.toLowerCase().replace(/[\s\-_/]/g, '');
+    if (k && v.includes(k) && k.length > bestLen) { best = parseFloat(table[key]); bestLen = k.length; }
+  }
+  if (best && isFinite(best) && best > 0) return best;
+  // Unknown material — fall back on the family so we're never wildly off
+  const fam = materialFamily(material);
+  if (fam === 'stainless') return 1.45;
+  if (fam === 'aluminum') return 0.9;
+  return 1.0;
+}
+
 // Machine capacity bands (width). Still meaningful — but a SOFT factor now, not a wall.
 const WIDTH_BANDS = [
   { max: 24, label: '0-24"' },
@@ -115,6 +156,8 @@ async function suggestPrice(target, opts = {}) {
   const minCharge = parseFloat(opts.minLaborCharge) || 150;
 
   const tFam = materialFamily(target.material);
+  const matFactors = opts.materialFactors || {};
+  const tFactor = materialFactor(target.material, matFactors);
   const tDims = plateDims(target);
   const tWeight = weightLbs(target);              // real weight — what the crane lifts
   const tBillable = billableWeightLbs(target);    // band-max weight — what you charge for
@@ -147,16 +190,21 @@ async function suggestPrice(target, opts = {}) {
     const labor = parseFloat(p.laborTotal);
     if (!labor || labor <= 0) continue;
     const fam = materialFamily(p.material);
-    if (tFam !== 'unknown' && fam !== 'unknown' && fam !== tFam) continue; // never mix metals
+    const cFactor = materialFactor(p.material, matFactors);
 
     const w = billableWeightLbs(p);          // rate is computed on BILLABLE weight, consistently
     if (!w || w <= 0) continue;              // need size to compute a rate
     const dims = plateDims(p);
-    const rate = labor / w;                  // $ per billable lb - the scale-free comparison
+    // DIFFICULTY-ADJUSTED weight: an AR400 job of the same size is much more work than A36, so we
+    // normalise every comparable to "A36-equivalent pounds". That lets an A36 job inform an AR400
+    // quote (scaled up) instead of the data being siloed per material.
+    const wAdj = w * cFactor;
+    const rate = labor / wAdj;               // $ per A36-equivalent lb
     if (!isFinite(rate) || rate <= 0) continue;
 
     // Similarity: thickness matters most, then width band, then diameter, then age.
     let score = 0;
+    if (fam !== tFam) score += 1.2;          // different metal family — usable, but less similar
     if (tThk && dims.t) score += Math.abs(dims.t - tThk) / tThk * 3;
     const band = widthBand(dims.w);
     if (tBand !== null && band !== null) score += Math.abs(band - tBand) * 0.6; // SOFT, not a wall
@@ -165,8 +213,9 @@ async function suggestPrice(target, opts = {}) {
     const ageDays = (now - new Date(p.estimate.createdAt).getTime()) / 86400000;
     score += Math.min(ageDays / 365, 3) * 0.3;
 
+    const qty = Math.max(1, parseInt(p.quantity, 10) || 1);
     comps.push({
-      labor, weight: w, rate,
+      labor, weight: w, weightAdj: wAdj, factor: cFactor, rate, qty,
       thickness: dims.t, width: dims.w, length: dims.l, diameter: dia,
       material: p.material, clientName: p.estimate.clientName,
       ageDays: Math.floor(ageDays), score
@@ -192,34 +241,51 @@ async function suggestPrice(target, opts = {}) {
   // small jobs and LOW on big ones. The old model took the highest $/lb (which comes from the
   // SMALLEST jobs) and multiplied it across a big job -> absurd numbers ($997 for a $375-ish job).
   // Fit price = setup + rate x weight by least squares on the comparables instead.
+  // Fit on JOB TOTALS, not per-piece: setup is paid ONCE per job, so it must amortise across
+  // quantity. Fitting per-piece prices would charge full setup on every single piece and never
+  // give a quantity break.
+  //   totalLabor = setup + rate x (qty x weightEach)
+  //   priceEach  = setup/qty + rate x weightEach
   let setup = 0, rate = null, fitted = false;
   if (top.length >= 4) {
     const n = top.length;
-    const mw = top.reduce((s, c) => s + c.weight, 0) / n;
-    const mp = top.reduce((s, c) => s + c.labor, 0) / n;
+    const X = top.map(c => c.qty * c.weightAdj); // total A36-equivalent weight of that job
+    const Y = top.map(c => c.labor * c.qty);     // total labor charged for that job
+    const mx = X.reduce((a, b) => a + b, 0) / n;
+    const my = Y.reduce((a, b) => a + b, 0) / n;
     let Sxy = 0, Sxx = 0;
-    for (const c of top) { Sxy += (c.weight - mw) * (c.labor - mp); Sxx += (c.weight - mw) * (c.weight - mw); }
+    for (let i = 0; i < n; i++) { Sxy += (X[i] - mx) * (Y[i] - my); Sxx += (X[i] - mx) * (X[i] - mx); }
     if (Sxx > 0) {
       const slope = Sxy / Sxx;
-      const intercept = mp - slope * mw;
-      if (slope > 0) {                      // a negative slope means the data is noise; fall back
+      const intercept = my - slope * mx;
+      if (slope > 0) {
         rate = slope;
-        setup = Math.max(0, intercept);     // never a negative setup cost
+        setup = Math.max(0, intercept);        // never a negative setup cost
         fitted = true;
       }
     }
   }
   if (!fitted) {
-    // Not enough data to fit — fall back to the MEDIAN rate (never the max, that's the trap above)
-    rate = median(rates);
+    rate = median(rates);                      // median rate, never the max (that was the old trap)
     setup = 0;
   }
 
-  const predicted = setup + rate * tBillable;
+  // Admin overrides per part type — the owner's own judgement beats a curve fit.
+  const ov = opts.override || {};
+  if (ov.enabled) {
+    if (ov.setupCost !== undefined && ov.setupCost !== null && ov.setupCost !== '') setup = parseFloat(ov.setupCost) || 0;
+    if (ov.ratePerLb) rate = parseFloat(ov.ratePerLb) || rate;
+    fitted = true;
+  }
+
+  const tQty = Math.max(1, parseInt(target.quantity, 10) || 1);
+  const tBillableAdj = tBillable * tFactor;    // A36-equivalent pounds for THIS job
+  const jobTotal = setup + rate * (tQty * tBillableAdj);
+  const predicted = jobTotal / tQty;           // price EACH, with setup spread over the run
 
   // How much ABOVE the fitted line has he actually WON? Lean toward the upper end of that,
   // rather than inventing a price from an unrelated small job's $/lb.
-  const ratios = top.map(c => c.labor / Math.max(1, setup + rate * c.weight)).sort((a, b) => a - b);
+  const ratios = top.map(c => c.labor / Math.max(1, (setup + rate * (c.qty * c.weightAdj)) / c.qty)).sort((a, b) => a - b);
   const leanRaw = percentile(ratios, 75) || 1;
   const lean = Math.min(Math.max(leanRaw, 1), 1.25);   // never lean more than +25%
   const bestEver = Math.min(ratios[ratios.length - 1] || 1, 1.6);
@@ -228,7 +294,7 @@ async function suggestPrice(target, opts = {}) {
   const provenHigh = predicted * bestEver;
   const recentComps = top.filter(c => c.ageDays <= 365);
   const recentTypical = recentComps.length
-    ? median(recentComps.map(c => c.labor / Math.max(1, setup + rate * c.weight))) * predicted
+    ? median(recentComps.map(c => c.labor / Math.max(1, (setup + rate * (c.qty * c.weightAdj)) / c.qty))) * predicted
     : null;
 
   let suggested = Math.max(predicted * lean, minCharge);
@@ -255,6 +321,11 @@ async function suggestPrice(target, opts = {}) {
     ratePerLb: Math.round(rate * 10000) / 10000,
     setupCost: Math.round(setup * 100) / 100,
     fitted,
+    quantity: tQty,
+    materialFactor: Math.round(tFactor * 100) / 100,
+    priceEachAtQty1: Math.round((setup + rate * tBillableAdj) * 100) / 100,
+    jobTotal: Math.round((setup + rate * (tQty * tBillableAdj)) * 100) / 100,
+    overrideUsed: !!ov.enabled,
     billableWeightLbs: Math.round(tBillable),
     billableWidth: billableWidth(tDims.w),
     minCharge,
@@ -262,6 +333,7 @@ async function suggestPrice(target, opts = {}) {
     upliftPct: isNewClient ? upliftPct : 0,
     samples: top.slice(0, 6).map(c => ({
       labor: c.labor,
+      qty: c.qty,
       weight: Math.round(c.weight),
       rate: Math.round(c.rate * 1000) / 1000,
       material: c.material,
@@ -274,4 +346,4 @@ async function suggestPrice(target, opts = {}) {
   });
 }
 
-module.exports = { suggestPrice, materialFamily, parseNum, weightLbs, widthBand };
+module.exports = { suggestPrice, materialFamily, materialFactor, DEFAULT_MATERIAL_FACTORS, parseNum, weightLbs, billableWeightLbs, widthBand };

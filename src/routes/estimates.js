@@ -646,15 +646,23 @@ router.get('/price-suggestion', async (req, res, next) => {
       const row = await AppSettings.findOne({ where: { key: 'pricing_config' } });
       if (row && row.value) cfg = { ...cfg, ...row.value };
     } catch (e) {}
+    const partTypeCfg = (cfg.partTypes && cfg.partTypes[req.query.partType]) || {};
     const result = await suggestPrice({
       partType: req.query.partType,
       material: req.query.material,
       thickness: req.query.thickness,
       width: req.query.width,
       length: req.query.length,
+      quantity: req.query.quantity,
       diameter: req.query.diameter || req.query.innerDiameter || req.query.outerDiameter,
       clientName: req.query.clientName
-    }, { newClientUpliftPct: cfg.newClientUpliftPct, minLaborCharge: cfg.minLaborCharge });
+    }, {
+      newClientUpliftPct: cfg.newClientUpliftPct,
+      minLaborCharge: partTypeCfg.minCharge || cfg.minLaborCharge,
+      override: partTypeCfg,
+      materialFactors: cfg.materialFactors || {}
+    });
+    result.guidance = partTypeCfg.notes || null;
     res.json({ data: result });
   } catch (error) { next(error); }
 });

@@ -142,7 +142,7 @@ app.get('/api/debug/estimator-keys', async (req, res) => {
       unlocksQuotesTab: !!(k.isEstimator || k.permissions === 'admin')
     }));
     res.json({
-      version: 'v272',
+      version: 'v273',
       keys: rows,
       qualifying: rows.filter(r => r.unlocksQuotesTab).map(r => r.name),
       hint: rows.some(r => r.unlocksQuotesTab)
@@ -161,8 +161,26 @@ app.get('/api/debug/push', async (req, res) => {
     const creds = await verifyPushCredentials();
     let devices = [];
     try {
-      const rows = await DeviceToken.findAll({ where: { isActive: true } });
-      devices = rows.map(d => ({ label: d.label, platform: d.platform, isEstimator: d.isEstimator, lastSeenAt: d.lastSeenAt }));
+      const { ApiKey } = require('./models');
+      const rows = await DeviceToken.findAll();
+      devices = [];
+      for (const d of rows) {
+        let keyName = null, keyQualifies = null;
+        if (d.apiKeyId) {
+          const k = await ApiKey.findByPk(d.apiKeyId);
+          if (k) { keyName = k.name; keyQualifies = !!(k.isEstimator || k.permissions === 'admin'); }
+        }
+        devices.push({
+          label: d.label,
+          platform: d.platform,
+          isActive: d.isActive,
+          storedIsEstimator: d.isEstimator,
+          registeredWithKey: keyName || '(unknown — registered before v273)',
+          keyIsEstimator: keyQualifies,
+          willReceivePushes: !!(keyQualifies !== null ? keyQualifies : d.isEstimator) && d.isActive,
+          lastSeenAt: d.lastSeenAt
+        });
+      }
     } catch (e) { /* table may not exist until migration runs */ }
 
     let digest = null;
@@ -183,7 +201,7 @@ app.get('/api/debug/push', async (req, res) => {
 
     const ready = creds.configured && creds.authOk;
     res.json({
-      version: 'v272',
+      version: 'v273',
       firebase: creds,
       registeredDevices: devices.length,
       devices,
@@ -232,11 +250,10 @@ app.put('/api/settings/pricing-config', authenticate, async (req, res) => {
 // GET is allowed (no auth) so it can be fired straight from a browser.
 const sendTestPush = async (req, res) => {
   try {
-    const { sendPush, isPushConfigured } = require('./services/push');
-    const { DeviceToken } = require('./models');
+    const { sendPush, isPushConfigured, getEstimatorDevices } = require('./services/push');
     if (!isPushConfigured()) return res.status(400).json({ error: { message: 'FIREBASE_SERVICE_ACCOUNT not set' } });
-    const devices = await DeviceToken.findAll({ where: { isEstimator: true, isActive: true } });
-    if (!devices.length) return res.status(400).json({ error: { message: 'No estimator devices registered yet' } });
+    const devices = await getEstimatorDevices();
+    if (!devices.length) return res.status(400).json({ error: { message: 'No estimator devices qualify. Tick "Estimator device" on the API key that this device uses (Admin -> API Keys), then reopen the app.' } });
     const results = [];
     for (const d of devices) {
       try {
@@ -262,13 +279,14 @@ app.post('/api/devices/register', authenticate, async (req, res) => {
       (req.apiKey && (req.apiKey.isEstimator || req.apiKey.permissions === 'admin'))
     );
     const { DeviceToken } = require('./models');
+    const apiKeyId = req.apiKey?.id || null;
     const existing = await DeviceToken.findOne({ where: { token } });
     if (existing) {
-      await existing.update({ isEstimator, isActive: true, lastSeenAt: new Date(), label: label || existing.label });
+      await existing.update({ isEstimator, apiKeyId, isActive: true, lastSeenAt: new Date(), label: label || existing.label });
       return res.json({ data: { id: existing.id, isEstimator } });
     }
     const created = await DeviceToken.create({
-      token, label: label || null, platform: platform || 'android', isEstimator, isActive: true, lastSeenAt: new Date()
+      token, label: label || null, platform: platform || 'android', apiKeyId, isEstimator, isActive: true, lastSeenAt: new Date()
     });
     res.status(201).json({ data: { id: created.id, isEstimator } });
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
@@ -311,7 +329,7 @@ app.get('/api/debug/models', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
     const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return res.json({ version: 'v272', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
+    if (!apiKey) return res.json({ version: 'v273', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
     const https = require('https');
     const r = await new Promise((resolve) => {
       const rq = https.request({
@@ -326,7 +344,7 @@ app.get('/api/debug/models', async (req, res) => {
     });
     let parsed = null; try { parsed = JSON.parse(r.body); } catch {}
     res.json({
-      version: 'v272',
+      version: 'v273',
       keyPresent: true,
       keyPrefix: apiKey.slice(0, 10) + '…',
       anthropicStatus: r.status,
@@ -334,13 +352,13 @@ app.get('/api/debug/models', async (req, res) => {
       models: Array.isArray(parsed?.data) ? parsed.data.map(m => m.id) : [],
       rawSnippet: String(r.body).slice(0, 300)
     });
-  } catch (e) { res.json({ version: 'v272', error: e.message }); }
+  } catch (e) { res.json({ version: 'v273', error: e.message }); }
 });
 
 // GET /api/version - no auth; hit this in a browser to confirm which backend build is actually running
 app.get('/api/version', (req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.json({ version: 'v272', built: '2026-06-13', note: 'v248 — manual AI parse runs in background (fixes 30s timeout).' });
+  res.json({ version: 'v273', built: '2026-06-13', note: 'v248 — manual AI parse runs in background (fixes 30s timeout).' });
 });
 
 // GET /api/settings/available-models - live lookup of currently-available Anthropic models (for the dropdown)
@@ -2254,6 +2272,7 @@ async function startServer() {
       await sequelize.query(`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS "isEstimator" BOOLEAN DEFAULT false NOT NULL`);
       await sequelize.query(`ALTER TABLE estimates ADD COLUMN IF NOT EXISTS "reminderDismissedAt" TIMESTAMP WITH TIME ZONE`);
       await sequelize.query(`ALTER TABLE estimates ADD COLUMN IF NOT EXISTS "reminderSnoozeUntil" TIMESTAMP WITH TIME ZONE`);
+      await sequelize.query(`ALTER TABLE device_tokens ADD COLUMN IF NOT EXISTS "apiKeyId" UUID`);
       await sequelize.query(`
         CREATE TABLE IF NOT EXISTS device_tokens (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -2261,6 +2280,7 @@ async function startServer() {
           label VARCHAR(255),
           platform VARCHAR(50) DEFAULT 'android',
           "isEstimator" BOOLEAN DEFAULT false NOT NULL,
+          "apiKeyId" UUID,
           "isActive" BOOLEAN DEFAULT true NOT NULL,
           "lastSeenAt" TIMESTAMP WITH TIME ZONE,
           "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
@@ -2316,7 +2336,8 @@ async function startServer() {
           console.log(`[quote-reminder] ${title}: ${body} (push not configured — set FIREBASE_SERVICE_ACCOUNT)`);
           return;
         }
-        const devices = await DeviceToken.findAll({ where: { isEstimator: true, isActive: true } });
+        const { getEstimatorDevices } = require('./services/push');
+        const devices = await getEstimatorDevices();
         for (const d of devices) {
           try {
             await sendPush(d.token, title, body, { type: 'quote_reminder', drafts: drafts.length });

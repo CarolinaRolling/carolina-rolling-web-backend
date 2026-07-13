@@ -2902,6 +2902,7 @@ const DeviceToken = sequelize.define('DeviceToken', {
   token: { type: DataTypes.TEXT, allowNull: false, unique: true },
   label: { type: DataTypes.STRING, allowNull: true }, // e.g. "Jason's phone"
   platform: { type: DataTypes.STRING, defaultValue: 'android' },
+  apiKeyId: { type: DataTypes.UUID, allowNull: true }, // which API key registered it — estimator status is read live from this
   isEstimator: { type: DataTypes.BOOLEAN, defaultValue: false },
   isActive: { type: DataTypes.BOOLEAN, defaultValue: true },
   lastSeenAt: { type: DataTypes.DATE, allowNull: true }

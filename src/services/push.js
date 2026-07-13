@@ -130,8 +130,7 @@ async function notifyEstimatorDevices(title, body, data = {}) {
     logPush({ title, result: 'SKIPPED — FIREBASE_SERVICE_ACCOUNT not set' });
     return { sent: 0, skipped: true };
   }
-  const { DeviceToken } = require('../models');
-  const devices = await DeviceToken.findAll({ where: { isEstimator: true, isActive: true } });
+  const devices = await getEstimatorDevices();
   if (!devices.length) {
     console.warn(`[push] "${title}" — NO estimator devices registered, nothing sent`);
     logPush({ title, result: 'NO ESTIMATOR DEVICES REGISTERED — the phone has not registered with an estimator API key' });
@@ -154,4 +153,25 @@ async function notifyEstimatorDevices(title, body, data = {}) {
   return { sent };
 }
 
-module.exports = { sendPush, isPushConfigured, verifyPushCredentials, notifyEstimatorDevices, getPushLog };
+// Which devices should receive estimator notifications?
+// Read the answer LIVE from the API key the device registered with — so ticking
+// "Estimator device" in admin takes effect immediately, without waiting for the app
+// to re-register (and a re-registration can't silently un-flag a device either).
+async function getEstimatorDevices() {
+  const { DeviceToken, ApiKey } = require('../models');
+  const devices = await DeviceToken.findAll({ where: { isActive: true } });
+  const out = [];
+  for (const d of devices) {
+    let qualifies = !!d.isEstimator;
+    if (d.apiKeyId) {
+      try {
+        const k = await ApiKey.findByPk(d.apiKeyId);
+        if (k) qualifies = !!(k.isEstimator || k.permissions === 'admin');
+      } catch (e) { /* fall back to the stored flag */ }
+    }
+    if (qualifies) out.push(d);
+  }
+  return out;
+}
+
+module.exports = { sendPush, isPushConfigured, verifyPushCredentials, notifyEstimatorDevices, getPushLog, getEstimatorDevices };

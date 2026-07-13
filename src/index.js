@@ -142,7 +142,7 @@ app.get('/api/debug/estimator-keys', async (req, res) => {
       unlocksQuotesTab: !!(k.isEstimator || k.permissions === 'admin')
     }));
     res.json({
-      version: 'v280',
+      version: 'v285',
       keys: rows,
       qualifying: rows.filter(r => r.unlocksQuotesTab).map(r => r.name),
       hint: rows.some(r => r.unlocksQuotesTab)
@@ -206,7 +206,7 @@ app.get('/api/debug/push', async (req, res) => {
 
     const ready = creds.configured && creds.authOk;
     res.json({
-      version: 'v280',
+      version: 'v285',
       firebase: creds,
       registeredDevices: devices.length,
       devices,
@@ -335,7 +335,7 @@ app.get('/api/debug/models', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
     const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return res.json({ version: 'v280', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
+    if (!apiKey) return res.json({ version: 'v285', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
     const https = require('https');
     const r = await new Promise((resolve) => {
       const rq = https.request({
@@ -350,7 +350,7 @@ app.get('/api/debug/models', async (req, res) => {
     });
     let parsed = null; try { parsed = JSON.parse(r.body); } catch {}
     res.json({
-      version: 'v280',
+      version: 'v285',
       keyPresent: true,
       keyPrefix: apiKey.slice(0, 10) + '…',
       anthropicStatus: r.status,
@@ -358,13 +358,13 @@ app.get('/api/debug/models', async (req, res) => {
       models: Array.isArray(parsed?.data) ? parsed.data.map(m => m.id) : [],
       rawSnippet: String(r.body).slice(0, 300)
     });
-  } catch (e) { res.json({ version: 'v280', error: e.message }); }
+  } catch (e) { res.json({ version: 'v285', error: e.message }); }
 });
 
 // GET /api/version - no auth; hit this in a browser to confirm which backend build is actually running
 app.get('/api/version', (req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.json({ version: 'v280', built: '2026-06-13', note: 'v248 — manual AI parse runs in background (fixes 30s timeout).' });
+  res.json({ version: 'v285', built: '2026-06-13', note: 'v248 — manual AI parse runs in background (fixes 30s timeout).' });
 });
 
 // GET /api/settings/available-models - live lookup of currently-available Anthropic models (for the dropdown)
@@ -2296,6 +2296,8 @@ async function startServer() {
       // Guarded on its own so a failure elsewhere in this block can never skip it.
       try {
         await sequelize.query(`ALTER TABLE device_tokens ADD COLUMN IF NOT EXISTS "apiKeyId" UUID`);
+        await sequelize.query(`ALTER TABLE estimate_part_files ADD COLUMN IF NOT EXISTS "layer" INTEGER`);
+        await sequelize.query(`ALTER TABLE work_order_part_files ADD COLUMN IF NOT EXISTS "layer" INTEGER`);
         console.log('Ensured device_tokens.apiKeyId');
       } catch (e) { console.log('device_tokens.apiKeyId migration:', e.message); }
       await sequelize.query(`ALTER TABLE work_order_part_files ADD COLUMN IF NOT EXISTS "vendorPortalVisible" BOOLEAN DEFAULT false NOT NULL`);

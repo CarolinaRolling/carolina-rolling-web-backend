@@ -1854,6 +1854,11 @@ const EstimatePartFile = sequelize.define('EstimatePartFile', {
     type: DataTypes.STRING,
     defaultValue: 'other'
   },
+  // Which cone layer this cut file belongs to (cones split into layers need a DXF per layer). Null = whole part.
+  layer: {
+    type: DataTypes.INTEGER,
+    allowNull: true
+  },
   fileLastModified: {
     type: DataTypes.DATE,
     allowNull: true

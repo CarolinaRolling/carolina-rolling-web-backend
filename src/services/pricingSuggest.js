@@ -187,17 +187,51 @@ async function suggestPrice(target, opts = {}) {
   const top = comps.slice(0, 25);
   const rates = top.map(c => c.rate);
 
-  const medRate = median(rates);
-  const highRate = percentile(rates, 85);   // proven high - he has won at this rate
-  const recent = top.filter(c => c.ageDays <= 365).map(c => c.rate);
-  const recentRate = recent.length ? median(recent) : null;
+  // ---- SETUP + RATE MODEL -------------------------------------------------------------
+  // Price is NOT proportional to size. Every job carries fixed setup hours, so $/lb is HIGH on
+  // small jobs and LOW on big ones. The old model took the highest $/lb (which comes from the
+  // SMALLEST jobs) and multiplied it across a big job -> absurd numbers ($997 for a $375-ish job).
+  // Fit price = setup + rate x weight by least squares on the comparables instead.
+  let setup = 0, rate = null, fitted = false;
+  if (top.length >= 4) {
+    const n = top.length;
+    const mw = top.reduce((s, c) => s + c.weight, 0) / n;
+    const mp = top.reduce((s, c) => s + c.labor, 0) / n;
+    let Sxy = 0, Sxx = 0;
+    for (const c of top) { Sxy += (c.weight - mw) * (c.labor - mp); Sxx += (c.weight - mw) * (c.weight - mw); }
+    if (Sxx > 0) {
+      const slope = Sxy / Sxx;
+      const intercept = mp - slope * mw;
+      if (slope > 0) {                      // a negative slope means the data is noise; fall back
+        rate = slope;
+        setup = Math.max(0, intercept);     // never a negative setup cost
+        fitted = true;
+      }
+    }
+  }
+  if (!fitted) {
+    // Not enough data to fit — fall back to the MEDIAN rate (never the max, that's the trap above)
+    rate = median(rates);
+    setup = 0;
+  }
 
-  const typical = medRate * tBillable;
-  const provenHigh = Math.max.apply(null, rates) * tBillable;
-  const recentTypical = recentRate ? recentRate * tBillable : null;
+  const predicted = setup + rate * tBillable;
 
-  // Lead with the proven-high end, never below the minimum charge.
-  let suggested = Math.max(highRate * tBillable, recentTypical || 0, typical, minCharge);
+  // How much ABOVE the fitted line has he actually WON? Lean toward the upper end of that,
+  // rather than inventing a price from an unrelated small job's $/lb.
+  const ratios = top.map(c => c.labor / Math.max(1, setup + rate * c.weight)).sort((a, b) => a - b);
+  const leanRaw = percentile(ratios, 75) || 1;
+  const lean = Math.min(Math.max(leanRaw, 1), 1.25);   // never lean more than +25%
+  const bestEver = Math.min(ratios[ratios.length - 1] || 1, 1.6);
+
+  const typical = predicted;
+  const provenHigh = predicted * bestEver;
+  const recentComps = top.filter(c => c.ageDays <= 365);
+  const recentTypical = recentComps.length
+    ? median(recentComps.map(c => c.labor / Math.max(1, setup + rate * c.weight))) * predicted
+    : null;
+
+  let suggested = Math.max(predicted * lean, minCharge);
 
   let isNewClient = false;
   if (target.clientName && upliftPct > 0) {
@@ -218,7 +252,9 @@ async function suggestPrice(target, opts = {}) {
     provenHigh: Math.round(provenHigh * 100) / 100,
     low: Math.round(Math.min.apply(null, rates) * tBillable * 100) / 100,
     recentMedian: recentTypical ? Math.round(recentTypical * 100) / 100 : null,
-    ratePerLb: Math.round(medRate * 10000) / 10000,
+    ratePerLb: Math.round(rate * 10000) / 10000,
+    setupCost: Math.round(setup * 100) / 100,
+    fitted,
     billableWeightLbs: Math.round(tBillable),
     billableWidth: billableWidth(tDims.w),
     minCharge,

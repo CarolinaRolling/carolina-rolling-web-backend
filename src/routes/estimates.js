@@ -108,6 +108,12 @@ function cleanNumericFields(data, fields = NUMERIC_FIELDS) {
       cleaned[field] = isNaN(num) ? null : num;
     }
   });
+  // A part ALWAYS has a quantity — never null. Blanking the box (or a momentary empty value while
+  // retyping) used to save quantity as null, so it came back blank and had to be re-entered.
+  if ('quantity' in cleaned) {
+    const q = parseInt(cleaned.quantity, 10);
+    cleaned.quantity = (!q || isNaN(q) || q < 1) ? 1 : q;
+  }
   return cleaned;
 }
 
@@ -1315,6 +1321,7 @@ router.post('/:id/parts/:partId/files', upload.array('files', 10), async (req, r
       const lastMod = req.body.fileLastModified ? new Date(parseInt(req.body.fileLastModified)) : null;
 
       // Create file record
+      const layerNum = parseInt(req.body.layer, 10);
       const partFile = await EstimatePartFile.create({
         partId: part.id,
         filename: file.filename,
@@ -1324,6 +1331,7 @@ router.post('/:id/parts/:partId/files', upload.array('files', 10), async (req, r
         url: result.url,
         cloudinaryId: result.storageId,
         fileType: detectedType,
+        layer: (!isNaN(layerNum) && layerNum > 0) ? layerNum : null, // cone layer this cut file belongs to
         fileLastModified: lastMod
       });
 
@@ -2672,6 +2680,22 @@ router.get('/:id/pdf', async (req, res, next) => {
         if (grade) coneLine += ' ' + grade;
         if (origin) coneLine += ' ' + origin;
         descLines.push(coneLine);
+
+        // If the cone is SPLIT, spell out exactly what the client receives — one line per rolled
+        // section, with its size and how many arc pieces. They need this to quote their welding.
+        const layers = Array.isArray(fd._coneLayers) ? fd._coneLayers : [];
+        if (layers.length > 1) {
+          const totalPieces = layers.reduce((s, L) => s + (parseInt(L.pieces) || 1), 0);
+          descLines.push(`Split into ${layers.length} rolled sections (${totalPieces} piece${totalPieces === 1 ? '' : 's'} per cone):`);
+          layers.forEach((L) => {
+            const pcs = parseInt(L.pieces) || 1;
+            const arc = pcs > 1 ? ` @ ${(360 / pcs).toFixed(0)}\u00b0 each` : ' (full wrap)';
+            descLines.push(
+              `  Section ${L.layer}: ${pcs} pc${pcs === 1 ? '' : 's'}${arc} - ` +
+              `${Number(L.bottomDia).toFixed(3)}" OD x ${Number(L.topDia).toFixed(3)}" OD x ${Number(L.height).toFixed(3)}" VH`
+            );
+          });
+        }
       } else if (part.materialDescription) {
         descLines.push(part.materialDescription);
       } else {

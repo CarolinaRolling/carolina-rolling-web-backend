@@ -159,7 +159,17 @@ async function notifyEstimatorDevices(title, body, data = {}) {
 // to re-register (and a re-registration can't silently un-flag a device either).
 async function getEstimatorDevices() {
   const { DeviceToken, ApiKey } = require('../models');
-  const devices = await DeviceToken.findAll({ where: { isActive: true } });
+  let devices;
+  try {
+    devices = await DeviceToken.findAll({ where: { isActive: true } });
+  } catch (e) {
+    // The apiKeyId column may not exist yet on an older DB — fall back to the columns we know exist.
+    console.warn('[push] device query failed, retrying without apiKeyId:', e.message);
+    devices = await DeviceToken.findAll({
+      where: { isActive: true },
+      attributes: ['id', 'token', 'label', 'platform', 'isEstimator', 'isActive']
+    });
+  }
   const out = [];
   for (const d of devices) {
     let qualifies = !!d.isEstimator;

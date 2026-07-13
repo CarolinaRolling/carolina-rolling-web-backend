@@ -127,6 +127,31 @@ app.get('/api/email-scanner/oauth/callback', async (req, res) => {
 const { authenticate } = require('./routes/auth');
 app.use('/api/shipments', authenticate, shipmentRoutes);
 
+// GET /api/debug/estimator-keys - no auth; shows which API keys unlock the Quotes tab
+app.get('/api/debug/estimator-keys', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const { ApiKey } = require('./models');
+    const keys = await ApiKey.findAll({ attributes: ['name', 'operatorName', 'permissions', 'isEstimator', 'isActive'] });
+    const rows = keys.map(k => ({
+      name: k.name,
+      operatorName: k.operatorName,
+      permissions: k.permissions,
+      isEstimator: k.isEstimator,
+      isActive: k.isActive,
+      unlocksQuotesTab: !!(k.isEstimator || k.permissions === 'admin')
+    }));
+    res.json({
+      version: 'v268',
+      keys: rows,
+      qualifying: rows.filter(r => r.unlocksQuotesTab).map(r => r.name),
+      hint: rows.some(r => r.unlocksQuotesTab)
+        ? 'Use one of the "qualifying" keys in the phone app to see the Quotes tab.'
+        : '❌ No API key qualifies. Create one with permissions=admin (or isEstimator=true) and enter it in the phone app.'
+    });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
 // GET /api/debug/push - no auth; verify Firebase credentials + see registered devices + preview the reminder
 app.get('/api/debug/push', async (req, res) => {
   res.set('Cache-Control', 'no-store');
@@ -158,7 +183,7 @@ app.get('/api/debug/push', async (req, res) => {
 
     const ready = creds.configured && creds.authOk;
     res.json({
-      version: 'v267',
+      version: 'v268',
       firebase: creds,
       registeredDevices: devices.length,
       devices,
@@ -281,7 +306,7 @@ app.get('/api/debug/models', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
     const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return res.json({ version: 'v267', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
+    if (!apiKey) return res.json({ version: 'v268', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
     const https = require('https');
     const r = await new Promise((resolve) => {
       const rq = https.request({
@@ -296,7 +321,7 @@ app.get('/api/debug/models', async (req, res) => {
     });
     let parsed = null; try { parsed = JSON.parse(r.body); } catch {}
     res.json({
-      version: 'v267',
+      version: 'v268',
       keyPresent: true,
       keyPrefix: apiKey.slice(0, 10) + '…',
       anthropicStatus: r.status,
@@ -304,13 +329,13 @@ app.get('/api/debug/models', async (req, res) => {
       models: Array.isArray(parsed?.data) ? parsed.data.map(m => m.id) : [],
       rawSnippet: String(r.body).slice(0, 300)
     });
-  } catch (e) { res.json({ version: 'v267', error: e.message }); }
+  } catch (e) { res.json({ version: 'v268', error: e.message }); }
 });
 
 // GET /api/version - no auth; hit this in a browser to confirm which backend build is actually running
 app.get('/api/version', (req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.json({ version: 'v267', built: '2026-06-13', note: 'v248 — manual AI parse runs in background (fixes 30s timeout).' });
+  res.json({ version: 'v268', built: '2026-06-13', note: 'v248 — manual AI parse runs in background (fixes 30s timeout).' });
 });
 
 // GET /api/settings/available-models - live lookup of currently-available Anthropic models (for the dropdown)

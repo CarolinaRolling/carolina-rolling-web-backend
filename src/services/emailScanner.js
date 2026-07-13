@@ -100,25 +100,27 @@ function isBusinessHours() {
 
 // Parse email body to extract text content
 function extractTextFromParts(payload) {
-  let text = '';
-  
-  if (payload.mimeType === 'text/plain' && payload.body?.data) {
-    text += Buffer.from(payload.body.data, 'base64').toString('utf-8');
-  }
-  
-  if (payload.mimeType === 'text/html' && payload.body?.data) {
-    const html = Buffer.from(payload.body.data, 'base64').toString('utf-8');
-    // Strip HTML tags for plain text
-    text += html.replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
-  }
+  // A multipart/alternative email carries the SAME message twice — once as text/plain and once as
+  // text/html. The old version concatenated both, so the AI read every line twice and duly created
+  // duplicate parts ("1 eccentric cone" -> two cones). Collect each representation separately and
+  // return only ONE: plain text if present, else the stripped HTML.
+  const plain = [];
+  const html = [];
 
-  if (payload.parts) {
-    for (const part of payload.parts) {
-      text += '\n' + extractTextFromParts(part);
+  const walk = (node) => {
+    if (!node) return;
+    if (node.mimeType === 'text/plain' && node.body?.data) {
+      plain.push(Buffer.from(node.body.data, 'base64').toString('utf-8'));
+    } else if (node.mimeType === 'text/html' && node.body?.data) {
+      const h = Buffer.from(node.body.data, 'base64').toString('utf-8');
+      html.push(h.replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim());
     }
-  }
+    if (node.parts) for (const p of node.parts) walk(p);
+  };
+  walk(payload);
 
-  return text.trim();
+  const text = plain.length ? plain.join('\n') : html.join('\n');
+  return String(text || '').trim();
 }
 
 // Get email header value
@@ -184,8 +186,12 @@ shaped_plate — Round plates, donuts (rings), and custom-shaped plates (NOT rol
   donutPurpose: "cylinder" if forming to fit a cylinder, "head" if forming to fit an elliptical head, omit if flat
 
 cone_roll — Conical shape (frustum, reducer):
-  Fields: material, thickness, outerDiameter (large end OD), diameter (small end OD), width (slant height or V/H), arcDegrees
+  Fields: material, thickness, outerDiameter (large end OD), diameter (small end OD), width (slant height or V/H), arcDegrees, coneType, eccentricAngle
   Note: V/H means vertical height of the cone. Two different diameters = cone.
+  coneType: "eccentric" if the email says eccentric / offset / offset cone / lobster-back offset; otherwise "concentric".
+  An ECCENTRIC cone has its small end offset to one side (the axes don't line up) — it is NOT the same
+  shape as a concentric cone, so always set coneType when the email says so. eccentricAngle only if a
+  specific offset angle is given.
 
 pipe_roll — Pipe or tube bending:
   Fields: material, outerDiameter, wallThickness, radius (centerline bend radius), arcDegrees
@@ -310,6 +316,13 @@ Respond ONLY with valid JSON (no markdown, no backticks). Format:
 }
 
 CRITICAL: For missingFields, list any field the client did NOT provide that is needed to complete the estimate. Common missing fields: thickness, material, diameter/radius, arcDegrees, length, rollType. Add a human-readable note in missingFieldNotes explaining what's missing.
+
+CRITICAL — DO NOT DUPLICATE PARTS:
+- The same item may appear more than once in the email (plain-text + HTML copies, quoted replies,
+  forwarded threads). If the SAME part appears twice with identical specs, it is ONE part, not two.
+- Trust the stated quantity. "1 eccentric cone" means quantity 1 — ONE line item — even if the line
+  appears twice in the text. Only create separate parts when the email genuinely lists DIFFERENT parts
+  or explicitly states more than one (e.g. "2 cones", "qty 2", or two clearly distinct specs).
 
 CRITICAL — isNewRequest (does this email warrant a NEW estimate?):
 - Set "isNewRequest": true ONLY if the client is asking us to quote work we have NOT already quoted.
@@ -557,7 +570,9 @@ function buildFormData(p) {
       fd._coneSmallDiaMeasure = 'diameter';
     }
     if (p.width) fd._coneHeight = String(p.width); // V/H = cone height
-    fd._coneType = 'concentric';
+    // Eccentric (offset) cones are a real, different shape — don't force everything to concentric.
+    fd._coneType = (String(p.coneType || '').toLowerCase() === 'eccentric') ? 'eccentric' : 'concentric';
+    if (fd._coneType === 'eccentric' && p.eccentricAngle) fd._coneEccentricAngle = String(p.eccentricAngle);
     fd._coneRadialSegments = '1';
   }
 

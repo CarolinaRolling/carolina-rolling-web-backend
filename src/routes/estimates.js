@@ -3423,6 +3423,12 @@ MEASUREMENT POINTS — CRITICAL:
 
 Thickness format: Use fractions like '1/2"', '3/8"'. Only decimals if no fraction match.
 
+CONES: set "coneType": "eccentric" when the document says eccentric / offset cone (the small end is
+offset to one side — a genuinely different shape); otherwise "concentric".
+
+DO NOT DUPLICATE: the same item may appear more than once (repeated text, quoted threads). Trust the
+stated quantity — "1 eccentric cone" is ONE part with quantity 1, even if the line appears twice.
+
 PRICING — if the document is a purchase order or quote that lists a price:
 - Set "unitPrice" to the price PER PIECE for that line (the rolling/forming/labor charge). E.g. "375.0000/PC" or "$375 each" → unitPrice = 375. "500.00/PC" → 500.
 - If only a line total (extended amount) is shown, divide by the quantity to get the per-piece price (e.g. amount 750.00 for 2 PCS → unitPrice = 375).

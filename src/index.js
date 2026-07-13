@@ -142,7 +142,7 @@ app.get('/api/debug/estimator-keys', async (req, res) => {
       unlocksQuotesTab: !!(k.isEstimator || k.permissions === 'admin')
     }));
     res.json({
-      version: 'v271',
+      version: 'v272',
       keys: rows,
       qualifying: rows.filter(r => r.unlocksQuotesTab).map(r => r.name),
       hint: rows.some(r => r.unlocksQuotesTab)
@@ -183,7 +183,7 @@ app.get('/api/debug/push', async (req, res) => {
 
     const ready = creds.configured && creds.authOk;
     res.json({
-      version: 'v271',
+      version: 'v272',
       firebase: creds,
       registeredDevices: devices.length,
       devices,
@@ -208,26 +208,6 @@ app.get('/api/debug/push', async (req, res) => {
   }
 });
 
-// POST /api/debug/push/test - send a real test push to registered estimator devices
-app.post('/api/debug/push/test', authenticate, async (req, res) => {
-  try {
-    const { sendPush, isPushConfigured } = require('./services/push');
-    const { DeviceToken } = require('./models');
-    if (!isPushConfigured()) return res.status(400).json({ error: { message: 'FIREBASE_SERVICE_ACCOUNT not set' } });
-    const devices = await DeviceToken.findAll({ where: { isEstimator: true, isActive: true } });
-    if (!devices.length) return res.status(400).json({ error: { message: 'No estimator devices registered yet' } });
-    const results = [];
-    for (const d of devices) {
-      try {
-        await sendPush(d.token, 'Test notification', 'Quote reminders are working. 🎉', { type: 'test' });
-        results.push({ device: d.label, sent: true });
-      } catch (e) {
-        results.push({ device: d.label, sent: false, error: e.message });
-      }
-    }
-    res.json({ data: results });
-  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
-});
 
 // === Pricing config (new-client uplift) — must be registered before the /api/settings catch-all router ===
 app.get('/api/settings/pricing-config', authenticate, async (req, res) => {
@@ -247,6 +227,30 @@ app.put('/api/settings/pricing-config', authenticate, async (req, res) => {
     res.json({ data: value });
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
+
+// GET/POST /api/debug/push/test - send a real test push to registered estimator devices.
+// GET is allowed (no auth) so it can be fired straight from a browser.
+const sendTestPush = async (req, res) => {
+  try {
+    const { sendPush, isPushConfigured } = require('./services/push');
+    const { DeviceToken } = require('./models');
+    if (!isPushConfigured()) return res.status(400).json({ error: { message: 'FIREBASE_SERVICE_ACCOUNT not set' } });
+    const devices = await DeviceToken.findAll({ where: { isEstimator: true, isActive: true } });
+    if (!devices.length) return res.status(400).json({ error: { message: 'No estimator devices registered yet' } });
+    const results = [];
+    for (const d of devices) {
+      try {
+        await sendPush(d.token, '🎉 Test notification', 'Quote reminders are working.', { type: 'test' });
+        results.push({ device: d.label, sent: true });
+      } catch (e) {
+        results.push({ device: d.label, sent: false, error: e.message });
+      }
+    }
+    res.json({ data: results, hint: 'If sent:true but nothing appeared on the device, the app needs the v269+ build (notification channel) and notification permission allowed.' });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+};
+app.get('/api/debug/push/test', sendTestPush);
+app.post('/api/debug/push/test', authenticate, sendTestPush);
 
 // === Device tokens for push notifications (estimator phone) ===
 app.post('/api/devices/register', authenticate, async (req, res) => {
@@ -307,7 +311,7 @@ app.get('/api/debug/models', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
     const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return res.json({ version: 'v271', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
+    if (!apiKey) return res.json({ version: 'v272', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
     const https = require('https');
     const r = await new Promise((resolve) => {
       const rq = https.request({
@@ -322,7 +326,7 @@ app.get('/api/debug/models', async (req, res) => {
     });
     let parsed = null; try { parsed = JSON.parse(r.body); } catch {}
     res.json({
-      version: 'v271',
+      version: 'v272',
       keyPresent: true,
       keyPrefix: apiKey.slice(0, 10) + '…',
       anthropicStatus: r.status,
@@ -330,13 +334,13 @@ app.get('/api/debug/models', async (req, res) => {
       models: Array.isArray(parsed?.data) ? parsed.data.map(m => m.id) : [],
       rawSnippet: String(r.body).slice(0, 300)
     });
-  } catch (e) { res.json({ version: 'v271', error: e.message }); }
+  } catch (e) { res.json({ version: 'v272', error: e.message }); }
 });
 
 // GET /api/version - no auth; hit this in a browser to confirm which backend build is actually running
 app.get('/api/version', (req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.json({ version: 'v271', built: '2026-06-13', note: 'v248 — manual AI parse runs in background (fixes 30s timeout).' });
+  res.json({ version: 'v272', built: '2026-06-13', note: 'v248 — manual AI parse runs in background (fixes 30s timeout).' });
 });
 
 // GET /api/settings/available-models - live lookup of currently-available Anthropic models (for the dropdown)

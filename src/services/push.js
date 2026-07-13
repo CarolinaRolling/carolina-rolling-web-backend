@@ -116,4 +116,27 @@ async function verifyPushCredentials() {
   }
 }
 
-module.exports = { sendPush, isPushConfigured, verifyPushCredentials };
+// Send a notification to every registered estimator device (e.g. the owner's phone).
+// Used for instant pings like "new quote request received" — separate from the 4-hourly digest.
+async function notifyEstimatorDevices(title, body, data = {}) {
+  if (!isPushConfigured()) {
+    console.log(`[push] (not configured) would send: ${title} — ${body}`);
+    return { sent: 0, skipped: true };
+  }
+  const { DeviceToken } = require('../models');
+  const devices = await DeviceToken.findAll({ where: { isEstimator: true, isActive: true } });
+  let sent = 0;
+  for (const d of devices) {
+    try {
+      await sendPush(d.token, title, body, data);
+      sent++;
+    } catch (e) {
+      console.error('[push] send failed:', e.message);
+      if (e.status === 404 || e.status === 403) { try { await d.update({ isActive: false }); } catch {} }
+    }
+  }
+  console.log(`[push] "${title}" sent to ${sent} estimator device(s)`);
+  return { sent };
+}
+
+module.exports = { sendPush, isPushConfigured, verifyPushCredentials, notifyEstimatorDevices };

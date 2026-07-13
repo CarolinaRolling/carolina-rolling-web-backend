@@ -158,7 +158,7 @@ app.get('/api/debug/push', async (req, res) => {
 
     const ready = creds.configured && creds.authOk;
     res.json({
-      version: 'v263',
+      version: 'v267',
       firebase: creds,
       registeredDevices: devices.length,
       devices,
@@ -200,6 +200,25 @@ app.post('/api/debug/push/test', authenticate, async (req, res) => {
       }
     }
     res.json({ data: results });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+// === Pricing config (new-client uplift) — must be registered before the /api/settings catch-all router ===
+app.get('/api/settings/pricing-config', authenticate, async (req, res) => {
+  try {
+    const row = await AppSettings.findOne({ where: { key: 'pricing_config' } });
+    res.json({ data: { newClientUpliftPct: 0, targetGrowthPct: 0, ...(row?.value || {}) } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+app.put('/api/settings/pricing-config', authenticate, async (req, res) => {
+  try {
+    const value = {
+      newClientUpliftPct: parseFloat(req.body.newClientUpliftPct) || 0,
+      targetGrowthPct: parseFloat(req.body.targetGrowthPct) || 0
+    };
+    await AppSettings.upsert({ key: 'pricing_config', value });
+    res.json({ data: value });
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
@@ -262,7 +281,7 @@ app.get('/api/debug/models', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
     const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return res.json({ version: 'v263', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
+    if (!apiKey) return res.json({ version: 'v267', keyPresent: false, reason: 'ANTHROPIC_API_KEY is NOT set on this server' });
     const https = require('https');
     const r = await new Promise((resolve) => {
       const rq = https.request({
@@ -277,7 +296,7 @@ app.get('/api/debug/models', async (req, res) => {
     });
     let parsed = null; try { parsed = JSON.parse(r.body); } catch {}
     res.json({
-      version: 'v263',
+      version: 'v267',
       keyPresent: true,
       keyPrefix: apiKey.slice(0, 10) + '…',
       anthropicStatus: r.status,
@@ -285,13 +304,13 @@ app.get('/api/debug/models', async (req, res) => {
       models: Array.isArray(parsed?.data) ? parsed.data.map(m => m.id) : [],
       rawSnippet: String(r.body).slice(0, 300)
     });
-  } catch (e) { res.json({ version: 'v263', error: e.message }); }
+  } catch (e) { res.json({ version: 'v267', error: e.message }); }
 });
 
 // GET /api/version - no auth; hit this in a browser to confirm which backend build is actually running
 app.get('/api/version', (req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.json({ version: 'v263', built: '2026-06-13', note: 'v248 — manual AI parse runs in background (fixes 30s timeout).' });
+  res.json({ version: 'v267', built: '2026-06-13', note: 'v248 — manual AI parse runs in background (fixes 30s timeout).' });
 });
 
 // GET /api/settings/available-models - live lookup of currently-available Anthropic models (for the dropdown)

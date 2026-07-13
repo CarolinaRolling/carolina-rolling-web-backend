@@ -579,7 +579,7 @@ module.exports = { router, authenticateToken, requireAdmin, logActivity, initial
 // POST /api/auth/api-keys - Create new API key (admin only)
 router.post('/api-keys', authenticateToken, requireAdmin, async (req, res, next) => {
   try {
-    const { name, clientName, vendorName, permissions, expiresAt, allowedIPs, operatorName, deviceName } = req.body;
+    const { name, clientName, vendorName, permissions, expiresAt, allowedIPs, operatorName, deviceName, isEstimator } = req.body;
     if (!name) {
       return res.status(400).json({ error: { message: 'API key name is required' } });
     }
@@ -594,6 +594,7 @@ router.post('/api-keys', authenticateToken, requireAdmin, async (req, res, next)
       clientName: clientName || null,
       vendorName: vendorName || null,
       permissions: permissions || 'read',
+      isEstimator: !!isEstimator, // estimator device (owner's phone) — unlocks the Quotes tab + quote reminders
       expiresAt: expiresAt || null,
       allowedIPs: allowedIPs || null,
       operatorName: operatorName || null,

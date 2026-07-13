@@ -629,6 +629,28 @@ function buildQuoteDigest(drafts) {
   return { title, body, draftCount: drafts.length };
 }
 
+// GET /api/estimates/price-suggestion - recommended labor price from comparable WON jobs
+// Query: partType, material, thickness, diameter, clientName
+router.get('/price-suggestion', async (req, res, next) => {
+  try {
+    const { suggestPrice } = require('../services/pricingSuggest');
+    const { AppSettings } = require('../models');
+    let cfg = { newClientUpliftPct: 0 };
+    try {
+      const row = await AppSettings.findOne({ where: { key: 'pricing_config' } });
+      if (row && row.value) cfg = { ...cfg, ...row.value };
+    } catch (e) {}
+    const result = await suggestPrice({
+      partType: req.query.partType,
+      material: req.query.material,
+      thickness: req.query.thickness,
+      diameter: req.query.diameter || req.query.innerDiameter || req.query.outerDiameter,
+      clientName: req.query.clientName
+    }, { newClientUpliftPct: cfg.newClientUpliftPct });
+    res.json({ data: result });
+  } catch (error) { next(error); }
+});
+
 // GET /api/estimates/unsent-drafts - quotes still in draft (never sent) — the real money leak
 router.get('/unsent-drafts', async (req, res, next) => {
   try {
@@ -2457,8 +2479,13 @@ router.get('/:id/pdf', async (req, res, next) => {
     doc.text(estimate.estimateNumber, 350, 52, { width: 212, align: 'right', lineBreak: false });
     doc.font('Helvetica').fontSize(11).fillColor(grayColor);
     doc.text(`Date: ${formatDate(estimate.createdAt)}`, 350, 65, { width: 212, align: 'right', lineBreak: false });
-    if (estimate.validUntil) {
-      doc.text(`Valid Until: ${formatDate(estimate.validUntil)}`, 350, 76, { width: 212, align: 'right', lineBreak: false });
+    // Quotes are good for 30 days. If no explicit validUntil was set, derive it so every quote
+    // states an expiry — jobs often come back 6-12 months later at old prices otherwise.
+    const validityBasis = estimate.sentAt || estimate.createdAt;
+    const derivedValid = validityBasis ? new Date(new Date(validityBasis).getTime() + 30 * 86400000) : null;
+    const validUntilShown = estimate.validUntil || derivedValid;
+    if (validUntilShown) {
+      doc.text(`Valid Until: ${formatDate(validUntilShown)}`, 350, 76, { width: 212, align: 'right', lineBreak: false });
     }
 
     // Divider line

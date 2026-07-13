@@ -73,7 +73,10 @@ async function sendPush(deviceToken, title, body, data = {}) {
       token: deviceToken,
       notification: { title, body },
       data: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)])),
-      android: { priority: 'high', notification: { channel_id: 'quote_reminders' } }
+      // NOTE: deliberately NOT setting channel_id. If the installed app hasn't created that
+      // channel yet, Android silently DROPS the notification. Omitting it lets Android fall back
+      // to a default channel, so pushes display on any build.
+      android: { priority: 'high', notification: { sound: 'default' } }
     }
   });
   const resp = await new Promise((resolve, reject) => {

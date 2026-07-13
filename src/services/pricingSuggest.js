@@ -37,6 +37,40 @@ function materialFamily(s) {
   return v ? 'other' : 'unknown';
 }
 
+// Width bands for plate rolling. Width is the DOMINANT cost driver — it's a machine-capacity
+// cliff, not a smooth curve. The roller maxes at 120"; 120-124" only sometimes clears and is
+// very expensive. Comparables must come from the SAME band or the price is meaningless.
+const WIDTH_BANDS = [
+  { max: 24, label: '0–24"' },
+  { max: 60, label: '24–60"' },
+  { max: 96, label: '60–96"' },
+  { max: 120, label: '96–120"' },
+  { max: Infinity, label: 'over 120" (needs machine clearance — special pricing)' }
+];
+function widthBand(w) {
+  const v = parseFloat(w) || 0;
+  if (!v) return null;
+  for (let i = 0; i < WIDTH_BANDS.length; i++) {
+    if (v <= WIDTH_BANDS[i].max) return i;
+  }
+  return WIDTH_BANDS.length - 1;
+}
+
+// Crane capacity — a hard physical limit. If a piece is heavier than this you can't lift it,
+// so it doesn't matter what it's priced at.
+const CRANE_CAPACITY_LBS = parseFloat(process.env.CRANE_CAPACITY_LBS) || 10000;
+
+// lb per cubic inch
+const DENSITY = { carbon: 0.2836, stainless: 0.289, aluminum: 0.098, other: 0.2836, unknown: 0.2836 };
+
+// Estimated weight of ONE piece of flat plate before rolling (what the crane actually lifts).
+function estimateWeightLbs({ thickness, width, length, material }) {
+  const t = parseNum(thickness), w = parseNum(width), l = parseNum(length);
+  if (!t || !w || !l) return null;
+  const d = DENSITY[materialFamily(material)] ?? DENSITY.carbon;
+  return t * w * l * d;
+}
+
 const median = (arr) => {
   if (!arr.length) return null;
   const s = [...arr].sort((a, b) => a - b);
@@ -60,6 +94,10 @@ async function suggestPrice(target, opts = {}) {
   const tThk = parseNum(target.thickness);
   const tDia = parseNum(target.diameter || target.innerDiameter || target.outerDiameter);
   const tFam = materialFamily(target.material);
+  const tWidth = parseNum(target.width);
+  const tBand = widthBand(tWidth);
+  const estWeight = estimateWeightLbs(target);
+  const overCrane = estWeight != null && estWeight > CRANE_CAPACITY_LBS;
 
   // Pull won parts of the same type
   const rows = await EstimatePart.findAll({
@@ -82,12 +120,16 @@ async function suggestPrice(target, opts = {}) {
     const thk = parseNum(p.thickness);
     const dia = parseNum(p.diameter || p.innerDiameter);
     const fam = materialFamily(p.material);
+    const band = widthBand(parseNum(p.width));
 
     // Score similarity. Lower = closer. Reject clearly different jobs.
     let score = 0;
     if (tFam !== 'unknown' && fam !== 'unknown') {
       if (fam !== tFam) continue;             // never mix carbon / stainless / aluminum
     }
+    // HARD REQUIREMENT: same width band. A 12" ring and a 118" ring are different jobs
+    // on different machines at wildly different prices — averaging them is meaningless.
+    if (tBand !== null && band !== null && band !== tBand) continue;
     if (tThk && thk) {
       const rel = Math.abs(thk - tThk) / tThk;
       if (rel > 0.5) continue;                 // >50% off in thickness isn't comparable
@@ -106,6 +148,7 @@ async function suggestPrice(target, opts = {}) {
       labor,
       thickness: thk,
       diameter: dia,
+      width: parseNum(p.width),
       material: p.material,
       clientName: p.estimate.clientName,
       when: p.estimate.createdAt,
@@ -119,7 +162,18 @@ async function suggestPrice(target, opts = {}) {
   const prices = top.map(c => c.labor);
 
   if (!prices.length) {
-    return { found: 0, confidence: 'none', message: 'No comparable won jobs yet for this configuration.' };
+    return {
+      found: 0,
+      confidence: 'none',
+      widthBand: tBand !== null ? WIDTH_BANDS[tBand].label : null,
+      oversize: tBand === WIDTH_BANDS.length - 1,
+      estWeightLbs: estWeight != null ? Math.round(estWeight) : null,
+      craneCapacityLbs: CRANE_CAPACITY_LBS,
+      overCrane,
+      message: tBand !== null
+        ? `No comparable won jobs yet at ${WIDTH_BANDS[tBand].label} width.`
+        : 'No comparable won jobs yet for this configuration.'
+    };
   }
 
   const med = median(prices);
@@ -147,6 +201,11 @@ async function suggestPrice(target, opts = {}) {
   return {
     found: prices.length,
     confidence,
+    widthBand: tBand !== null ? WIDTH_BANDS[tBand].label : null,
+    oversize: tBand === WIDTH_BANDS.length - 1, // over 120" — needs clearance check, prices high
+    estWeightLbs: estWeight != null ? Math.round(estWeight) : null,
+    craneCapacityLbs: CRANE_CAPACITY_LBS,
+    overCrane, // heavier than the crane can lift — a hard physical limit
     suggested: Math.round(suggested * 100) / 100,
     median: Math.round(med * 100) / 100,
     provenHigh: Math.round(max * 100) / 100,
@@ -158,6 +217,7 @@ async function suggestPrice(target, opts = {}) {
       labor: c.labor,
       material: c.material,
       thickness: c.thickness,
+      width: c.width,
       diameter: c.diameter,
       client: c.clientName,
       ageDays: c.ageDays

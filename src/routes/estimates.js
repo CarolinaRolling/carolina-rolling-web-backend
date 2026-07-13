@@ -644,6 +644,8 @@ router.get('/price-suggestion', async (req, res, next) => {
       partType: req.query.partType,
       material: req.query.material,
       thickness: req.query.thickness,
+      width: req.query.width,
+      length: req.query.length,
       diameter: req.query.diameter || req.query.innerDiameter || req.query.outerDiameter,
       clientName: req.query.clientName
     }, { newClientUpliftPct: cfg.newClientUpliftPct });

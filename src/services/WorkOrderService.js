@@ -85,11 +85,16 @@ class WorkOrderService {
 
       // Create work order
       const orderNumber = generateWorkOrderNumber();
+      // Caller data is spread FIRST so it can never clobber the identifiers we just
+      // allocated. drNumber is not in NUMERIC_FIELDS, so a drNumber of null or a stray
+      // string in the request body used to overwrite nextDRNumber and produce a work order
+      // with no DR number while still burning one from the sequence.
+      const { drNumber: _ignoredDr, orderNumber: _ignoredOrder, ...safeData } = cleanNumericFields(data);
       const workOrder = await WorkOrder.create({
-        orderNumber,
-        drNumber: nextDRNumber,
         status: WORK_ORDER_STATUSES.RECEIVED,
-        ...cleanNumericFields(data)
+        ...safeData,
+        orderNumber,
+        drNumber: nextDRNumber
       }, { transaction });
 
       // Link DR to work order

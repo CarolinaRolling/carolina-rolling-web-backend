@@ -151,6 +151,22 @@ router.post('/assign', async (req, res, next) => {
       clientName
     }, { transaction });
 
+    // Stamp the number onto the work order itself. Creating only the DRNumber row left the
+    // work order with drNumber = null, so it still showed as DR-less everywhere and there was
+    // no way to repair one short of deleting and rebuilding it.
+    if (workOrderId) {
+      const wo = await WorkOrder.findByPk(workOrderId, { transaction });
+      if (!wo) {
+        await transaction.rollback();
+        return res.status(404).json({ error: { message: 'Work order not found' } });
+      }
+      if (wo.drNumber && wo.drNumber !== drNumber) {
+        await transaction.rollback();
+        return res.status(400).json({ error: { message: `Work order already has DR-${wo.drNumber}` } });
+      }
+      await wo.update({ drNumber }, { transaction });
+    }
+
     await transaction.commit();
 
     res.status(201).json({

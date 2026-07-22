@@ -11,6 +11,16 @@ const fileStorage = require('../utils/storage');
 const { Op } = require('sequelize');
 const { Estimate, EstimatePart, EstimatePartFile, EstimateFile, WorkOrder, WorkOrderPart, WorkOrderPartFile, InboundOrder, AppSettings, DRNumber, PONumber, DailyActivity, Client, Vendor, ShipmentCharge, sequelize } = require('../models');
 
+// Spec label matching the other roll forms: ID/ISR, OD/OSR, CLD/CLR.
+function coneSpecLabel(measurePoint, measureType) {
+  const isRad = measureType === 'radius';
+  const mp = measurePoint || 'inside';
+  if (mp === 'inside') return isRad ? 'ISR' : 'ID';
+  if (mp === 'outside') return isRad ? 'OSR' : 'OD';
+  return isRad ? 'CLR' : 'CLD';
+}
+
+
 const router = express.Router();
 
 // Fetch a URL following redirects (up to 5 hops), returns response stream or null
@@ -256,7 +266,7 @@ function calculatePartTotals(part) {
 }
 
 // Calculate estimate totals
-const EA_PRICED_TYPES = ['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'];
+const EA_PRICED_TYPES = ['plate_roll', 'shaped_plate', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'];
 
 // Parse dimension string: "3/8"" → 0.375, "1-1/2"" → 1.5, "2.5" → 2.5, "24 ga" → 0.025
 function parseDimension(val) {
@@ -290,7 +300,7 @@ function getPartSize(part) {
   if (merged.partType === 'channel_roll') return parseDimension(merged._channelSize || merged.sectionSize || '');
   if (merged.partType === 'beam_roll') return parseDimension(merged._beamSize || merged.sectionSize || '');
   if (merged.partType === 'tee_bar') return parseDimension(merged._teeSize || merged.sectionSize || '');
-  if (merged.partType === 'cone_roll') return parseFloat(merged._coneLargeDia) || parseDimension(merged.sectionSize || '');
+  if (merged.partType === 'cone_roll') return (parseFloat(merged._coneLargeDia) * (merged._coneLargeDiaMeasure === 'radius' ? 2 : 1)) || parseDimension(merged.sectionSize || '');
   return parseDimension(merged.sectionSize || merged.thickness || '');
 }
 
@@ -2243,7 +2253,7 @@ router.post('/:id/duplicate', async (req, res, next) => {
         cutFileReference: origPart.cutFileReference
       };
 
-      if (!['plate_roll', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'].includes(partData.partType)) {
+      if (!['plate_roll', 'shaped_plate', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'].includes(partData.partType)) {
         const totals = calculatePartTotals(partData);
         Object.assign(partData, totals);
       }
@@ -2675,8 +2685,8 @@ router.get('/:id/pdf', async (req, res, next) => {
       if (part.partType === 'cone_roll') {
         const fd = part.formData || {};
         const thk = part.thickness || fd.thickness || '';
-        const ldType = (fd._coneLargeDiaType || 'inside') === 'inside' ? 'ID' : (fd._coneLargeDiaType === 'outside' ? 'OD' : 'CLD');
-        const sdType = (fd._coneSmallDiaType || 'inside') === 'inside' ? 'ID' : (fd._coneSmallDiaType === 'outside' ? 'OD' : 'CLD');
+        const ldType = coneSpecLabel(fd._coneLargeDiaType, fd._coneLargeDiaMeasure);
+        const sdType = coneSpecLabel(fd._coneSmallDiaType, fd._coneSmallDiaMeasure);
         const ld = parseFloat(fd._coneLargeDia) || 0;
         const sd = parseFloat(fd._coneSmallDia) || 0;
         const vh = parseFloat(fd._coneHeight) || 0;
@@ -3240,6 +3250,7 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
 
     await transaction.commit();
     committed = true;
+    console.log(`[convert] ✅ COMMITTED — DR-${drNumber} created from ${estimate.estimateNumber} (${estimate.parts.length} parts). Responding 201.`);
 
     // From here the work order already exists — post-commit steps must NEVER fail the request.
     try {
@@ -3262,6 +3273,7 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
       }) || workOrder;
     } catch (fetchErr) { console.error('[convert] work order re-fetch failed (non-fatal):', fetchErr.message); }
 
+    console.log(`[convert] ➡️  Sending 201 for DR-${drNumber}`);
     return res.status(201).json({
       data: {
         workOrder: completeWorkOrder

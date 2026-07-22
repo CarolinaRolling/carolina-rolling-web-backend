@@ -186,8 +186,16 @@ shaped_plate — Round plates, donuts (rings), and custom-shaped plates (NOT rol
   donutPurpose: "cylinder" if forming to fit a cylinder, "head" if forming to fit an elliptical head, omit if flat
 
 cone_roll — Conical shape (frustum, reducer):
-  Fields: material, thickness, outerDiameter (large end OD), diameter (small end OD), width (slant height or V/H), arcDegrees, coneType, eccentricAngle
+  Fields: material, thickness, outerDiameter (large end), diameter (small end), width (slant height or V/H), arcDegrees, coneType, eccentricAngle,
+    largeEndMeasurePoint, largeEndMeasureType, smallEndMeasurePoint, smallEndMeasureType
   Note: V/H means vertical height of the cone. Two different diameters = cone.
+  Put the large end value in outerDiameter and the small end value in diameter EXACTLY as written — never convert
+  a radius into a diameter yourself. Instead, record how each end was specified:
+    largeEndMeasurePoint / smallEndMeasurePoint: "inside" (ID, ISR), "outside" (OD, OSR), or "centerline" (CLD, CLR)
+    largeEndMeasureType / smallEndMeasureType: "radius" (ISR, OSR, CLR, or the word radius) or "diameter"
+  Default both ends to "outside" + "diameter" when the email just gives bare numbers.
+  Example: "51" OSR x 12" OD x 24" V/H" -> outerDiameter 51, largeEndMeasurePoint "outside", largeEndMeasureType "radius",
+  diameter 12, smallEndMeasurePoint "outside", smallEndMeasureType "diameter", width 24.
   coneType: "eccentric" if the email says eccentric / offset / offset cone / lobster-back offset; otherwise "concentric".
   An ECCENTRIC cone has its small end offset to one side (the axes don't line up) — it is NOT the same
   shape as a concentric cone, so always set coneType when the email says so. eccentricAngle only if a
@@ -558,16 +566,26 @@ function buildFormData(p) {
 
   else if (type === 'cone_roll') {
     if (p.thickness) fd.thickness = p.thickness;
+    // How each end was specified. Values are stored as written (a radius stays a radius);
+    // the forms and print code label them ID/ISR, OD/OSR, CLD/CLR off these two fields.
+    const conePoint = (v) => {
+      const s = String(v || '').toLowerCase();
+      if (s === 'inside' || s === 'id' || s === 'isr') return 'inside';
+      if (s === 'outside' || s === 'od' || s === 'osr') return 'outside';
+      if (s === 'centerline' || s === 'cl' || s === 'cld' || s === 'clr') return 'centerline';
+      return 'outside';
+    };
+    const coneMeasure = (v) => (String(v || '').toLowerCase() === 'radius' ? 'radius' : 'diameter');
     // Large end = outerDiameter, small end = diameter
     if (p.outerDiameter) {
       fd._coneLargeDia = String(p.outerDiameter);
-      fd._coneLargeDiaType = 'outside';
-      fd._coneLargeDiaMeasure = 'diameter';
+      fd._coneLargeDiaType = conePoint(p.largeEndMeasurePoint || p.measurePoint);
+      fd._coneLargeDiaMeasure = coneMeasure(p.largeEndMeasureType);
     }
     if (p.diameter) {
       fd._coneSmallDia = String(p.diameter);
-      fd._coneSmallDiaType = 'outside';
-      fd._coneSmallDiaMeasure = 'diameter';
+      fd._coneSmallDiaType = conePoint(p.smallEndMeasurePoint || p.measurePoint);
+      fd._coneSmallDiaMeasure = coneMeasure(p.smallEndMeasureType);
     }
     if (p.width) fd._coneHeight = String(p.width); // V/H = cone height
     // Eccentric (offset) cones are a real, different shape — don't force everything to concentric.
@@ -2268,7 +2286,12 @@ shaped_plate — Round plates, donuts (rings), and custom-shaped plates (NOT rol
   Fields: material, thickness, outerDiameter (OD), innerDiameter (ID — donuts only), width/length (custom shapes only), donutPurpose
 
 cone_roll — Conical shape (frustum, reducer):
-  Fields: material, thickness, outerDiameter (large end OD), diameter (small end OD), width (slant height or V/H), arcDegrees
+  Fields: material, thickness, outerDiameter (large end), diameter (small end), width (slant height or V/H), arcDegrees,
+    largeEndMeasurePoint, largeEndMeasureType, smallEndMeasurePoint, smallEndMeasureType
+  Record the large/small end values EXACTLY as written — never convert a radius into a diameter yourself.
+  largeEndMeasurePoint / smallEndMeasurePoint: "inside" (ID, ISR), "outside" (OD, OSR), "centerline" (CLD, CLR).
+  largeEndMeasureType / smallEndMeasureType: "radius" (ISR, OSR, CLR, or the word radius) or "diameter".
+  Default both ends to "outside" + "diameter" when only bare numbers are given.
 
 pipe_roll — Pipe or tube bending:
   Fields: material, outerDiameter, wallThickness, radius (centerline bend radius), arcDegrees

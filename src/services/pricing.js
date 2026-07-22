@@ -258,13 +258,17 @@ function buildWorkOrderPartFromEstimate(estimatePart) {
   if (!data.laborRate && fd.laborRate) data.laborRate = fd.laborRate;
   if (!data.laborHours && fd.laborHours) data.laborHours = fd.laborHours;
 
-  // Default materialSource for service types
-  if (!data.materialSource) {
-    if (['fab_service', 'shop_rate'].includes(data.partType)) {
-      data.materialSource = 'customer_supplied';
-    } else {
-      data.materialSource = estimatePart.weSupplyMaterial ? 'we_order' : 'customer_supplied';
-    }
+  // Resolve materialSource. The estimate UI tracks "we supply" with the weSupplyMaterial
+  // checkbox and leaves materialSource at its model default of 'customer_supplied', so we
+  // cannot treat a present materialSource as authoritative — only an explicit non-default
+  // value ('we_order' / 'in_stock') beats the checkbox. Without this, every we-supply part
+  // converted as customer-supplied: it dropped out of Order Material on the work order and
+  // printed "Material supplied by: Customer" on the traveler.
+  const explicitSource = ['we_order', 'in_stock'].includes(estimatePart.materialSource);
+  if (['fab_service', 'shop_rate'].includes(data.partType)) {
+    if (!data.materialSource) data.materialSource = 'customer_supplied';
+  } else if (!explicitSource) {
+    data.materialSource = estimatePart.weSupplyMaterial ? 'we_order' : 'customer_supplied';
   }
 
   // Recalculate laborTotal and partTotal from source values to ensure the WO part always
@@ -276,10 +280,25 @@ function buildWorkOrderPartFromEstimate(estimatePart) {
     'cone_roll', 'fab_service', 'shop_rate'];
   if (EA_PRICED.includes(data.partType)) {
     const qty = parseInt(data.quantity) || 1;
-    const matCost = parseFloat(data.materialTotal) || 0;
+    // Material cost each. The part-type forms write it to materialTotal; the estimate's own
+    // "We Supply Material" panel writes it to materialUnitCost instead. calculatePartTotals
+    // (which reconciles the two) is skipped for ea-priced types, so read both here or the
+    // material silently converts as $0.
+    let matCost = parseFloat(data.materialTotal) || 0;
+    if (matCost <= 0) {
+      const unitCost = parseFloat(data.materialUnitCost) || parseFloat(fd.materialUnitCost) || 0;
+      if (unitCost > 0) {
+        matCost = unitCost;
+        data.materialTotal = parseFloat(unitCost.toFixed(2));
+      }
+    }
     // Default markup to 20% if not set — matches frontend display behavior
     const matMarkupRaw = parseFloat(data.materialMarkupPercent);
     const matMarkup = isNaN(matMarkupRaw) ? 20 : matMarkupRaw;
+    // Persist the markup we actually used. A null markup means the estimate priced at +0%
+    // while every WO-side display defaults a null to +20%, so the same part silently gained
+    // 20% on conversion. Writing it explicitly keeps both sides showing one number.
+    data.materialMarkupPercent = matMarkup;
     const matEachRaw = Math.round(matCost * (1 + matMarkup / 100) * 100) / 100;
     // Apply material rounding if specified
     const rounding = fd._materialRounding || 'none';
@@ -320,6 +339,26 @@ function buildWorkOrderPartFromEstimate(estimatePart) {
 
   // Default status
   data.status = 'pending';
+
+  // Preserve estimate-only fields that have no WorkOrderPart column. Drilling and Cutting
+  // are collected in the estimate's Additional Services panel (cost + vendor) but the WO
+  // model only has Fitting and Welding, so without this they disappear at conversion with
+  // no trace. Parked in formData — this does NOT add them to partTotal, which is a separate
+  // decision, since the ea-priced estimate total does not include them either.
+  const ESTIMATE_ONLY_FIELDS = [
+    'serviceDrilling', 'serviceDrillingCost', 'serviceDrillingVendor',
+    'serviceCutting', 'serviceCuttingCost', 'serviceCuttingVendor',
+    'rollingCost', 'otherServicesCost', 'otherServicesMarkupPercent', 'otherServicesTotal',
+    'weSupplyMaterial'
+  ];
+  const carried = {};
+  for (const field of ESTIMATE_ONLY_FIELDS) {
+    const val = estimatePart[field];
+    if (val !== null && val !== undefined && val !== '') carried[field] = val;
+  }
+  if (Object.keys(carried).length > 0) {
+    data.formData = Object.assign({}, data.formData, carried);
+  }
 
   return data;
 }

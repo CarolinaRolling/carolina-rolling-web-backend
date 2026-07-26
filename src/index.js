@@ -2056,25 +2056,39 @@ async function startServer() {
 
     // Schema sync.
     //
-    // `alter: true` is NOT just "add new columns" — it makes the live schema match the models,
-    // which includes ALTER COLUMN TYPE and DROP COLUMN for anything the models do not declare.
-    // Running that against production on every boot risks dropping a column the moment a model
-    // field is renamed or removed, and it takes ACCESS EXCLUSIVE locks across all 51 tables.
+    // HISTORY: `sync({ alter: true })` ran on every boot and, because Sequelize re-drops and
+    // re-creates any column whose introspected type does not exactly match the model (DECIMAL,
+    // JSONB and ENUM are notoriously imprecise), it silently dropped-and-recreated columns on
+    // work_order_parts every restart. Each drop leaves a permanent dead slot in pg_attribute.
+    // Over months that table hit Postgres's hard 1600-column ceiling and the app went down.
     //
-    // It is therefore off in production unless explicitly opted in. Before turning it off for
-    // good, run `node backend/scripts/schema-drift-check.js` against a restored copy: any
-    // ADD COLUMN it reports is a migration that sync has been silently covering for.
-    const allowSchemaSync = process.env.NODE_ENV !== 'production' || process.env.ALLOW_SCHEMA_SYNC === 'true';
-    if (allowSchemaSync) {
+    // FIX: sync is OFF by default now — including when NODE_ENV is unset, which is the case
+    // that previously defaulted it ON. It only runs when SCHEMA_SYNC_MODE is explicitly set,
+    // and even then it uses a plain sync() (create-missing-tables only), never alter, so it
+    // can never drop a column again. Schema changes go through the ADD COLUMN IF NOT EXISTS
+    // migration block above — that is the single source of truth for the live schema.
+    //
+    // SCHEMA_SYNC_MODE values:
+    //   unset / anything else  -> no sync (production default, safe)
+    //   'safe'                 -> sync() : creates missing tables/columns, never drops or alters
+    //   'alter'                -> sync({ alter: true }) : the old dangerous behavior, dev only,
+    //                             use only against a throwaway database
+    const syncMode = process.env.SCHEMA_SYNC_MODE;
+    if (syncMode === 'safe' || syncMode === 'alter') {
       try {
-        await sequelize.sync({ alter: true });
-        console.log('Database synchronized' + (process.env.ALLOW_SCHEMA_SYNC === 'true' ? ' (ALLOW_SCHEMA_SYNC opt-in)' : ''));
+        if (syncMode === 'alter') {
+          console.warn('[schema] SCHEMA_SYNC_MODE=alter — this can DROP columns. Never use against production data.');
+          await sequelize.sync({ alter: true });
+        } else {
+          await sequelize.sync(); // create-only, cannot drop or alter existing columns
+        }
+        console.log(`Database synchronized (SCHEMA_SYNC_MODE=${syncMode})`);
       } catch (syncErr) {
         console.error('Database sync warning (non-fatal):', syncErr.message);
         console.log('Continuing with existing schema - run migrations manually if needed');
       }
     } else {
-      console.log('Schema sync skipped in production. Set ALLOW_SCHEMA_SYNC=true to re-enable.');
+      console.log('Schema sync off (default). Columns are managed by the migration block. Set SCHEMA_SYNC_MODE=safe to enable create-only sync.');
     }
 
     // Migrate picked_up status to shipped (consolidated statuses)

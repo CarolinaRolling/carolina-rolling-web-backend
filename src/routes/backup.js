@@ -1,4 +1,5 @@
 const express = require('express');
+const { requireAdmin } = require('./auth');
 const cloudinary = require('cloudinary').v2;
 const zlib = require('zlib');
 const { promisify } = require('util');
@@ -112,6 +113,36 @@ async function buildBackup(includeFiles = false) {
 
   // Weld Procedures
   backup.data.weldProcedures = (await WeldProcedure.findAll()).map(w => w.toJSON());
+
+  // ---- Financial records (v299) ----------------------------------------------------------
+  // These were absent from every backup taken before v299. A restore brought back every work
+  // order and part but no record of who had paid — AR would have had to be rebuilt by hand.
+  const {
+    WorkOrderPayment, ClientPayment, PaymentApplication, CreditMemo, CreditMemoApplication,
+    Refund, ShipmentCharge, WorkOrderInvoiceSend,
+    InspectionJob, InspectionUnit, InspectionTool, OperatorSignature, OperatorTask,
+    WorkOrderMessage
+  } = require('../models');
+
+  backup.data.workOrderPayments = (await WorkOrderPayment.findAll()).map(r => r.toJSON());
+  backup.data.clientPayments = (await ClientPayment.findAll()).map(r => r.toJSON());
+  backup.data.paymentApplications = (await PaymentApplication.findAll()).map(r => r.toJSON());
+  backup.data.creditMemos = (await CreditMemo.findAll()).map(r => r.toJSON());
+  backup.data.creditMemoApplications = (await CreditMemoApplication.findAll()).map(r => r.toJSON());
+  backup.data.refunds = (await Refund.findAll()).map(r => r.toJSON());
+  backup.data.shipmentCharges = (await ShipmentCharge.findAll()).map(r => r.toJSON());
+  backup.data.workOrderInvoiceSends = (await WorkOrderInvoiceSend.findAll()).map(r => r.toJSON());
+
+  // ---- Quality records --------------------------------------------------------------------
+  // Inspection results and signed operator sign-offs are evidence you may have to produce.
+  backup.data.inspectionTools = (await InspectionTool.findAll()).map(r => r.toJSON());
+  backup.data.inspectionJobs = (await InspectionJob.findAll()).map(r => r.toJSON());
+  backup.data.inspectionUnits = (await InspectionUnit.findAll()).map(r => r.toJSON());
+  backup.data.operatorSignatures = (await OperatorSignature.findAll()).map(r => r.toJSON());
+  backup.data.operatorTasks = (await OperatorTask.findAll()).map(r => r.toJSON());
+
+  // Order conversation history
+  backup.data.workOrderMessages = (await WorkOrderMessage.findAll()).map(r => r.toJSON());
 
   // Activity & Daily Logs (last 30 days)
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
@@ -487,7 +518,7 @@ router.get('/info', async (req, res, next) => {
 });
 
 // POST /api/backup/run-now - Trigger immediate cloud backup
-router.post('/run-now', async (req, res, next) => {
+router.post('/run-now', requireAdmin, async (req, res, next) => {
   try {
     const includeFiles = req.body.includeFiles === true;
     const result = await runAutoBackup(includeFiles);
@@ -502,7 +533,7 @@ router.post('/run-now', async (req, res, next) => {
 });
 
 // POST /api/backup/run-background - Start backup in background, email when done
-router.post('/run-background', async (req, res, next) => {
+router.post('/run-background', requireAdmin, async (req, res, next) => {
   try {
     const includeFiles = req.body.includeFiles !== false; // default true
     const email = req.body.email;
@@ -591,7 +622,7 @@ router.post('/run-background', async (req, res, next) => {
 });
 
 // POST /api/backup/test - Full round-trip test: build → compress → upload → download → verify → cleanup
-router.post('/test', async (req, res, next) => {
+router.post('/test', requireAdmin, async (req, res, next) => {
   const results = { steps: [], success: false };
   const startTime = Date.now();
   
@@ -652,7 +683,7 @@ router.post('/test', async (req, res, next) => {
 });
 
 // POST /api/backup/restore - Restore from backup JSON
-router.post('/restore', async (req, res, next) => {
+router.post('/restore', requireAdmin, async (req, res, next) => {
   try {
     const { backup, options = {} } = req.body;
     if (!backup || !backup.data) {
@@ -881,6 +912,46 @@ router.post('/restore', async (req, res, next) => {
         }
       }
       console.log(`[restore] payrollWeeks: ${results.payrollWeeks.restored} restored, ${results.payrollWeeks.skipped} skipped`);
+    }
+
+    // ---- Financial, quality and message records (v299) ----------------------------------
+    // Restored last: every one of these references a work order, client, or estimate that the
+    // passes above have already created. The restoreSimple helper defers unresolvable FKs to
+    // the second pass below, so ordering within this block is not critical, but payments come
+    // before the applications that point at them.
+    {
+      const M = require('../models');
+      await restoreSimple(M.InspectionTool, backup.data.inspectionTools, 'inspectionTools');
+      await restoreSimple(M.InspectionJob, backup.data.inspectionJobs, 'inspectionJobs');
+      await restoreSimple(M.InspectionUnit, backup.data.inspectionUnits, 'inspectionUnits');
+
+      await restoreSimple(M.WorkOrderPayment, backup.data.workOrderPayments, 'workOrderPayments');
+      await restoreSimple(M.ClientPayment, backup.data.clientPayments, 'clientPayments');
+      await restoreSimple(M.CreditMemo, backup.data.creditMemos, 'creditMemos');
+      await restoreSimple(M.PaymentApplication, backup.data.paymentApplications, 'paymentApplications');
+      await restoreSimple(M.CreditMemoApplication, backup.data.creditMemoApplications, 'creditMemoApplications');
+      await restoreSimple(M.Refund, backup.data.refunds, 'refunds');
+      await restoreSimple(M.ShipmentCharge, backup.data.shipmentCharges, 'shipmentCharges');
+      await restoreSimple(M.WorkOrderInvoiceSend, backup.data.workOrderInvoiceSends, 'workOrderInvoiceSends');
+
+      await restoreSimple(M.OperatorSignature, backup.data.operatorSignatures, 'operatorSignatures');
+      await restoreSimple(M.OperatorTask, backup.data.operatorTasks, 'operatorTasks');
+      await restoreSimple(M.WorkOrderMessage, backup.data.workOrderMessages, 'workOrderMessages');
+
+      // Pre-existing gap: these were captured by every backup but the restore never put them
+      // back, so a restore silently lost them. Completing the round trip.
+      await restoreSimple(M.InvoiceNumber, backup.data.invoiceNumbers, 'invoiceNumbers');
+      await restoreSimple(M.WeldProcedure, backup.data.weldProcedures, 'weldProcedures');
+      await restoreSimple(M.ShopSupply, backup.data.shopSupplies, 'shopSupplies');
+      await restoreSimple(M.ShopSupplyLog, backup.data.shopSupplyLogs, 'shopSupplyLogs');
+      await restoreSimple(M.VendorIssue, backup.data.vendorIssues, 'vendorIssues');
+      await restoreSimple(M.GmailAccount, backup.data.gmailAccounts, 'gmailAccounts');
+      await restoreSimple(M.ScannedEmail, backup.data.scannedEmails, 'scannedEmails');
+      await restoreSimple(M.PendingOrder, backup.data.pendingOrders, 'pendingOrders');
+      await restoreSimple(M.TodoItem, backup.data.todos, 'todos');
+      await restoreSimple(M.EmailLog, backup.data.emailLogs, 'emailLogs');
+      await restoreSimple(M.ActivityLog, backup.data.activityLogs, 'activityLogs');
+      await restoreSimple(M.DailyActivity, backup.data.dailyActivity, 'dailyActivity');
     }
 
     // ===== SECOND PASS: Apply deferred FK updates =====

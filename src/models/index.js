@@ -320,6 +320,51 @@ ShipmentDocument.belongsTo(Shipment, {
   as: 'shipment' 
 });
 
+// DeletionArchive Model
+// A JSON snapshot of anything destroyed, written immediately before the delete.
+//
+// Chosen over Sequelize's `paranoid: true` deliberately. paranoid rewrites the WHERE clause of
+// every query on the model, which is a large behavioural change across ~100 query sites, and it
+// interacts badly with the unique index on work_orders.drNumber — a soft-deleted row keeps
+// holding its DR number forever. An archive table changes no existing query, works uniformly
+// across all 51 models, and doubles as the audit trail for deletes (which were barely logged).
+const DeletionArchive = sequelize.define('DeletionArchive', {
+  id: {
+    type: DataTypes.UUID,
+    defaultValue: DataTypes.UUIDV4,
+    primaryKey: true
+  },
+  modelName: {
+    type: DataTypes.STRING,
+    allowNull: false
+  },
+  recordId: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  // Human-readable pointer so the archive is searchable without parsing the snapshot,
+  // e.g. "DR-2963" or "EST-1471".
+  label: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  snapshot: {
+    type: DataTypes.JSONB,
+    allowNull: false
+  },
+  deletedBy: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  reason: {
+    type: DataTypes.STRING,
+    allowNull: true
+  }
+}, {
+  tableName: 'deletion_archive',
+  timestamps: true
+});
+
 // AppSettings Model - for synced settings like location positions
 const AppSettings = sequelize.define('AppSettings', {
   id: {
@@ -707,6 +752,11 @@ const WorkOrder = sequelize.define('WorkOrder', {
     allowNull: true
   },
   // USMCA per-order overrides
+  // Why USMCA auto-generation was skipped, if it was. Advisory display only.
+  usmcaBlockedReason: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
   usmcaImporterName: {
     type: DataTypes.STRING,
     allowNull: true
@@ -784,6 +834,19 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
     type: DataTypes.STRING,
     allowNull: true
   },
+  // Country where the material was PRODUCED (melted/poured), not where it was bought.
+  // ISO-2 code from constants/countries.js. Drives the USMCA certificate origin column.
+  heatCountry: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  // Client's own job number for this part — distinct from clientPartNumber.
+  clientJobNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  // Rows are { heat, qty, country } — country is the ISO-2 origin for THAT heat, since a
+  // split part can legitimately come from two different mills in two different countries.
   heatBreakdown: {
     type: DataTypes.JSONB,
     allowNull: true,
@@ -1508,6 +1571,16 @@ const EstimatePart = sequelize.define('EstimatePart', {
     allowNull: true
   },
   heatNumber: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  // Country where the material was PRODUCED, not purchased. ISO-2, see constants/countries.js.
+  heatCountry: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  // Client's own job number for this part — distinct from clientPartNumber.
+  clientJobNumber: {
     type: DataTypes.STRING,
     allowNull: true
   },
@@ -3734,6 +3807,7 @@ const OperatorSignature = sequelize.define('OperatorSignature', {
 });
 
 module.exports = {
+  DeletionArchive,
   sequelize,
   User,
   ActivityLog,

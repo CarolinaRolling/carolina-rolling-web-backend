@@ -3,7 +3,10 @@
  * Single source of truth for pricing calculations and estimate→WO data transfer
  */
 
-const { AppSettings } = require('../models');
+// Required lazily inside the one function that needs it. A top-level require pulls in the whole
+// Sequelize instance, which needs DATABASE_URL just to construct — that made the pure pricing
+// functions in this file impossible to unit test without a database.
+const getAppSettings = () => require('../models').AppSettings;
 
 // ==================== PRICING ====================
 
@@ -56,7 +59,7 @@ function calculatePartTotal(part) {
 // Load labor minimums from settings
 async function loadLaborMinimums() {
   try {
-    const setting = await AppSettings.findOne({ where: { key: 'labor_minimums' } });
+    const setting = await getAppSettings().findOne({ where: { key: 'labor_minimums' } });
     if (setting?.value) return JSON.parse(setting.value);
   } catch (e) {}
   return [];
@@ -202,7 +205,7 @@ function buildWorkOrderFromEstimate(estimate, overrides = {}) {
 
 // Fields that copy from EstimatePart → WorkOrderPart
 const PART_SHARED_FIELDS = [
-  'partNumber', 'partType', 'clientPartNumber', 'heatNumber', 'cutFileReference',
+  'partNumber', 'partType', 'clientPartNumber', 'heatNumber', 'heatCountry', 'clientJobNumber', 'cutFileReference',
   'rev', 'poLineNumber', 'lotNumber',
   'quantity', 'material', 'thickness', 'width', 'length',
   'outerDiameter', 'wallThickness', 'sectionSize', 'rollType',

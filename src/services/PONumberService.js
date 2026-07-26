@@ -3,6 +3,7 @@
 
 const { Op } = require('sequelize');
 const { DEFAULTS, PO_STATUSES } = require('../constants');
+const { allocatePONumber } = require('./numberAllocator');
 
 class PONumberService {
   constructor(models) {
@@ -71,27 +72,11 @@ class PONumberService {
         }
         poNumber = data.customNumber;
       } else {
-        // Get next available number
-        const setting = await AppSettings.findOne({ 
-          where: { key: 'next_po_number' }, 
-          transaction 
+        // Allocated under an advisory lock so two simultaneous PO creations cannot claim the
+        // same number. See services/numberAllocator.js.
+        poNumber = await allocatePONumber(this.models, transaction, {
+          startingNumber: DEFAULTS.STARTING_PO_NUMBER
         });
-        
-        if (setting?.value?.nextNumber) {
-          poNumber = setting.value.nextNumber;
-          await setting.update({ value: { nextNumber: poNumber + 1 } }, { transaction });
-        } else {
-          const lastPO = await PONumber.findOne({
-            order: [['poNumber', 'DESC']],
-            transaction
-          });
-          poNumber = lastPO ? lastPO.poNumber + 1 : DEFAULTS.STARTING_PO_NUMBER;
-          
-          await AppSettings.upsert({
-            key: 'next_po_number',
-            value: { nextNumber: poNumber + 1 }
-          }, { transaction });
-        }
       }
 
       // Create PO number entry

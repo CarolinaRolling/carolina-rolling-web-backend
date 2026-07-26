@@ -92,7 +92,10 @@ const NUMERIC_FIELDS = [
   'setupCharge', 'otherCharges', 'partTotal', 'quantity',
   'serviceDrillingCost', 'serviceCuttingCost', 'serviceFittingCost',
   'serviceWeldingCost', 'serviceWeldingPercent',
-  'truckingCost', 'taxRate', 'taxAmount', 'subtotal', 'grandTotal'
+  'truckingCost', 'taxRate', 'taxAmount', 'subtotal', 'grandTotal',
+  // Identifier columns. drNumber is an INTEGER column that was never sanitized, so a stray
+  // string or empty value from a client went straight at it.
+  'drNumber'
 ];
 
 // Default values

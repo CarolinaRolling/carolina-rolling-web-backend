@@ -1100,4 +1100,16 @@ router.put('/:key', async (req, res, next) => {
 
 
 module.exports = router;
+
+// GET /api/settings/ai-usage — today's AI token spend against the daily budget.
+// Set AI_DAILY_TOKEN_BUDGET to change the cap; calls are refused once it is reached.
+router.get('/ai-usage', async (req, res, next) => {
+  try {
+    const { summary } = require('../services/aiUsage');
+    res.json({ data: await summary() });
+  } catch (error) {
+    next(error);
+  }
+});
+
 module.exports.sendScheduleEmail = sendScheduleEmail;

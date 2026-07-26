@@ -1,4 +1,5 @@
 const express = require('express');
+const { allocateDRNumber, reserveCustomDRNumber } = require('../services/numberAllocator');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -1102,13 +1103,27 @@ router.post('/:id/restore', async (req, res, next) => {
 // DELETE /api/estimates/:id/permanent - Permanently delete
 router.delete('/:id/permanent', async (req, res, next) => {
   try {
+    // Load the parts too — without them the archive would preserve the estimate header but
+    // lose every line item, which is the part that actually took work to build.
     const estimate = await Estimate.findByPk(req.params.id, {
-      include: [{ model: EstimateFile, as: 'files' }]
+      include: [
+        { model: EstimateFile, as: 'files' },
+        { model: EstimatePart, as: 'parts', include: [{ model: EstimatePartFile, as: 'files' }] }
+      ]
     });
 
     if (!estimate) {
       return res.status(404).json({ error: { message: 'Estimate not found' } });
     }
+
+    // This is the one irreversible estimate path — trash is recoverable, this is not.
+    const { archiveRecord, labelFor } = require('../services/deletionArchive');
+    await archiveRecord(estimate, {
+      modelName: 'Estimate',
+      label: labelFor(estimate),
+      deletedBy: req.body?.deletedBy || req.user?.username || null,
+      reason: 'permanent delete from trash'
+    });
 
     // Delete files from Cloudinary
     for (const file of estimate.files || []) {
@@ -1205,9 +1220,19 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     // Sanitize ENUM fields — empty strings break Postgres
     if (updates.rollType === '') updates.rollType = null;
 
-    // Extract underscore-prefixed fields into formData JSONB
+    // Extract underscore-prefixed fields into formData JSONB.
+    //
+    // formData is a whole-column replace, so a request that carries only SOME underscore
+    // fields used to silently erase the rest — the cone/plate/roll forms keep most of their
+    // geometry in `_`-prefixed keys, so a partial save could wipe a part's specs. Merge over
+    // the stored formData instead. A key the caller explicitly sends as '' or null still
+    // overwrites, so clearing a field on purpose keeps working; only omission is now safe.
     updates = extractFormData(updates);
-    
+    if (updates.formData) {
+      const existingFormData = (part.formData && typeof part.formData === 'object') ? part.formData : {};
+      updates.formData = { ...existingFormData, ...updates.formData };
+    }
+
     // Calculate part totals (skip for ea-priced types which compute their own partTotal)
     const mergedPart = { ...part.toJSON(), ...updates };
     if (!['plate_roll', 'shaped_plate', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'].includes(mergedPart.partType)) {
@@ -2013,26 +2038,21 @@ router.delete('/:id/files/:fileId', async (req, res, next) => {
 // ============= CONVERT TO WORK ORDER =============
 
 // Helper to get next DR number
+// Delegates to the shared allocator, which takes a Postgres advisory lock so two conversions
+// running at once cannot claim the same DR number. See services/numberAllocator.js.
 async function getNextDRNumber(transaction) {
-  const setting = await AppSettings.findOne({ where: { key: 'next_dr_number' }, transaction });
-  
-  if (setting?.value?.nextNumber) {
-    const drNumber = setting.value.nextNumber;
-    await setting.update({ value: { nextNumber: drNumber + 1 } }, { transaction });
-    return drNumber;
-  }
-
-  // Fallback: check both tables for max
-  const lastDR = await DRNumber.findOne({
-    order: [['drNumber', 'DESC']],
-    transaction
-  });
-  const maxWODR = await WorkOrder.max('drNumber', { transaction }) || 0;
-  const maxDR = Math.max(lastDR?.drNumber || 0, maxWODR);
-  return maxDR + 1;
+  return allocateDRNumber(require('../models'), transaction);
 }
 
-// POST /api/estimates/:id/convert - Convert estimate to work order (for customer supplied)
+// POST /api/estimates/:id/convert
+//
+// DEPRECATED AND UNROUTED. Nothing in the web app or the Android app calls this — every
+// conversion goes through /convert-to-workorder below. It is kept only as reference until
+// its remaining unique behavior is confirmed migrated:
+//   - lot number auto-fill        -> MIGRATED to /convert-to-workorder
+//   - pendingInboundCount         -> NOT migrated, decide whether it is still wanted
+// It does NOT copy part files, remap _linkedPartId, or copy shipment charges, so it should
+// never be wired back up as-is. Delete once pendingInboundCount is settled.
 router.post('/:id/convert', async (req, res, next) => {
   const transaction = await sequelize.transaction();
   
@@ -3110,13 +3130,12 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
     let drNumber;
     if (customDRNumber) {
       // Check if custom DR already exists
-      const existingDR = await DRNumber.findOne({ where: { drNumber: parseInt(customDRNumber) }, transaction });
-      const existingWO = await WorkOrder.findOne({ where: { drNumber: parseInt(customDRNumber) }, transaction });
-      if (existingDR || existingWO) {
+      try {
+        drNumber = await reserveCustomDRNumber(require('../models'), transaction, customDRNumber);
+      } catch (reserveErr) {
         await transaction.rollback();
-        return res.status(400).json({ error: { message: `DR-${customDRNumber} already exists` } });
+        return res.status(reserveErr.status || 400).json({ error: { message: reserveErr.message } });
       }
-      drNumber = parseInt(customDRNumber);
     } else {
       drNumber = await getNextDRNumber(transaction);
     }
@@ -3157,10 +3176,21 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
 
     // Create work order parts from estimate parts using shared utility
     const estimateToWoPartIdMap = {};
+    let displayNums = {};
+    try {
+      displayNums = (computeDisplayNumbers(estimate.parts || []) || {}).display || {};
+    } catch (e) { displayNums = {}; }
     for (const estimatePart of estimate.parts) {
       try {
         const partData = buildWorkOrderPartFromEstimate(estimatePart);
         partData.workOrderId = workOrder.id;
+
+        // Auto-fill lot number as <DR number>-<production number>. This only ever existed in
+        // the unused /convert handler, so converted work orders have never actually received
+        // lot numbers.
+        if (!partData.lotNumber || !String(partData.lotNumber).trim()) {
+          if (drNumber) partData.lotNumber = `${drNumber}-${displayNums[estimatePart.id] || estimatePart.partNumber}`;
+        }
         
         console.log(`[convert] Part #${partData.partNumber} (${partData.partType}): labor=${partData.laborTotal}, material=${partData.materialTotal}, total=${partData.partTotal}`);
 

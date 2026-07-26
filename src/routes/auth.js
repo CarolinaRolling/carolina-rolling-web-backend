@@ -5,7 +5,16 @@ const { User, ActivityLog, ApiKey } = require('../models');
 
 const router = express.Router();
 
-const JWT_SECRET = process.env.JWT_SECRET || 'carolina-rolling-secret-key-2024';
+// No hardcoded fallback in production. A literal in the source means anyone with a copy of
+// the repo can forge a token for any user, so refuse to boot instead of failing open.
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('JWT_SECRET is not set. Refusing to start in production without a signing secret.');
+  }
+  console.warn('[auth] JWT_SECRET not set — using an insecure development-only secret.');
+}
+const JWT_SIGNING_KEY = JWT_SECRET || 'insecure-development-only-secret';
 
 // Middleware to verify JWT token
 const authenticateToken = async (req, res, next) => {
@@ -17,7 +26,7 @@ const authenticateToken = async (req, res, next) => {
   }
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, JWT_SIGNING_KEY);
     const user = await User.findByPk(decoded.userId);
     
     if (!user || !user.isActive) {
@@ -49,12 +58,16 @@ const authenticate = async (req, res, next) => {
   const apiKeyHeader = req.headers['x-api-key'];
 
   // Option 1: JWT Bearer token (main app) - header or ?token= query param
-  const jwtToken = (authHeader && authHeader.startsWith('Bearer ')) 
-    ? authHeader.split(' ')[1] 
-    : req.query.token;
+  // Credentials in the query string end up in access logs, browser history, and Referer
+  // headers. File downloads genuinely need them (an <img>/window.open cannot set a header),
+  // so they stay allowed — but only on GET, so a leaked token cannot be used to write.
+  const allowQueryCredentials = req.method === 'GET';
+  const jwtToken = (authHeader && authHeader.startsWith('Bearer '))
+    ? authHeader.split(' ')[1]
+    : (allowQueryCredentials ? req.query.token : undefined);
   if (jwtToken) {
     try {
-      const decoded = jwt.verify(jwtToken, JWT_SECRET);
+      const decoded = jwt.verify(jwtToken, JWT_SIGNING_KEY);
       const user = await User.findByPk(decoded.userId);
       if (user && user.isActive) {
         req.user = user;
@@ -65,7 +78,7 @@ const authenticate = async (req, res, next) => {
   }
 
   // Option 2: API Key (portal/external apps) - header or query param
-  const apiKeyValue = apiKeyHeader || req.query.apikey;
+  const apiKeyValue = apiKeyHeader || (allowQueryCredentials ? req.query.apikey : undefined);
   if (apiKeyValue) {
     try {
       const apiKey = await ApiKey.findOne({ where: { key: apiKeyValue } });
@@ -247,7 +260,7 @@ router.post('/login', async (req, res, next) => {
 
     const token = jwt.sign(
       { userId: user.id, username: user.username, role: user.role },
-      JWT_SECRET,
+      JWT_SIGNING_KEY,
       { expiresIn: '7d' }
     );
 

@@ -4,6 +4,7 @@
 const { Op } = require('sequelize');
 const cloudinary = require('cloudinary').v2;
 const { WORK_ORDER_STATUSES, DEFAULTS, cleanNumericFields, generateWorkOrderNumber } = require('../constants');
+const { allocateDRNumber } = require('./numberAllocator');
 
 class WorkOrderService {
   constructor(models) {
@@ -71,11 +72,11 @@ class WorkOrderService {
     const transaction = await sequelize.transaction();
 
     try {
-      // Get next DR number
-      const maxDRFromTable = await DRNumber.max('drNumber', { transaction }) || 0;
-      const maxDRFromWorkOrders = await WorkOrder.max('drNumber', { transaction }) || 0;
-      const maxDR = Math.max(maxDRFromTable, maxDRFromWorkOrders, DEFAULTS.STARTING_DR_NUMBER);
-      const nextDRNumber = maxDR + 1;
+      // Get next DR number under an advisory lock so two simultaneous creates cannot both
+      // claim it. See services/numberAllocator.js.
+      const nextDRNumber = await allocateDRNumber(this.models, transaction, {
+        startingNumber: DEFAULTS.STARTING_DR_NUMBER
+      });
 
       // Create DR number record
       const drRecord = await DRNumber.create({
@@ -120,7 +121,7 @@ class WorkOrderService {
   }
 
   // Delete a work order and all related data
-  async delete(id) {
+  async delete(id, options = {}) {
     const { WorkOrder, WorkOrderPart, WorkOrderPartFile, WorkOrderDocument, 
             DRNumber, PONumber, Estimate, InboundOrder, sequelize } = this.models;
     
@@ -140,28 +141,29 @@ class WorkOrderService {
         throw new Error('Work order not found');
       }
 
-      // Delete files from Cloudinary
+      // Snapshot before anything is destroyed. The work order was loaded with parts, files and
+      // documents, so the archived JSON is a complete record — enough to reconstruct the order
+      // if this delete turns out to have been a mistake.
+      const { archiveRecord, labelFor } = require('./deletionArchive');
+      await archiveRecord(workOrder, {
+        modelName: 'WorkOrder',
+        label: labelFor(workOrder),
+        deletedBy: options.deletedBy || null,
+        reason: options.reason || null,
+        transaction,
+      });
+
+      // Collect remote asset ids now, but do NOT delete them yet. Cloudinary deletes cannot be
+      // rolled back — if the transaction below fails, the work order comes back but its prints,
+      // STEP files and DXFs would already be gone. Deletion happens after a successful commit.
+      const cloudinaryIdsToDelete = [];
       for (const part of workOrder.parts || []) {
         for (const file of part.files || []) {
-          if (file.cloudinaryId) {
-            try {
-              await cloudinary.uploader.destroy(file.cloudinaryId, { resource_type: 'raw' });
-            } catch (e) {
-              console.error('Failed to delete file from Cloudinary:', e);
-            }
-          }
+          if (file.cloudinaryId) cloudinaryIdsToDelete.push(file.cloudinaryId);
         }
       }
-
-      // Delete documents from Cloudinary
       for (const doc of workOrder.documents || []) {
-        if (doc.cloudinaryId) {
-          try {
-            await cloudinary.uploader.destroy(doc.cloudinaryId, { resource_type: 'raw' });
-          } catch (e) {
-            console.error('Failed to delete document from Cloudinary:', e);
-          }
-        }
+        if (doc.cloudinaryId) cloudinaryIdsToDelete.push(doc.cloudinaryId);
       }
 
       // Clear foreign key references (don't delete, just unlink)
@@ -219,6 +221,18 @@ class WorkOrderService {
       await workOrder.destroy({ transaction });
 
       await transaction.commit();
+
+      // Committed — the database no longer references these assets, so it is now safe to
+      // remove them. Failures here leave orphaned files in Cloudinary, which is recoverable;
+      // deleting before the commit would not have been.
+      for (const cloudinaryId of cloudinaryIdsToDelete) {
+        try {
+          await cloudinary.uploader.destroy(cloudinaryId, { resource_type: 'raw' });
+        } catch (e) {
+          console.error('Failed to delete asset from Cloudinary (orphaned):', cloudinaryId, e.message);
+        }
+      }
+
       return { success: true, message: 'Work order deleted successfully' };
     } catch (error) {
       await transaction.rollback();

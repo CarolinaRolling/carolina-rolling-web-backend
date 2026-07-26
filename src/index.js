@@ -13,6 +13,7 @@ const inboundRoutes = require('./routes/inbound');
 const workordersRoutes = require('./routes/workorders');
 const estimatesRoutes = require('./routes/estimates');
 const backupRoutes = require('./routes/backup');
+const deletionArchiveRoutes = require('./routes/deletion-archive');
 const drNumbersRoutes = require('./routes/dr-numbers');
 const poNumbersRoutes = require('./routes/po-numbers');
 const emailRoutes = require('./routes/email');
@@ -39,9 +40,49 @@ app.set('trust proxy', 1);
 
 // Middleware
 app.use(compression()); // Gzip responses — big win for 80+ part WO JSON
-app.use(cors());
+
+// CORS. Set ALLOWED_ORIGINS to a comma-separated list of your own domains to lock this down.
+// Left unset it stays permissive so nothing breaks on deploy, but it logs a warning at boot.
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
+  .split(',').map(o => o.trim()).filter(Boolean);
+if (ALLOWED_ORIGINS.length > 0) {
+  app.use(cors({
+    origin: (origin, cb) => {
+      // No origin = same-origin, curl, or a native app — those are not browser CORS requests.
+      if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+      return cb(new Error('Not allowed by CORS'));
+    },
+    credentials: true
+  }));
+} else {
+  console.warn('[cors] ALLOWED_ORIGINS not set — allowing all origins. Set it to lock this down.');
+  app.use(cors());
+}
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true }));
+
+// Rate limiting. The shop shares one public IP, so the general limit is deliberately generous
+// and exists only to blunt runaway loops and scrapers. Login is limited per USERNAME rather
+// than per IP, so one person fat-fingering their password cannot lock out the whole floor.
+const rateLimit = require('express-rate-limit');
+
+const generalLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 600,               // per IP per minute across the whole API
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: { message: 'Too many requests, please slow down.' } }
+});
+
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,                // failed-ish attempts per account per 15 min
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,   // a correct login never counts against you
+  keyGenerator: (req) => String(req.body?.username || req.ip).toLowerCase(),
+  message: { error: { message: 'Too many login attempts. Try again in a few minutes.' } }
+});
 
 // Request timing — logs slow requests to Heroku logs (>2s)
 app.use((req, res, next) => {
@@ -75,6 +116,8 @@ app.get('/health', (req, res) => {
 });
 
 // API Routes
+app.use('/api', generalLimiter);
+app.use('/api/auth/login', loginLimiter);
 app.use('/api/auth', authRoutes);
 
 // Email Scanner - OAuth callback MUST be before authenticate middleware (Google redirects browser here)
@@ -510,6 +553,7 @@ const blockPortalKeys = (req, res, next) => {
 app.use('/api/workorders', authenticate, blockPortalKeys, workordersRoutes);
 app.use('/api/estimates', authenticate, blockPortalKeys, estimatesRoutes);
 app.use('/api/backup', authenticate, backupRoutes);
+app.use('/api/deletion-archive', authenticate, deletionArchiveRoutes);
 const businessRoutes = require('./routes/business');
 app.use('/api/business', authenticate, blockPortalKeys, businessRoutes);
 app.use('/api/inspections', authenticate, blockPortalKeys, require('./routes/inspection'));
@@ -1318,10 +1362,18 @@ app.use((err, req, res, next) => {
     });
   }
   
-  res.status(err.status || 500).json({
+  // Deliberate errors (those with a .status) carry messages meant for the user, so pass them
+  // through. Unhandled 500s do not — a raw Sequelize/Postgres message can name columns,
+  // constraints, and occasionally row values. Log the detail, return something generic.
+  const status = err.status || 500;
+  const isDeliberate = Boolean(err.status) && status < 500;
+  if (!isDeliberate) {
+    console.error('Unhandled error:', err.stack || err);
+  }
+  res.status(status).json({
     error: {
-      message: err.message || 'Internal server error',
-      ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
+      message: isDeliberate ? err.message : 'Something went wrong. Please try again.',
+      ...(process.env.NODE_ENV === 'development' && { detail: err.message, stack: err.stack })
     }
   });
 });
@@ -1546,9 +1598,158 @@ async function startServer() {
       console.log('PO status pre-sync conversion:', enumErr.message);
     }
     
+    // ---- Indexes (v299) ----------------------------------------------------------------
+    // Postgres does NOT automatically index the referencing side of a foreign key, and no model
+    // in this codebase declared an index, so every join and every filtered list was a sequential
+    // scan. These are the foreign keys plus the status/trashedAt columns that list screens
+    // filter on. Low-cardinality flags (isActive, partType, documentType) are deliberately
+    // excluded — an index there costs write time and would rarely be chosen by the planner.
+    //
+    // CREATE INDEX takes a write lock on the table. These run fast at current data volumes, but
+    // first boot after deploying this will be slower than usual. IF NOT EXISTS makes it
+    // idempotent, so it is a no-op on every subsequent boot.
+    const indexMigrations = [
+        `CREATE INDEX IF NOT EXISTS idx_activity_logs_userid ON activity_logs ("userId")`,
+        `CREATE INDEX IF NOT EXISTS idx_client_payments_clientid ON client_payments ("clientId")`,
+        `CREATE INDEX IF NOT EXISTS idx_credit_memo_applications_clientpaymentid ON credit_memo_applications ("clientPaymentId")`,
+        `CREATE INDEX IF NOT EXISTS idx_credit_memo_applications_creditmemoid ON credit_memo_applications ("creditMemoId")`,
+        `CREATE INDEX IF NOT EXISTS idx_credit_memo_applications_workorderid ON credit_memo_applications ("workOrderId")`,
+        `CREATE INDEX IF NOT EXISTS idx_credit_memos_clientid ON credit_memos ("clientId")`,
+        `CREATE INDEX IF NOT EXISTS idx_credit_memos_sourceclientpaymentid ON credit_memos ("sourceClientPaymentId")`,
+        `CREATE INDEX IF NOT EXISTS idx_daily_activities_resourceid ON daily_activities ("resourceId")`,
+        `CREATE INDEX IF NOT EXISTS idx_device_tokens_apikeyid ON device_tokens ("apiKeyId")`,
+        `CREATE INDEX IF NOT EXISTS idx_dr_numbers_clientid ON dr_numbers ("clientId")`,
+        `CREATE INDEX IF NOT EXISTS idx_dr_numbers_estimateid ON dr_numbers ("estimateId")`,
+        `CREATE INDEX IF NOT EXISTS idx_dr_numbers_status ON dr_numbers ("status")`,
+        `CREATE INDEX IF NOT EXISTS idx_dr_numbers_workorderid ON dr_numbers ("workOrderId")`,
+        `CREATE INDEX IF NOT EXISTS idx_estimate_files_estimateid ON estimate_files ("estimateId")`,
+        `CREATE INDEX IF NOT EXISTS idx_estimate_part_files_partid ON estimate_part_files ("partId")`,
+        `CREATE INDEX IF NOT EXISTS idx_estimate_parts_estimateid ON estimate_parts ("estimateId")`,
+        `CREATE INDEX IF NOT EXISTS idx_estimate_parts_inboundorderid ON estimate_parts ("inboundOrderId")`,
+        `CREATE INDEX IF NOT EXISTS idx_estimate_parts_outsideprocessingvendorid ON estimate_parts ("outsideProcessingVendorId")`,
+        `CREATE INDEX IF NOT EXISTS idx_estimate_parts_vendorid ON estimate_parts ("vendorId")`,
+        `CREATE INDEX IF NOT EXISTS idx_estimates_clientid ON estimates ("clientId")`,
+        `CREATE INDEX IF NOT EXISTS idx_estimates_rfqgmailaccountid ON estimates ("rfqGmailAccountId")`,
+        `CREATE INDEX IF NOT EXISTS idx_estimates_rfqvendorid ON estimates ("rfqVendorId")`,
+        `CREATE INDEX IF NOT EXISTS idx_estimates_scannedemailid ON estimates ("scannedEmailId")`,
+        `CREATE INDEX IF NOT EXISTS idx_estimates_status ON estimates ("status")`,
+        `CREATE INDEX IF NOT EXISTS idx_estimates_trashedat ON estimates ("trashedAt")`,
+        `CREATE INDEX IF NOT EXISTS idx_estimates_workorderid ON estimates ("workOrderId")`,
+        `CREATE INDEX IF NOT EXISTS idx_inbound_orders_clientid ON inbound_orders ("clientId")`,
+        `CREATE INDEX IF NOT EXISTS idx_inbound_orders_estimateid ON inbound_orders ("estimateId")`,
+        `CREATE INDEX IF NOT EXISTS idx_inbound_orders_status ON inbound_orders ("status")`,
+        `CREATE INDEX IF NOT EXISTS idx_inbound_orders_vendorid ON inbound_orders ("vendorId")`,
+        `CREATE INDEX IF NOT EXISTS idx_inbound_orders_workorderid ON inbound_orders ("workOrderId")`,
+        `CREATE INDEX IF NOT EXISTS idx_inspection_jobs_inspectionpartid ON inspection_jobs ("inspectionPartId")`,
+        `CREATE INDEX IF NOT EXISTS idx_inspection_jobs_workorderid ON inspection_jobs ("workOrderId")`,
+        `CREATE INDEX IF NOT EXISTS idx_inspection_jobs_workorderpartid ON inspection_jobs ("workOrderPartId")`,
+        `CREATE INDEX IF NOT EXISTS idx_inspection_units_inspectionjobid ON inspection_units ("inspectionJobId")`,
+        `CREATE INDEX IF NOT EXISTS idx_invoice_numbers_clientid ON invoice_numbers ("clientId")`,
+        `CREATE INDEX IF NOT EXISTS idx_invoice_numbers_status ON invoice_numbers ("status")`,
+        `CREATE INDEX IF NOT EXISTS idx_invoice_numbers_workorderid ON invoice_numbers ("workOrderId")`,
+        `CREATE INDEX IF NOT EXISTS idx_liabilities_linkedpoid ON liabilities ("linkedPOId")`,
+        `CREATE INDEX IF NOT EXISTS idx_liabilities_scannedemailid ON liabilities ("scannedEmailId")`,
+        `CREATE INDEX IF NOT EXISTS idx_liabilities_vendorid ON liabilities ("vendorId")`,
+        `CREATE INDEX IF NOT EXISTS idx_payment_applications_clientpaymentid ON payment_applications ("clientPaymentId")`,
+        `CREATE INDEX IF NOT EXISTS idx_payment_applications_workorderid ON payment_applications ("workOrderId")`,
+        `CREATE INDEX IF NOT EXISTS idx_payroll_entries_employeeid ON payroll_entries ("employeeId")`,
+        `CREATE INDEX IF NOT EXISTS idx_payroll_entries_payrollweekid ON payroll_entries ("payrollWeekId")`,
+        `CREATE INDEX IF NOT EXISTS idx_pending_orders_clientid ON pending_orders ("clientId")`,
+        `CREATE INDEX IF NOT EXISTS idx_pending_orders_matchedestimateid ON pending_orders ("matchedEstimateId")`,
+        `CREATE INDEX IF NOT EXISTS idx_pending_orders_scannedemailid ON pending_orders ("scannedEmailId")`,
+        `CREATE INDEX IF NOT EXISTS idx_pending_orders_status ON pending_orders ("status")`,
+        `CREATE INDEX IF NOT EXISTS idx_pending_orders_workorderid ON pending_orders ("workOrderId")`,
+        `CREATE INDEX IF NOT EXISTS idx_po_numbers_clientid ON po_numbers ("clientId")`,
+        `CREATE INDEX IF NOT EXISTS idx_po_numbers_estimateid ON po_numbers ("estimateId")`,
+        `CREATE INDEX IF NOT EXISTS idx_po_numbers_inboundorderid ON po_numbers ("inboundOrderId")`,
+        `CREATE INDEX IF NOT EXISTS idx_po_numbers_status ON po_numbers ("status")`,
+        `CREATE INDEX IF NOT EXISTS idx_po_numbers_vendorid ON po_numbers ("vendorId")`,
+        `CREATE INDEX IF NOT EXISTS idx_po_numbers_workorderid ON po_numbers ("workOrderId")`,
+        `CREATE INDEX IF NOT EXISTS idx_refunds_clientid ON refunds ("clientId")`,
+        `CREATE INDEX IF NOT EXISTS idx_refunds_sourceclientpaymentid ON refunds ("sourceClientPaymentId")`,
+        `CREATE INDEX IF NOT EXISTS idx_refunds_sourceworkorderid ON refunds ("sourceWorkOrderId")`,
+        `CREATE INDEX IF NOT EXISTS idx_scanned_emails_clientid ON scanned_emails ("clientId")`,
+        `CREATE INDEX IF NOT EXISTS idx_scanned_emails_estimateid ON scanned_emails ("estimateId")`,
+        `CREATE INDEX IF NOT EXISTS idx_scanned_emails_gmailaccountid ON scanned_emails ("gmailAccountId")`,
+        `CREATE INDEX IF NOT EXISTS idx_scanned_emails_pendingorderid ON scanned_emails ("pendingOrderId")`,
+        `CREATE INDEX IF NOT EXISTS idx_scanned_emails_status ON scanned_emails ("status")`,
+        `CREATE INDEX IF NOT EXISTS idx_shipment_charges_estimateid ON shipment_charges ("estimateId")`,
+        `CREATE INDEX IF NOT EXISTS idx_shipment_charges_vendorid ON shipment_charges ("vendorId")`,
+        `CREATE INDEX IF NOT EXISTS idx_shipment_charges_workorderid ON shipment_charges ("workOrderId")`,
+        `CREATE INDEX IF NOT EXISTS idx_shipment_documents_shipmentid ON shipment_documents ("shipmentId")`,
+        `CREATE INDEX IF NOT EXISTS idx_shipment_photos_shipmentid ON shipment_photos ("shipmentId")`,
+        `CREATE INDEX IF NOT EXISTS idx_shipments_status ON shipments ("status")`,
+        `CREATE INDEX IF NOT EXISTS idx_shipments_workorderid ON shipments ("workOrderId")`,
+        `CREATE INDEX IF NOT EXISTS idx_shop_supply_logs_shopsupplyid ON shop_supply_logs ("shopSupplyId")`,
+        `CREATE INDEX IF NOT EXISTS idx_todo_items_estimateid ON todo_items ("estimateId")`,
+        `CREATE INDEX IF NOT EXISTS idx_vendor_issues_vendorid ON vendor_issues ("vendorId")`,
+        `CREATE INDEX IF NOT EXISTS idx_vendor_issues_workorderid ON vendor_issues ("workOrderId")`,
+        `CREATE INDEX IF NOT EXISTS idx_vendor_issues_workorderpartid ON vendor_issues ("workOrderPartId")`,
+        `CREATE INDEX IF NOT EXISTS idx_work_order_documents_workorderid ON work_order_documents ("workOrderId")`,
+        `CREATE INDEX IF NOT EXISTS idx_work_order_invoice_sends_workorderid ON work_order_invoice_sends ("workOrderId")`,
+        `CREATE INDEX IF NOT EXISTS idx_work_order_messages_workorderid ON work_order_messages ("workOrderId")`,
+        `CREATE INDEX IF NOT EXISTS idx_work_order_part_files_workorderpartid ON work_order_part_files ("workOrderPartId")`,
+        `CREATE INDEX IF NOT EXISTS idx_work_order_parts_awaitinginboundid ON work_order_parts ("awaitingInboundId")`,
+        `CREATE INDEX IF NOT EXISTS idx_work_order_parts_inboundorderid ON work_order_parts ("inboundOrderId")`,
+        `CREATE INDEX IF NOT EXISTS idx_work_order_parts_outsideprocessingvendorid ON work_order_parts ("outsideProcessingVendorId")`,
+        `CREATE INDEX IF NOT EXISTS idx_work_order_parts_status ON work_order_parts ("status")`,
+        `CREATE INDEX IF NOT EXISTS idx_work_order_parts_vendorid ON work_order_parts ("vendorId")`,
+        `CREATE INDEX IF NOT EXISTS idx_work_order_parts_workorderid ON work_order_parts ("workOrderId")`,
+        `CREATE INDEX IF NOT EXISTS idx_work_order_payments_workorderid ON work_order_payments ("workOrderId")`,
+        `CREATE INDEX IF NOT EXISTS idx_work_orders_clientid ON work_orders ("clientId")`,
+        `CREATE INDEX IF NOT EXISTS idx_work_orders_estimateid ON work_orders ("estimateId")`,
+        `CREATE INDEX IF NOT EXISTS idx_work_orders_status ON work_orders ("status")`,
+        `CREATE INDEX IF NOT EXISTS idx_estimates_drnumber ON estimates ("drNumber")`,
+        `CREATE INDEX IF NOT EXISTS idx_work_order_parts_workorderid_partnumber ON work_order_parts ("workOrderId", "partNumber")`,
+      // ---- Trigram indexes for search ------------------------------------------------
+      // The work order and estimate search uses iLike '%term%'. A leading wildcard makes a
+      // normal B-tree index useless, so these stayed sequential scans even after the indexes
+      // above. pg_trgm supports them properly. If the extension cannot be created (it needs
+      // privileges some managed Postgres plans withhold) the GIN statements below simply fail
+      // and get logged — search keeps working, just without the index.
+      `CREATE EXTENSION IF NOT EXISTS pg_trgm`,
+      `CREATE INDEX IF NOT EXISTS idx_work_orders_clientname_trgm ON work_orders USING gin ("clientName" gin_trgm_ops)`,
+      `CREATE INDEX IF NOT EXISTS idx_work_orders_ordernumber_trgm ON work_orders USING gin ("orderNumber" gin_trgm_ops)`,
+      `CREATE INDEX IF NOT EXISTS idx_work_orders_clientpo_trgm ON work_orders USING gin ("clientPurchaseOrderNumber" gin_trgm_ops)`,
+      `CREATE INDEX IF NOT EXISTS idx_estimates_clientname_trgm ON estimates USING gin ("clientName" gin_trgm_ops)`,
+      `CREATE INDEX IF NOT EXISTS idx_clients_name_trgm ON clients USING gin ("name" gin_trgm_ops)`,
+      `CREATE INDEX IF NOT EXISTS idx_vendors_name_trgm ON vendors USING gin ("name" gin_trgm_ops)`,
+    ];
+    for (const stmt of indexMigrations) {
+      try {
+        await sequelize.query(stmt);
+      } catch (idxErr) {
+        console.warn('[index] skipped:', idxErr.message.split('\n')[0]);
+      }
+    }
+    console.log(`Indexes verified (${indexMigrations.length})`);
+
     // Explicitly add contactExtension to work_orders and estimates if missing
     // (alter:true sometimes misses new columns on Heroku Postgres)
     const migrations = [
+        // Material country of origin + client job number (v298). heatCountry is an ISO-2 code
+        // for where the material was PRODUCED; per-heat countries live inside the existing
+        // heatBreakdown JSONB, so that column needs no change.
+        `ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "usmcaBlockedReason" TEXT`,
+        // Deletion archive (v299) — snapshot of anything destroyed, written before the delete.
+        `CREATE TABLE IF NOT EXISTS deletion_archive (
+           id UUID PRIMARY KEY,
+           "modelName" VARCHAR(255) NOT NULL,
+           "recordId" VARCHAR(255),
+           label VARCHAR(255),
+           snapshot JSONB NOT NULL,
+           "deletedBy" VARCHAR(255),
+           reason VARCHAR(255),
+           "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+           "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+         )`,
+        `CREATE INDEX IF NOT EXISTS idx_deletion_archive_model ON deletion_archive ("modelName")`,
+        `CREATE INDEX IF NOT EXISTS idx_deletion_archive_label ON deletion_archive (label)`,
+        `CREATE INDEX IF NOT EXISTS idx_deletion_archive_created ON deletion_archive ("createdAt")`,
+        `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "heatCountry" VARCHAR(8)`,
+        `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "clientJobNumber" VARCHAR(255)`,
+        `ALTER TABLE estimate_parts ADD COLUMN IF NOT EXISTS "heatCountry" VARCHAR(8)`,
+        `ALTER TABLE estimate_parts ADD COLUMN IF NOT EXISTS "clientJobNumber" VARCHAR(255)`,
         `ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "contactExtension" VARCHAR(255)`,
         `ALTER TABLE estimates ADD COLUMN IF NOT EXISTS "contactExtension" VARCHAR(255)`,
         `ALTER TABLE work_order_messages ADD COLUMN IF NOT EXISTS "readByOperators" JSONB NOT NULL DEFAULT '[]'`,
@@ -1853,14 +2054,27 @@ async function startServer() {
     }
     console.log('column migrations ensured');
 
-    // Sync models - use alter to add new columns
-    // This is safe for adding new nullable columns
-    try {
-      await sequelize.sync({ alter: true });
-      console.log('Database synchronized');
-    } catch (syncErr) {
-      console.error('Database sync warning (non-fatal):', syncErr.message);
-      console.log('Continuing with existing schema - run migrations manually if needed');
+    // Schema sync.
+    //
+    // `alter: true` is NOT just "add new columns" — it makes the live schema match the models,
+    // which includes ALTER COLUMN TYPE and DROP COLUMN for anything the models do not declare.
+    // Running that against production on every boot risks dropping a column the moment a model
+    // field is renamed or removed, and it takes ACCESS EXCLUSIVE locks across all 51 tables.
+    //
+    // It is therefore off in production unless explicitly opted in. Before turning it off for
+    // good, run `node backend/scripts/schema-drift-check.js` against a restored copy: any
+    // ADD COLUMN it reports is a migration that sync has been silently covering for.
+    const allowSchemaSync = process.env.NODE_ENV !== 'production' || process.env.ALLOW_SCHEMA_SYNC === 'true';
+    if (allowSchemaSync) {
+      try {
+        await sequelize.sync({ alter: true });
+        console.log('Database synchronized' + (process.env.ALLOW_SCHEMA_SYNC === 'true' ? ' (ALLOW_SCHEMA_SYNC opt-in)' : ''));
+      } catch (syncErr) {
+        console.error('Database sync warning (non-fatal):', syncErr.message);
+        console.log('Continuing with existing schema - run migrations manually if needed');
+      }
+    } else {
+      console.log('Schema sync skipped in production. Set ALLOW_SCHEMA_SYNC=true to re-enable.');
     }
 
     // Migrate picked_up status to shipped (consolidated statuses)
@@ -2368,6 +2582,23 @@ async function startServer() {
 
     // Quote reminders — every 4 hours during business hours (7:30am–4pm Pacific), Mon–Fri.
     // 7:30, 11:30, 3:30 — all inside the 7:30a–4p window.
+    // ---- Cron single-instance guard (v299) -----------------------------------------------
+    // Heroku runs the full process on every dyno, so each scheduled job would fire once PER
+    // DYNO. On one web dyno that is invisible; the day you scale to two, every daily client
+    // email goes out twice, two backups run concurrently, and the AI retry loop doubles.
+    //
+    // process.env.DYNO is set by Heroku ("web.1", "web.2", ...). Outside Heroku it is
+    // undefined and everything runs as before.
+    const CRON_LEADER = !process.env.DYNO || process.env.DYNO === 'web.1';
+    if (!CRON_LEADER) {
+      console.log(`[cron] ${process.env.DYNO} is not the leader — scheduled jobs disabled on this dyno.`);
+    }
+    const originalCronSchedule = cron.schedule.bind(cron);
+    cron.schedule = (expr, fn, opts) => {
+      if (!CRON_LEADER) return { start() {}, stop() {}, destroy() {} };
+      return originalCronSchedule(expr, fn, opts);
+    };
+
     cron.schedule('30 7,11,15 * * 1-5', async () => {
       try {
         const estimatesRouter = require('./routes/estimates');

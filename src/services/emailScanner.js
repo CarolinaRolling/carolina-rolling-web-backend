@@ -422,6 +422,11 @@ Add a "summary" field in your response: a 1-2 sentence plain-English summary of 
       req.end();
     });
 
+    // Stop before spending if today's token budget is already gone. Failing closed is
+    // deliberate — a runaway retry loop should halt rather than keep billing.
+    const aiUsage = require('./aiUsage');
+    await aiUsage.assertWithinBudget('emailScanner.parse');
+
     // Retry up to 3 times on 529 overloaded with exponential backoff: 8s, 24s, 72s
     const MAX_RETRIES = 3;
     const BACKOFF_MS = [8000, 24000, 72000];
@@ -446,6 +451,7 @@ Add a "summary" field in your response: a 1-2 sentence plain-English summary of 
     }
 
     const data = JSON.parse(responseText);
+    await aiUsage.record(data.usage, 'emailScanner.parse');
     const text = data.content?.[0]?.text || '';
     console.log(`[EmailScanner] AI response (first 200): ${text.substring(0, 200)}`);
     

@@ -876,7 +876,47 @@ router.put('/printer-config', async (req, res, next) => {
 
 // ==================== SCRAP PICKUP ====================
 
-// GET /api/settings/scrap-config
+// ─── Confirmed HS/HTS codes per material+shape ────────────────────────────────
+// A broker-confirmed lookup table so the USMCA generator recalls verified codes instead of
+// guessing. Stored as a single JSON blob in AppSettings — no schema column (deliberately, after
+// the 2026-07 column-limit incident). Each entry: { id, material, shape, hsCode, note,
+// confirmedBy, confirmedAt }. The generator matches on material+shape and falls back to its
+// heuristic guess only when nothing is confirmed.
+router.get('/hts-codes', async (req, res, next) => {
+  try {
+    const setting = await AppSettings.findOne({ where: { key: 'hts_codes' } });
+    res.json({ data: setting?.value?.codes || [] });
+  } catch (error) { next(error); }
+});
+
+// PUT /api/settings/hts-codes — replace the whole list (the UI sends the full array)
+router.put('/hts-codes', async (req, res, next) => {
+  try {
+    const incoming = Array.isArray(req.body?.codes) ? req.body.codes : [];
+    // Normalize + keep only the fields we own, so nothing unexpected gets persisted.
+    const codes = incoming.map((c, i) => ({
+      id: c.id || `hts_${Date.now()}_${i}`,
+      material: String(c.material || '').trim(),
+      shape: String(c.shape || '').trim(),
+      hsCode: String(c.hsCode || '').trim(),
+      note: String(c.note || '').trim(),
+      confirmedBy: String(c.confirmedBy || '').trim(),
+      confirmedAt: c.confirmedAt || null,
+    })).filter(c => c.material || c.shape || c.hsCode);
+
+    const value = { codes };
+    const existing = await AppSettings.findOne({ where: { key: 'hts_codes' } });
+    if (existing) await existing.update({ value });
+    else await AppSettings.create({ key: 'hts_codes', value });
+
+    res.json({ data: codes, message: 'HS codes saved' });
+  } catch (error) {
+    console.error('[hts-codes] Save error:', error.message);
+    next(error);
+  }
+});
+
+
 router.get('/scrap-config', async (req, res, next) => {
   try {
     const setting = await AppSettings.findOne({ where: { key: 'scrap_config' } });

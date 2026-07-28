@@ -50,6 +50,12 @@ function extractFormData(data) {
   const cleaned = {};
   // UI-only fields that should never be stored in formData
   const excludeFromFormData = ['_vendorSearch', '_shapeFile'];
+  // Real table columns that must NEVER be shadowed inside formData. A duplicate here overrides
+  // the real column on load (formData is spread over the part), which caused edited parts to
+  // silently revert — materialSource/vendor kept snapping back. Strip them if they sneak in.
+  const neverInFormData = ['materialSource', 'weSupplyMaterial', 'vendorId', 'supplierName',
+    'materialUnitCost', 'materialMarkupPercent', 'quantity', 'materialDescription',
+    'vendorEstimateNumber', 'materialTotal', 'partTotal', 'laborTotal', 'materialSource'];
   for (const [key, value] of Object.entries(data)) {
     if (key.startsWith('_')) {
       if (!excludeFromFormData.includes(key)) {
@@ -58,6 +64,10 @@ function extractFormData(data) {
     } else {
       cleaned[key] = value;
     }
+  }
+  // Scrub shadow columns from any incoming formData object.
+  if (data.formData && typeof data.formData === 'object') {
+    neverInFormData.forEach(k => { if (k in formData) delete formData[k]; });
   }
   if (Object.keys(formData).length > 0) {
     cleaned.formData = formData;
@@ -1231,6 +1241,12 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     if (updates.formData) {
       const existingFormData = (part.formData && typeof part.formData === 'object') ? part.formData : {};
       updates.formData = { ...existingFormData, ...updates.formData };
+      // Final scrub: real table columns must never live in formData, or a stale shadow value
+      // overrides the real column on the next load and the part appears to "revert". This
+      // catches shadows already sitting in the stored formData (e.g. from AI-imported parts).
+      ['materialSource', 'weSupplyMaterial', 'vendorId', 'supplierName', 'materialUnitCost',
+       'materialMarkupPercent', 'quantity', 'materialDescription', 'vendorEstimateNumber',
+       'materialTotal', 'partTotal', 'laborTotal'].forEach(k => { delete updates.formData[k]; });
     }
 
     // Calculate part totals (skip for ea-priced types which compute their own partTotal)

@@ -1241,12 +1241,11 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     if (updates.formData) {
       const existingFormData = (part.formData && typeof part.formData === 'object') ? part.formData : {};
       updates.formData = { ...existingFormData, ...updates.formData };
-      // Final scrub: real table columns must never live in formData, or a stale shadow value
-      // overrides the real column on the next load and the part appears to "revert". This
-      // catches shadows already sitting in the stored formData (e.g. from AI-imported parts).
-      ['materialSource', 'weSupplyMaterial', 'vendorId', 'supplierName', 'materialUnitCost',
-       'materialMarkupPercent', 'quantity', 'materialDescription', 'vendorEstimateNumber',
-       'materialTotal', 'partTotal', 'laborTotal'].forEach(k => { delete updates.formData[k]; });
+      // Final scrub: formData holds only form-only keys (prefixed '_'). Any non-underscore key
+      // is a shadow of a real table column and would override the real value on next load,
+      // making the part "revert". Strip every non-underscore key — this catches shadows already
+      // sitting in stored formData (e.g. specialInstructions, material, from AI-imported parts).
+      Object.keys(updates.formData).forEach(k => { if (!k.startsWith('_')) delete updates.formData[k]; });
     }
 
     // Calculate part totals (skip for ea-priced types which compute their own partTotal)

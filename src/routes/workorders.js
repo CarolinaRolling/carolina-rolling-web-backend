@@ -6663,7 +6663,17 @@ async function buildCocPdfBuffer(workOrder, { parts, wps, certifiedBy, dateStr }
     const fd = p.formData && typeof p.formData === 'object' ? p.formData : {};
     let matDesc = p._materialDescription || fd._materialDescription || p.materialDescription || '';
     matDesc = matDesc.replace(/^\d+pc:\s*/i, '');
-    const heatNum = p.heatNumber || fd.heatNumber || '';
+    // Heat number(s). A part can be a single heat (p.heatNumber) OR split across several heats
+    // stored in heatBreakdown [{ heat, qty, country }]. The CoC used to read only the single
+    // field, so split-heat parts showed no heat number at all. Build a combined string.
+    let heatNum = '';
+    const breakdown = Array.isArray(p.heatBreakdown) ? p.heatBreakdown.filter(r => r && r.heat) : [];
+    if (breakdown.length > 0) {
+      // e.g. "ER34 (5), ER77 (3)" — include the per-heat qty when present.
+      heatNum = breakdown.map(r => r.qty ? `${r.heat} (${r.qty})` : r.heat).join(', ');
+    } else {
+      heatNum = p.heatNumber || fd.heatNumber || '';
+    }
     const revNum = p.rev || fd.rev || '';
     const poLineNum = p.poLineNumber || fd.poLineNumber || '';
     const lotNum = p.lotNumber || fd.lotNumber || '';
@@ -6690,7 +6700,7 @@ async function buildCocPdfBuffer(workOrder, { parts, wps, certifiedBy, dateStr }
       y += doc.heightOfString(p.specialInstructions, { width: 360 }) + 1;
     }
     const trackingBits = [];
-    if (heatNum) trackingBits.push('Heat #: ' + heatNum);
+    if (heatNum) trackingBits.push((breakdown.length > 1 ? 'Heat #s: ' : 'Heat #: ') + heatNum);
     if (revNum) trackingBits.push('Rev: ' + revNum);
     if (poLineNum) trackingBits.push('PO Line: ' + poLineNum);
     if (lotNum) trackingBits.push('Lot: ' + lotNum);

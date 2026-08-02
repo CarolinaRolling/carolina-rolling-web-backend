@@ -3856,6 +3856,12 @@ module.exports = {
   ClientPayment,
   PaymentApplication,
   CreditMemo,
+  // These three are defined above but were never exported, so the v299 backup's
+  // require('../models') got `undefined` for them and threw "Cannot read properties of
+  // undefined (reading 'findAll')" on every scheduled run. Exporting them fixes the backup.
+  Refund,
+  WorkOrderPayment,
+  WorkOrderInvoiceSend,
   CreditMemoApplication,
   Refund
 };

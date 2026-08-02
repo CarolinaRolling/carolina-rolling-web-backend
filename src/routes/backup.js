@@ -426,9 +426,19 @@ async function runAutoBackup(includeFiles = false) {
       console.error('[auto-backup] Cleanup error (non-fatal):', cleanErr.message);
     }
 
+    // Record success so the Backup page banner reflects the most recent backup — whether it was
+    // the scheduled cron OR a manual "Run Backup Now". Previously only the cron wrote this, so a
+    // successful manual backup left a stale "Last Auto-Backup Failed" warning on screen.
+    try {
+      await AppSettings.upsert({ key: 'last_backup_status', value: { status: 'success', timestamp: new Date().toISOString(), size: uploadResult.size } });
+    } catch (statusErr) { console.warn('[auto-backup] could not write success status:', statusErr.message); }
+
     return { success: true, ...uploadResult, counts: dbBackup.counts, duration };
   } catch (error) {
     console.error('[auto-backup] FAILED:', error.message);
+    try {
+      await AppSettings.upsert({ key: 'last_backup_status', value: { status: 'failed', timestamp: new Date().toISOString(), error: error.message } });
+    } catch (statusErr) { console.warn('[auto-backup] could not write failed status:', statusErr.message); }
     return { success: false, error: error.message };
   }
 }

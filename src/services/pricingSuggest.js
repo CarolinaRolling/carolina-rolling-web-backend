@@ -80,6 +80,20 @@ function parseNum(s) {
   if (s === null || s === undefined || s === '') return null;
   if (typeof s === 'number') return s;
   let str = String(s).replace(/["\u2033]|in\.?|inch(es)?/gi, ' ').trim();
+  // Gauge thickness must convert to its decimal inch value BEFORE the plain-number fallback below.
+  // Otherwise "10 ga" parses as the number 10, and weight (t*w*l*density) comes out ~100x too high
+  // — 10ga 48x120 was read as 10" thick, giving ~16,000 lb instead of ~220 lb. Matches the
+  // frontend gaugeMap in PlateRollForm.js (standard sheet-steel gauges).
+  const gaugeMatch = str.match(/(\d+)\s*ga\b/i);
+  if (gaugeMatch) {
+    const GAUGE_DECIMAL = {
+      '3': 0.2391, '4': 0.2242, '5': 0.2092, '6': 0.1943, '7': 0.1793, '8': 0.1644,
+      '9': 0.1495, '10': 0.1345, '11': 0.1196, '12': 0.1046, '13': 0.0897, '14': 0.0747,
+      '16': 0.0598, '18': 0.0478, '20': 0.0359, '22': 0.0299, '24': 0.0239, '26': 0.0179
+    };
+    const g = GAUGE_DECIMAL[gaugeMatch[1]];
+    if (g !== undefined) return g;
+  }
   let m = str.match(/(\d+)[\s-]+(\d+)\s*\/\s*(\d+)/);
   if (m) return parseInt(m[1]) + parseInt(m[2]) / parseInt(m[3]);
   m = str.match(/(\d+)\s*\/\s*(\d+)/);

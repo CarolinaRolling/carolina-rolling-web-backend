@@ -518,6 +518,84 @@ router.delete('/vendors/:id', async (req, res, next) => {
   }
 });
 
+// POST /api/vendors/:id/merge — Merge source vendor into this (target) vendor
+// All records referencing sourceId are reassigned to targetId (this), source vendor is deleted.
+// Mirrors the client merge. Vendors are referenced more widely than clients: several vendorId
+// FKs, plus name-based supplier fields on parts, plus RFQ and outside-processing vendor IDs.
+router.post('/vendors/:id/merge', async (req, res, next) => {
+  const { sourceId } = req.body;
+  const targetId = req.params.id;
+  if (!sourceId) return res.status(400).json({ error: { message: 'sourceId is required' } });
+  if (sourceId === targetId) return res.status(400).json({ error: { message: 'Source and target cannot be the same vendor' } });
+
+  const { sequelize } = require('../models');
+  const t = await sequelize.transaction();
+  try {
+    const [target, source] = await Promise.all([
+      Vendor.findByPk(targetId),
+      Vendor.findByPk(sourceId)
+    ]);
+    if (!target) { await t.rollback(); return res.status(404).json({ error: { message: 'Target vendor not found' } }); }
+    if (!source) { await t.rollback(); return res.status(404).json({ error: { message: 'Source vendor not found' } }); }
+
+    const targetName = target.name;
+    const sourceName = source.name;
+
+    // Tables with a plain vendorId FK
+    const idTables = [
+      { table: 'inbound_orders', idCol: '"vendorId"' },
+      { table: 'work_order_parts', idCol: '"vendorId"' },
+      { table: 'estimate_parts', idCol: '"vendorId"' },
+      { table: 'po_numbers', idCol: '"vendorId"' },
+      { table: 'vendor_issues', idCol: '"vendorId"' },
+      { table: 'liabilities', idCol: '"vendorId"' },
+      { table: 'shipment_charges', idCol: '"vendorId"' },
+      // RFQ + outside-processing vendor references
+      { table: 'estimates', idCol: '"rfqVendorId"' },
+      { table: 'work_order_parts', idCol: '"outsideProcessingVendorId"' },
+      { table: 'estimate_parts', idCol: '"outsideProcessingVendorId"' },
+    ];
+    for (const { table, idCol } of idTables) {
+      try {
+        await sequelize.query(
+          `UPDATE ${table} SET ${idCol} = :targetId WHERE ${idCol} = :sourceId`,
+          { replacements: { targetId, sourceId }, transaction: t }
+        );
+      } catch (e) { /* column/table may not exist — skip */ }
+    }
+
+    // Parts also store the vendor NAME in supplierName (denormalized). Reassign by matching the
+    // source name so the display stays consistent with the merged vendor.
+    for (const table of ['work_order_parts', 'estimate_parts']) {
+      try {
+        await sequelize.query(
+          `UPDATE ${table} SET "supplierName" = :targetName WHERE "supplierName" = :sourceName`,
+          { replacements: { targetName, sourceName }, transaction: t }
+        );
+      } catch (e) { /* skip */ }
+    }
+
+    // vendorName-only fields (no FK) on vendor_issues and shipment_charges
+    for (const table of ['vendor_issues', 'shipment_charges']) {
+      try {
+        await sequelize.query(
+          `UPDATE ${table} SET "vendorName" = :targetName WHERE "vendorName" = :sourceName`,
+          { replacements: { targetName, sourceName }, transaction: t }
+        );
+      } catch (e) { /* skip */ }
+    }
+
+    // Delete source vendor
+    await source.destroy({ transaction: t });
+    await t.commit();
+
+    res.json({ data: target, message: `Merged "${sourceName}" into "${targetName}" — all records transferred` });
+  } catch (err) {
+    await t.rollback();
+    next(err);
+  }
+});
+
 // Helper: parse paymentTerms string into days (0 = COD/immediate)
 function termsToDays(terms) {
   if (!terms) return null;

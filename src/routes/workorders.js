@@ -3331,6 +3331,26 @@ router.delete('/:id/parts/:partId', async (req, res, next) => {
 
     await part.destroy();
 
+    // Clean up any inspection job linked to this part (plus its units) so deleting an
+    // inspection line doesn't leave an orphaned job + measurements in the database.
+    try {
+      const { InspectionJob, InspectionUnit } = require('../models');
+      const orphanJobs = await InspectionJob.findAll({ where: { workOrderPartId: req.params.partId } });
+      for (const job of orphanJobs) {
+        await InspectionUnit.destroy({ where: { inspectionJobId: job.id } });
+        await job.destroy();
+      }
+      // Also handle an inspection SERVICE line being deleted: its job is keyed to the line it
+      // links to via inspectionPartId.
+      const svcJobs = await InspectionJob.findAll({ where: { inspectionPartId: req.params.partId } });
+      for (const job of svcJobs) {
+        await InspectionUnit.destroy({ where: { inspectionJobId: job.id } });
+        await job.destroy();
+      }
+    } catch (e) {
+      console.error('[part delete] inspection cleanup failed (non-fatal):', e.message);
+    }
+
     // Renumber remaining parts
     const remainingParts = await WorkOrderPart.findAll({
       where: { workOrderId: req.params.id },

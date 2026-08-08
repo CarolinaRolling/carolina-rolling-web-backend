@@ -2882,6 +2882,10 @@ router.post('/:id/parts', async (req, res, next) => {
       heatNumber,
       heatCountry: req.body.heatCountry || null,
       clientJobNumber: req.body.clientJobNumber || null,
+      bendCount: req.body.bendCount ?? null,
+      handlingClass: req.body.handlingClass || null,
+      recommendedLabor: req.body.recommendedLabor ?? null,
+      actualRunTimeMin: req.body.actualRunTimeMin ?? null,
       rev: req.body.rev || null,
       poLineNumber: req.body.poLineNumber || null,
       lotNumber: autoLotNumber,
@@ -3024,6 +3028,11 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     if (heatBreakdown !== undefined) updates.heatBreakdown = heatBreakdown;
     if (req.body.heatCountry !== undefined) updates.heatCountry = req.body.heatCountry;
     if (req.body.clientJobNumber !== undefined) updates.clientJobNumber = req.body.clientJobNumber;
+    // Press brake fields (real columns, Step 1 + Step 4)
+    if (req.body.bendCount !== undefined) updates.bendCount = req.body.bendCount;
+    if (req.body.handlingClass !== undefined) updates.handlingClass = req.body.handlingClass;
+    if (req.body.recommendedLabor !== undefined) updates.recommendedLabor = req.body.recommendedLabor;
+    if (req.body.actualRunTimeMin !== undefined) updates.actualRunTimeMin = req.body.actualRunTimeMin;
     if (req.body.rev !== undefined) updates.rev = req.body.rev;
     if (req.body.poLineNumber !== undefined) updates.poLineNumber = req.body.poLineNumber;
     if (req.body.lotNumber !== undefined) updates.lotNumber = req.body.lotNumber;

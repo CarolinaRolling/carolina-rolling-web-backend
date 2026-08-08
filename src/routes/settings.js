@@ -876,7 +876,59 @@ router.put('/printer-config', async (req, res, next) => {
 
 // ==================== SCRAP PICKUP ====================
 
-// ─── Confirmed HS/HTS codes per material+shape ────────────────────────────────
+// ─── Press Brake recommendation config ────────────────────────────────────────
+// Editable constants behind the press-brake labor recommendation. Stored as one JSON blob in
+// AppSettings (no schema column). PLACEHOLDER values below are clearly marked — the shop owner
+// must replace them with real numbers via Settings → Press Brake. They are intentionally NOT
+// tuned; they exist only so the feature renders something before real values are entered.
+const PRESS_BRAKE_DEFAULTS = {
+  _placeholder: true, // flag so the UI can warn these are not real values yet
+  setupTimeSec: 300,            // PLACEHOLDER — flat setup time, one machine
+  shopRate: 95,                 // PLACEHOLDER — $/hr
+  secondsPerBend: 20,           // PLACEHOLDER — base seconds per bend before multipliers
+  handlingMultipliers: {        // PLACEHOLDER — one per handling class
+    'one-operator': 1.0,
+    'two-person': 2.0,
+    'two-person-crane': 3.0
+  },
+  minimumCharge: 45,            // PLACEHOLDER — floor on the recommendation
+  // Capacity (Step 3) — machine is CNC 350-ton, 12-ft Cincinnati
+  maxBendLengthFt: 12,
+  maxTonnage: 350,
+  materialFactors: { mild: 1.0, stainless: 1.5, aluminum: 0.5 },
+  // V-die table: thickness(in) → preferred V opening(in). PLACEHOLDER — replace from tooling.
+  vDieTable: [
+    { thickness: 0.075, vOpening: 0.5 },
+    { thickness: 0.135, vOpening: 0.75 },
+    { thickness: 0.25, vOpening: 1.5 },
+    { thickness: 0.5, vOpening: 3.0 }
+  ]
+};
+
+router.get('/press-brake-config', async (req, res, next) => {
+  try {
+    const setting = await AppSettings.findOne({ where: { key: 'press_brake_config' } });
+    res.json({ data: setting?.value || PRESS_BRAKE_DEFAULTS });
+  } catch (error) { next(error); }
+});
+
+router.put('/press-brake-config', async (req, res, next) => {
+  try {
+    const incoming = (req.body && typeof req.body.config === 'object') ? req.body.config : {};
+    // Merge over defaults so a partial save can't drop required keys, and clear the placeholder
+    // flag once the owner has saved real values.
+    const value = { ...PRESS_BRAKE_DEFAULTS, ...incoming, _placeholder: false };
+    const existing = await AppSettings.findOne({ where: { key: 'press_brake_config' } });
+    if (existing) await existing.update({ value });
+    else await AppSettings.create({ key: 'press_brake_config', value });
+    res.json({ data: value, message: 'Press brake config saved' });
+  } catch (error) {
+    console.error('[press-brake-config] save error:', error.message);
+    next(error);
+  }
+});
+
+
 // A broker-confirmed lookup table so the USMCA generator recalls verified codes instead of
 // guessing. Stored as a single JSON blob in AppSettings — no schema column (deliberately, after
 // the 2026-07 column-limit incident). Each entry: { id, material, shape, hsCode, note,

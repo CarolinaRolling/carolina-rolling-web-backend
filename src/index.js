@@ -1750,6 +1750,17 @@ async function startServer() {
         `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "clientJobNumber" VARCHAR(255)`,
         `ALTER TABLE estimate_parts ADD COLUMN IF NOT EXISTS "heatCountry" VARCHAR(8)`,
         `ALTER TABLE estimate_parts ADD COLUMN IF NOT EXISTS "clientJobNumber" VARCHAR(255)`,
+        // Press Brake feature — bend count + handling class (Step 1) and override/outcome
+        // capture (Step 4). Real columns on BOTH part tables (press brake parts exist in each).
+        // Kept OUT of formData so the shadow-revert rule doesn't apply to them.
+        `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "bendCount" INTEGER`,
+        `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "handlingClass" VARCHAR(16)`,
+        `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "recommendedLabor" DECIMAL(10,2)`,
+        `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "actualRunTimeMin" DECIMAL(10,2)`,
+        `ALTER TABLE estimate_parts ADD COLUMN IF NOT EXISTS "bendCount" INTEGER`,
+        `ALTER TABLE estimate_parts ADD COLUMN IF NOT EXISTS "handlingClass" VARCHAR(16)`,
+        `ALTER TABLE estimate_parts ADD COLUMN IF NOT EXISTS "recommendedLabor" DECIMAL(10,2)`,
+        `ALTER TABLE estimate_parts ADD COLUMN IF NOT EXISTS "actualRunTimeMin" DECIMAL(10,2)`,
         `ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "contactExtension" VARCHAR(255)`,
         `ALTER TABLE estimates ADD COLUMN IF NOT EXISTS "contactExtension" VARCHAR(255)`,
         `ALTER TABLE work_order_messages ADD COLUMN IF NOT EXISTS "readByOperators" JSONB NOT NULL DEFAULT '[]'`,

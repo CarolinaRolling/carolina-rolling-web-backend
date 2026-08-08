@@ -845,6 +845,11 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
     type: DataTypes.STRING,
     allowNull: true
   },
+  // Press Brake feature fields (real columns, never in formData).
+  bendCount: { type: DataTypes.INTEGER, allowNull: true },
+  handlingClass: { type: DataTypes.STRING, allowNull: true }, // 'one-hand' | 'two-hand' | 'two-person'
+  recommendedLabor: { type: DataTypes.DECIMAL(10, 2), allowNull: true }, // the suggested labor at save time
+  actualRunTimeMin: { type: DataTypes.DECIMAL(10, 2), allowNull: true }, // entered post-completion, for calibration
   // Rows are { heat, qty, country } — country is the ISO-2 origin for THAT heat, since a
   // split part can legitimately come from two different mills in two different countries.
   heatBreakdown: {
@@ -1584,6 +1589,11 @@ const EstimatePart = sequelize.define('EstimatePart', {
     type: DataTypes.STRING,
     allowNull: true
   },
+  // Press Brake feature fields (real columns, never in formData).
+  bendCount: { type: DataTypes.INTEGER, allowNull: true },
+  handlingClass: { type: DataTypes.STRING, allowNull: true }, // 'one-hand' | 'two-hand' | 'two-person'
+  recommendedLabor: { type: DataTypes.DECIMAL(10, 2), allowNull: true },
+  actualRunTimeMin: { type: DataTypes.DECIMAL(10, 2), allowNull: true },
   cutFileReference: {
     type: DataTypes.STRING,
     allowNull: true

@@ -1363,7 +1363,9 @@ router.post('/:id/parts/:partId/files', upload.array('files', 10), async (req, r
       let detectedType = fileType;
       if (ext === '.pdf') detectedType = fileType === 'cut_file' ? 'cut_file' : 'drawing';
       else if (ext === '.stp' || ext === '.step') detectedType = 'step_file';
-      else if (ext === '.dxf') detectedType = 'cut_file';
+      // A DXF defaults to cut_file, BUT respect an explicit press_dxf (bend-line file for the
+      // press — must never be shared to the cut vendor) or cut_file passed by the caller.
+      else if (ext === '.dxf') detectedType = (fileType === 'press_dxf' || fileType === 'cut_file') ? fileType : 'cut_file';
 
       // Upload file
       const result = await fileStorage.uploadFile(file.path, {

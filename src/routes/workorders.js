@@ -3405,6 +3405,11 @@ router.post('/:id/parts/:partId/files', upload.array('files', 10), async (req, r
 
     tempFiles.push(...req.files.map(f => f.path));
 
+    // An explicit fileType may be supplied (e.g. from the press-brake auto-fill, which needs the
+    // bend-line DXF typed 'press_dxf' so it is NEVER shared to the cut vendor, while the clean DXF
+    // is 'cut_file'). When provided and valid, it overrides extension-based detection.
+    const explicitType = (req.body && typeof req.body.fileType === 'string' && req.body.fileType.trim())
+      ? req.body.fileType.trim() : null;
     const files = await Promise.all(
       req.files.map(async (file) => {
         // Determine file type
@@ -3416,6 +3421,7 @@ router.post('/:id/parts/:partId/files', upload.array('files', 10), async (req, r
         else if (ext === '.dwg') fileType = 'drawing';
         else if (['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(ext)) fileType = 'drawing';
         else if (ext === '.doc' || ext === '.docx') fileType = 'specification';
+        if (explicitType) fileType = explicitType;   // caller-specified role wins
 
         // Upload file
         const uploadResult = await fileStorage.uploadFile(file.path, {

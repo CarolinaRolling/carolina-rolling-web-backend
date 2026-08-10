@@ -1073,7 +1073,18 @@ router.get('/preview/:id', async (req, res, next) => {
     const result = await buildInvoiceIIF(wo, wo.parts || [], client, wo.invoiceNumber);
     if (!result) return res.json({ data: null, message: 'No billable items found' });
     
-    res.json({ data: { summary: result.summary, config: QB_CONFIG, rawIIF: result.lines.join('\n') } });
+    // Warn if the client has no quickbooksName set. QuickBooks matches customers by exact name;
+    // if CR Admin's name doesn't match QB, the import creates a DUPLICATE customer. Setting
+    // quickbooksName to the exact QB name prevents that.
+    const warnings = [];
+    if (!client || !client.quickbooksName || !String(client.quickbooksName).trim()) {
+      warnings.push({
+        type: 'no_quickbooks_name',
+        message: `"${client?.name || wo.clientName || 'This client'}" has no QuickBooks Name set. If this exact name isn't already a customer in QuickBooks, the import will create a new one — and any spelling difference makes a duplicate. Confirm the client exists in QuickBooks (or set their QuickBooks Name to match) before importing.`
+      });
+    }
+
+    res.json({ data: { summary: result.summary, config: QB_CONFIG, rawIIF: result.lines.join('\n'), warnings } });
   } catch (error) { next(error); }
 });
 

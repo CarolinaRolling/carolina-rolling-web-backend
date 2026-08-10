@@ -2883,6 +2883,7 @@ router.post('/:id/parts', async (req, res, next) => {
       heatCountry: req.body.heatCountry || null,
       clientJobNumber: req.body.clientJobNumber || null,
       bendCount: req.body.bendCount ?? null,
+      falseBends: req.body.falseBends ?? null,
       handlingClass: req.body.handlingClass || null,
       recommendedLabor: req.body.recommendedLabor ?? null,
       actualRunTimeMin: req.body.actualRunTimeMin ?? null,
@@ -3030,6 +3031,7 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     if (req.body.clientJobNumber !== undefined) updates.clientJobNumber = req.body.clientJobNumber;
     // Press brake fields (real columns, Step 1 + Step 4)
     if (req.body.bendCount !== undefined) updates.bendCount = req.body.bendCount;
+    if (req.body.falseBends !== undefined) updates.falseBends = req.body.falseBends;
     if (req.body.handlingClass !== undefined) updates.handlingClass = req.body.handlingClass;
     if (req.body.recommendedLabor !== undefined) updates.recommendedLabor = req.body.recommendedLabor;
     if (req.body.actualRunTimeMin !== undefined) updates.actualRunTimeMin = req.body.actualRunTimeMin;

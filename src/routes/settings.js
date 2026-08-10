@@ -902,7 +902,17 @@ const PRESS_BRAKE_DEFAULTS = {
     { thickness: 0.135, vOpening: 0.75 },
     { thickness: 0.25, vOpening: 1.5 },
     { thickness: 0.5, vOpening: 3.0 }
-  ]
+  ],
+  // STEP/DXF parser service (runs on the shop NAS). Blank = feature off / manual entry only.
+  parserUrl: 'https://jasonlthornton.synology.me:8201',
+  // Handling-class auto-suggest thresholds. Weight in lb, size (longest flat dim) in inches.
+  // A part is bumped up a class if it exceeds EITHER the weight OR size limit of a lower class.
+  // PLACEHOLDER — set to your real limits.
+  handlingThresholds: {
+    'one-operator':     { maxWeightLb: 50,  maxSizeIn: 48 },   // up to here = one operator
+    'two-person':       { maxWeightLb: 200, maxSizeIn: 120 },  // up to here = two person
+    // anything above two-person limits = two-person-crane
+  }
 };
 
 router.get('/press-brake-config', async (req, res, next) => {

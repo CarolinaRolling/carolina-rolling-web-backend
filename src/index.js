@@ -1754,10 +1754,12 @@ async function startServer() {
         // capture (Step 4). Real columns on BOTH part tables (press brake parts exist in each).
         // Kept OUT of formData so the shadow-revert rule doesn't apply to them.
         `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "bendCount" INTEGER`,
+        `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "falseBends" INTEGER`,
         `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "handlingClass" VARCHAR(16)`,
         `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "recommendedLabor" DECIMAL(10,2)`,
         `ALTER TABLE work_order_parts ADD COLUMN IF NOT EXISTS "actualRunTimeMin" DECIMAL(10,2)`,
         `ALTER TABLE estimate_parts ADD COLUMN IF NOT EXISTS "bendCount" INTEGER`,
+        `ALTER TABLE estimate_parts ADD COLUMN IF NOT EXISTS "falseBends" INTEGER`,
         `ALTER TABLE estimate_parts ADD COLUMN IF NOT EXISTS "handlingClass" VARCHAR(16)`,
         `ALTER TABLE estimate_parts ADD COLUMN IF NOT EXISTS "recommendedLabor" DECIMAL(10,2)`,
         `ALTER TABLE estimate_parts ADD COLUMN IF NOT EXISTS "actualRunTimeMin" DECIMAL(10,2)`,

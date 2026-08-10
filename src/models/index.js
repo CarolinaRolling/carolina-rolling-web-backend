@@ -847,6 +847,7 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
   },
   // Press Brake feature fields (real columns, never in formData).
   bendCount: { type: DataTypes.INTEGER, allowNull: true },
+  falseBends: { type: DataTypes.INTEGER, allowNull: true },
   handlingClass: { type: DataTypes.STRING, allowNull: true }, // 'one-hand' | 'two-hand' | 'two-person'
   recommendedLabor: { type: DataTypes.DECIMAL(10, 2), allowNull: true }, // the suggested labor at save time
   actualRunTimeMin: { type: DataTypes.DECIMAL(10, 2), allowNull: true }, // entered post-completion, for calibration
@@ -1591,6 +1592,7 @@ const EstimatePart = sequelize.define('EstimatePart', {
   },
   // Press Brake feature fields (real columns, never in formData).
   bendCount: { type: DataTypes.INTEGER, allowNull: true },
+  falseBends: { type: DataTypes.INTEGER, allowNull: true },
   handlingClass: { type: DataTypes.STRING, allowNull: true }, // 'one-hand' | 'two-hand' | 'two-person'
   recommendedLabor: { type: DataTypes.DECIMAL(10, 2), allowNull: true },
   actualRunTimeMin: { type: DataTypes.DECIMAL(10, 2), allowNull: true },

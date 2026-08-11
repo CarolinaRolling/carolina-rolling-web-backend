@@ -411,6 +411,7 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
       const doc = new PDFDocument({
         size: 'letter',
         margins: { top: 50, left: 50, right: 50, bottom: 0 },
+        bufferPages: true,
       });
       const chunks = [];
       doc.on('data', c => chunks.push(c));
@@ -708,6 +709,11 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
 
       // ── Totals ──
       yPos += 10;
+      // Keep the whole totals block together — if it won't fit in the remaining space, start it on
+      // a new page so the TOTAL DUE box never jams against the very bottom edge. The block needs
+      // roughly: divider + subtotal + tax + total box + credit-card-fees ≈ 130pt.
+      const TOTALS_BLOCK_H = 150;
+      if (yPos + TOTALS_BLOCK_H > 720) { doc.addPage(); yPos = 50; }
       doc.strokeColor(lightGray).lineWidth(1).moveTo(50, yPos).lineTo(562, yPos).stroke();
       yPos += 12;
 
@@ -826,13 +832,21 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
         yPos += 26;
       }
 
-      // Footer — only draw if enough room remains on this page (need ~30px)
-      const pageBottom = 742; // PDFKit letter page bottom margin
-      if (yPos + 30 < pageBottom) {
-        const footerY = Math.max(yPos + 10, 720);
-        doc.strokeColor(lightGray).lineWidth(0.5).moveTo(50, footerY).lineTo(562, footerY).stroke();
-        doc.font('Helvetica').fontSize(8.5).fillColor('#aaa')
-          .text('Carolina Rolling Co. Inc.  |  9152 Sonrisa St., Bellflower, CA 90706  |  (562) 633-1044  |  keepitrolling@carolinarolling.com', 50, footerY + 8, { width: 512, align: 'center', lineBreak: false });
+      // Footer — clean, matching the estimate style: divider + company info line + invoice#/page
+      // line, drawn on EVERY page via the buffered-page loop.
+      const pageRange = doc.bufferedPageRange();
+      for (let i = 0; i < pageRange.count; i++) {
+        doc.switchToPage(pageRange.start + i);
+        const savedBottom = doc.page.margins.bottom;
+        doc.page.margins.bottom = 0;
+        doc.strokeColor('#e0e0e0').lineWidth(0.5).moveTo(50, 742).lineTo(562, 742).stroke();
+        doc.font('Helvetica').fontSize(8).fillColor('#999')
+          .text('Carolina Rolling Co. Inc.  |  9152 Sonrisa St., Bellflower, CA 90706  |  (562) 633-1044  |  keepitrolling@carolinarolling.com',
+            50, 750, { align: 'center', width: 512, lineBreak: false });
+        doc.fontSize(7.5).fillColor('#aaa')
+          .text(`Invoice #${invNum}  |  Page ${i + 1} of ${pageRange.count}`,
+            50, 762, { align: 'center', width: 512, lineBreak: false });
+        doc.page.margins.bottom = savedBottom;
       }
 
       doc.end();

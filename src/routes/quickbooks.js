@@ -404,7 +404,14 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
 
   return new Promise(async (resolve, reject) => {
     try {
-      const doc = new PDFDocument({ margin: 50, size: 'letter' });
+      // Explicit margins with NO bottom margin. All content here is absolutely positioned via
+      // yPos with manual page-break checks, so PDFKit's automatic bottom-margin page flow isn't
+      // needed — and leaving it on caused stray blank trailing pages when a manually-placed
+      // .text() landed near the 742pt bottom margin and auto-created a new page.
+      const doc = new PDFDocument({
+        size: 'letter',
+        margins: { top: 50, left: 50, right: 50, bottom: 0 },
+      });
       const chunks = [];
       doc.on('data', c => chunks.push(c));
       doc.on('end', () => resolve(Buffer.concat(chunks)));

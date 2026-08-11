@@ -3111,14 +3111,19 @@ router.get('/:id/pdf', async (req, res, next) => {
       // Temporarily remove bottom margin so writing near page bottom doesn't auto-create pages
       const savedBottomMargin = doc.page.margins.bottom;
       doc.page.margins.bottom = 0;
-      doc.fontSize(10.5).fillColor(grayColor);
+      // Divider above the footer
+      doc.strokeColor('#e0e0e0').lineWidth(0.5).moveTo(50, 742).lineTo(562, 742).stroke();
+      // Company line (small, gray) then the estimate # / page line below it — spaced so the two
+      // lines don't overlap (each ~9pt line needs ~10pt of vertical room).
+      doc.font('Helvetica').fontSize(8).fillColor('#999');
       doc.text(
-        'Carolina Rolling Co. Inc. | 9152 Sonrisa St., Bellflower, CA 90706 | (562) 633-1044 | keepitrolling@carolinarolling.com',
-        50, 745, { align: 'center', width: 512, lineBreak: false }
+        'Carolina Rolling Co. Inc.  |  9152 Sonrisa St., Bellflower, CA 90706  |  (562) 633-1044  |  keepitrolling@carolinarolling.com',
+        50, 750, { align: 'center', width: 512, lineBreak: false }
       );
+      doc.fontSize(7.5).fillColor('#aaa');
       doc.text(
-        `${estimate.estimateNumber} | Page ${i + 1} of ${pageCount}`,
-        50, 756, { align: 'center', width: 512, lineBreak: false }
+        `${estimate.estimateNumber}  |  Page ${i + 1} of ${pageCount}`,
+        50, 762, { align: 'center', width: 512, lineBreak: false }
       );
       doc.page.margins.bottom = savedBottomMargin;
     }

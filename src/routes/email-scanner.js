@@ -304,10 +304,17 @@ router.get('/search-estimates', async (req, res, next) => {
 // GET /api/email-scanner/supplier-emails - vendor/supplier emails for the Supplier Comms tab.
 router.get('/supplier-emails', async (req, res, next) => {
   try {
-    const { linked } = req.query; // optional filter: 'true' | 'false'
+    const { linked, days } = req.query; // linked: 'true'|'false'; days: recency window (default 14)
     const where = { commCategory: 'vendor' };
     if (linked === 'true') where.estimateId = { [Op.ne]: null };
     else if (linked === 'false') where.estimateId = { [Op.is]: null };
+    // Recency window — supplier quotes go stale fast, and old un-linked vendor mail piles up.
+    // Default to the last 14 days; days=0 (or 'all') shows everything.
+    const windowDays = days === 'all' ? 0 : (days !== undefined ? parseInt(days) : 14);
+    if (windowDays > 0) {
+      const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
+      where.receivedAt = { [Op.gte]: since };
+    }
     const emails = await ScannedEmail.findAll({
       where,
       order: [['receivedAt', 'DESC'], ['createdAt', 'DESC']],

@@ -361,6 +361,40 @@ function refreshDerivedFields(part) {
       part._rollingDescription = line;
     }
   }
+
+  // === Pitch (helical) info for the WORK ORDER — internal, so it INCLUDES the developed radius
+  // (the number operators roll to). The estimate/customer PDF omits the developed radius. ===
+  {
+    const fd = part.formData && typeof part.formData === 'object' ? part.formData : {};
+    const pitchOn = part._pitchEnabled ?? fd._pitchEnabled;
+    if (pitchOn) {
+      const pAngle = parseFloat(part._pitchAngle ?? fd._pitchAngle);
+      const pRun = parseFloat(part._pitchRun ?? fd._pitchRun);
+      const pRise = parseFloat(part._pitchRise ?? fd._pitchRise);
+      const pDirRaw = part._pitchDirection ?? fd._pitchDirection;
+      const pDevDia = parseFloat(part._pitchDevelopedDia ?? fd._pitchDevelopedDia);
+      const bits = [];
+      if (Number.isFinite(pAngle) && pAngle > 0) bits.push(`${pAngle.toFixed(2)} deg`);
+      if (Number.isFinite(pRun) && Number.isFinite(pRise) && pRun > 0) bits.push(`${pRise}" rise / ${pRun}" run`);
+      else if (Number.isFinite(pRise) && pRise > 0) bits.push(`${pRise}" rise`);
+      const pDir = pDirRaw === 'counterclockwise' ? 'CCW' : pDirRaw === 'clockwise' ? 'CW' : null;
+      if (pDir) bits.push(pDir);
+      // Developed radius (internal): _pitchDevelopedDia is a diameter; show CLR = dia/2.
+      if (Number.isFinite(pDevDia) && pDevDia > 0) bits.push(`Dev: ${(pDevDia / 2).toFixed(4)}" CLR (${pDevDia.toFixed(4)}" CLD)`);
+      if (bits.length) {
+        const pitchLine = `Pitch: ${bits.join(' | ')}`;
+        part._pitchDescription = pitchLine;
+        // Append to the rolling description so every WO PDF that shows rolling info includes pitch.
+        // Guard against double-appending if this normalizer runs more than once on the same part.
+        const already = part._rollingDescription && part._rollingDescription.includes('Pitch:');
+        if (!already) {
+          part._rollingDescription = part._rollingDescription
+            ? `${part._rollingDescription}\n${pitchLine}`
+            : pitchLine;
+        }
+      }
+    }
+  }
   
   // === Material Description: rebuild if missing but raw fields exist ===
   if (!part._materialDescription && !part.materialDescription) {

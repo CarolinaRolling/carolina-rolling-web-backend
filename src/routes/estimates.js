@@ -2786,6 +2786,25 @@ router.get('/:id/pdf', async (req, res, next) => {
         descLines.push(`${part._ringsNeeded} complete ring(s) required`);
       }
 
+      // Pitch (helical) info — for pitched pipe/tube/etc. Shows angle, run/rise, and direction.
+      // Deliberately EXCLUDES the developed radius/diameter (internal-only info).
+      if (part._pitchEnabled) {
+        const pAngle = parseFloat(part._pitchAngle);
+        const pRun = parseFloat(part._pitchRun);
+        const pRise = parseFloat(part._pitchRise);
+        const pitchBits = [];
+        if (Number.isFinite(pAngle) && pAngle > 0) pitchBits.push(`${pAngle.toFixed(2)} deg`);
+        if (Number.isFinite(pRun) && Number.isFinite(pRise) && pRun > 0) {
+          pitchBits.push(`${pRise}" rise over ${pRun}" run`);
+        } else if (Number.isFinite(pRise) && pRise > 0) {
+          pitchBits.push(`${pRise}" rise`);
+        }
+        const pDir = part._pitchDirection === 'counterclockwise' ? 'Counterclockwise'
+          : part._pitchDirection === 'clockwise' ? 'Clockwise' : null;
+        if (pDir) pitchBits.push(pDir);
+        if (pitchBits.length) descLines.push(`Pitch: ${pitchBits.join(' | ')}`);
+      }
+
       // Orientation option text
       if ((part.partType === 'angle_roll' || part.partType === 'channel_roll') && part._orientationOption) {
         const combo = part.rollType === 'easy_way' ? 'EW-OD' : 'HW-ID';

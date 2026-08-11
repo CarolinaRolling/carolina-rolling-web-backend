@@ -299,6 +299,83 @@ router.get('/search-estimates', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// ==================== SUPPLIER COMMUNICATIONS ====================
+
+// GET /api/email-scanner/supplier-emails - vendor/supplier emails for the Supplier Comms tab.
+router.get('/supplier-emails', async (req, res, next) => {
+  try {
+    const { linked } = req.query; // optional filter: 'true' | 'false'
+    const where = { commCategory: 'vendor' };
+    if (linked === 'true') where.estimateId = { [Op.ne]: null };
+    else if (linked === 'false') where.estimateId = { [Op.is]: null };
+    const emails = await ScannedEmail.findAll({
+      where,
+      order: [['receivedAt', 'DESC'], ['createdAt', 'DESC']],
+      limit: 100,
+      include: [{ model: GmailAccount, as: 'gmailAccount', attributes: ['email'] }]
+    });
+    const estimateIds = [...new Set(emails.map(e => e.estimateId).filter(Boolean))];
+    let estMap = {};
+    if (estimateIds.length) {
+      const ests = await Estimate.findAll({
+        where: { id: { [Op.in]: estimateIds } },
+        attributes: ['id', 'estimateNumber', 'clientName']
+      });
+      estMap = Object.fromEntries(ests.map(e => [e.id, { estimateNumber: e.estimateNumber, clientName: e.clientName }]));
+    }
+    const data = emails.map(e => ({
+      id: e.id,
+      fromEmail: e.fromEmail,
+      fromName: e.fromName,
+      subject: e.subject,
+      receivedAt: e.receivedAt,
+      gmailLink: e.gmailLink,
+      parsedData: e.parsedData,
+      parseConfidence: e.parseConfidence,
+      estimateId: e.estimateId,
+      linkedEstimate: e.estimateId ? (estMap[e.estimateId] || null) : null,
+      rawBody: e.rawBody ? String(e.rawBody).substring(0, 5000) : null,
+    }));
+    res.json({ data });
+  } catch (error) { next(error); }
+});
+
+// POST /api/email-scanner/supplier-emails/:id/link - link a supplier email to an estimate and
+// auto-advance that estimate's board to 'pricing_received' (never moving it backward).
+router.post('/supplier-emails/:id/link', async (req, res, next) => {
+  try {
+    const { estimateId } = req.body;
+    if (!estimateId) return res.status(400).json({ error: { message: 'estimateId is required' } });
+    const email = await ScannedEmail.findByPk(req.params.id);
+    if (!email) return res.status(404).json({ error: { message: 'Email not found' } });
+    const estimate = await Estimate.findByPk(estimateId);
+    if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
+
+    email.estimateId = estimateId;
+    await email.save();
+
+    const STAGE_ORDER = ['created', 'waiting_pricing', 'pricing_received', 'in_review', 'ready_to_send'];
+    const curIdx = STAGE_ORDER.indexOf(estimate.workflowStage || 'created');
+    const targetIdx = STAGE_ORDER.indexOf('pricing_received');
+    if (curIdx < targetIdx) {
+      estimate.workflowStage = 'pricing_received';
+      await estimate.save();
+    }
+    res.json({ data: { ok: true, estimateId, workflowStage: estimate.workflowStage } });
+  } catch (error) { next(error); }
+});
+
+// POST /api/email-scanner/supplier-emails/:id/unlink - remove the estimate link from an email.
+router.post('/supplier-emails/:id/unlink', async (req, res, next) => {
+  try {
+    const email = await ScannedEmail.findByPk(req.params.id);
+    if (!email) return res.status(404).json({ error: { message: 'Email not found' } });
+    email.estimateId = null;
+    await email.save();
+    res.json({ data: { ok: true } });
+  } catch (error) { next(error); }
+});
+
 // ==================== GENERAL NOTES ====================
 
 // GET /api/email-scanner/general-notes - Get general AI parsing notes

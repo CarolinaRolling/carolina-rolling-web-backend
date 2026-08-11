@@ -376,6 +376,19 @@ router.post('/supplier-emails/:id/unlink', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// GET /api/email-scanner/estimate/:estimateId/supplier-emails - supplier emails linked to a given
+// estimate (for the material-tab reference). Supports multiple suppliers on one estimate.
+router.get('/estimate/:estimateId/supplier-emails', async (req, res, next) => {
+  try {
+    const emails = await ScannedEmail.findAll({
+      where: { estimateId: req.params.estimateId, commCategory: 'vendor' },
+      order: [['receivedAt', 'DESC']],
+      attributes: ['id', 'fromEmail', 'fromName', 'subject', 'receivedAt', 'gmailLink', 'parsedData', 'parseConfidence'],
+    });
+    res.json({ data: emails });
+  } catch (error) { next(error); }
+});
+
 // ==================== GENERAL NOTES ====================
 
 // GET /api/email-scanner/general-notes - Get general AI parsing notes

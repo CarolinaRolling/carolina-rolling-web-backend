@@ -2561,6 +2561,9 @@ async function startServer() {
       // customer-facing status. Stored as VARCHAR (app-layer enum). Existing rows default to a
       // sensible stage below.
       await sequelize.query(`ALTER TABLE estimates ADD COLUMN IF NOT EXISTS "workflowStage" VARCHAR(32) DEFAULT 'created'`);
+      // Supplier Communications tab: only true material/service QUOTES (not invoices/confirmations)
+      // show in the tab. AI triage sets this flag.
+      await sequelize.query(`ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commIsSupplierQuote" BOOLEAN DEFAULT false`);
       await sequelize.query(`
         CREATE TABLE IF NOT EXISTS device_tokens (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

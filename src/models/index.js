@@ -2632,6 +2632,13 @@ const ScannedEmail = sequelize.define('ScannedEmail', {
     type: DataTypes.BOOLEAN,
     defaultValue: false
   },
+  // True ONLY when a vendor is giving US pricing for material/services (a quote we can link to an
+  // estimate) — NOT invoices, order confirmations, shipping notices, or other vendor mail. Drives
+  // the Supplier Communications tab so it shows only actual quotes.
+  commIsSupplierQuote: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
   commNeedsResponse: {
     type: DataTypes.BOOLEAN,
     defaultValue: false

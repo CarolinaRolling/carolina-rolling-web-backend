@@ -304,8 +304,12 @@ router.get('/search-estimates', async (req, res, next) => {
 // GET /api/email-scanner/supplier-emails - vendor/supplier emails for the Supplier Comms tab.
 router.get('/supplier-emails', async (req, res, next) => {
   try {
-    const { linked, days } = req.query; // linked: 'true'|'false'; days: recency window (default 14)
+    const { linked, days, includeAll } = req.query;
+    // Show ONLY vendor emails the AI judged to be actual material/service QUOTES (not invoices,
+    // order confirmations, shipping notices, etc.). includeAll=true relaxes this to all vendor mail
+    // (fallback if the flag hasn't been backfilled yet on older rows).
     const where = { commCategory: 'vendor' };
+    if (includeAll !== 'true') where.commIsSupplierQuote = true;
     if (linked === 'true') where.estimateId = { [Op.ne]: null };
     else if (linked === 'false') where.estimateId = { [Op.is]: null };
     // Recency window — supplier quotes go stale fast, and old un-linked vendor mail piles up.

@@ -62,16 +62,17 @@ function isOwnSender(addr) {
 async function classifyEmail({ from, fromEmail, subject, snippet, body, knownClient }) {
   // No AI key → safe default
   if (!process.env.ANTHROPIC_API_KEY) {
-    return { category: knownClient ? 'client_inquiry' : 'general', isQuoteRequest: false, needsResponse: !!knownClient };
+    return { category: knownClient ? 'client_inquiry' : 'general', isQuoteRequest: false, needsResponse: !!knownClient, isSupplierQuote: false };
   }
   const sys = `You triage incoming email for Carolina Rolling Company, a metal ROLLING / FORMING / FABRICATION shop. Customers send US steel to roll and form; we BUY material and services from vendors.
 Reply with ONLY JSON (no markdown):
-{"category":"<client_inquiry|vendor|bill|marketing|spam|business|general>","isQuoteRequest":<bool>,"needsResponse":<bool>}
+{"category":"<client_inquiry|vendor|bill|marketing|spam|business|general>","isQuoteRequest":<bool>,"needsResponse":<bool>,"isSupplierQuote":<bool>}
 
 Decide who the sender is RELATIVE TO US:
 - client_inquiry = someone who wants US to do work FOR them: asking us to roll/form/fabricate, requesting a quote, sending drawings or specs, or asking about pricing, lead time, or the status of their job. They are BUYING from us. This holds even if the sender is itself a company, shop, or fabricator. When unsure between client_inquiry and vendor and they are asking us to DO or QUOTE work, choose client_inquiry.
   - isQuoteRequest=true when they ask us to quote/price work or send specs/drawings for a quote.
 - vendor = a supplier or subcontractor WE BUY FROM: steel/material suppliers, outside processing (galvanizing, machining, heat treat), or freight/trucking. Usually order confirmations, shipping notices, material quotes WE requested, or their invoices. Only use vendor when they are clearly selling material/services we purchase to fulfill jobs.
+  - isSupplierQuote=true ONLY when this vendor email is GIVING US PRICING for material or services — i.e. an actual quote/estimate with prices, per-unit costs, or a formal price offer for steel/material/processing we asked about. isSupplierQuote=FALSE for vendor INVOICES, bills, statements, order confirmations, shipping/tracking notices, delivery ETAs, "your order shipped", acknowledgements, or anything that is not the vendor quoting us a price to buy. When in doubt, set isSupplierQuote=false.
 - bill = an invoice, statement, or payment request addressed to us.
 - business = taxes, government/regulatory notices, certifications, annual reports, insurance, licensing.
 - marketing = UNSOLICITED sales pitches, promotions, newsletters, cold outreach, ads — INCLUDING equipment-financing offers, "lines of credit", business loans, leasing, SEO/website services, insurance sales. needsResponse=false.
@@ -107,18 +108,19 @@ CRITICAL RULES:
     const parsed = JSON.parse(text);
     let category = VALID_CATEGORIES.includes(parsed.category) ? parsed.category : 'general';
     let isQuoteRequest = !!parsed.isQuoteRequest;
+    let isSupplierQuote = !!parsed.isSupplierQuote && category === 'vendor'; // only meaningful for vendors
     let needsResponse = parsed.needsResponse !== undefined ? !!parsed.needsResponse : !['marketing', 'spam'].includes(category);
     // Guard: our own outgoing mail (invoices/quotes we send out) must never be treated as an
     // incoming bill or client request.
     const senderAddr = fromEmail || ((String(from || '').match(/<(.+?)>/) || [])[1]) || from || '';
     if (isOwnSender(senderAddr)) {
       if (['bill', 'client_inquiry', 'vendor'].includes(category)) category = 'general';
-      isQuoteRequest = false; needsResponse = false;
+      isQuoteRequest = false; needsResponse = false; isSupplierQuote = false;
     }
-    return { category, isQuoteRequest, needsResponse };
+    return { category, isQuoteRequest, needsResponse, isSupplierQuote };
   } catch (err) {
     console.warn('[CommCenter] classify failed, default general:', err.message);
-    return { category: knownClient ? 'client_inquiry' : 'general', isQuoteRequest: false, needsResponse: !!knownClient };
+    return { category: knownClient ? 'client_inquiry' : 'general', isQuoteRequest: false, needsResponse: !!knownClient, isSupplierQuote: false };
   }
 }
 
@@ -226,13 +228,26 @@ async function reclassifyExisting({ limit = 400 } = {}) {
   for (const e of emails) {
     const fromEmail = (e.fromEmail || '').toLowerCase().trim();
     let triage;
-    if (vendorAddrs[fromEmail]) {
-      triage = { category: 'vendor', isQuoteRequest: false, needsResponse: false };
-    } else {
-      triage = await classifyEmail({ from: e.fromName || e.fromEmail, fromEmail: e.fromEmail, subject: e.subject, snippet: e.commSnippet, knownClient: clientAddrs[fromEmail] || null });
+    // Even for known vendor addresses, run AI classification so we can tell a material QUOTE apart
+    // from an invoice / order confirmation / shipping notice. (Previously vendors were blanket-
+    // tagged 'vendor' with no quote detection, which flooded the Supplier tab with non-quotes.)
+    const knownVendor = !!vendorAddrs[fromEmail];
+    triage = await classifyEmail({
+      from: e.fromName || e.fromEmail, fromEmail: e.fromEmail, subject: e.subject,
+      snippet: e.commSnippet, body: e.rawBody, knownClient: clientAddrs[fromEmail] || null,
+    });
+    // If the AI didn't land on vendor but we KNOW this address is a vendor, trust the known mapping
+    // for the category — but keep the AI's isSupplierQuote judgment about whether it's a quote.
+    if (knownVendor && triage.category !== 'vendor' && !['bill'].includes(triage.category)) {
+      triage.category = 'vendor';
     }
     try {
-      await e.update({ commCategory: triage.category, commIsQuoteRequest: triage.isQuoteRequest, commNeedsResponse: triage.needsResponse });
+      await e.update({
+        commCategory: triage.category,
+        commIsQuoteRequest: triage.isQuoteRequest,
+        commNeedsResponse: triage.needsResponse,
+        commIsSupplierQuote: !!triage.isSupplierQuote && triage.category === 'vendor',
+      });
       updated++;
     } catch { /* skip individual failures */ }
   }

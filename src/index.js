@@ -2557,6 +2557,10 @@ async function startServer() {
       await sequelize.query(`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS "isEstimator" BOOLEAN DEFAULT false NOT NULL`);
       await sequelize.query(`ALTER TABLE estimates ADD COLUMN IF NOT EXISTS "reminderDismissedAt" TIMESTAMP WITH TIME ZONE`);
       await sequelize.query(`ALTER TABLE estimates ADD COLUMN IF NOT EXISTS "reminderSnoozeUntil" TIMESTAMP WITH TIME ZONE`);
+      // Estimate progression board (Review Center): internal prep-workflow stage, separate from
+      // customer-facing status. Stored as VARCHAR (app-layer enum). Existing rows default to a
+      // sensible stage below.
+      await sequelize.query(`ALTER TABLE estimates ADD COLUMN IF NOT EXISTS "workflowStage" VARCHAR(32) DEFAULT 'created'`);
       await sequelize.query(`
         CREATE TABLE IF NOT EXISTS device_tokens (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

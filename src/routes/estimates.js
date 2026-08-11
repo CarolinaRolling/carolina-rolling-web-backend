@@ -1015,7 +1015,7 @@ router.put('/:id', async (req, res, next) => {
       'useCustomTax', 'customTaxReason', 'truckingDescription', 'truckingCost', 'status',
       'taxExempt', 'taxExemptCertNumber', 'taxExemptReason',
       'discountPercent', 'discountAmount', 'discountReason',
-      'minimumOverride', 'minimumOverrideReason', 'opTransports'];
+      'minimumOverride', 'minimumOverrideReason', 'opTransports', 'workflowStage'];
     
     fields.forEach(field => {
       if (req.body[field] !== undefined) {

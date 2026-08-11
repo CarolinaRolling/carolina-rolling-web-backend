@@ -1344,6 +1344,15 @@ const Estimate = sequelize.define('Estimate', {
     type: DataTypes.ENUM('draft', 'sent', 'accepted', 'declined', 'archived', 'converted'),
     defaultValue: 'draft'
   },
+  // Internal prep-workflow stage (the progression board in the Review Center). This is SEPARATE
+  // from the customer-facing `status` above — it tracks how far along the office is in preparing
+  // the estimate: created -> waiting_pricing -> pricing_received -> in_review -> ready_to_send.
+  // Some stages auto-advance (created on creation; pricing_received when a supplier quote links);
+  // any office user can manually move it forward or back.
+  workflowStage: {
+    type: DataTypes.ENUM('created', 'waiting_pricing', 'pricing_received', 'in_review', 'ready_to_send'),
+    defaultValue: 'created'
+  },
   // Trucking (estimate-level, not per part)
   truckingDescription: {
     type: DataTypes.STRING,

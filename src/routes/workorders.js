@@ -585,7 +585,15 @@ async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
           desc = pieces.join(' ') || 'N/A';
         }
         partObj._poDesc = desc;
-        partObj._poQty = partObj._stockLengthsNeeded || partObj.quantity || 1;
+        // PO quantity = STOCK to buy, not finished-piece count.
+        // For complete-ring parts, `quantity` is the number of finished RINGS, and the raw stock to
+        // purchase is the sticks/lengths count. Different roll forms store that under different keys:
+        // PlateRollForm -> _stockLengthsNeeded; all other roll forms -> _ringSticksNeeded. Prefer the
+        // stock/stick count; only fall back to `quantity` when no stock count exists (non-ring parts
+        // where quantity already IS the stock count).
+        const stockCount = partObj._stockLengthsNeeded || partObj._ringSticksNeeded;
+        partObj._poQty = (partObj._completeRings && stockCount) ? stockCount
+          : (stockCount || partObj.quantity || 1);
       });
 
       // Merge identical materials into single PO lines

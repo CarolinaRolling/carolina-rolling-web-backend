@@ -118,8 +118,32 @@ async function generatePickupReceiptBuffer(workOrder, entry, idx) {
     const totalDisplayItems = regularItems.length;
     regularItems.forEach((item, i) => {
       if (ry > 680) { doc.addPage(); ry = 50; }
+      // Cut-vs-coiled shipping quantity for complete-ring parts:
+      //   - CUT apart (_cutServiceType set): ship the RING count (what item.quantity already is).
+      //   - COILED (not cut): ship the LENGTH count, with a note "N pieces to make M complete units",
+      //     because the customer physically receives fewer pieces than the unit count.
+      const woPart = woPartsMap[item.partId] || woPartsMap[item.partNumber];
+      const pfd = woPart?.formData && typeof woPart.formData === 'object' ? woPart.formData : {};
+      const isCompleteRings = !!(pfd._completeRings || woPart?._completeRings);
+      const cutType = pfd._cutServiceType || woPart?._cutServiceType || '';
+      const ringCount = parseInt(pfd._ringsNeeded || woPart?._ringsNeeded) || parseInt(item.quantity) || 0;
+      const stickCount = parseInt(pfd._ringSticksNeeded || woPart?._ringSticksNeeded) || 0;
+      const isCoiled = isCompleteRings && (!cutType || cutType === '');
+
+      let shipQtyLabel = String(item.quantity || 0);
+      let coiledNote = '';
+      if (isCoiled && stickCount > 0) {
+        // Scale the length count to the proportion actually being shipped (partial pickups).
+        const shippedRings = parseInt(item.quantity) || 0;
+        const shippedLengths = ringCount > 0
+          ? Math.max(1, Math.round(stickCount * (shippedRings / ringCount)))
+          : stickCount;
+        shipQtyLabel = String(shippedLengths);
+        coiledNote = `${shippedLengths} piece${shippedLengths === 1 ? '' : 's'} to make ${shippedRings} complete unit${shippedRings === 1 ? '' : 's'} (not cut)`;
+      }
+
       doc.font('Helvetica-Bold').fontSize(10).fillColor('#333');
-      doc.text(String(item.quantity || 0), 50, ry, { width: 35 });
+      doc.text(shipQtyLabel, 50, ry, { width: 35 });
       doc.font('Helvetica').fontSize(11).fillColor('#333');
       doc.text(item.clientPartNumber || (workOrder.drNumber ? String(workOrder.drNumber) + '-' + String(pickupDisp[item.partId] || item.partNumber || '') : String(pickupDisp[item.partId] || item.partNumber || '')), 90, ry, { width: 105 });
       let desc = (item.description || '')
@@ -129,6 +153,13 @@ async function generatePickupReceiptBuffer(workOrder, entry, idx) {
         .trim();
       doc.text(desc, 200, ry, { width: 360 });
       ry += doc.heightOfString(desc, { width: 360 }) + 1;
+      // Coiled note under the description so the customer sees why piece count < unit count.
+      if (coiledNote) {
+        doc.font('Helvetica-Oblique').fontSize(9.5).fillColor('#b26a00');
+        doc.text(coiledNote, 200, ry, { width: 360 });
+        ry += doc.heightOfString(coiledNote, { width: 360 }) + 1;
+        doc.font('Helvetica').fillColor('#333');
+      }
       if (item.rollingDescription) {
         const cleanRoll1 = cleanPdfText(item.rollingDescription);
         doc.font('Helvetica').fontSize(10.5).fillColor('#555');

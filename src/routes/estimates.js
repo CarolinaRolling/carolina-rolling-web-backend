@@ -10,7 +10,7 @@ const { v4: uuidv4 } = require('uuid');
 const cloudinary = require('cloudinary').v2;
 const fileStorage = require('../utils/storage');
 const { Op } = require('sequelize');
-const { Estimate, EstimatePart, EstimatePartFile, EstimateFile, WorkOrder, WorkOrderPart, WorkOrderPartFile, InboundOrder, AppSettings, DRNumber, PONumber, DailyActivity, Client, Vendor, ShipmentCharge, sequelize } = require('../models');
+const { Estimate, EstimatePart, EstimatePartFile, EstimateFile, WorkOrder, WorkOrderPart, WorkOrderPartFile, InboundOrder, AppSettings, DRNumber, PONumber, DailyActivity, Client, Vendor, ShipmentCharge, ScannedEmail, sequelize } = require('../models');
 
 // Spec label matching the other roll forms: ID/ISR, OD/OSR, CLD/CLR.
 function coneSpecLabel(measurePoint, measureType) {
@@ -840,6 +840,27 @@ router.get('/', async (req, res, next) => {
     const rows = req.apiKey?.clientName && !req.apiKey?.deviceName
       ? estimates.rows.map(stripEstimatePricing)
       : estimates.rows;
+
+    // Attach a supplier-quote count per estimate (how many vendor emails are linked to it) so the
+    // progression board can show "Pricing Received · N quotes". One grouped query for all rows.
+    try {
+      const estIds = estimates.rows.map(e => e.id);
+      if (estIds.length) {
+        const counts = await ScannedEmail.findAll({
+          where: { estimateId: { [Op.in]: estIds }, commCategory: 'vendor' },
+          attributes: ['estimateId', [sequelize.fn('COUNT', sequelize.col('id')), 'cnt']],
+          group: ['estimateId'],
+          raw: true,
+        });
+        const countMap = Object.fromEntries(counts.map(c => [c.estimateId, parseInt(c.cnt) || 0]));
+        for (const e of rows) {
+          // dataValues for Sequelize instances; plain assign for stripped objects
+          const val = countMap[e.id] || 0;
+          if (e.dataValues) e.dataValues.quoteCount = val; else e.quoteCount = val;
+        }
+      }
+    } catch (e) { /* non-fatal: count is a nicety */ }
+
     res.json({
       data: rows,
       total: estimates.count,

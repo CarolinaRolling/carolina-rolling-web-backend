@@ -1358,7 +1358,14 @@ async function _runScanInternal() {
             
             const noteBlock = `\n\n***Supplier quote: ${vendorName} (${timestamp})***\n📧 ${gmailLink}\n${pricingSummary}\n***Supplier quote: end***`;
             const currentNotes = rfqEstimate.internalNotes || '';
-            await rfqEstimate.update({ internalNotes: currentNotes + noteBlock });
+            const estUpdate = { internalNotes: currentNotes + noteBlock };
+            // Auto-advance the progression board to 'pricing_received' — a supplier quote just came
+            // in and got linked. Never move BACKWARD (e.g. if it's already in_review/ready_to_send).
+            const STAGE_ORDER = ['created', 'waiting_pricing', 'pricing_received', 'in_review', 'ready_to_send'];
+            const curIdx = STAGE_ORDER.indexOf(rfqEstimate.workflowStage || 'created');
+            const targetIdx = STAGE_ORDER.indexOf('pricing_received');
+            if (curIdx < targetIdx) estUpdate.workflowStage = 'pricing_received';
+            await rfqEstimate.update(estUpdate);
             console.log(`[EmailScanner] Appended vendor quote to ${rfqEstimate.estimateNumber} internal notes`);
 
             await scannedEmail.update({

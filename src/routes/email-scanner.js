@@ -889,6 +889,17 @@ router.post('/vendor-rfq/:estimateId', async (req, res, next) => {
       rfqSentAt: new Date()
     });
 
+    // Auto-advance the progression board to 'waiting_pricing' when an RFQ goes out — but never move
+    // BACKWARD (e.g. if pricing already came in for another supplier and it's past this stage).
+    try {
+      const STAGE_ORDER = ['created', 'waiting_pricing', 'pricing_received', 'in_review', 'ready_to_send'];
+      const curIdx = STAGE_ORDER.indexOf(estimate.workflowStage || 'created');
+      const targetIdx = STAGE_ORDER.indexOf('waiting_pricing');
+      if (curIdx < targetIdx) {
+        await estimate.update({ workflowStage: 'waiting_pricing' });
+      }
+    } catch (e) { /* non-fatal: board advance is best-effort */ }
+
     // Save which contact the RFQ was sent to on the affected parts
     const contactName = req.body.contactName || vendor.contactName || '';
     for (const p of partsToQuote) {

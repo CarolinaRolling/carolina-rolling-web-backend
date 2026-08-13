@@ -1984,6 +1984,8 @@ async function startServer() {
       await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "assignedSequence" INTEGER`);
       await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "assignedAt" TIMESTAMP WITH TIME ZONE`);
       console.log('Job assignment columns ready');
+      // Internal notes on work orders (carried over from the estimate on conversion).
+      await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "internalNotes" TEXT`);
     } catch(e) { console.log('Job assignment columns error:', e.message); }
 
     // Operator tasks table (free-text reminders)

@@ -58,6 +58,14 @@ router.post('/', async (req, res, next) => {
           const titleParts = [finalEstimateNumber];
           if (clientName) titleParts.push(clientName);
           finalTitle = `Review pricing: ${titleParts.join(' — ')}`;
+          // Auto-advance the progression board to 'in_review' — the estimate has been sent for
+          // review. Never move backward (e.g. if it's somehow already ready_to_send).
+          const STAGE_ORDER = ['created', 'waiting_pricing', 'pricing_received', 'in_review', 'ready_to_send'];
+          const curIdx = STAGE_ORDER.indexOf(est.workflowStage || 'created');
+          const targetIdx = STAGE_ORDER.indexOf('in_review');
+          if (curIdx < targetIdx) {
+            await est.update({ workflowStage: 'in_review' });
+          }
         }
       } catch (e) { /* use frontend-provided title */ }
     }
@@ -152,6 +160,14 @@ router.post('/:id/accept', async (req, res, next) => {
         if (est) {
           estLabel = est.estimateNumber || estLabel;
           clientName = est.clientName || '';
+          // Auto-advance the progression board to 'ready_to_send' — the review passed, so the
+          // estimate is ready to go to the client. Never move backward.
+          const STAGE_ORDER = ['created', 'waiting_pricing', 'pricing_received', 'in_review', 'ready_to_send'];
+          const curIdx = STAGE_ORDER.indexOf(est.workflowStage || 'created');
+          const targetIdx = STAGE_ORDER.indexOf('ready_to_send');
+          if (curIdx < targetIdx) {
+            await est.update({ workflowStage: 'ready_to_send' });
+          }
         }
       } catch (e) { /* ignore lookup failure */ }
 

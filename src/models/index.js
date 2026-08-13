@@ -526,6 +526,12 @@ const WorkOrder = sequelize.define('WorkOrder', {
     type: DataTypes.TEXT,
     allowNull: true
   },
+  // Internal notes — carried over from the estimate on conversion, editable on the WO. Internal
+  // only (not customer-facing), like the estimate's internalNotes.
+  internalNotes: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  },
   receivedAt: {
     type: DataTypes.DATE,
     allowNull: true

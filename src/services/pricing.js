@@ -178,7 +178,8 @@ const ORDER_FIELD_MAP = {
   discountAmount: 'discountAmount',
   discountReason: 'discountReason',
   // Notes
-  notes: 'notes'
+  notes: 'notes',
+  internalNotes: 'internalNotes'
 };
 
 // Build WO data from estimate (order-level)

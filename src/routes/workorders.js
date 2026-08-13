@@ -2568,6 +2568,7 @@ router.put('/:id', async (req, res, next) => {
       requestedDueDate,
       promisedDate,
       status,
+      internalNotes,
       pickedUpBy,
       signatureData,
       // Pricing fields
@@ -2620,6 +2621,7 @@ router.put('/:id', async (req, res, next) => {
       contactEmail: getValue(contactEmail, workOrder.contactEmail),
       contactExtension: getValue(contactExtension, workOrder.contactExtension),
       notes: getValue(notes, workOrder.notes),
+      internalNotes: getValue(internalNotes, workOrder.internalNotes),
       priority: getValue(priority, workOrder.priority),
       receivedBy: getValue(receivedBy, workOrder.receivedBy),
       requestedDueDate: getDateValue(requestedDueDate, workOrder.requestedDueDate),

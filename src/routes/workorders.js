@@ -2402,6 +2402,59 @@ router.get('/blank-shipper', async (req, res, next) => {
 });
 
 // GET /:id/pickup/:index/receipt - Generate pickup receipt PDF on demand
+// GET /api/workorders/:id/frequent-drivers - suggest this client's most frequent pickup drivers,
+// derived from pickup history across the client's recent work orders. Groups near-duplicate name
+// spellings and returns the top few. No maintenance — self-updating from real pickups.
+router.get('/:id/frequent-drivers', async (req, res, next) => {
+  try {
+    const wo = await WorkOrder.findByPk(req.params.id, { attributes: ['id', 'clientId', 'clientName'] });
+    if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
+    if (!wo.clientName && !wo.clientId) return res.json({ data: [] });
+
+    // Pull recent work orders for the same client that have pickup history.
+    const clauses = [];
+    if (wo.clientId) clauses.push({ clientId: wo.clientId });
+    if (wo.clientName) clauses.push({ clientName: wo.clientName });
+    const orders = await WorkOrder.findAll({
+      where: { [Op.or]: clauses, pickupHistory: { [Op.ne]: null } },
+      attributes: ['pickupHistory'],
+      order: [['pickedUpAt', 'DESC']],
+      limit: 300,
+    });
+
+    // Normalize a name for grouping: lowercase, strip punctuation, collapse spaces. Names that
+    // normalize the same (e.g. "Mike R." vs "mike r") group together; we display the most common
+    // original spelling.
+    const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
+    const groups = {}; // normKey -> { count, variants: {original: count}, lastSeen }
+    for (const o of orders) {
+      const hist = Array.isArray(o.pickupHistory) ? o.pickupHistory : [];
+      for (const entry of hist) {
+        const raw = (entry.pickedUpBy || '').trim();
+        const key = norm(raw);
+        if (!key || key === 'unknown') continue;
+        if (!groups[key]) groups[key] = { count: 0, variants: {}, lastSeen: entry.date || null };
+        groups[key].count += 1;
+        groups[key].variants[raw] = (groups[key].variants[raw] || 0) + 1;
+        if (entry.date && (!groups[key].lastSeen || entry.date > groups[key].lastSeen)) groups[key].lastSeen = entry.date;
+      }
+    }
+
+    // For each group, pick the most-used original spelling as the display name.
+    const drivers = Object.values(groups).map(g => {
+      const bestVariant = Object.entries(g.variants).sort((a, b) => b[1] - a[1])[0][0];
+      return { name: bestVariant, count: g.count, lastSeen: g.lastSeen };
+    })
+    // Only real regulars: seen at least twice. Sort by frequency, then most recent.
+    .filter(d => d.count >= 2)
+    .sort((a, b) => b.count - a.count || String(b.lastSeen || '').localeCompare(String(a.lastSeen || '')))
+    .slice(0, 4);
+
+    res.json({ data: drivers });
+  } catch (error) { next(error); }
+});
+
+
 router.get('/:id/pickup/:index/receipt', async (req, res, next) => {
   try {
     const PDFDocument = require('pdfkit');

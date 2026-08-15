@@ -3,6 +3,8 @@
 
 const express = require('express');
 const router = express.Router();
+const multer = require('multer');
+const poUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
 // Service will be injected
 let inboundService = null;
@@ -119,6 +121,31 @@ router.delete('/:id', async (req, res, next) => {
     }
     next(error);
   }
+});
+
+// POST /api/inbound/scan-po - Stage 1: extract structured data from an uploaded customer PO
+// (PDF or photo) using a vision model, and return it for the employee to review. Does NOT create
+// anything — extraction only. (Matching to estimates + discrepancy flagging come in later stages.)
+router.post('/scan-po', poUpload.single('po'), async (req, res, next) => {
+  try {
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ error: { message: 'No file uploaded' } });
+    }
+    const { extractPurchaseOrder } = require('../services/poScanner');
+    const result = await extractPurchaseOrder(req.file.buffer, req.file.mimetype);
+    if (result.error) {
+      const msgs = {
+        no_api_key: 'AI extraction is not configured (missing API key).',
+        empty_file: 'The uploaded file was empty.',
+        unsupported_type: 'Unsupported file type — upload a PDF or an image (JPG/PNG).',
+        empty_response: 'The AI could not read anything from this file — try a clearer scan/photo.',
+        extract_failed: 'Could not read the purchase order — try a clearer scan/photo.',
+        api_error: 'AI extraction failed — please try again.',
+      };
+      return res.status(422).json({ error: { message: msgs[result.error] || 'Could not read the purchase order.', code: result.error } });
+    }
+    res.json({ data: result, fileName: req.file.originalname, mimeType: req.file.mimetype });
+  } catch (error) { next(error); }
 });
 
 module.exports = router;

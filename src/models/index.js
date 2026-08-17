@@ -1359,6 +1359,13 @@ const Estimate = sequelize.define('Estimate', {
     type: DataTypes.ENUM('created', 'waiting_pricing', 'pricing_received', 'in_review', 'ready_to_send'),
     defaultValue: 'created'
   },
+  // Set true when the email scanner detects the estimator quoted pricing to the client by email but
+  // the estimate's price fields haven't been filled in yet. Surfaces a "pricing quoted — needs
+  // entry" flag on the progression board. Cleared once the estimator enters/confirms pricing.
+  pricingQuotedNeedsEntry: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false
+  },
   // Trucking (estimate-level, not per part)
   truckingDescription: {
     type: DataTypes.STRING,

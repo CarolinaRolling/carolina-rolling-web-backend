@@ -2563,6 +2563,8 @@ async function startServer() {
       // customer-facing status. Stored as VARCHAR (app-layer enum). Existing rows default to a
       // sensible stage below.
       await sequelize.query(`ALTER TABLE estimates ADD COLUMN IF NOT EXISTS "workflowStage" VARCHAR(32) DEFAULT 'created'`);
+      // Flag set by the scanner when the estimator emailed the client pricing but hasn't entered it.
+      await sequelize.query(`ALTER TABLE estimates ADD COLUMN IF NOT EXISTS "pricingQuotedNeedsEntry" BOOLEAN DEFAULT false`);
       // Supplier Communications tab: only true material/service QUOTES (not invoices/confirmations)
       // show in the tab. AI triage sets this flag.
       await sequelize.query(`ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "commIsSupplierQuote" BOOLEAN DEFAULT false`);

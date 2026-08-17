@@ -1036,7 +1036,7 @@ router.put('/:id', async (req, res, next) => {
       'useCustomTax', 'customTaxReason', 'truckingDescription', 'truckingCost', 'status',
       'taxExempt', 'taxExemptCertNumber', 'taxExemptReason',
       'discountPercent', 'discountAmount', 'discountReason',
-      'minimumOverride', 'minimumOverrideReason', 'opTransports', 'workflowStage'];
+      'minimumOverride', 'minimumOverrideReason', 'opTransports', 'workflowStage', 'pricingQuotedNeedsEntry'];
     
     fields.forEach(field => {
       if (req.body[field] !== undefined) {
@@ -1282,6 +1282,11 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     const estimate = await Estimate.findByPk(req.params.id);
     const allParts = await EstimatePart.findAll({ where: { estimateId: estimate.id } });
     const estimateTotals = await calculateEstimateTotalsWithMinimums(allParts, estimate);
+    // Once real pricing is entered (a non-zero total), clear the "pricing quoted — needs entry"
+    // flag the scanner set. The estimator has now entered/confirmed the pricing.
+    if (estimate.pricingQuotedNeedsEntry && parseFloat(estimateTotals.grandTotal || estimate.grandTotal || 0) > 0) {
+      estimateTotals.pricingQuotedNeedsEntry = false;
+    }
     await estimate.update(estimateTotals);
 
     res.json({

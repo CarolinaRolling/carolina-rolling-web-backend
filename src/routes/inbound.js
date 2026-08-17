@@ -131,7 +131,7 @@ router.post('/scan-po', poUpload.single('po'), async (req, res, next) => {
     if (!req.file || !req.file.buffer) {
       return res.status(400).json({ error: { message: 'No file uploaded' } });
     }
-    const { extractPurchaseOrder } = require('../services/poScanner');
+    const { extractPurchaseOrder, matchEstimates } = require('../services/poScanner');
     const result = await extractPurchaseOrder(req.file.buffer, req.file.mimetype);
     if (result.error) {
       const msgs = {
@@ -144,7 +144,25 @@ router.post('/scan-po', poUpload.single('po'), async (req, res, next) => {
       };
       return res.status(422).json({ error: { message: msgs[result.error] || 'Could not read the purchase order.', code: result.error } });
     }
-    res.json({ data: result, fileName: req.file.originalname, mimeType: req.file.mimetype });
+
+    // Stage 2: match against open estimates (draft/sent — the ones awaiting an order).
+    let matches = [];
+    try {
+      const { Estimate, EstimatePart } = require('../models');
+      const { Op } = require('sequelize');
+      const estimates = await Estimate.findAll({
+        where: { status: { [Op.in]: ['draft', 'sent', 'accepted'] } },
+        attributes: ['id', 'estimateNumber', 'clientName', 'clientPurchaseOrderNumber', 'status'],
+        include: [{ model: EstimatePart, as: 'parts', attributes: ['materialDescription', 'quantity', 'formData'] }],
+        order: [['createdAt', 'DESC']],
+        limit: 400,
+      });
+      matches = matchEstimates(result, estimates.map(e => e.toJSON()));
+    } catch (e) {
+      console.warn('[scan-po] estimate matching failed:', e.message);
+    }
+
+    res.json({ data: result, matches, fileName: req.file.originalname, mimeType: req.file.mimetype });
   } catch (error) { next(error); }
 });
 

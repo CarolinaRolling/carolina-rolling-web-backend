@@ -70,4 +70,114 @@ async function extractPurchaseOrder(buffer, mimeType) {
   }
 }
 
-module.exports = { extractPurchaseOrder };
+module.exports = { extractPurchaseOrder, matchEstimates };
+
+// ---------------------------------------------------------------------------
+// Stage 2: match extracted PO data against open estimates and score candidates.
+// ---------------------------------------------------------------------------
+
+// Normalize text for comparison: lowercase, drop punctuation, collapse whitespace.
+function normText(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9. ]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// Pull comparable numeric tokens (dimensions, diameters) out of a text string. e.g. "52.75 x 228.55"
+// and "73.75 OD" -> ["52.75","228.55","73.75"]. Used to compare PO line items to estimate parts
+// without depending on exact wording.
+function numTokens(s) {
+  const out = new Set();
+  const matches = String(s || '').match(/\d+(?:\.\d+)?(?:\s*[-/]\s*\d+(?:\.\d+)?)?/g) || [];
+  for (const m of matches) {
+    const cleaned = m.replace(/\s+/g, '');
+    // skip trivially small integers (like a lone "1" or "2") that add noise
+    const val = parseFloat(cleaned);
+    if (!isNaN(val) && val >= 3) out.add(cleaned);
+  }
+  return out;
+}
+
+// Simple fuzzy similarity for client names (0..1): token overlap + substring bonus. Handles the
+// "Howell" vs "Nowell" OCR case reasonably (shared "owell steel" tokens) without external deps.
+function nameSimilarity(a, b) {
+  const na = normText(a), nb = normText(b);
+  if (!na || !nb) return 0;
+  if (na === nb) return 1;
+  if (na.includes(nb) || nb.includes(na)) return 0.9;
+  const ta = new Set(na.split(' ')), tb = new Set(nb.split(' '));
+  let shared = 0;
+  for (const t of ta) if (tb.has(t)) shared++;
+  const tokenScore = shared / Math.max(ta.size, tb.size);
+  // Character-level closeness on the whole string (catches single-letter OCR errors).
+  const maxLen = Math.max(na.length, nb.length);
+  let same = 0; for (let i = 0; i < Math.min(na.length, nb.length); i++) if (na[i] === nb[i]) same++;
+  const charScore = same / maxLen;
+  return Math.max(tokenScore, charScore * 0.85);
+}
+
+/**
+ * Score open estimates against extracted PO data.
+ * @param {object} po  extracted PO { clientName, poNumber, lineItems[] }
+ * @param {Array} estimates  each { id, estimateNumber, clientName, clientPurchaseOrderNumber, status, parts:[{materialDescription, quantity, formData}] }
+ * @returns {Array} ranked candidates [{ estimateId, estimateNumber, clientName, status, score, reasons[] }]
+ */
+function matchEstimates(po, estimates) {
+  const poItems = Array.isArray(po.lineItems) ? po.lineItems : [];
+  // Precompute the PO's numeric fingerprint (all dims/diameters across all line items).
+  const poNums = new Set();
+  for (const li of poItems) {
+    for (const t of numTokens([li.description, li.dimensions, li.diameter].filter(Boolean).join(' '))) poNums.add(t);
+  }
+  const poPo = normText(po.poNumber);
+
+  const scored = estimates.map(est => {
+    const reasons = [];
+    let score = 0;
+
+    // 1) Client name similarity (fuzzy — tolerates the Howell/Nowell OCR slip).
+    const nameSim = nameSimilarity(po.clientName, est.clientName);
+    if (nameSim >= 0.6) {
+      score += nameSim * 40;
+      reasons.push(nameSim >= 0.9 ? `Client matches (${est.clientName})` : `Client likely matches (${est.clientName})`);
+    }
+
+    // 2) Exact client PO number match, when the estimate happens to have one stored (rare early on,
+    //    strong signal when present).
+    if (poPo && normText(est.clientPurchaseOrderNumber) && normText(est.clientPurchaseOrderNumber) === poPo) {
+      score += 40;
+      reasons.push(`PO number matches (${po.poNumber})`);
+    }
+
+    // 3) Part-content overlap: how many of the PO's numeric tokens (dims/diameters) appear in this
+    //    estimate's parts. This is the workhorse when there's no PO/SO number to key on.
+    const estNums = new Set();
+    for (const p of (est.parts || [])) {
+      for (const t of numTokens([p.materialDescription, JSON.stringify(p.formData || {})].join(' '))) estNums.add(t);
+    }
+    let overlap = 0;
+    for (const t of poNums) if (estNums.has(t)) overlap++;
+    if (poNums.size > 0 && overlap > 0) {
+      const frac = overlap / poNums.size;
+      score += frac * 40;
+      reasons.push(`${overlap} of ${poNums.size} dimensions match`);
+    }
+
+    // 4) Part-count agreement (soft signal).
+    if (poItems.length && (est.parts || []).length) {
+      if (poItems.length === est.parts.length) { score += 5; reasons.push(`Same number of items (${poItems.length})`); }
+    }
+
+    return {
+      estimateId: est.id,
+      estimateNumber: est.estimateNumber,
+      clientName: est.clientName,
+      status: est.status,
+      score: Math.round(score),
+      reasons,
+    };
+  })
+  .filter(c => c.score >= 20)         // drop weak noise
+  .sort((a, b) => b.score - a.score)
+  .slice(0, 5);
+
+  return scored;
+}

@@ -143,6 +143,41 @@ function extractName(fromStr) {
   return match ? match[1].trim() : fromStr.split('@')[0];
 }
 
+// Detect and extract pricing the ESTIMATOR quoted to a client in an outbound email. Returns the
+// quoted-price text verbatim (preserving conditional notes) or null if the email doesn't appear to
+// contain pricing. NOTES-ONLY by design: we never parse this into price fields — the estimator maps
+// prices to parts and confirms. The AI's job here is just "does this email quote prices, and if so
+// pull the relevant lines" — a much safer task than field-mapping.
+async function extractOutboundPricing(bodyText) {
+  if (!process.env.ANTHROPIC_API_KEY || !bodyText || !bodyText.trim()) return null;
+  const https = require('https');
+  const sys = `You are reading an email a steel-rolling shop's estimator SENT to a client. Determine if the estimator QUOTED PRICING (prices for parts/labor) in this email.
+Reply with ONLY JSON: {"hasPricing":boolean,"pricingText":string}
+- hasPricing = true only if the email contains actual prices the estimator is quoting (e.g. "$5 ea", "$30 per bend", "1200 total"). Order confirmations, questions, or scheduling are NOT pricing.
+- pricingText = the pricing portion of the email, copied VERBATIM (keep every price line and any conditional notes like "if the client allows X, increase labor to $Y"). Do NOT summarize, reformat, or map prices to parts. Preserve the estimator's exact wording and line breaks. Empty string if hasPricing is false.`;
+  const reqBody = JSON.stringify({
+    model: getParsingModel(), max_tokens: 800, system: sys,
+    messages: [{ role: 'user', content: bodyText.substring(0, 4000) }],
+  });
+  try {
+    const raw = await new Promise((resolve) => {
+      const req = https.request({
+        hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(reqBody) },
+      }, (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => { try { resolve(JSON.parse(d).content?.[0]?.text || ''); } catch { resolve(''); } }); });
+      req.on('error', () => resolve(''));
+      req.setTimeout(30000, () => { req.destroy(); resolve(''); });
+      req.write(reqBody); req.end();
+    });
+    if (!raw.trim()) return null;
+    const parsed = JSON.parse(raw.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim());
+    if (parsed.hasPricing && parsed.pricingText && parsed.pricingText.trim()) return parsed.pricingText.trim();
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
 // Use Claude API to parse email content
 async function parseEmailWithAI(emailBody, subject, clientName, parsingNotes, generalNotes) {
   try {
@@ -1176,6 +1211,12 @@ async function _runScanInternal() {
       }
       // Also search for any replies to our RFQ emails (catches vendor responses)
       queryParts.push('subject:RFQ-');
+      // Also catch OUR sent emails TO monitored clients — this is how we detect pricing the
+      // estimator quoted by email (from:me to:client). Only clients, not vendors.
+      const clientAddresses = Object.keys(emailToClient);
+      if (clientAddresses.length > 0) {
+        queryParts.push(`(from:${account.email} (${clientAddresses.map(e => `to:${e}`).join(' OR ')}))`);
+      }
       
       // Use a wider window — go back 2 hours before lastScannedAt to catch edge cases
       const afterDate = account.lastScannedAt 
@@ -1218,8 +1259,42 @@ async function _runScanInternal() {
           const fromEmail = extractEmail(from);
           const fromName = extractName(from);
 
-          // Skip our own sent emails
+          // Skip our own sent emails — BUT first check if this outbound email is us quoting pricing
+          // to a client in a thread that already has a draft estimate. If so, capture the quoted
+          // prices into the estimate's internal notes and flag it "pricing quoted — needs entry".
+          // (Notes-only: we never auto-fill price fields; the estimator maps + confirms.)
           if (fromEmail === account.email.toLowerCase()) {
+            try {
+              const outThreadId = fullMsg.data.threadId;
+              if (outThreadId) {
+                // Find a client estimate linked to this thread (via its scanned email).
+                const threadEmail = await ScannedEmail.findOne({
+                  where: { gmailThreadId: outThreadId, estimateId: { [Op.ne]: null } },
+                  order: [['createdAt', 'DESC']],
+                });
+                if (threadEmail && threadEmail.estimateId) {
+                  const est = await Estimate.findByPk(threadEmail.estimateId);
+                  // Only for draft estimates that don't yet have pricing entered, and only once
+                  // (don't re-append if we already flagged this estimate from a prior send).
+                  if (est && est.status === 'draft' && !est.pricingQuotedNeedsEntry) {
+                    const outBody = extractTextFromParts(fullMsg.data.payload);
+                    const quoted = await extractOutboundPricing(outBody);
+                    if (quoted) {
+                      const ts = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' });
+                      const gmLink = `https://mail.google.com/mail/?authuser=${encodeURIComponent(account.email)}#sent/${msg.id}`;
+                      const noteBlock = `\n\n***Pricing you quoted the client (${ts})***\n📧 ${gmLink}\n${quoted}\n(Verify and enter these into the estimate, then generate the PDF.)\n***Quoted pricing: end***`;
+                      await est.update({
+                        internalNotes: (est.internalNotes || '') + noteBlock,
+                        pricingQuotedNeedsEntry: true,
+                      });
+                      console.log(`[EmailScanner] Captured outbound pricing into ${est.estimateNumber} internal notes + flagged needs-entry`);
+                    }
+                  }
+                }
+              }
+            } catch (e) {
+              console.warn('[EmailScanner] outbound pricing capture failed:', e.message);
+            }
             console.log(`[EmailScanner] Skipping own sent email: ${subject}`);
             continue;
           }

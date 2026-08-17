@@ -176,6 +176,20 @@ router.post('/scan-now', async (req, res, next) => {
   }
 });
 
+// POST /api/email-scanner/scan-draft-pricing - run ONLY the draft-pricing pass (reads draft
+// estimates' threads for pricing the estimator sent). Independent of the normal scan's flags.
+router.post('/scan-draft-pricing', async (req, res, next) => {
+  try {
+    const { scanDraftsForPricing } = require('../services/emailScanner');
+    const result = await scanDraftsForPricing();
+    const flagged = result?.flagged || 0;
+    res.json({ data: result, message: flagged > 0 ? `Found pricing on ${flagged} estimate${flagged === 1 ? '' : 's'}` : 'No new quoted pricing found on draft estimates' });
+  } catch (error) {
+    console.error('[EmailScanner] Draft-pricing scan error:', error.message);
+    next(error);
+  }
+});
+
 // GET /api/email-scanner/history - Recent scanned emails
 router.get('/history', async (req, res, next) => {
   try {

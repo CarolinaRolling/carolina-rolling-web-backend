@@ -1157,6 +1157,98 @@ async function createPendingOrderFromParsed(parsed, clientInfo, scannedEmail) {
 // Scan lock to prevent concurrent scans causing deadlocks
 let scanRunning = false;
 
+// ---------------------------------------------------------------------------
+// Dedicated pass: look at DRAFT estimates' email threads for pricing the estimator sent, and
+// capture it into internal notes (+ flag the board). This is SEPARATE from the normal scan — it
+// ignores the -label:cr-processed / date-window / dedup logic, because the estimator's pricing
+// reply usually lives in a thread the normal scan already marked processed (when it first built the
+// estimate from the client's request). Instead of watching the mail firehose, we go directly to
+// each draft-in-need and read its own conversation.
+// ---------------------------------------------------------------------------
+async function scanDraftsForPricing() {
+  if (!process.env.ANTHROPIC_API_KEY) return { error: 'ANTHROPIC_API_KEY not configured' };
+  const accounts = await GmailAccount.findAll({ where: { isActive: true } });
+  if (!accounts.length) return { skipped: true, reason: 'No Gmail accounts connected' };
+
+  // Draft estimates that came from an email (have a scannedEmailId) and haven't been flagged yet.
+  const drafts = await Estimate.findAll({
+    where: { status: 'draft', pricingQuotedNeedsEntry: false, scannedEmailId: { [Op.ne]: null } },
+    order: [['createdAt', 'DESC']],
+    limit: 100,
+  });
+  if (!drafts.length) return { checked: 0, flagged: 0, reason: 'No draft estimates awaiting pricing' };
+
+  const result = { checked: 0, flagged: 0, errors: 0 };
+
+  for (const est of drafts) {
+    try {
+      // Resolve this estimate's Gmail thread via its originating scanned email.
+      const se = await ScannedEmail.findByPk(est.scannedEmailId);
+      const threadId = se?.gmailThreadId;
+      if (!threadId) continue;
+
+      // Which account owns this thread? Prefer the scanned email's account; else try each.
+      const acctForThread = accounts.find(a => a.id === se.gmailAccountId) || accounts[0];
+      const gmail = await getGmailClient(acctForThread);
+
+      result.checked++;
+
+      // Pull the whole conversation.
+      let thread;
+      try {
+        thread = await gmail.users.threads.get({ userId: 'me', id: threadId, format: 'full' });
+      } catch (e) {
+        // Thread might belong to a different account — try the others.
+        let found = false;
+        for (const a of accounts) {
+          if (a.id === acctForThread.id) continue;
+          try { const g = await getGmailClient(a); thread = await g.users.threads.get({ userId: 'me', id: threadId, format: 'full' }); found = true; break; } catch {}
+        }
+        if (!found) continue;
+      }
+
+      const messages = thread?.data?.messages || [];
+      // Find messages the ESTIMATOR sent (from our account) — those may contain the quoted pricing.
+      // Read newest-first so we capture the latest pricing if there were several.
+      const ourAddrs = accounts.map(a => a.email.toLowerCase());
+      const ourMessages = messages.filter(m => {
+        const fromHdr = (m.payload?.headers || []).find(h => h.name.toLowerCase() === 'from');
+        const fromEmail = extractEmail(fromHdr?.value || '');
+        return ourAddrs.includes(fromEmail);
+      }).reverse();
+
+      let captured = false;
+      for (const m of ourMessages) {
+        const body = extractTextFromParts(m.payload);
+        if (!body || !body.trim()) continue;
+        const quoted = await extractOutboundPricing(body);
+        if (quoted) {
+          const ts = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' });
+          const gmLink = `https://mail.google.com/mail/?authuser=${encodeURIComponent(acctForThread.email)}#sent/${m.id}`;
+          const noteBlock = `\n\n***Pricing you quoted the client (${ts})***\n📧 ${gmLink}\n${quoted}\n(Verify and enter these into the estimate, then generate the PDF.)\n***Quoted pricing: end***`;
+          await est.update({
+            internalNotes: (est.internalNotes || '') + noteBlock,
+            pricingQuotedNeedsEntry: true,
+          });
+          console.log(`[DraftPricingScan] Captured pricing into ${est.estimateNumber} from thread ${threadId}`);
+          result.flagged++;
+          captured = true;
+          break;
+        }
+      }
+      if (!captured) {
+        // no pricing found in this thread yet — leave unflagged so a later send is caught
+      }
+    } catch (e) {
+      result.errors++;
+      console.warn(`[DraftPricingScan] error on estimate ${est.estimateNumber}:`, e.message);
+    }
+  }
+
+  console.log(`[DraftPricingScan] checked ${result.checked} drafts, flagged ${result.flagged}`);
+  return result;
+}
+
 // Main scan function — scans all connected accounts
 async function runScan() {
   if (scanRunning) {
@@ -1166,7 +1258,17 @@ async function runScan() {
   scanRunning = true;
 
   try {
-    return await _runScanInternal();
+    const scanResult = await _runScanInternal();
+    // After the normal scan, run the dedicated draft-pricing pass. It reads draft estimates' own
+    // threads for pricing the estimator sent — catching quotes the normal scan skips because the
+    // thread was already marked processed.
+    try {
+      const pricingResult = await scanDraftsForPricing();
+      if (pricingResult && pricingResult.flagged) scanResult.pricingFlagged = pricingResult.flagged;
+    } catch (e) {
+      console.warn('[EmailScanner] draft-pricing pass failed:', e.message);
+    }
+    return scanResult;
   } catch (fatalErr) {
     console.error('[EmailScanner] Fatal scan error:', fatalErr.message);
     return { error: fatalErr.message, processed: 0, estimates: 0, pendingOrders: 0, errors: 1 };
@@ -1211,12 +1313,6 @@ async function _runScanInternal() {
       }
       // Also search for any replies to our RFQ emails (catches vendor responses)
       queryParts.push('subject:RFQ-');
-      // Also catch OUR sent emails TO monitored clients — this is how we detect pricing the
-      // estimator quoted by email (from:me to:client). Only clients, not vendors.
-      const clientAddresses = Object.keys(emailToClient);
-      if (clientAddresses.length > 0) {
-        queryParts.push(`(from:${account.email} (${clientAddresses.map(e => `to:${e}`).join(' OR ')}))`);
-      }
       
       // Use a wider window — go back 2 hours before lastScannedAt to catch edge cases
       const afterDate = account.lastScannedAt 
@@ -1259,42 +1355,10 @@ async function _runScanInternal() {
           const fromEmail = extractEmail(from);
           const fromName = extractName(from);
 
-          // Skip our own sent emails — BUT first check if this outbound email is us quoting pricing
-          // to a client in a thread that already has a draft estimate. If so, capture the quoted
-          // prices into the estimate's internal notes and flag it "pricing quoted — needs entry".
-          // (Notes-only: we never auto-fill price fields; the estimator maps + confirms.)
+          // Skip our own sent emails. (Pricing the estimator sent to clients is captured separately
+          // by scanDraftsForPricing(), which reads each draft estimate's thread directly — that
+          // works even when the thread was already marked processed by an earlier scan.)
           if (fromEmail === account.email.toLowerCase()) {
-            try {
-              const outThreadId = fullMsg.data.threadId;
-              if (outThreadId) {
-                // Find a client estimate linked to this thread (via its scanned email).
-                const threadEmail = await ScannedEmail.findOne({
-                  where: { gmailThreadId: outThreadId, estimateId: { [Op.ne]: null } },
-                  order: [['createdAt', 'DESC']],
-                });
-                if (threadEmail && threadEmail.estimateId) {
-                  const est = await Estimate.findByPk(threadEmail.estimateId);
-                  // Only for draft estimates that don't yet have pricing entered, and only once
-                  // (don't re-append if we already flagged this estimate from a prior send).
-                  if (est && est.status === 'draft' && !est.pricingQuotedNeedsEntry) {
-                    const outBody = extractTextFromParts(fullMsg.data.payload);
-                    const quoted = await extractOutboundPricing(outBody);
-                    if (quoted) {
-                      const ts = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' });
-                      const gmLink = `https://mail.google.com/mail/?authuser=${encodeURIComponent(account.email)}#sent/${msg.id}`;
-                      const noteBlock = `\n\n***Pricing you quoted the client (${ts})***\n📧 ${gmLink}\n${quoted}\n(Verify and enter these into the estimate, then generate the PDF.)\n***Quoted pricing: end***`;
-                      await est.update({
-                        internalNotes: (est.internalNotes || '') + noteBlock,
-                        pricingQuotedNeedsEntry: true,
-                      });
-                      console.log(`[EmailScanner] Captured outbound pricing into ${est.estimateNumber} internal notes + flagged needs-entry`);
-                    }
-                  }
-                }
-              }
-            } catch (e) {
-              console.warn('[EmailScanner] outbound pricing capture failed:', e.message);
-            }
             console.log(`[EmailScanner] Skipping own sent email: ${subject}`);
             continue;
           }
@@ -2255,6 +2319,7 @@ module.exports = {
   getOAuth2Client,
   getGmailClient,
   runScan,
+  scanDraftsForPricing,
   isBusinessHours,
   parseEmailWithAI,
   parseDocumentWithAI,

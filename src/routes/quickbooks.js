@@ -1140,6 +1140,33 @@ router.get('/invoice-numbers', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// POST /api/quickbooks/invoice-numbers/backfill - one-time recovery: find work orders that have an
+// invoiceNumber but no matching InvoiceNumber tracking row, and create the missing rows so they show
+// on the tracking page. Safe to run repeatedly (skips numbers already tracked).
+router.post('/invoice-numbers/backfill', async (req, res, next) => {
+  try {
+    const { Op } = require('sequelize');
+    const wos = await WorkOrder.findAll({
+      where: { invoiceNumber: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] } },
+      attributes: ['id', 'invoiceNumber', 'clientId', 'clientName', 'drNumber'],
+    });
+    let created = 0, skipped = 0, invalid = 0;
+    for (const wo of wos) {
+      const numInt = parseInt(wo.invoiceNumber);
+      if (isNaN(numInt) || numInt <= 0) { invalid++; continue; }
+      const existing = await InvoiceNumber.findOne({ where: { invoiceNumber: numInt } });
+      if (existing) {
+        if (!existing.workOrderId) { await existing.update({ workOrderId: wo.id, clientId: wo.clientId || existing.clientId, clientName: wo.clientName || existing.clientName }); }
+        skipped++;
+        continue;
+      }
+      await InvoiceNumber.create({ invoiceNumber: numInt, workOrderId: wo.id, clientId: wo.clientId || null, clientName: wo.clientName || null });
+      created++;
+    }
+    res.json({ data: { created, skipped, invalid, scanned: wos.length }, message: `Backfill complete: ${created} added, ${skipped} already tracked${invalid ? `, ${invalid} had non-numeric invoice numbers` : ''}.` });
+  } catch (error) { next(error); }
+});
+
 // POST /api/quickbooks/invoice-numbers/manual - Manually create an invoice number entry
 router.post('/invoice-numbers/manual', async (req, res, next) => {
   try {
@@ -1713,11 +1740,19 @@ router.put('/invoice-number/:id', async (req, res, next) => {
     const oldNum = wo.invoiceNumber;
     await wo.update({ invoiceNumber: newNum });
 
-    // Update InvoiceNumber record if exists
-    await InvoiceNumber.update(
-      { invoiceNumber: parseInt(newNum) || newNum },
+    // Update the InvoiceNumber tracking record if it exists; create it if it doesn't, so the number
+    // always appears on the tracking page regardless of how it was first recorded.
+    const numInt = parseInt(newNum) || 0;
+    const [affected] = await InvoiceNumber.update(
+      { invoiceNumber: numInt || newNum },
       { where: { workOrderId: wo.id } }
     );
+    if (!affected && numInt > 0) {
+      const dup = await InvoiceNumber.findOne({ where: { invoiceNumber: numInt } });
+      if (!dup) {
+        await InvoiceNumber.create({ invoiceNumber: numInt, workOrderId: wo.id, clientId: wo.clientId || null, clientName: wo.clientName || null });
+      }
+    }
 
     res.json({ data: wo.toJSON(), message: `Invoice number changed from #${oldNum || '?'} to #${newNum}` });
   } catch (error) { next(error); }

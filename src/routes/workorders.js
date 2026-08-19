@@ -1872,6 +1872,29 @@ router.post('/:id/invoice', upload.single('invoicePdf'), async (req, res, next) 
     }
 
     await workOrder.update(updates);
+
+    // Also record this invoice number in the InvoiceNumber tracking table so it appears on the
+    // Invoice Numbers tracking page. (Previously only the auto-assign path did this, so invoices
+    // recorded here with a typed number never showed up on the tracker.) Skip if that number is
+    // already tracked, to avoid duplicates.
+    try {
+      const { InvoiceNumber } = require('../models');
+      const numInt = parseInt(invoiceNumber);
+      if (!isNaN(numInt) && numInt > 0) {
+        const existing = await InvoiceNumber.findOne({ where: { invoiceNumber: numInt } });
+        if (!existing) {
+          await InvoiceNumber.create({
+            invoiceNumber: numInt,
+            workOrderId: workOrder.id,
+            clientId: workOrder.clientId || null,
+            clientName: workOrder.clientName || null,
+          });
+        } else if (!existing.workOrderId && workOrder.id) {
+          // Backfill the link if the number was pre-created (e.g. imported) but unlinked.
+          await existing.update({ workOrderId: workOrder.id, clientId: workOrder.clientId || existing.clientId, clientName: workOrder.clientName || existing.clientName });
+        }
+      }
+    } catch (e) { console.warn('[invoice] could not record InvoiceNumber tracking row:', e.message); }
     
     const updated = await WorkOrder.findByPk(req.params.id, {
       include: [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'partTotal', 'quantity'] }]

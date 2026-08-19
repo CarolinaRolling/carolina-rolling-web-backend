@@ -1150,21 +1150,37 @@ router.post('/invoice-numbers/backfill', async (req, res, next) => {
       where: { invoiceNumber: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] } },
       attributes: ['id', 'invoiceNumber', 'clientId', 'clientName', 'drNumber'],
     });
-    let created = 0, skipped = 0, invalid = 0;
+    let created = 0, skipped = 0, invalid = 0, errored = 0;
+    const errors = [];
     for (const wo of wos) {
-      const numInt = parseInt(wo.invoiceNumber);
-      if (isNaN(numInt) || numInt <= 0) { invalid++; continue; }
-      const existing = await InvoiceNumber.findOne({ where: { invoiceNumber: numInt } });
-      if (existing) {
-        if (!existing.workOrderId) { await existing.update({ workOrderId: wo.id, clientId: wo.clientId || existing.clientId, clientName: wo.clientName || existing.clientName }); }
-        skipped++;
-        continue;
+      try {
+        const numInt = parseInt(wo.invoiceNumber, 10);
+        if (isNaN(numInt) || numInt <= 0) { invalid++; continue; }
+        const existing = await InvoiceNumber.findOne({ where: { invoiceNumber: numInt } });
+        if (existing) {
+          if (!existing.workOrderId) {
+            await existing.update({ workOrderId: wo.id, clientId: wo.clientId || existing.clientId, clientName: wo.clientName || existing.clientName });
+          }
+          skipped++;
+          continue;
+        }
+        await InvoiceNumber.create({ invoiceNumber: numInt, workOrderId: wo.id, clientId: wo.clientId || null, clientName: wo.clientName || null });
+        created++;
+      } catch (rowErr) {
+        // One bad row (e.g. a duplicate/constraint) must not abort the whole backfill.
+        errored++;
+        if (errors.length < 10) errors.push(`#${wo.invoiceNumber} (DR ${wo.drNumber || '?'}): ${rowErr.message}`);
+        console.warn(`[backfill] skipped invoice #${wo.invoiceNumber} on WO ${wo.id}: ${rowErr.message}`);
       }
-      await InvoiceNumber.create({ invoiceNumber: numInt, workOrderId: wo.id, clientId: wo.clientId || null, clientName: wo.clientName || null });
-      created++;
     }
-    res.json({ data: { created, skipped, invalid, scanned: wos.length }, message: `Backfill complete: ${created} added, ${skipped} already tracked${invalid ? `, ${invalid} had non-numeric invoice numbers` : ''}.` });
-  } catch (error) { next(error); }
+    let msg = `Backfill complete: ${created} added, ${skipped} already tracked`;
+    if (invalid) msg += `, ${invalid} non-numeric`;
+    if (errored) msg += `, ${errored} could not be added (see details)`;
+    res.json({ data: { created, skipped, invalid, errored, scanned: wos.length, errors }, message: msg + '.' });
+  } catch (error) {
+    console.error('[backfill] fatal:', error);
+    res.status(500).json({ error: { message: `Backfill failed: ${error.message}` } });
+  }
 });
 
 // POST /api/quickbooks/invoice-numbers/manual - Manually create an invoice number entry

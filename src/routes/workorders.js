@@ -1805,14 +1805,65 @@ router.put('/:id/status', async (req, res, next) => {
 });
 
 // POST /api/workorders/:id/record-payment - Record COD payment
+// POST /api/workorders/:id/backfill-pricing — recompute pricing columns (materialTotal, laborTotal,
+// partTotal, markup) for work-order parts that came over with NULL pricing. This affects work orders
+// converted before the conversion recalc fix: the formData carried over intact but the top-level
+// pricing columns were left null, so the WO showed no material/price. We re-derive them from the
+// source estimate part using the same (now-correct) conversion logic. Safe: only touches parts whose
+// partTotal is currently null/empty; never overwrites an existing price.
+router.post('/:id/backfill-pricing', async (req, res, next) => {
+  try {
+    const { buildWorkOrderPartFromEstimate } = require('../services/pricing');
+    const workOrder = await WorkOrder.findByPk(req.params.id, {
+      include: [{ model: WorkOrderPart, as: 'parts' }]
+    });
+    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+    if (!workOrder.estimateId) return res.status(400).json({ error: { message: 'This work order is not linked to an estimate, so pricing cannot be backfilled from one.' } });
+
+    const estParts = await EstimatePart.findAll({ where: { estimateId: workOrder.estimateId } });
+    // Match estimate parts by partNumber (stable across conversion).
+    const estByNum = {};
+    for (const ep of estParts) estByNum[ep.partNumber] = ep;
+
+    let updated = 0, skipped = 0, noSource = 0;
+    const details = [];
+    for (const wp of (workOrder.parts || [])) {
+      // Only backfill parts with missing pricing — never touch ones that already have a total.
+      const hasPrice = wp.partTotal !== null && wp.partTotal !== undefined && wp.partTotal !== '' && parseFloat(wp.partTotal) > 0;
+      if (hasPrice) { skipped++; continue; }
+      const ep = estByNum[wp.partNumber];
+      if (!ep) { noSource++; continue; }
+      try {
+        // Reuse the proven conversion logic to compute correct pricing from the estimate part.
+        const rebuilt = buildWorkOrderPartFromEstimate(ep.toJSON ? ep.toJSON() : ep);
+        const patch = {};
+        for (const f of ['materialTotal', 'materialUnitCost', 'materialMarkupPercent', 'laborTotal', 'setupCharge', 'otherCharges', 'partTotal']) {
+          if (rebuilt[f] !== undefined && rebuilt[f] !== null) patch[f] = rebuilt[f];
+        }
+        if (Object.keys(patch).length > 0) {
+          await wp.update(patch);
+          updated++;
+          details.push(`Part ${wp.partNumber}: partTotal=${patch.partTotal ?? '?'}`);
+        } else {
+          noSource++;
+        }
+      } catch (e) {
+        details.push(`Part ${wp.partNumber}: error ${e.message}`);
+      }
+    }
+    res.json({ data: { updated, skipped, noSource, details }, message: `Backfill complete: ${updated} part(s) priced, ${skipped} already had pricing${noSource ? `, ${noSource} had no source` : ''}.` });
+  } catch (error) { next(error); }
+});
+
+// POST /api/workorders/:id/record-payment - Record COD payment
 router.post('/:id/record-payment', async (req, res, next) => {
   try {
     const workOrder = await WorkOrder.findByPk(req.params.id);
     if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
-    
+
     const { paymentDate, paymentMethod, paymentReference } = req.body;
     if (!paymentMethod) return res.status(400).json({ error: { message: 'Payment method is required' } });
-    
+
     await workOrder.update({
       codPaid: true,
       paymentDate: paymentDate || new Date(),

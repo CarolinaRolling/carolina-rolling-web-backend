@@ -1075,6 +1075,19 @@ router.put('/:id', async (req, res, next) => {
 
     await estimate.update(updates);
 
+    // When an estimate reaches a state where a pricing review is no longer pending (sent to the
+    // client, accepted, or declined), auto-complete any open "Review pricing" todos for it so the
+    // task doesn't linger on the board after the work is done.
+    if (['sent', 'accepted', 'declined'].includes(updates.status)) {
+      try {
+        const { TodoItem } = require('../models');
+        const { Op } = require('sequelize');
+        await TodoItem.update(
+          { status: 'completed', completedBy: req.user?.username || 'system', completedAt: new Date() },
+          { where: { type: 'estimate_review', estimateId: estimate.id, status: { [Op.ne]: 'completed' } } }
+        );
+      } catch (e) { console.warn('[estimate] could not auto-close review todo:', e.message); }
+    }
     // Ensure taxExempt is proper boolean after update (SQLite stores as 0/1)
     if (estimate.taxExempt !== undefined) {
       estimate.taxExempt = estimate.taxExempt === true || estimate.taxExempt === 1 || estimate.taxExempt === '1' || estimate.taxExempt === 'true';

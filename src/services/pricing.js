@@ -56,6 +56,41 @@ function calculatePartTotal(part) {
   return Math.round((matEach + labEach + setup + other + opEach + opTransportEach) * qty * 100) / 100;
 }
 
+// Return the per-each material and labor components for a part, using the same logic as
+// calculatePartTotal, so an invoice/estimate can show a "Material: $X / Rolling: $Y" breakdown that
+// reconciles with the line total. labEach here is the full billed labor per unit (base rolling plus
+// any outside-processing cost+profit folded in, matching how the client-facing line is priced).
+function partBreakdown(part) {
+  const fd = part.formData && typeof part.formData === 'object' ? part.formData : {};
+  const qty = parseInt(part.quantity) || 1;
+  const matCost = parseFloat(part.materialTotal) || parseFloat(fd.materialTotal) || 0;
+  const matMarkupRaw = parseFloat(part.materialMarkupPercent);
+  const matMarkup = isNaN(matMarkupRaw) ? (parseFloat(fd.materialMarkupPercent) || (matCost > 0 ? 20 : 0)) : matMarkupRaw;
+  const matEach = roundUpMaterial(matCost * (1 + matMarkup / 100), fd._materialRounding);
+
+  // For fab/shop parts the authoritative price is partTotal (see the estimate PDF fix); derive the
+  // per-unit service price from it so material shows 0 and the whole line is "service".
+  if (['fab_service', 'shop_rate'].includes(part.partType)) {
+    const stored = parseFloat(part.partTotal) || 0;
+    const labEach = qty > 0 ? stored / qty : stored;
+    return { matEach: 0, labEach };
+  }
+
+  // Regular parts: base rolling labor + outside-processing (cost + profit) folded into the labor line,
+  // matching the estimate display.
+  const baseLab = basePartLaborEach(part);
+  const opCost = parseFloat(part.outsideProcessingCost) || 0;
+  const opMarkup = parseFloat(part.outsideProcessingMarkupPercent) || 0;
+  const opEach = Math.round(opCost * (1 + opMarkup / 100) * 100) / 100;
+  const opTransport = parseFloat(part.outsideProcessingTransportCost) || 0;
+  const opTransportMarkup = parseFloat(part.outsideProcessingTransportMarkupPercent) || 0;
+  const opTransportEach = Math.round(opTransport * (1 + opTransportMarkup / 100) * 100) / 100;
+  const setup = parseFloat(part.setupCharge) || parseFloat(fd.setupCharge) || 0;
+  const other = parseFloat(part.otherCharges) || parseFloat(fd.otherCharges) || 0;
+  const labEach = baseLab + opEach + opTransportEach + setup + other;
+  return { matEach, labEach };
+}
+
 // Load labor minimums from settings
 async function loadLaborMinimums() {
   try {
@@ -371,6 +406,7 @@ function buildWorkOrderPartFromEstimate(estimatePart) {
 module.exports = {
   roundUpMaterial,
   calculatePartTotal,
+  partBreakdown,
   loadLaborMinimums,
   calculateMinimumAdjustment,
   calculateOrderTotals,

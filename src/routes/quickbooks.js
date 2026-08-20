@@ -75,7 +75,7 @@ function getFinalShipDate(wo) {
 }
 
 // Pricing utilities from shared module
-const { calculatePartTotal, roundUpMaterial, loadLaborMinimums, calculateMinimumAdjustment } = require('../services/pricing');
+const { calculatePartTotal, partBreakdown, roundUpMaterial, loadLaborMinimums, calculateMinimumAdjustment } = require('../services/pricing');
 
 function getPartAmount(part) {
   return calculatePartTotal(part);
@@ -578,6 +578,44 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
           if (yPos > 700) { doc.addPage(); yPos = 50; }
           doc.font('Helvetica').fontSize(9).fillColor(grayColor).text('  Note: ' + specialInstr, 85, yPos, { width: 420, lineBreak: false });
           yPos += 13;
+        }
+
+        // Detail lines under the part — mirrors the estimate PDF: tracking numbers, material source,
+        // and the material/labor ($) breakdown, so the client sees the same detail on the invoice.
+        const detailLines = [];
+        if (part.clientPartNumber) detailLines.push(`Client Part#: ${part.clientPartNumber}`);
+        if (part.rev) detailLines.push(`Rev: ${part.rev}`);
+        if (part.heatNumber) detailLines.push(`Heat#: ${part.heatNumber}${part.heatCountry ? ` (${part.heatCountry})` : ''}`);
+        if (part.lotNumber) detailLines.push(`Lot#: ${part.lotNumber}`);
+        if (part.clientJobNumber) detailLines.push(`Job#: ${part.clientJobNumber}`);
+        // Material source (skip for services)
+        if (!SERVICE_TYPES.includes(part.partType)) {
+          const supplier = part.materialSource === 'customer_supplied'
+            ? (client?.name || wo.clientName || 'Customer')
+            : 'Carolina Rolling Co., Inc.';
+          detailLines.push(`Material supplied by: ${supplier}`);
+        }
+        // Material / labor breakdown ($ per each), from the shared pricing helper so it reconciles
+        // with the line total. Include the linked services' per-unit price in the labor line.
+        try {
+          const bd = partBreakdown(part);
+          let labEach = bd.labEach;
+          for (const svc of linked) {
+            const sq = parseInt(svc.quantity) || 1;
+            const svcTot = calculatePartTotal(svc);
+            labEach += (part.quantity && parseInt(part.quantity) > 0) ? (svcTot / (parseInt(part.quantity))) : (sq > 0 ? svcTot / sq : svcTot);
+          }
+          if (bd.matEach > 0) detailLines.push(`Material: ${fmtCur(bd.matEach)} ea`);
+          if (labEach > 0) {
+            const lblbl = part.partType === 'flat_stock' ? 'Handling' : 'Rolling';
+            detailLines.push(`${lblbl}: ${fmtCur(labEach)} ea`);
+          }
+        } catch (e) { /* breakdown is best-effort; never block the invoice */ }
+
+        for (const dl of detailLines) {
+          if (yPos > 705) { doc.addPage(); yPos = 50; }
+          doc.font('Helvetica').fontSize(8.5).fillColor(grayColor).text('  ' + dl, 85, yPos, { width: 420, lineBreak: false });
+          yPos += 11;
         }
 
         // Service note under part

@@ -3564,6 +3564,9 @@ MEASUREMENT POINTS — CRITICAL:
 - Default to "inside" only when explicitly stated as ID or ISR
 
 Thickness format: Use fractions like '1/2"', '3/8"'. Only decimals if no fraction match.
+Dimension fields (width, length, diameter, outerDiameter, innerDiameter, radius): ALWAYS use DECIMALS,
+never fractions. Convert any fraction to decimal — e.g. "8 1/4"" -> 8.25, "5 3/8"" -> 5.375, "1/2" -> 0.5.
+These fields are used for calculations, so a fraction string will break the math.
 
 CONES: set "coneType": "eccentric" when the document says eccentric / offset cone (the small end is
 offset to one side — a genuinely different shape); otherwise "concentric".

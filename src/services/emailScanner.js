@@ -298,6 +298,8 @@ AVAILABLE DROPDOWN OPTIONS — You MUST pick from these lists when possible. Onl
 Thickness options (for plate_roll, press_brake, flat_stock, angle_roll):
   "24 ga", "20 ga", "16 ga", "14 ga", "12 ga", "11 ga", "10 ga", '1/8"', '3/16"', '1/4"', '5/16"', '3/8"', '1/2"', '5/8"', '3/4"', '7/8"', '1"', '1-1/4"', '1-1/2"', '2"'
   IMPORTANT: Use the FRACTION format with quotes, e.g. '3/8"' not "0.375". Only use decimals if the value doesn't match a fraction.
+  NOTE: this fraction rule is ONLY for thickness. Dimension fields (width, length, diameter, outerDiameter,
+  innerDiameter, radius) must ALWAYS be decimals — convert fractions, e.g. "8 1/4"" -> 8.25, "1/2" -> 0.5.
 
 Angle sizes (legSize field — legs only, NO thickness):
   "0.5x0.5", "0.75x0.75", "1x1", "1.25x1.25", "1.5x1.5", "2x2", "2.5x2.5", "3x3", "4x4", "5x5", "6x6", "1x2", "2x3", "3x4", "4x5", "4x6"
@@ -531,9 +533,43 @@ function generateEstimateNumber() {
 }
 
 // Build formData object that matches what the frontend form components expect
+// Convert a dimension value that may be written as a fraction/mixed number ("8 1/4", "8-1/4",
+// "1/2", '8 1/4"') into a decimal string ("8.25", "0.5"). Leaves plain decimals and non-numeric
+// values untouched. Used for roll value / diameter / radius / width / length, which must be numeric
+// for the math and form fields — NOT for thickness or section sizes, which stay as fractions.
+function dimToDecimal(v) {
+  if (v === null || v === undefined) return v;
+  let s = String(v).trim().replace(/"/g, '').trim();
+  if (!s) return v;
+  // Already a plain decimal/integer
+  if (/^-?\d*\.?\d+$/.test(s)) return s;
+  // Mixed number: "8 1/4" or "8-1/4"
+  let m = s.match(/^(\d+)\s*[- ]\s*(\d+)\s*\/\s*(\d+)$/);
+  if (m) {
+    const whole = parseInt(m[1], 10), num = parseInt(m[2], 10), den = parseInt(m[3], 10);
+    if (den > 0) return String(whole + num / den);
+  }
+  // Simple fraction: "1/4"
+  m = s.match(/^(\d+)\s*\/\s*(\d+)$/);
+  if (m) {
+    const num = parseInt(m[1], 10), den = parseInt(m[2], 10);
+    if (den > 0) return String(num / den);
+  }
+  // Leading number with trailing junk (e.g. "8.25 in") — pull the leading number
+  m = s.match(/^(-?\d*\.?\d+)/);
+  if (m) return m[1];
+  return v; // give up — leave as-is
+}
+
 function buildFormData(p) {
   const fd = {};
   const type = p.partType || 'plate_roll';
+  // Normalize numeric dimension fields from fractions to decimals up front, so every part type below
+  // stores clean numbers (the AI sometimes returns "8 1/4" where the field needs 8.25). Thickness and
+  // section/bar sizes are intentionally NOT converted — they stay in fraction form.
+  for (const f of ['width', 'length', 'diameter', 'outerDiameter', 'innerDiameter', 'radius']) {
+    if (p[f] !== null && p[f] !== undefined && p[f] !== '') p[f] = dimToDecimal(p[f]);
+  }
 
   // Helper: resolve measure point from AI response, with a default fallback
   const resolveMP = (part, fallback) => {

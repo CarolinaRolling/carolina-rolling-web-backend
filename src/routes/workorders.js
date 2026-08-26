@@ -669,7 +669,7 @@ async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
 
       mergedLines.forEach((partObj, index) => {
         const desc = partObj._poDesc || 'N/A';
-        const cleanDesc = desc.replace(/^\d+\s*[×x]\s*\d+['"]\s*length\(s\):\s*/i, '').replace(/^\d+pc:\s*/i, '');
+        const cleanDesc = cleanPdfText(desc.replace(/^\d+\s*[×x]\s*\d+['"]\s*length\(s\):\s*/i, '').replace(/^\d+pc:\s*/i, ''));
         const cutFile = partObj._mergedCutFiles ? partObj._mergedCutFiles.join(', ') : (partObj.cutFileReference || '');
         
         // Calculate row height based on description length
@@ -863,7 +863,7 @@ async function generateOutsideProcessingPO(poNumber, vendor, parts, workOrder, s
         if (partObj.formData && typeof partObj.formData === 'object') Object.assign(partObj, partObj.formData);
         const qty = parseInt(partObj.quantity) || 1;
         const desc = partObj._materialDescription || partObj.materialDescription || `Part #${partObj.partNumber}`;
-        const cleanDesc = desc.replace(/^\d+pc:\s*/i, '');
+        const cleanDesc = cleanPdfText(desc.replace(/^\d+pc:\s*/i, ''));
         const unitCost = parseFloat(partObj.outsideProcessingCost) || 0;
         const lineCost = unitCost * qty;
         totalCost += lineCost;
@@ -4876,7 +4876,7 @@ async function generateTransportPO(poNumber, vendor, trip, workOrder, parts) {
         if (partObj.formData && typeof partObj.formData === 'object') Object.assign(partObj, partObj.formData);
         const qty = parseInt(partObj.quantity) || 1;
         const desc = partObj._materialDescription || partObj.materialDescription || `Part #${partObj.partNumber}`;
-        const cleanDesc = desc.replace(/^\d+pc:\s*/i, '');
+        const cleanDesc = cleanPdfText(desc.replace(/^\d+pc:\s*/i, ''));
 
         const descHeight = doc.heightOfString(cleanDesc, { width: W - 116 });
         const rowHeight = Math.max(28, descHeight + 12);

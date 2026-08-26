@@ -2811,7 +2811,7 @@ router.get('/:id/pdf', async (req, res, next) => {
           });
         }
       } else if (part.materialDescription) {
-        descLines.push(part.materialDescription);
+        descLines.push(part.materialDescription.replace(/""+/g, '"'));
       } else {
         // Build from individual fields
         const specs = [];
@@ -2916,7 +2916,7 @@ router.get('/:id/pdf', async (req, res, next) => {
         descLines.push(`Note: ${part.specialInstructions}`);
       }
 
-      const description = descLines.join('\n');
+      const description = descLines.join('\n').replace(/""+/g, '"');
       const isLinkedSvc = ['fab_service', 'shop_rate'].includes(part.partType) && part._linkedPartId;
       const linkedParentPart = isLinkedSvc ? sortedParts.find(p => String(p.id) === String(part._linkedPartId)) : null;
       const xOffset = isLinkedSvc ? 20 : 0;

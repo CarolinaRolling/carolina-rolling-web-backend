@@ -40,6 +40,7 @@ function formatQBDate(dateStr) {
 function clean(s) {
   return (s || '')
     .replace(/[\t\r\n]/g, ' ')
+    .replace(/""+/g, '"')           // collapse any doubled inch marks (e.g. 5 3/8"") into one
     .replace(/π/g, 'pi')
     .replace(/(\d)"(\s|$|x|X|\))/g, '$1in.$2')
     .replace(/"/g, "'")
@@ -576,8 +577,11 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
         const specialInstr = clean(part.specialInstructions || fd.specialInstructions || '');
         if (specialInstr) {
           if (yPos > 700) { doc.addPage(); yPos = 50; }
-          doc.font('Helvetica').fontSize(9).fillColor(grayColor).text('  Note: ' + specialInstr, 85, yPos, { width: 420, lineBreak: false });
-          yPos += 13;
+          doc.font('Helvetica').fontSize(9).fillColor(grayColor);
+          const noteText = '  Note: ' + specialInstr;
+          const noteH = doc.heightOfString(noteText, { width: 470 });
+          doc.text(noteText, 85, yPos, { width: 470 });
+          yPos += Math.max(13, noteH + 2);
         }
 
         // Detail lines under the part — mirrors the estimate PDF: tracking numbers, material source,
@@ -614,17 +618,23 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
 
         for (const dl of detailLines) {
           if (yPos > 705) { doc.addPage(); yPos = 50; }
-          doc.font('Helvetica').fontSize(8.5).fillColor(grayColor).text('  ' + dl, 85, yPos, { width: 420, lineBreak: false });
-          yPos += 11;
+          doc.font('Helvetica').fontSize(8.5).fillColor(grayColor);
+          const dlText = '  ' + dl;
+          const dlH = doc.heightOfString(dlText, { width: 470 });
+          doc.text(dlText, 85, yPos, { width: 470 });
+          yPos += Math.max(11, dlH + 1);
         }
 
         // Service note under part
         for (const svc of linked) {
           if (yPos > 700) { doc.addPage(); yPos = 50; }
           const svcFd = (svc.formData && typeof svc.formData === 'object') ? svc.formData : {};
-          const svcLabel = clean(svcFd._serviceNotes || svcFd._serviceType || 'Fabrication Service').substring(0, 60);
-          doc.font('Helvetica').fontSize(9).fillColor(grayColor).text('  + ' + svcLabel, 85, yPos, { width: 420, lineBreak: false });
-          yPos += 13;
+          const svcLabel = clean(svcFd._serviceNotes || svcFd._serviceType || 'Fabrication Service');
+          doc.font('Helvetica').fontSize(9).fillColor(grayColor);
+          const svcText = '  + ' + svcLabel;
+          const svcH = doc.heightOfString(svcText, { width: 470 });
+          doc.text(svcText, 85, yPos, { width: 470 });
+          yPos += Math.max(13, svcH + 2);
         }
 
         doc.strokeColor(lightGray).lineWidth(0.3).moveTo(50, yPos).lineTo(562, yPos).stroke();

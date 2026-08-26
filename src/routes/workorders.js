@@ -2,11 +2,20 @@
 // Clean text for Helvetica PDF rendering — replace unsupported Unicode chars
 function cleanPdfText(s) {
   return (s || '')
+    .replace(/""+/g, '"')
     .replace(/°/g, ' deg')
     .replace(/↻/g, '(CW)')
     .replace(/↺/g, '(CCW)')
     .replace(/π/g, 'pi')
     .replace(/[^\x00-\x7F]/g, '');
+}
+
+// Append an inch mark only if the value doesn't already have one, so a value stored WITH a quote
+// (e.g. `5 3/8"`) doesn't come out doubled (`5 3/8""`).
+function inch(v) {
+  if (v === null || v === undefined) return '';
+  const s = String(v).trim();
+  return s.endsWith('"') ? s : s + '"';
 }
 
 const express = require('express');
@@ -387,7 +396,7 @@ function refreshDerivedFields(part) {
           dir = part.rollType === 'easy_way' ? ' EW' : part.rollType === 'on_edge' ? ' OE' : ' HW';
         }
       }
-      let line = `Roll to ${rollVal}" ${spec}${dir}`;
+      let line = `Roll to ${inch(rollVal)} ${spec}${dir}`;
       if (part.arcDegrees) line += ` | Arc: ${part.arcDegrees} deg`;
       part._rollingDescription = line;
     }
@@ -430,12 +439,12 @@ function refreshDerivedFields(part) {
   // === Material Description: rebuild if missing but raw fields exist ===
   if (!part._materialDescription && !part.materialDescription) {
     const specs = [];
-    if (part.thickness) specs.push(part.thickness);
-    if (part.width) specs.push(`x ${part.width}"`);
-    if (part.length) specs.push(`x ${part.length}"`);
+    if (part.thickness) specs.push(inch(part.thickness));
+    if (part.width) specs.push(`x ${inch(part.width)}`);
+    if (part.length) specs.push(`x ${inch(part.length)}`);
     if (part.sectionSize) specs.push(part.sectionSize);
-    if (part.outerDiameter) specs.push(`${part.outerDiameter}" OD`);
-    if (part.wallThickness && part.wallThickness !== 'SOLID') specs.push(`x ${part.wallThickness} wall`);
+    if (part.outerDiameter) specs.push(`${inch(part.outerDiameter)} OD`);
+    if (part.wallThickness && part.wallThickness !== 'SOLID') specs.push(`x ${inch(part.wallThickness)} wall`);
     if (part.material) specs.push(part.material);
     if (specs.length > 0) {
       const desc = `${part.quantity || 1}pc: ${specs.join(' ')}`;
@@ -605,11 +614,11 @@ async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
             const sizeDisplay = partObj.partType === 'pipe_roll' && partObj._schedule ? partObj.sectionSize.replace(' Pipe', ` Sch ${partObj._schedule} Pipe`) : partObj.sectionSize;
             pieces.push(sizeDisplay);
           }
-          if (partObj.thickness) pieces.push(partObj.thickness);
-          if (partObj.width) pieces.push(`x ${partObj.width}"`);
+          if (partObj.thickness) pieces.push(inch(partObj.thickness));
+          if (partObj.width) pieces.push(`x ${inch(partObj.width)}`);
           if (partObj.length) pieces.push(`x ${partObj.length}`);
-          if (partObj.outerDiameter) pieces.push(`${partObj.outerDiameter}" OD`);
-          if (partObj.wallThickness && partObj.wallThickness !== 'SOLID') pieces.push(`x ${partObj.wallThickness} wall`);
+          if (partObj.outerDiameter) pieces.push(`${inch(partObj.outerDiameter)} OD`);
+          if (partObj.wallThickness && partObj.wallThickness !== 'SOLID') pieces.push(`x ${inch(partObj.wallThickness)} wall`);
           if (partObj.wallThickness === 'SOLID') pieces.push('Solid');
           if (partObj.material) pieces.push(partObj.material);
           if (partObj.partType) pieces.push(PART_LABELS[partObj.partType] || partObj.partType.replace(/_/g, ' '));

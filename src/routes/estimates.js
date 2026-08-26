@@ -21,6 +21,14 @@ function coneSpecLabel(measurePoint, measureType) {
   return isRad ? 'CLR' : 'CLD';
 }
 
+// Append an inch mark to a dimension value only if it doesn't already have one, so values that were
+// stored WITH a quote (e.g. read off a drawing as `5 3/8"`) don't come out doubled (`5 3/8""`).
+function inch(v) {
+  if (v === null || v === undefined) return '';
+  const s = String(v).trim();
+  return s.endsWith('"') ? s : s + '"';
+}
+
 
 const router = express.Router();
 
@@ -2812,11 +2820,11 @@ router.get('/:id/pdf', async (req, res, next) => {
           const sizeDisplay = part.partType === 'pipe_roll' && part._schedule ? part.sectionSize.replace(' Pipe', ` Sch ${part._schedule} Pipe`) : part.sectionSize;
           specs.push(sizeDisplay);
         }
-        if (part.thickness) specs.push(part.thickness);
-        if (part.width) specs.push(`${part.width}" wide`);
-        if (part.length) specs.push(part.length.toString().includes("'") || part.length.toString().includes('"') ? part.length : `${part.length}" long`);
-        if (part.outerDiameter) specs.push(`${part.outerDiameter}" OD`);
-        if (part.wallThickness && part.wallThickness !== 'SOLID') specs.push(`${part.wallThickness}" wall`);
+        if (part.thickness) specs.push(inch(part.thickness));
+        if (part.width) specs.push(`${inch(part.width)} wide`);
+        if (part.length) specs.push(part.length.toString().includes("'") || part.length.toString().includes('"') ? part.length : `${inch(part.length)} long`);
+        if (part.outerDiameter) specs.push(`${inch(part.outerDiameter)} OD`);
+        if (part.wallThickness && part.wallThickness !== 'SOLID') specs.push(`${inch(part.wallThickness)} wall`);
         if (part.wallThickness === 'SOLID') specs.push('Solid Bar');
         if (specs.length) descLines.push(specs.join(' x '));
       }
@@ -2826,7 +2834,7 @@ router.get('/:id/pdf', async (req, res, next) => {
       if (rollVal) {
         const specLabel = getSpecLabel(part);
         const dirLabel = getRollDirLabel(part);
-        let rollLine = `Roll: ${rollVal}" ${specLabel}`;
+        let rollLine = `Roll: ${inch(rollVal)} ${specLabel}`;
         if (dirLabel) rollLine += ` (${dirLabel})`;
         if (part.arcDegrees) rollLine += ` | Arc: ${part.arcDegrees} deg`;
         descLines.push(rollLine);

@@ -116,7 +116,13 @@ app.get('/health', (req, res) => {
 });
 
 // API Routes
-app.use('/api', generalLimiter);
+// Apply the general limiter to everything EXCEPT /api/auth, so that a request storm from one IP can
+// never block that same user from logging back in. Auth has its own dedicated loginLimiter below for
+// brute-force protection.
+app.use('/api', (req, res, next) => {
+  if (req.path.startsWith('/auth')) return next();
+  return generalLimiter(req, res, next);
+});
 app.use('/api/auth/login', loginLimiter);
 app.use('/api/auth', authRoutes);
 

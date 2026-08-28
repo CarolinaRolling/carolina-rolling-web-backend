@@ -3512,7 +3512,7 @@ setInterval(() => { const now = Date.now(); for (const [k, v] of aiParseJobs) if
 
 // Shared AI-parse background worker. Used by both the file-upload route and the from-email route.
 // `uploaded` is an array of { path, originalname } (multer-shaped). Sets the job result/error.
-async function runAiParse(estimate, uploaded, quoteIndex, extraNotes, jobId, quoteText) {
+async function runAiParse(estimate, uploaded, quoteIndex, extraNotes, jobId, quoteText, autoCreate) {
   const tempPaths = uploaded.map(f => f.path);
   try {
     const clientName = estimate.clientName || 'Unknown Client';
@@ -3789,14 +3789,83 @@ MATCHING RULES (when multiple files are provided):
 
     console.log(`[AI-Parse] Parsed ${partsWithFormData.length} parts from ${uploaded.length} file(s); ${attachedIdx.size} print(s) auto-matched, ${unmatchedPrints.length} unmatched`);
 
-    aiParseJobs.set(jobId, { status: 'done', createdAt: Date.now(), heldFiles: heldManifest, holdDir, result: {
+    // AUTO-CREATE path (Comm Center "Convert to Estimate"): there's no interactive Accept step, so
+    // build and persist the parts here, mirroring the frontend accept handler, and attach matched prints.
+    let autoCreated = 0, autoAttached = 0;
+    if (autoCreate) {
+      for (const p of partsWithFormData) {
+        try {
+          const fd = { ...(p.formData || {}) };
+          if (p.measurePoint === 'outside' || p.measurePoint === 'OD') fd._rollMeasurePoint = 'outside';
+          else if (p.measurePoint === 'inside' || p.measurePoint === 'ID') fd._rollMeasurePoint = 'inside';
+          else if (p.measurePoint === 'centerline' || p.measurePoint === 'CL') fd._rollMeasurePoint = 'centerline';
+          else if (p.outerDiameter && !p.radius) fd._rollMeasurePoint = 'outside';
+          if (p.outerDiameter || p.diameter) { fd._rollValue = String(p.outerDiameter || p.diameter); fd._rollMeasureType = p.measureType || 'diameter'; }
+          else if (p.radius) { fd._rollValue = String(p.radius); fd._rollMeasureType = 'radius'; }
+          if (p.rollType) fd.rollType = p.rollType;
+          if (p.description) fd._materialDescription = p.description;
+
+          let partData = cleanNumericFields({
+            estimateId: estimate.id,
+            partNumber: p.partNumber,
+            partType: p.partType || 'plate_roll',
+            quantity: parseInt(p.quantity) || 1,
+            material: p.material || '',
+            thickness: p.thickness || '',
+            width: p.width || '',
+            length: p.length || '',
+            outerDiameter: p.outerDiameter || '',
+            wallThickness: p.wallThickness || '',
+            sectionSize: p.sectionSize || '',
+            radius: p.radius || '',
+            diameter: p.diameter || p.outerDiameter || '',
+            arcDegrees: p.arcDegrees || '',
+            rollType: p.rollType || '',
+            flangeOut: p.flangeOut || false,
+            specialInstructions: p.specialInstructions || '',
+            clientPartNumber: p.clientPartNumber || '',
+            materialDescription: p.description || '',
+            materialSource: p.materialSource || 'customer_supplied',
+            laborTotal: fd.laborTotal || '',
+            formData: fd
+          });
+          partData = extractFormData(partData);
+          const createdPart = await EstimatePart.create(partData);
+          autoCreated++;
+          // Attach a confidently-matched print, if any.
+          if (createdPart?.id && p.matchedPrint && heldFiles[p.matchedPrint.fileIndex]) {
+            try {
+              const held = heldFiles[p.matchedPrint.fileIndex];
+              const ext = path.extname(held.originalName).toLowerCase();
+              const mimeMap = { '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.dxf': 'application/dxf', '.stp': 'application/step', '.step': 'application/step' };
+              const mimeType = mimeMap[ext] || 'application/octet-stream';
+              const detectedType = (ext === '.dxf') ? 'cut_file' : (ext === '.stp' || ext === '.step') ? 'step_file' : 'drawing';
+              const up = await fileStorage.uploadFile(held.path, { folder: `estimates/${estimate.id}/parts/${createdPart.id}`, originalName: held.originalName, mimeType });
+              const stat = (() => { try { return fs.statSync(held.path).size; } catch { return null; } })();
+              await EstimatePartFile.create({ partId: createdPart.id, filename: path.basename(held.path), originalName: held.originalName, mimeType, size: stat, url: up.url, cloudinaryId: up.storageId, fileType: detectedType });
+              autoAttached++;
+            } catch (attErr) { console.warn('[AI-Parse] auto-attach failed:', attErr.message); }
+          }
+        } catch (cErr) { console.error('[AI-Parse] auto-create part failed:', cErr.message); }
+      }
+      // Recompute estimate totals now that parts exist.
+      try {
+        const freshParts = await EstimatePart.findAll({ where: { estimateId: estimate.id } });
+        const totals = await calculateEstimateTotalsWithMinimums(freshParts, estimate);
+        if (totals) await estimate.update(totals);
+      } catch (tErr) { console.warn('[AI-Parse] totals recompute failed:', tErr.message); }
+      console.log(`[AI-Parse] Auto-created ${autoCreated} parts, attached ${autoAttached} prints to estimate ${estimate.id}`);
+    }
+
+    aiParseJobs.set(jobId, { status: 'done', createdAt: Date.now(), heldFiles: heldManifest, holdDir, autoCreated, autoAttached, result: {
       parts: partsWithFormData,
       notes: parsed.notes || '',
       documentType: parsed.documentType || 'unknown',
       aiNotes: parsed.aiNotes || '',
       aiRawSnippet: (text || '').substring(0, 600),
       fileName: fileMeta.map(m => m.originalName).join(', '),
-      unmatchedPrints
+      unmatchedPrints,
+      autoCreated, autoAttached
     } });
   } catch (error) {
     tempPaths.forEach(pth => { try { fs.unlinkSync(pth); } catch {} });
@@ -4136,12 +4205,31 @@ router.delete('/:id/shipment-charges/:chargeId', async (req, res, next) => {
 // Center "Convert to Estimate"). Returns { estimate, jobId }.
 router.createEstimateAndParseAttachments = async function(client, scanned, attachments, notes) {
   const estimateNumber = generateEstimateNumber();
+  // Pick the specific contact who sent the email, if they're in the client's contacts — not just the
+  // client's default contact. Match by email first, then by name.
+  let contactName = client.contactName || scanned.fromName || '';
+  let contactEmail = client.contactEmail || scanned.fromEmail || '';
+  let contactPhone = client.contactPhone || '';
+  const contacts = Array.isArray(client.contacts) ? client.contacts : [];
+  const senderEmail = (scanned.fromEmail || '').trim().toLowerCase();
+  const senderName = (scanned.fromName || '').trim().toLowerCase();
+  let picked = contacts.find(k => (k.email || '').trim().toLowerCase() === senderEmail && senderEmail);
+  if (!picked && senderName) picked = contacts.find(k => {
+    const n = (k.name || '').trim().toLowerCase();
+    return n && (n === senderName || n.includes(senderName) || senderName.includes(n));
+  });
+  if (picked) {
+    contactName = picked.name || contactName;
+    contactEmail = picked.email || contactEmail;
+    contactPhone = picked.phone || contactPhone;
+  }
   const estimate = await Estimate.create({
     estimateNumber,
     clientId: client.id,
     clientName: client.name,
-    contactName: client.contactName || scanned.fromName || '',
-    contactEmail: client.contactEmail || scanned.fromEmail || '',
+    contactName,
+    contactEmail,
+    contactPhone,
     projectDescription: scanned.subject || '',
     status: 'draft'
   });
@@ -4155,7 +4243,8 @@ router.createEstimateAndParseAttachments = async function(client, scanned, attac
   });
   const jobId = require('crypto').randomBytes(8).toString('hex');
   aiParseJobs.set(jobId, { status: 'pending', createdAt: Date.now() });
-  runAiParse(estimate, uploaded, -1, (notes || ''), jobId);
+  // autoCreate=true: no interactive Accept step in the convert flow, so persist parts automatically.
+  runAiParse(estimate, uploaded, -1, (notes || ''), jobId, undefined, true);
   return { estimate, jobId };
 };
 

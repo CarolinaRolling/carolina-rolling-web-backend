@@ -3512,10 +3512,11 @@ setInterval(() => { const now = Date.now(); for (const [k, v] of aiParseJobs) if
 
 // Shared AI-parse background worker. Used by both the file-upload route and the from-email route.
 // `uploaded` is an array of { path, originalname } (multer-shaped). Sets the job result/error.
-async function runAiParse(estimate, uploaded, quoteIndex, extraNotes, jobId) {
+async function runAiParse(estimate, uploaded, quoteIndex, extraNotes, jobId, quoteText) {
   const tempPaths = uploaded.map(f => f.path);
   try {
     const clientName = estimate.clientName || 'Unknown Client';
+    const hasQuoteText = quoteText && String(quoteText).trim().length > 0;
 
     // Load general AI notes
     const generalNotesSetting = await AppSettings.findOne({ where: { key: 'email_scanner_general_notes' } });
@@ -3531,10 +3532,20 @@ async function runAiParse(estimate, uploaded, quoteIndex, extraNotes, jobId) {
     // Build the content array for Claude: every file, each preceded by a label so the AI knows which
     // is the quote and which are prints, and can reference each print by its index for matching.
     const contentItems = [];
+
+    // If the part list was pasted as text, that IS the quote — inject it and treat every file as a print.
+    if (hasQuoteText) {
+      contentItems.push({
+        type: 'text',
+        text: `--- QUOTE / PART LIST (pasted text) ---\n${String(quoteText).trim()}\n--- END QUOTE ---`
+      });
+    }
+
     const fileMeta = []; // parallel: { index, originalName, isQuote }
     uploaded.forEach((f, idx) => {
       const ext = path.extname(f.originalname).toLowerCase();
-      const isQuote = idx === quoteIndex;
+      // When a quote text is provided, no file is the quote — all files are prints.
+      const isQuote = !hasQuoteText && idx === quoteIndex;
       fileMeta.push({ index: idx, originalName: f.originalname, isQuote });
       contentItems.push({
         type: 'text',
@@ -3551,11 +3562,12 @@ async function runAiParse(estimate, uploaded, quoteIndex, extraNotes, jobId) {
       }
     });
 
-    const anyPrints = fileMeta.some(m => !m.isQuote) && fileMeta.length > 1;
+    // Prints exist to match whenever there are files and the quote is either pasted text or a marked file.
+    const anyPrints = hasQuoteText ? fileMeta.length > 0 : (fileMeta.some(m => !m.isQuote) && fileMeta.length > 1);
     contentItems.push({
       type: 'text',
       text: `These files are from client: ${clientName}. Parse them as a request for quote (RFQ) for metal rolling, forming, or fabrication.\n`
-        + `Extract all parts, dimensions, materials, and quantities from the QUOTE/part list.\n`
+        + `Extract all parts, dimensions, materials, and quantities from the QUOTE/part list${hasQuoteText ? ' (the pasted text above)' : ''}.\n`
         + (anyPrints
             ? `Then MATCH each individual print/drawing file to the part it belongs to, using the client part number (the print number the client uses to reference the part). For each print, read its part/drawing number from the DRAWING'S TITLE BLOCK first, then fall back to the filename. Only match a print to a part when you are confident (the part number clearly matches). If you cannot confidently match a print, leave it unmatched.\n`
             : '')
@@ -3740,7 +3752,7 @@ MATCHING RULES (when multiple files are provided):
     fs.mkdirSync(holdDir, { recursive: true });
     const heldFiles = {}; // index -> { path, originalName }
     uploaded.forEach((f, idx) => {
-      if (idx === quoteIndex) return; // don't hold the quote itself
+      if (!hasQuoteText && idx === quoteIndex) return; // don't hold the quote FILE (text quote: hold all)
       const dest = path.join(holdDir, `${idx}__${f.originalname.replace(/[^\w.\-]/g, '_')}`);
       try { fs.copyFileSync(f.path, dest); heldFiles[idx] = { path: dest, originalName: f.originalname }; } catch {}
     });
@@ -3809,7 +3821,8 @@ router.post('/:id/ai-parse-document', upload.array('files', 25), async (req, res
     // Accept either the new multi-file field ('files') or a single legacy 'file'.
     let uploaded = req.files || [];
     if (req.file) uploaded = [...uploaded, req.file];
-    if (uploaded.length === 0) return res.status(400).json({ error: { message: 'No file uploaded' } });
+    const hasQuoteText = req.body.quoteText && String(req.body.quoteText).trim().length > 0;
+    if (uploaded.length === 0 && !hasQuoteText) return res.status(400).json({ error: { message: 'Add at least one file, or paste the part list as text.' } });
     uploaded.forEach(f => tempPaths.push(f.path));
 
     // Respond right away with a job id; the AI parse continues in the background and the client polls.
@@ -3822,7 +3835,7 @@ router.post('/:id/ai-parse-document', upload.array('files', 25), async (req, res
     const quoteIndex = (quoteIndexRaw !== undefined && quoteIndexRaw !== '') ? parseInt(quoteIndexRaw) : -1;
 
     // Kick off the shared background worker; the client polls ai-parse-status for the result.
-    runAiParse(estimate, uploaded, quoteIndex, (req.body.additionalNotes || req.body.notes || ''), jobId);
+    runAiParse(estimate, uploaded, quoteIndex, (req.body.additionalNotes || req.body.notes || ''), jobId, req.body.quoteText);
   } catch (error) {
     tempPaths.forEach(pth => { try { fs.unlinkSync(pth); } catch {} });
     console.error('[AI-Parse] Error:', error.message);

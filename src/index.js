@@ -2596,6 +2596,23 @@ async function startServer() {
         await sequelize.query(`ALTER TABLE work_order_part_files ADD COLUMN IF NOT EXISTS "layer" INTEGER`);
         console.log('Ensured device_tokens.apiKeyId');
       } catch (e) { console.log('device_tokens.apiKeyId migration:', e.message); }
+      // Work-order presence: which WO an operator currently has open on their tablet ("in machine").
+      try {
+        await sequelize.query(`
+          CREATE TABLE IF NOT EXISTS work_order_presence (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            "workOrderId" UUID NOT NULL,
+            "deviceLabel" VARCHAR(255),
+            "deviceToken" TEXT,
+            "lastHeartbeatAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+            "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+            "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+          )
+        `);
+        await sequelize.query(`CREATE UNIQUE INDEX IF NOT EXISTS wop_wo_device_uniq ON work_order_presence ("workOrderId", "deviceToken")`);
+        await sequelize.query(`CREATE INDEX IF NOT EXISTS wop_wo_idx ON work_order_presence ("workOrderId")`);
+        console.log('Ensured work_order_presence table');
+      } catch (e) { console.log('work_order_presence migration:', e.message); }
       await sequelize.query(`ALTER TABLE work_order_part_files ADD COLUMN IF NOT EXISTS "vendorPortalVisible" BOOLEAN DEFAULT false NOT NULL`);
       await sequelize.query(`
         CREATE TABLE IF NOT EXISTS vendor_issues (

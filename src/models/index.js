@@ -3030,6 +3030,25 @@ const DeviceToken = sequelize.define('DeviceToken', {
   timestamps: true
 });
 
+// WorkOrderPresence — tracks which work order an operator currently has OPEN on their tablet, so the
+// office can see what's "in the machine" right now. One row per (workOrderId, deviceLabel). The tablet
+// sends a heartbeat while the WO detail screen is open and a close signal when it leaves; a row is
+// considered stale (auto-cleared) if lastHeartbeatAt is older than the timeout (~15 min).
+const WorkOrderPresence = sequelize.define('WorkOrderPresence', {
+  id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+  workOrderId: { type: DataTypes.UUID, allowNull: false },
+  deviceLabel: { type: DataTypes.STRING, allowNull: true },   // operator / tablet name for display
+  deviceToken: { type: DataTypes.TEXT, allowNull: true },     // which device (for de-dupe)
+  lastHeartbeatAt: { type: DataTypes.DATE, allowNull: false, defaultValue: DataTypes.NOW }
+}, {
+  tableName: 'work_order_presence',
+  timestamps: true,
+  indexes: [
+    { unique: true, fields: ['workOrderId', 'deviceToken'] },
+    { fields: ['workOrderId'] }
+  ]
+});
+
 // ApiKey Model - for portal/external API access
 const ApiKey = sequelize.define('ApiKey', {
   id: {
@@ -3874,6 +3893,7 @@ module.exports = {
   Vendor,
   ApiKey,
   DeviceToken,
+  WorkOrderPresence,
   ShopSupply,
   ShopSupplyLog,
   TodoItem,

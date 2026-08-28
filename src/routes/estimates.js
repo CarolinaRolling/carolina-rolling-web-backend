@@ -1455,6 +1455,47 @@ router.post('/:id/parts/:partId/files', upload.array('files', 10), async (req, r
   }
 });
 
+// POST /api/estimates/:id/parts/:partId/attach-ai-print — attach a print the AI held during parsing
+// (identified by jobId + fileIndex) to this part, as a 'drawing'. Used when accepting AI-parsed parts.
+router.post('/:id/parts/:partId/attach-ai-print', async (req, res, next) => {
+  try {
+    const { jobId, fileIndex } = req.body || {};
+    if (!jobId || fileIndex === undefined || fileIndex === null) {
+      return res.status(400).json({ error: { message: 'jobId and fileIndex are required' } });
+    }
+    const job = aiParseJobs.get(jobId);
+    if (!job || !job.heldFiles) return res.status(404).json({ error: { message: 'That parse job has expired — re-upload the files.' } });
+    const held = job.heldFiles[fileIndex] || job.heldFiles[String(fileIndex)];
+    if (!held || !fs.existsSync(held.path)) return res.status(404).json({ error: { message: 'That print is no longer available — re-upload it.' } });
+
+    const part = await EstimatePart.findOne({ where: { id: req.params.partId, estimateId: req.params.id } });
+    if (!part) return res.status(404).json({ error: { message: 'Part not found' } });
+
+    const ext = path.extname(held.originalName).toLowerCase();
+    const mimeMap = { '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.dxf': 'application/dxf', '.stp': 'application/step', '.step': 'application/step' };
+    const mimeType = mimeMap[ext] || 'application/octet-stream';
+    const detectedType = (ext === '.dxf') ? 'cut_file' : (ext === '.stp' || ext === '.step') ? 'step_file' : 'drawing';
+
+    const result = await fileStorage.uploadFile(held.path, {
+      folder: `estimates/${req.params.id}/parts/${req.params.partId}`,
+      originalName: held.originalName,
+      mimeType
+    });
+    const stat = (() => { try { return fs.statSync(held.path).size; } catch { return null; } })();
+    const partFile = await EstimatePartFile.create({
+      partId: part.id,
+      filename: path.basename(held.path),
+      originalName: held.originalName,
+      mimeType,
+      size: stat,
+      url: result.url,
+      cloudinaryId: result.storageId,
+      fileType: detectedType
+    });
+    res.status(201).json({ data: partFile, message: 'Print attached' });
+  } catch (error) { next(error); }
+});
+
 // GET /api/estimates/:id/parts/:partId/files/:fileId/view - Get viewable URL for a part file
 router.get('/:id/parts/:partId/files/:fileId/view', async (req, res, next) => {
   try {
@@ -3469,29 +3510,11 @@ router.post('/:id/reset-conversion', async (req, res, next) => {
 const aiParseJobs = new Map();
 setInterval(() => { const now = Date.now(); for (const [k, v] of aiParseJobs) if (now - v.createdAt > 15 * 60 * 1000) aiParseJobs.delete(k); }, 60 * 1000);
 
-router.post('/:id/ai-parse-document', upload.single('file'), async (req, res, next) => {
-  let jobId = null;
+// Shared AI-parse background worker. Used by both the file-upload route and the from-email route.
+// `uploaded` is an array of { path, originalname } (multer-shaped). Sets the job result/error.
+async function runAiParse(estimate, uploaded, quoteIndex, extraNotes, jobId) {
+  const tempPaths = uploaded.map(f => f.path);
   try {
-    if (!process.env.ANTHROPIC_API_KEY) {
-      return res.status(400).json({ error: { message: 'ANTHROPIC_API_KEY not configured' } });
-    }
-
-    const estimate = await Estimate.findByPk(req.params.id, {
-      include: [{ model: EstimatePart, as: 'parts' }]
-    });
-    if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
-
-    if (!req.file) return res.status(400).json({ error: { message: 'No file uploaded' } });
-
-    // Respond right away with a job id; the AI parse continues in the background and the client polls for the result.
-    jobId = require('crypto').randomBytes(8).toString('hex');
-    aiParseJobs.set(jobId, { status: 'pending', createdAt: Date.now() });
-    res.status(202).json({ data: { jobId }, message: 'Parsing started' });
-
-    const filePath = req.file.path;
-    const fileBuffer = fs.readFileSync(filePath);
-    const base64Data = fileBuffer.toString('base64');
-    const ext = path.extname(req.file.originalname).toLowerCase();
     const clientName = estimate.clientName || 'Unknown Client';
 
     // Load general AI notes
@@ -3505,26 +3528,38 @@ router.post('/:id/ai-parse-document', upload.single('file'), async (req, res, ne
       clientNotes = client?.emailScanParsingNotes || '';
     }
 
-    // Build the content array for Claude
+    // Build the content array for Claude: every file, each preceded by a label so the AI knows which
+    // is the quote and which are prints, and can reference each print by its index for matching.
     const contentItems = [];
-
-    if (ext === '.pdf') {
+    const fileMeta = []; // parallel: { index, originalName, isQuote }
+    uploaded.forEach((f, idx) => {
+      const ext = path.extname(f.originalname).toLowerCase();
+      const isQuote = idx === quoteIndex;
+      fileMeta.push({ index: idx, originalName: f.originalname, isQuote });
       contentItems.push({
-        type: 'document',
-        source: { type: 'base64', media_type: 'application/pdf', data: base64Data }
+        type: 'text',
+        text: `--- FILE INDEX ${idx} ---\nFilename: "${f.originalname}"${isQuote ? '  (THIS IS THE QUOTE / PART LIST)' : '  (this is a PRINT/DRAWING)'}`
       });
-    } else {
-      const mimeMap = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
-      const mediaType = mimeMap[ext] || 'image/jpeg';
-      contentItems.push({
-        type: 'image',
-        source: { type: 'base64', media_type: mediaType, data: base64Data }
-      });
-    }
+      const buf = fs.readFileSync(f.path);
+      const base64Data = buf.toString('base64');
+      if (ext === '.pdf') {
+        contentItems.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64Data } });
+      } else {
+        const mimeMap = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
+        const mediaType = mimeMap[ext] || 'image/jpeg';
+        contentItems.push({ type: 'image', source: { type: 'base64', media_type: mediaType, data: base64Data } });
+      }
+    });
 
+    const anyPrints = fileMeta.some(m => !m.isQuote) && fileMeta.length > 1;
     contentItems.push({
       type: 'text',
-      text: `This is a document from client: ${clientName}. Parse it as a request for quote (RFQ) for metal rolling, forming, or fabrication services. Extract all parts, dimensions, materials, and quantities. ${req.body.additionalNotes || ''}`
+      text: `These files are from client: ${clientName}. Parse them as a request for quote (RFQ) for metal rolling, forming, or fabrication.\n`
+        + `Extract all parts, dimensions, materials, and quantities from the QUOTE/part list.\n`
+        + (anyPrints
+            ? `Then MATCH each individual print/drawing file to the part it belongs to, using the client part number (the print number the client uses to reference the part). For each print, read its part/drawing number from the DRAWING'S TITLE BLOCK first, then fall back to the filename. Only match a print to a part when you are confident (the part number clearly matches). If you cannot confidently match a print, leave it unmatched.\n`
+            : '')
+        + `${extraNotes || ''}`
     });
 
     // System prompt — reuse from email scanner with modifications for document parsing
@@ -3607,14 +3642,23 @@ Respond ONLY with valid JSON (no markdown, no backticks):
       "clientPartNumber": "",
       "unitPrice": null,
       "description": "auto-generated material description",
+      "matchedFileIndex": null,
+      "matchConfidence": "high",
       "missingFields": ["thickness"],
       "missingFieldNotes": "No thickness given"
     }
   ],
   "notes": "any delivery or project notes found",
   "documentType": "drawing" or "rfq" or "spec_sheet" or "po" or "other",
+  "unmatchedFileIndexes": [2, 4],
   "aiNotes": "summary of what was found and any issues"
-}`;
+}
+
+MATCHING RULES (when multiple files are provided):
+- "matchedFileIndex" = the FILE INDEX of the print/drawing that belongs to this part (from the "--- FILE INDEX N ---" labels). null if no print confidently matches this part.
+- "matchConfidence" = "high" only when the part number on the drawing (title block, preferred) or filename clearly matches this part's clientPartNumber; otherwise "low" or null and leave matchedFileIndex null.
+- Do NOT guess a match. A wrong drawing on a part is worse than no drawing. When unsure, leave it unmatched.
+- "unmatchedFileIndexes" = indexes of any print files you could not confidently match to a part (exclude the quote's index).`;
 
     const { getParsingModel } = require('../services/aiConfig');
     const requestBody = JSON.stringify({
@@ -3686,38 +3730,153 @@ Respond ONLY with valid JSON (no markdown, no backticks):
       throw new Error(`The AI read the document but didn't return usable data. It replied: "${snippet}${clean.length > 400 ? '…' : ''}"`);
     }
 
-    // Use buildFormData from email scanner to convert to our form format
+    // Use buildFormData from email scanner to convert to our form format. Also resolve each part's
+    // matched print into a stable reference the client can use to attach it on accept.
     const { buildFormData } = require('../services/emailScanner');
+
+    // Persist the uploaded prints to a holding area so they survive past this request and can be
+    // attached to parts when the user accepts. Keyed by file index.
+    const holdDir = path.join(path.dirname(uploaded[0].path), 'ai-prints', jobId);
+    fs.mkdirSync(holdDir, { recursive: true });
+    const heldFiles = {}; // index -> { path, originalName }
+    uploaded.forEach((f, idx) => {
+      if (idx === quoteIndex) return; // don't hold the quote itself
+      const dest = path.join(holdDir, `${idx}__${f.originalname.replace(/[^\w.\-]/g, '_')}`);
+      try { fs.copyFileSync(f.path, dest); heldFiles[idx] = { path: dest, originalName: f.originalname }; } catch {}
+    });
+
     const partsWithFormData = (parsed.parts || []).map((p, i) => {
       const formData = buildFormData(p);
+      const mfi = (p.matchedFileIndex !== undefined && p.matchedFileIndex !== null) ? parseInt(p.matchedFileIndex) : null;
+      const conf = (p.matchConfidence || '').toLowerCase();
+      // Only surface a match when it's held (a real print) AND the AI was confident.
+      const matched = (mfi !== null && heldFiles[mfi] && conf === 'high') ? {
+        fileIndex: mfi,
+        fileName: heldFiles[mfi].originalName
+      } : null;
       return {
         ...p,
         partNumber: (estimate.parts?.length || 0) + i + 1,
-        formData
+        formData,
+        matchedPrint: matched
       };
     });
 
-    // Cleanup uploaded file
-    try { fs.unlinkSync(filePath); } catch {}
+    // Unmatched prints: any held print not confidently attached to a part.
+    const attachedIdx = new Set(partsWithFormData.filter(p => p.matchedPrint).map(p => p.matchedPrint.fileIndex));
+    const unmatchedPrints = Object.entries(heldFiles)
+      .filter(([idx]) => !attachedIdx.has(parseInt(idx)))
+      .map(([idx, f]) => ({ fileIndex: parseInt(idx), fileName: f.originalName }));
 
-    console.log(`[AI-Parse] Parsed ${partsWithFormData.length} parts from ${req.file.originalname}`);
+    // Record the held-file manifest on the job so the accept step can find the files on disk.
+    const heldManifest = {};
+    Object.entries(heldFiles).forEach(([idx, f]) => { heldManifest[idx] = { path: f.path, originalName: f.originalName }; });
 
-    aiParseJobs.set(jobId, { status: 'done', createdAt: Date.now(), result: {
+    // Cleanup uploaded temp files (the prints are already copied to the hold dir)
+    tempPaths.forEach(pth => { try { fs.unlinkSync(pth); } catch {} });
+
+    console.log(`[AI-Parse] Parsed ${partsWithFormData.length} parts from ${uploaded.length} file(s); ${attachedIdx.size} print(s) auto-matched, ${unmatchedPrints.length} unmatched`);
+
+    aiParseJobs.set(jobId, { status: 'done', createdAt: Date.now(), heldFiles: heldManifest, holdDir, result: {
       parts: partsWithFormData,
       notes: parsed.notes || '',
       documentType: parsed.documentType || 'unknown',
       aiNotes: parsed.aiNotes || '',
       aiRawSnippet: (text || '').substring(0, 600),
-      fileName: req.file.originalname
+      fileName: fileMeta.map(m => m.originalName).join(', '),
+      unmatchedPrints
     } });
   } catch (error) {
-    // Cleanup on error
-    if (req.file?.path) try { fs.unlinkSync(req.file.path); } catch {}
+    tempPaths.forEach(pth => { try { fs.unlinkSync(pth); } catch {} });
+    console.error('[AI-Parse] Error:', error.message);
+    aiParseJobs.set(jobId, { status: 'error', error: error.message, createdAt: Date.now() });
+  }
+}
+
+router.post('/:id/ai-parse-document', upload.array('files', 25), async (req, res, next) => {
+  let jobId = null;
+  const tempPaths = [];
+  try {
+    if (!process.env.ANTHROPIC_API_KEY) {
+      return res.status(400).json({ error: { message: 'ANTHROPIC_API_KEY not configured' } });
+    }
+
+    const estimate = await Estimate.findByPk(req.params.id, {
+      include: [{ model: EstimatePart, as: 'parts' }]
+    });
+    if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
+
+    // Accept either the new multi-file field ('files') or a single legacy 'file'.
+    let uploaded = req.files || [];
+    if (req.file) uploaded = [...uploaded, req.file];
+    if (uploaded.length === 0) return res.status(400).json({ error: { message: 'No file uploaded' } });
+    uploaded.forEach(f => tempPaths.push(f.path));
+
+    // Respond right away with a job id; the AI parse continues in the background and the client polls.
+    jobId = require('crypto').randomBytes(8).toString('hex');
+    aiParseJobs.set(jobId, { status: 'pending', createdAt: Date.now() });
+    res.status(202).json({ data: { jobId }, message: 'Parsing started' });
+
+    // The client marks which uploaded file is the QUOTE (the list with quantities + print numbers).
+    const quoteIndexRaw = req.body.quoteIndex;
+    const quoteIndex = (quoteIndexRaw !== undefined && quoteIndexRaw !== '') ? parseInt(quoteIndexRaw) : -1;
+
+    // Kick off the shared background worker; the client polls ai-parse-status for the result.
+    runAiParse(estimate, uploaded, quoteIndex, (req.body.additionalNotes || req.body.notes || ''), jobId);
+  } catch (error) {
+    tempPaths.forEach(pth => { try { fs.unlinkSync(pth); } catch {} });
     console.error('[AI-Parse] Error:', error.message);
     if (jobId) aiParseJobs.set(jobId, { status: 'error', error: error.message, createdAt: Date.now() });
     else next(error);
   }
 });
+
+
+// POST /api/estimates/:id/ai-parse-email — fetch a Gmail message (by id or URL) with its attachments
+// and run the same AI parse. Body: { emailRef, quoteIndex?, notes? }.
+router.post('/:id/ai-parse-email', async (req, res, next) => {
+  let jobId = null;
+  const tempPaths = [];
+  try {
+    if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: { message: 'ANTHROPIC_API_KEY not configured' } });
+    const estimate = await Estimate.findByPk(req.params.id, { include: [{ model: EstimatePart, as: 'parts' }] });
+    if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
+
+    const emailRef = (req.body && req.body.emailRef || '').trim();
+    if (!emailRef) return res.status(400).json({ error: { message: 'Paste a Gmail message id or URL.' } });
+
+    const { fetchEmailAttachments } = require('../services/emailScanner');
+    const { attachments } = await fetchEmailAttachments(emailRef);
+    if (!attachments || attachments.length === 0) {
+      return res.status(400).json({ error: { message: 'That email has no PDF or image attachments to parse.' } });
+    }
+
+    // Write attachments to temp files shaped like multer uploads.
+    const uploadDir = path.join(__dirname, '..', '..', 'uploads');
+    try { fs.mkdirSync(uploadDir, { recursive: true }); } catch {}
+    const uploaded = attachments.map((a, i) => {
+      const safe = a.originalName.replace(/[^\w.\-]/g, '_');
+      const fp = path.join(uploadDir, `email-${Date.now()}-${i}-${safe}`);
+      fs.writeFileSync(fp, a.buffer);
+      tempPaths.push(fp);
+      return { path: fp, originalname: a.originalName };
+    });
+
+    const quoteIndexRaw = req.body.quoteIndex;
+    const quoteIndex = (quoteIndexRaw !== undefined && quoteIndexRaw !== '') ? parseInt(quoteIndexRaw) : -1;
+
+    jobId = require('crypto').randomBytes(8).toString('hex');
+    aiParseJobs.set(jobId, { status: 'pending', createdAt: Date.now() });
+    res.status(202).json({ data: { jobId, fileCount: uploaded.length }, message: 'Parsing started' });
+
+    runAiParse(estimate, uploaded, quoteIndex, (req.body.notes || ''), jobId);
+  } catch (error) {
+    tempPaths.forEach(pth => { try { fs.unlinkSync(pth); } catch {} });
+    if (jobId) aiParseJobs.set(jobId, { status: 'error', error: error.message, createdAt: Date.now() });
+    else next(error);
+  }
+});
+
 
 // GET /api/estimates/:id/ai-parse-status/:jobId - poll the background parse job
 router.get('/:id/ai-parse-status/:jobId', async (req, res) => {

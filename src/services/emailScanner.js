@@ -2361,8 +2361,67 @@ module.exports = {
   parseDocumentWithAI,
   getScanConfig,
   buildFormData,
-  processRetries
+  processRetries,
+  fetchEmailAttachments
 };
+
+// Fetch a Gmail message by id (accepts a raw id or a Gmail URL) and return its PDF/image attachments
+// as { originalName, buffer, mimeType }, plus the message subject/body. Tries each configured account
+// until one can read the message. Used by the AI-parse "from email" feature.
+async function fetchEmailAttachments(idOrUrl) {
+  // Extract a message id from a Gmail URL if a URL was pasted. Gmail thread/message ids are the long
+  // hex segment after the last '#.../' or '/'. Fall back to the raw string.
+  let messageId = String(idOrUrl || '').trim();
+  const urlMatch = messageId.match(/[#/]([A-Za-z0-9]{12,})\??/);
+  if (messageId.includes('mail.google.com') && urlMatch) messageId = urlMatch[1];
+  // Also handle the ?th=<id> or #inbox/<id> forms
+  const thMatch = String(idOrUrl).match(/[?&]th=([A-Za-z0-9]+)/);
+  if (thMatch) messageId = thMatch[1];
+  if (!messageId) throw new Error('Could not read a Gmail message id from that input.');
+
+  const config = await getScanConfig();
+  const accounts = (config && config.accounts) ? config.accounts.filter(a => a.enabled !== false) : [];
+  if (accounts.length === 0) throw new Error('No Gmail account is connected for scanning.');
+
+  let lastErr = null;
+  for (const account of accounts) {
+    try {
+      const gmail = await getGmailClient(account);
+      // The pasted id might be a thread id or a message id — try message first, then thread's messages.
+      let msgIds = [];
+      try {
+        await gmail.users.messages.get({ userId: 'me', id: messageId, format: 'minimal' });
+        msgIds = [messageId];
+      } catch {
+        const thread = await gmail.users.threads.get({ userId: 'me', id: messageId, format: 'full' });
+        msgIds = (thread.data.messages || []).map(m => m.id);
+      }
+      const attachments = [];
+      let subject = '';
+      for (const mid of msgIds) {
+        const full = await gmail.users.messages.get({ userId: 'me', id: mid, format: 'full' });
+        const headers = full.data.payload?.headers || [];
+        if (!subject) subject = (headers.find(h => h.name === 'Subject') || {}).value || '';
+        const walk = async (part) => {
+          if (!part) return;
+          const filename = part.filename || '';
+          const mimeType = part.mimeType || '';
+          const isDoc = /\.(pdf|png|jpe?g|gif|webp)$/i.test(filename) || /^(application\/pdf|image\/)/.test(mimeType);
+          if (filename && isDoc && part.body?.attachmentId) {
+            const att = await gmail.users.messages.attachments.get({ userId: 'me', messageId: mid, id: part.body.attachmentId });
+            const buffer = Buffer.from(att.data.data, 'base64');
+            attachments.push({ originalName: filename, buffer, mimeType: mimeType || 'application/octet-stream' });
+          }
+          for (const sub of (part.parts || [])) await walk(sub);
+        };
+        await walk(full.data.payload);
+      }
+      return { attachments, subject };
+    } catch (e) { lastErr = e; }
+  }
+  throw new Error(`Could not fetch that email from any connected account${lastErr ? ': ' + lastErr.message : ''}.`);
+}
+
 
 // Parse an uploaded image or PDF with Claude Vision API
 async function parseDocumentWithAI(fileBuffer, mimeType, clientName, parsingNotes) {

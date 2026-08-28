@@ -31,7 +31,7 @@ const cloudinary = require('cloudinary').v2;
 const fileStorage = require('../utils/storage');
 const { Op } = require('sequelize');
 const { PDFDocument: PDFLibDocument } = require('pdf-lib');
-const { WorkOrder, WorkOrderPart, WorkOrderPartFile, WorkOrderDocument, DailyActivity, DRNumber, InboundOrder, PONumber, AppSettings, Estimate, EstimatePart, Vendor, Client, Shipment, ShipmentPhoto, ShipmentCharge, sequelize } = require('../models');
+const { WorkOrder, WorkOrderPart, WorkOrderPartFile, WorkOrderDocument, DailyActivity, DRNumber, InboundOrder, PONumber, AppSettings, Estimate, EstimatePart, Vendor, Client, Shipment, ShipmentPhoto, ShipmentCharge, WorkOrderPresence, sequelize } = require('../models');
 
 // Spec label matching the other roll forms: ID/ISR, OD/OSR, CLD/CLR.
 function coneSpecLabel(measurePoint, measureType) {
@@ -1194,6 +1194,65 @@ async function archiveLinkedShipments(workOrderId) {
     console.error('[auto-archive] Failed to archive shipments:', err.message);
   }
 }
+
+// ==================== WORK ORDER PRESENCE ("in machine") ====================
+// A tablet posts a heartbeat while it has a WO detail screen open, and posts a close when it leaves.
+// The office reads active presences to show an "In Machine" overlay and float those jobs to the top.
+const PRESENCE_STALE_MS = 15 * 60 * 1000; // auto-clear after 15 min of no heartbeat
+
+// POST /api/workorders/:id/presence — heartbeat: mark this device as currently viewing this WO.
+router.post('/:id/presence', async (req, res, next) => {
+  try {
+    const { Op } = require('sequelize');
+    const workOrderId = req.params.id;
+    // Identify the device: prefer an explicit token/label in the body, fall back to auth context.
+    const deviceToken = (req.body && req.body.deviceToken) || req.headers['x-device-token'] || (req.user && req.user.username) || 'unknown';
+    const deviceLabel = (req.body && req.body.deviceLabel) || (req.user && req.user.username) || null;
+    const now = new Date();
+    // ONE JOB PER DEVICE: a tablet can only be on one work order at a time. Opening a new WO means the
+    // operator has moved on, so clear this device's presence on every OTHER work order first. This is
+    // enforced server-side so it works even if the tablet's clear-on-exit signal never lands (e.g. the
+    // operator hunts through several orders to find the right one — only the current one stays flagged).
+    await WorkOrderPresence.destroy({ where: { deviceToken, workOrderId: { [Op.ne]: workOrderId } } });
+    // Upsert on (workOrderId, deviceToken).
+    const existing = await WorkOrderPresence.findOne({ where: { workOrderId, deviceToken } });
+    if (existing) {
+      await existing.update({ lastHeartbeatAt: now, deviceLabel: deviceLabel || existing.deviceLabel });
+    } else {
+      await WorkOrderPresence.create({ workOrderId, deviceToken, deviceLabel, lastHeartbeatAt: now });
+    }
+    res.json({ data: { ok: true } });
+  } catch (error) { next(error); }
+});
+
+// DELETE /api/workorders/:id/presence — the tablet left the WO screen: clear this device's presence now.
+router.delete('/:id/presence', async (req, res, next) => {
+  try {
+    const workOrderId = req.params.id;
+    const deviceToken = (req.body && req.body.deviceToken) || req.headers['x-device-token'] || (req.user && req.user.username) || 'unknown';
+    await WorkOrderPresence.destroy({ where: { workOrderId, deviceToken } });
+    res.json({ data: { ok: true } });
+  } catch (error) { next(error); }
+});
+
+// GET /api/workorders/presence/active — list WO ids currently open on a tablet (non-stale), with who.
+router.get('/presence/active', async (req, res, next) => {
+  try {
+    const { Op } = require('sequelize');
+    const cutoff = new Date(Date.now() - PRESENCE_STALE_MS);
+    // Opportunistically purge stale rows so the table stays small and lists stay accurate.
+    await WorkOrderPresence.destroy({ where: { lastHeartbeatAt: { [Op.lt]: cutoff } } });
+    const rows = await WorkOrderPresence.findAll({ where: { lastHeartbeatAt: { [Op.gte]: cutoff } } });
+    // Collapse to one entry per WO (a WO could be open on more than one tablet).
+    const byWo = {};
+    for (const r of rows) {
+      if (!byWo[r.workOrderId]) byWo[r.workOrderId] = { workOrderId: r.workOrderId, viewers: [], lastHeartbeatAt: r.lastHeartbeatAt };
+      byWo[r.workOrderId].viewers.push(r.deviceLabel || 'Operator');
+      if (r.lastHeartbeatAt > byWo[r.workOrderId].lastHeartbeatAt) byWo[r.workOrderId].lastHeartbeatAt = r.lastHeartbeatAt;
+    }
+    res.json({ data: Object.values(byWo) });
+  } catch (error) { next(error); }
+});
 
 // GET /api/workorders - Get all work orders
 router.get('/', async (req, res, next) => {

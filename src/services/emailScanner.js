@@ -2373,15 +2373,15 @@ module.exports = {
 // used by "Convert to Estimate" in the Comm Center — the ScannedEmail row already has the real API id
 // and account, so there's no fragile URL/id parsing. Returns { attachments, subject, fromEmail, fromName }.
 async function fetchAttachmentsByMessageId(gmailMessageId, gmailAccountId) {
-  const config = await getScanConfig();
-  let accounts = (config && config.accounts) ? config.accounts : [];
-  // Prefer the exact account the email came in on; fall back to trying all enabled accounts.
-  const enabled = accounts.filter(a => a.enabled !== false);
+  // Use the real connected Gmail mailboxes (same source the scanner uses) — NOT getScanConfig(), which
+  // returns client/vendor monitoring config, not connected accounts.
+  const allAccounts = await GmailAccount.findAll({ where: { isActive: true } });
+  if (allAccounts.length === 0) throw new Error('No Gmail account is connected.');
+  // Prefer the exact account the email arrived on; fall back to trying the others.
   const ordered = [
-    ...enabled.filter(a => a.id === gmailAccountId || a.accountId === gmailAccountId),
-    ...enabled.filter(a => !(a.id === gmailAccountId || a.accountId === gmailAccountId))
+    ...allAccounts.filter(a => a.id === gmailAccountId),
+    ...allAccounts.filter(a => a.id !== gmailAccountId)
   ];
-  if (ordered.length === 0) throw new Error('No Gmail account is connected.');
   let lastErr = null;
   for (const account of ordered) {
     try {
@@ -2420,8 +2420,7 @@ async function fetchEmailAttachments(idOrUrl) {
   if (thMatch) messageId = thMatch[1];
   if (!messageId) throw new Error('Could not read a Gmail message id from that input.');
 
-  const config = await getScanConfig();
-  const accounts = (config && config.accounts) ? config.accounts.filter(a => a.enabled !== false) : [];
+  const accounts = await GmailAccount.findAll({ where: { isActive: true } });
   if (accounts.length === 0) throw new Error('No Gmail account is connected for scanning.');
 
   let lastErr = null;

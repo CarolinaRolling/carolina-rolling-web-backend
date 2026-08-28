@@ -2362,12 +2362,53 @@ module.exports = {
   getScanConfig,
   buildFormData,
   processRetries,
-  fetchEmailAttachments
+  fetchEmailAttachments,
+  fetchAttachmentsByMessageId
 };
 
 // Fetch a Gmail message by id (accepts a raw id or a Gmail URL) and return its PDF/image attachments
 // as { originalName, buffer, mimeType }, plus the message subject/body. Tries each configured account
 // until one can read the message. Used by the AI-parse "from email" feature.
+// Fetch attachments for a KNOWN Gmail API message id on a specific account. This is the reliable path
+// used by "Convert to Estimate" in the Comm Center — the ScannedEmail row already has the real API id
+// and account, so there's no fragile URL/id parsing. Returns { attachments, subject, fromEmail, fromName }.
+async function fetchAttachmentsByMessageId(gmailMessageId, gmailAccountId) {
+  const config = await getScanConfig();
+  let accounts = (config && config.accounts) ? config.accounts : [];
+  // Prefer the exact account the email came in on; fall back to trying all enabled accounts.
+  const enabled = accounts.filter(a => a.enabled !== false);
+  const ordered = [
+    ...enabled.filter(a => a.id === gmailAccountId || a.accountId === gmailAccountId),
+    ...enabled.filter(a => !(a.id === gmailAccountId || a.accountId === gmailAccountId))
+  ];
+  if (ordered.length === 0) throw new Error('No Gmail account is connected.');
+  let lastErr = null;
+  for (const account of ordered) {
+    try {
+      const gmail = await getGmailClient(account);
+      const full = await gmail.users.messages.get({ userId: 'me', id: gmailMessageId, format: 'full' });
+      const headers = full.data.payload?.headers || [];
+      const subject = (headers.find(h => h.name === 'Subject') || {}).value || '';
+      const fromRaw = (headers.find(h => h.name === 'From') || {}).value || '';
+      const attachments = [];
+      const walk = async (part) => {
+        if (!part) return;
+        const filename = part.filename || '';
+        const mimeType = part.mimeType || '';
+        const isDoc = /\.(pdf|png|jpe?g|gif|webp)$/i.test(filename) || /^(application\/pdf|image\/)/.test(mimeType);
+        if (filename && isDoc && part.body?.attachmentId) {
+          const att = await gmail.users.messages.attachments.get({ userId: 'me', messageId: gmailMessageId, id: part.body.attachmentId });
+          attachments.push({ originalName: filename, buffer: Buffer.from(att.data.data, 'base64'), mimeType: mimeType || 'application/octet-stream' });
+        }
+        for (const sub of (part.parts || [])) await walk(sub);
+      };
+      await walk(full.data.payload);
+      return { attachments, subject, fromEmail: extractEmail(fromRaw), fromName: extractName(fromRaw) };
+    } catch (e) { lastErr = e; }
+  }
+  throw new Error(`Could not fetch that email${lastErr ? ': ' + lastErr.message : ''}.`);
+}
+
 async function fetchEmailAttachments(idOrUrl) {
   // Extract a message id from a Gmail URL if a URL was pasted. Gmail thread/message ids are the long
   // hex segment after the last '#.../' or '/'. Fall back to the raw string.

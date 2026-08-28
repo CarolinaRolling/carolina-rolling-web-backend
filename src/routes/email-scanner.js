@@ -1184,4 +1184,109 @@ router.post('/parse-document', docUpload.single('file'), async (req, res, next) 
   }
 });
 
+// Find the best existing client for an inbound email, strongest signal first:
+//   1) a client whose email exactly matches the sender
+//   2) a client whose email domain matches the sender's domain
+//   3) a client whose company name appears in the sender name/email
+//   4) a client with a contact person matching the sender's name or email
+// Returns { client, reason } or { client: null } — NEVER creates a client.
+async function matchClientForEmail(fromEmail, fromName) {
+  const email = (fromEmail || '').trim().toLowerCase();
+  const name = (fromName || '').trim().toLowerCase();
+  const domain = email.includes('@') ? email.split('@')[1] : '';
+  // Generic mailbox domains shouldn't match by domain alone.
+  const genericDomains = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'aol.com', 'icloud.com', 'comcast.net', 'me.com'];
+  const clients = await Client.findAll();
+
+  // 1) exact email
+  for (const c of clients) {
+    const ce = (c.contactEmail || '').trim().toLowerCase();
+    const ae = (c.accountingContactEmail || '').trim().toLowerCase();
+    const ap = (c.apEmail || '').trim().toLowerCase();
+    if (email && (ce === email || ae === email || ap === email)) return { client: c, reason: 'exact email' };
+    // exact match against any saved contact
+    const contacts = Array.isArray(c.contacts) ? c.contacts : [];
+    if (email && contacts.some(k => (k.email || '').trim().toLowerCase() === email)) return { client: c, reason: 'contact email' };
+  }
+  // 2) domain (skip generic)
+  if (domain && !genericDomains.includes(domain)) {
+    for (const c of clients) {
+      const emails = [c.contactEmail, c.accountingContactEmail, c.apEmail, ...(Array.isArray(c.contacts) ? c.contacts.map(k => k.email) : [])]
+        .filter(Boolean).map(e => e.trim().toLowerCase());
+      if (emails.some(e => e.includes('@') && e.split('@')[1] === domain)) return { client: c, reason: 'email domain' };
+    }
+  }
+  // 3) company name appears in the sender name or the email local part
+  const haystack = `${name} ${email}`;
+  for (const c of clients) {
+    const cn = (c.name || '').trim().toLowerCase();
+    if (cn && cn.length >= 3 && haystack.includes(cn)) return { client: c, reason: 'company name' };
+  }
+  // 4) contact person name matches the sender name
+  if (name) {
+    for (const c of clients) {
+      const names = [c.contactName, ...(Array.isArray(c.contacts) ? c.contacts.map(k => k.name) : [])]
+        .filter(Boolean).map(n => n.trim().toLowerCase());
+      if (names.some(n => n.length >= 4 && (n === name || name.includes(n) || n.includes(name)))) return { client: c, reason: 'contact name' };
+    }
+  }
+  return { client: null };
+}
+
+// POST /api/email-scanner/convert-to-estimate/:scannedEmailId
+// Body (optional): { clientId }  — if the caller has chosen/created a client, use it.
+// Behavior: finds the sender's client (unless clientId given). If no client can be resolved, returns
+// 409 with the sender info + best guess so the UI can prompt to pick/create — it NEVER auto-creates a
+// client. Otherwise creates a draft estimate attached to that client and kicks off the AI parse of the
+// email's attachments in the background; the client returns a jobId to poll (same as ai-parse-document).
+router.post('/convert-to-estimate/:scannedEmailId', async (req, res, next) => {
+  try {
+    const scanned = await ScannedEmail.findByPk(req.params.scannedEmailId);
+    if (!scanned) return res.status(404).json({ error: { message: 'Email not found' } });
+
+    // Resolve the client.
+    let client = null;
+    let matchReason = null;
+    if (req.body && req.body.clientId) {
+      client = await Client.findByPk(req.body.clientId);
+      matchReason = 'chosen';
+    } else {
+      const m = await matchClientForEmail(scanned.fromEmail, scanned.fromName);
+      client = m.client; matchReason = m.reason || null;
+    }
+
+    if (!client) {
+      // No confident client — do NOT create one. Ask the UI to pick or create.
+      return res.status(409).json({
+        error: { code: 'NO_CLIENT', message: 'No matching client found for this sender. Pick an existing client or create one, then convert.' },
+        data: { fromEmail: scanned.fromEmail, fromName: scanned.fromName, subject: scanned.subject }
+      });
+    }
+
+    // Fetch the email's attachments via the reliable known-id path.
+    const { fetchAttachmentsByMessageId } = require('../services/emailScanner');
+    let attachments = [];
+    try {
+      const r = await fetchAttachmentsByMessageId(scanned.gmailMessageId, scanned.gmailAccountId);
+      attachments = r.attachments || [];
+    } catch (e) {
+      return res.status(400).json({ error: { message: 'Could not read the email attachments: ' + e.message } });
+    }
+    if (attachments.length === 0) {
+      return res.status(400).json({ error: { message: 'This email has no PDF or image attachments to parse.' } });
+    }
+
+    // Create the draft estimate + start the parse (helper lives in estimates.js so it can use the
+    // local estimate-number generator and the shared runAiParse worker).
+    try { if (!scanned.clientId) await scanned.update({ clientId: client.id }); } catch {}
+    const estimatesRouter = require('./estimates');
+    const { estimate, jobId } = await estimatesRouter.createEstimateAndParseAttachments(client, scanned, attachments, req.body.notes || '');
+
+    res.status(202).json({
+      data: { estimateId: estimate.id, estimateNumber: estimate.estimateNumber, clientId: client.id, clientName: client.name, matchReason, jobId, attachmentCount: attachments.length },
+      message: 'Estimate created; parsing attachments'
+    });
+  } catch (error) { next(error); }
+});
+
 module.exports = router;

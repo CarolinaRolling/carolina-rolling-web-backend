@@ -4132,4 +4132,31 @@ router.delete('/:id/shipment-charges/:chargeId', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// Create a draft estimate for a client and start an AI parse of in-memory attachments (used by Comm
+// Center "Convert to Estimate"). Returns { estimate, jobId }.
+router.createEstimateAndParseAttachments = async function(client, scanned, attachments, notes) {
+  const estimateNumber = generateEstimateNumber();
+  const estimate = await Estimate.create({
+    estimateNumber,
+    clientId: client.id,
+    clientName: client.name,
+    contactName: client.contactName || scanned.fromName || '',
+    contactEmail: client.contactEmail || scanned.fromEmail || '',
+    projectDescription: scanned.subject || '',
+    status: 'draft'
+  });
+  const uploadDir = path.join(__dirname, '..', '..', 'uploads');
+  try { fs.mkdirSync(uploadDir, { recursive: true }); } catch {}
+  const uploaded = attachments.map((a, i) => {
+    const safe = (a.originalName || `file-${i}`).replace(/[^\w.\-]/g, '_');
+    const fp = path.join(uploadDir, `convert-${Date.now()}-${i}-${safe}`);
+    fs.writeFileSync(fp, a.buffer);
+    return { path: fp, originalname: a.originalName || safe };
+  });
+  const jobId = require('crypto').randomBytes(8).toString('hex');
+  aiParseJobs.set(jobId, { status: 'pending', createdAt: Date.now() });
+  runAiParse(estimate, uploaded, -1, (notes || ''), jobId);
+  return { estimate, jobId };
+};
+
 module.exports = router;

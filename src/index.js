@@ -1212,20 +1212,22 @@ app.post('/api/com-center/scan-now', authenticate, async (req, res) => {
                   continue;
                 }
                 let triage;
+                let fullBody = '';
                 if (vendorAddrs[fromEmail]) {
                   triage = { category: 'vendor', isQuoteRequest: false, needsResponse: false };
+                  try { const { extractEmailBody } = require('./services/commCenter'); fullBody = extractEmailBody(detail.data.payload) || ''; } catch {}
                 } else {
                   const { classifyEmail, extractEmailBody } = require('./services/commCenter');
-                  const fullBody = extractEmailBody(detail.data.payload);
+                  fullBody = extractEmailBody(detail.data.payload) || '';
                   triage = await classifyEmail({ from: fromHeader, fromEmail, subject, snippet, body: fullBody, knownClient: clientAddrs[fromEmail] || null });
                 }
                 const category = triage.category;
                 const gmailLink = 'https://mail.google.com/mail/?authuser=' + encodeURIComponent(account.email || '') + '#all/' + msg.id;
                 const [emailRecord, created] = await ScannedEmail.findOrCreate({
                   where: { gmailMessageId: msg.id },
-                  defaults: { gmailAccountId: account.id, gmailThreadId: detail.data.threadId, fromEmail, fromName: fromName || fromEmail, subject, receivedAt: dateHeader ? new Date(dateHeader) : new Date(), commCategory: category, commIsQuoteRequest: triage.isQuoteRequest, commNeedsResponse: triage.needsResponse, commProcessed: true, commSnippet: snippet.substring(0, 500), commArchived: false, gmailLink, status: 'processed', emailType: 'comm_center' }
+                  defaults: { gmailAccountId: account.id, gmailThreadId: detail.data.threadId, fromEmail, fromName: fromName || fromEmail, subject, receivedAt: dateHeader ? new Date(dateHeader) : new Date(), commCategory: category, commIsQuoteRequest: triage.isQuoteRequest, commNeedsResponse: triage.needsResponse, commProcessed: true, commSnippet: snippet.substring(0, 500), rawBody: (fullBody || '').substring(0, 10000), commArchived: false, gmailLink, status: 'processed', emailType: 'comm_center' }
                 });
-                if (!created) await emailRecord.update({ commCategory: category, commIsQuoteRequest: triage.isQuoteRequest, commNeedsResponse: triage.needsResponse, commProcessed: true, commSnippet: snippet.substring(0, 500), gmailLink });
+                if (!created) await emailRecord.update({ commCategory: category, commIsQuoteRequest: triage.isQuoteRequest, commNeedsResponse: triage.needsResponse, commProcessed: true, commSnippet: snippet.substring(0, 500), ...(fullBody ? { rawBody: fullBody.substring(0, 10000) } : {}), gmailLink });
                 await gmail.users.messages.modify({ userId: 'me', id: msg.id, requestBody: { addLabelIds: [commLabelId] } });
               } catch (msgErr) { console.error('[CommScanner] msg error:', msgErr.message); }
             }
@@ -3061,11 +3063,13 @@ Please confirm with the operator and mark the order complete if ready.`,
 
                 // Classify (body-aware via snippet) — category + quote/needs-response flags
                 let triage;
+                let fullBody = '';
                 if (vendorAddrs[fromEmail]) {
                   triage = { category: 'vendor', isQuoteRequest: false, needsResponse: false };
+                  try { const { extractEmailBody } = require('./services/commCenter'); fullBody = extractEmailBody(detail.data.payload) || ''; } catch {}
                 } else {
                   const { classifyEmail, extractEmailBody } = require('./services/commCenter');
-                  const fullBody = extractEmailBody(detail.data.payload);
+                  fullBody = extractEmailBody(detail.data.payload) || '';
                   triage = await classifyEmail({ from: fromHeader, fromEmail, subject, snippet, body: fullBody, knownClient: clientAddrs[fromEmail] || null });
                 }
                 const category = triage.category;
@@ -3074,9 +3078,9 @@ Please confirm with the operator and mark the order complete if ready.`,
                 const gmailLink = 'https://mail.google.com/mail/?authuser=' + encodeURIComponent(account.email || '') + '#all/' + msg.id;
                 const [emailRec2, created2] = await ScannedEmail.findOrCreate({
                   where: { gmailMessageId: msg.id },
-                  defaults: { gmailAccountId: account.id, gmailThreadId: detail.data.threadId, fromEmail, fromName: fromName || fromEmail, subject, receivedAt: dateHeader ? new Date(dateHeader) : new Date(), commCategory: category, commIsQuoteRequest: triage.isQuoteRequest, commNeedsResponse: triage.needsResponse, commProcessed: true, commSnippet: snippet.substring(0, 500), commArchived: false, gmailLink, status: 'processed', emailType: 'comm_center' }
+                  defaults: { gmailAccountId: account.id, gmailThreadId: detail.data.threadId, fromEmail, fromName: fromName || fromEmail, subject, receivedAt: dateHeader ? new Date(dateHeader) : new Date(), commCategory: category, commIsQuoteRequest: triage.isQuoteRequest, commNeedsResponse: triage.needsResponse, commProcessed: true, commSnippet: snippet.substring(0, 500), rawBody: (fullBody || '').substring(0, 10000), commArchived: false, gmailLink, status: 'processed', emailType: 'comm_center' }
                 });
-                if (!created2) await emailRec2.update({ commCategory: category, commIsQuoteRequest: triage.isQuoteRequest, commNeedsResponse: triage.needsResponse, commProcessed: true, commSnippet: snippet.substring(0, 500), gmailLink });
+                if (!created2) await emailRec2.update({ commCategory: category, commIsQuoteRequest: triage.isQuoteRequest, commNeedsResponse: triage.needsResponse, commProcessed: true, commSnippet: snippet.substring(0, 500), ...(fullBody ? { rawBody: fullBody.substring(0, 10000) } : {}), gmailLink });
 
                 // Apply label
                 await gmail.users.messages.modify({ userId: 'me', id: msg.id, requestBody: { addLabelIds: [commLabelId] } });

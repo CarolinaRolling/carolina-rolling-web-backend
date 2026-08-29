@@ -3034,6 +3034,30 @@ const DeviceToken = sequelize.define('DeviceToken', {
 // office can see what's "in the machine" right now. One row per (workOrderId, deviceLabel). The tablet
 // sends a heartbeat while the WO detail screen is open and a close signal when it leaves; a row is
 // considered stale (auto-cleared) if lastHeartbeatAt is older than the timeout (~15 min).
+// Convert-to-Estimate queue: each row is one scanned email queued for AI conversion. A background
+// worker processes them one at a time. Items that can't match a client park in 'needs_client' and the
+// worker moves on; the user resolves them later, which re-queues them with a chosen clientId.
+const ConvertQueueItem = sequelize.define('ConvertQueueItem', {
+  id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+  scannedEmailId: { type: DataTypes.UUID, allowNull: false },
+  fromEmail: { type: DataTypes.STRING, allowNull: true },
+  fromName: { type: DataTypes.STRING, allowNull: true },
+  subject: { type: DataTypes.STRING, allowNull: true },
+  // queued -> processing -> done | needs_client | error
+  status: { type: DataTypes.STRING, allowNull: false, defaultValue: 'queued' },
+  clientId: { type: DataTypes.UUID, allowNull: true },        // chosen/matched client
+  clientName: { type: DataTypes.STRING, allowNull: true },
+  estimateId: { type: DataTypes.UUID, allowNull: true },      // set when done
+  estimateNumber: { type: DataTypes.STRING, allowNull: true },
+  partsCreated: { type: DataTypes.INTEGER, allowNull: true },
+  errorMessage: { type: DataTypes.TEXT, allowNull: true },
+  attempts: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 }
+}, {
+  tableName: 'convert_queue_items',
+  timestamps: true,
+  indexes: [ { fields: ['status'] }, { fields: ['scannedEmailId'] } ]
+});
+
 const WorkOrderPresence = sequelize.define('WorkOrderPresence', {
   id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
   workOrderId: { type: DataTypes.UUID, allowNull: false },
@@ -3894,6 +3918,7 @@ module.exports = {
   ApiKey,
   DeviceToken,
   WorkOrderPresence,
+  ConvertQueueItem,
   ShopSupply,
   ShopSupplyLog,
   TodoItem,

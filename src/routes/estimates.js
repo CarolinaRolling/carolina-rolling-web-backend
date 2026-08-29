@@ -3508,6 +3508,8 @@ router.post('/:id/reset-conversion', async (req, res, next) => {
 // POST /api/estimates/:id/ai-parse-document - Upload image/PDF and parse with AI
 // In-memory AI-parse jobs so the long AI call runs in the background (Heroku kills any HTTP request at 30s).
 const aiParseJobs = new Map();
+// Let other modules (e.g. the convert queue worker) read a job's status/result.
+router.getAiJob = (jobId) => aiParseJobs.get(jobId);
 setInterval(() => { const now = Date.now(); for (const [k, v] of aiParseJobs) if (now - v.createdAt > 15 * 60 * 1000) aiParseJobs.delete(k); }, 60 * 1000);
 
 // Shared AI-parse background worker. Used by both the file-upload route and the from-email route.
@@ -3792,7 +3794,11 @@ MATCHING RULES (when multiple files are provided):
     // AUTO-CREATE path (Comm Center "Convert to Estimate"): there's no interactive Accept step, so
     // build and persist the parts here, mirroring the frontend accept handler, and attach matched prints.
     let autoCreated = 0, autoAttached = 0;
+    let autoErrors = [];
     if (autoCreate) {
+      const VALID_PART_TYPES = ['plate_roll','shaped_plate','section_roll','angle_roll','beam_roll','pipe_roll','tube_roll','channel_roll','flat_bar','cone_roll','tee_bar','press_brake','flat_stock','fab_service','shop_rate','rush_service','inspection','other'];
+      const VALID_ROLL_TYPES = ['easy_way','hard_way','on_edge'];
+      const VALID_MATERIAL_SOURCES = ['customer_supplied','we_supply','we_order','in_stock'];
       for (const p of partsWithFormData) {
         try {
           const fd = { ...(p.formData || {}) };
@@ -3805,10 +3811,16 @@ MATCHING RULES (when multiple files are provided):
           if (p.rollType) fd.rollType = p.rollType;
           if (p.description) fd._materialDescription = p.description;
 
+          // Sanitize ENUM fields — an empty string or unexpected value breaks the Postgres ENUM column
+          // and would throw, silently killing this part's creation.
+          const partType = VALID_PART_TYPES.includes(p.partType) ? p.partType : 'plate_roll';
+          const rollType = VALID_ROLL_TYPES.includes(p.rollType) ? p.rollType : null;
+          const materialSource = VALID_MATERIAL_SOURCES.includes(p.materialSource) ? p.materialSource : 'customer_supplied';
+
           let partData = cleanNumericFields({
             estimateId: estimate.id,
             partNumber: p.partNumber,
-            partType: p.partType || 'plate_roll',
+            partType,
             quantity: parseInt(p.quantity) || 1,
             material: p.material || '',
             thickness: p.thickness || '',
@@ -3820,15 +3832,16 @@ MATCHING RULES (when multiple files are provided):
             radius: p.radius || '',
             diameter: p.diameter || p.outerDiameter || '',
             arcDegrees: p.arcDegrees || '',
-            rollType: p.rollType || '',
+            rollType,
             flangeOut: p.flangeOut || false,
             specialInstructions: p.specialInstructions || '',
             clientPartNumber: p.clientPartNumber || '',
             materialDescription: p.description || '',
-            materialSource: p.materialSource || 'customer_supplied',
+            materialSource,
             laborTotal: fd.laborTotal || '',
             formData: fd
           });
+          if (partData.rollType === '') partData.rollType = null;
           partData = extractFormData(partData);
           const createdPart = await EstimatePart.create(partData);
           autoCreated++;
@@ -3846,7 +3859,7 @@ MATCHING RULES (when multiple files are provided):
               autoAttached++;
             } catch (attErr) { console.warn('[AI-Parse] auto-attach failed:', attErr.message); }
           }
-        } catch (cErr) { console.error('[AI-Parse] auto-create part failed:', cErr.message); }
+        } catch (cErr) { console.error('[AI-Parse] auto-create part failed:', cErr.message); autoErrors.push(`Part ${p.partNumber || '?'}: ${cErr.message}`); }
       }
       // Recompute estimate totals now that parts exist.
       try {
@@ -3854,7 +3867,8 @@ MATCHING RULES (when multiple files are provided):
         const totals = await calculateEstimateTotalsWithMinimums(freshParts, estimate);
         if (totals) await estimate.update(totals);
       } catch (tErr) { console.warn('[AI-Parse] totals recompute failed:', tErr.message); }
-      console.log(`[AI-Parse] Auto-created ${autoCreated} parts, attached ${autoAttached} prints to estimate ${estimate.id}`);
+      console.log(`[AI-Parse] Auto-created ${autoCreated} parts, attached ${autoAttached} prints to estimate ${estimate.id}${autoErrors.length ? ' — ' + autoErrors.length + ' failed: ' + autoErrors.join('; ') : ''}`);
+      if (autoErrors.length) { runAiParse._lastAutoErrors = autoErrors; }
     }
 
     aiParseJobs.set(jobId, { status: 'done', createdAt: Date.now(), heldFiles: heldManifest, holdDir, autoCreated, autoAttached, result: {
@@ -3865,7 +3879,8 @@ MATCHING RULES (when multiple files are provided):
       aiRawSnippet: (text || '').substring(0, 600),
       fileName: fileMeta.map(m => m.originalName).join(', '),
       unmatchedPrints,
-      autoCreated, autoAttached
+      autoCreated, autoAttached,
+      autoErrors
     } });
   } catch (error) {
     tempPaths.forEach(pth => { try { fs.unlinkSync(pth); } catch {} });

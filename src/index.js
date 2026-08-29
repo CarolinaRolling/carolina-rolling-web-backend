@@ -2613,6 +2613,31 @@ async function startServer() {
         await sequelize.query(`CREATE INDEX IF NOT EXISTS wop_wo_idx ON work_order_presence ("workOrderId")`);
         console.log('Ensured work_order_presence table');
       } catch (e) { console.log('work_order_presence migration:', e.message); }
+      // Convert-to-Estimate queue.
+      try {
+        await sequelize.query(`
+          CREATE TABLE IF NOT EXISTS convert_queue_items (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            "scannedEmailId" UUID NOT NULL,
+            "fromEmail" VARCHAR(255),
+            "fromName" VARCHAR(255),
+            subject VARCHAR(255),
+            status VARCHAR(32) NOT NULL DEFAULT 'queued',
+            "clientId" UUID,
+            "clientName" VARCHAR(255),
+            "estimateId" UUID,
+            "estimateNumber" VARCHAR(255),
+            "partsCreated" INTEGER,
+            "errorMessage" TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+            "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+          )
+        `);
+        await sequelize.query(`CREATE INDEX IF NOT EXISTS cqi_status_idx ON convert_queue_items (status)`);
+        await sequelize.query(`CREATE INDEX IF NOT EXISTS cqi_email_idx ON convert_queue_items ("scannedEmailId")`);
+        console.log('Ensured convert_queue_items table');
+      } catch (e) { console.log('convert_queue_items migration:', e.message); }
       await sequelize.query(`ALTER TABLE work_order_part_files ADD COLUMN IF NOT EXISTS "vendorPortalVisible" BOOLEAN DEFAULT false NOT NULL`);
       await sequelize.query(`
         CREATE TABLE IF NOT EXISTS vendor_issues (

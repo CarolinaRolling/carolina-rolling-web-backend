@@ -1,5 +1,5 @@
 const express = require('express');
-const { GmailAccount, ScannedEmail, PendingOrder, Client, Vendor, Estimate, EstimatePart, EstimateFile, WorkOrder, WorkOrderPart, AppSettings, sequelize } = require('../models');
+const { GmailAccount, ScannedEmail, PendingOrder, Client, Vendor, Estimate, EstimatePart, EstimateFile, WorkOrder, WorkOrderPart, AppSettings, ConvertQueueItem, sequelize } = require('../models');
 const { getOAuth2Client, runScan, getScanConfig } = require('../services/emailScanner');
 const { Op } = require('sequelize');
 
@@ -1288,5 +1288,146 @@ router.post('/convert-to-estimate/:scannedEmailId', async (req, res, next) => {
     });
   } catch (error) { next(error); }
 });
+
+// ==================== CONVERT-TO-ESTIMATE QUEUE ====================
+// A single background worker processes queued emails one at a time. Items with no confident client
+// match are parked as 'needs_client' (the worker keeps going); the user resolves them later.
+let convertWorkerRunning = false;
+
+async function processConvertItem(item) {
+  await item.update({ status: 'processing', attempts: (item.attempts || 0) + 1 });
+  const scanned = await ScannedEmail.findByPk(item.scannedEmailId);
+  if (!scanned) { await item.update({ status: 'error', errorMessage: 'Scanned email no longer exists.' }); return; }
+
+  // Resolve client: use the chosen clientId if the item carries one, else try to match.
+  let client = null, matchReason = null;
+  if (item.clientId) { client = await Client.findByPk(item.clientId); matchReason = 'chosen'; }
+  if (!client) {
+    const m = await matchClientForEmail(scanned.fromEmail, scanned.fromName);
+    client = m.client; matchReason = m.reason || null;
+  }
+  if (!client) {
+    // Park it — no client. Worker moves on to the next item.
+    await item.update({ status: 'needs_client', errorMessage: null });
+    return;
+  }
+
+  // Fetch attachments.
+  const { fetchAttachmentsByMessageId } = require('../services/emailScanner');
+  let attachments = [];
+  try {
+    const r = await fetchAttachmentsByMessageId(scanned.gmailMessageId, scanned.gmailAccountId);
+    attachments = r.attachments || [];
+  } catch (e) {
+    await item.update({ status: 'error', errorMessage: 'Could not read attachments: ' + e.message, clientId: client.id, clientName: client.name });
+    return;
+  }
+  if (attachments.length === 0) {
+    await item.update({ status: 'error', errorMessage: 'No PDF/image attachments to parse.', clientId: client.id, clientName: client.name });
+    return;
+  }
+
+  try { if (!scanned.clientId) await scanned.update({ clientId: client.id }); } catch {}
+  const estimatesRouter = require('./estimates');
+  const { estimate, jobId } = await estimatesRouter.createEstimateAndParseAttachments(client, scanned, attachments, '');
+
+  // Wait for the parse+auto-create to finish so we can record the part count on the queue item.
+  const started = Date.now();
+  let parts = null, parseErr = null;
+  while (Date.now() - started < 3 * 60 * 1000) {
+    await new Promise(r => setTimeout(r, 2500));
+    const job = estimatesRouter.getAiJob ? estimatesRouter.getAiJob(jobId) : null;
+    if (job && job.status === 'done') { parts = job.autoCreated ?? (job.result?.autoCreated) ?? 0; break; }
+    if (job && job.status === 'error') { parseErr = job.error || 'parse failed'; break; }
+  }
+  await item.update({
+    status: parseErr ? 'error' : 'done',
+    clientId: client.id, clientName: client.name,
+    estimateId: estimate.id, estimateNumber: estimate.estimateNumber,
+    partsCreated: parts, errorMessage: parseErr || null
+  });
+}
+
+async function runConvertWorker() {
+  if (convertWorkerRunning) return;
+  convertWorkerRunning = true;
+  try {
+    // Process queued items until none remain (single-flight; one at a time).
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const next = await ConvertQueueItem.findOne({ where: { status: 'queued' }, order: [['createdAt', 'ASC']] });
+      if (!next) break;
+      try { await processConvertItem(next); }
+      catch (e) { try { await next.update({ status: 'error', errorMessage: e.message }); } catch {} }
+    }
+  } finally {
+    convertWorkerRunning = false;
+  }
+}
+
+// POST /api/email-scanner/convert-queue  { scannedEmailId, clientId? } — add an email to the queue.
+router.post('/convert-queue', async (req, res, next) => {
+  try {
+    const { scannedEmailId, clientId } = req.body || {};
+    if (!scannedEmailId) return res.status(400).json({ error: { message: 'scannedEmailId is required' } });
+    const scanned = await ScannedEmail.findByPk(scannedEmailId);
+    if (!scanned) return res.status(404).json({ error: { message: 'Email not found' } });
+    // Avoid duplicate active items for the same email.
+    let item = await ConvertQueueItem.findOne({ where: { scannedEmailId, status: ['queued', 'processing', 'needs_client'] } });
+    if (item) {
+      if (clientId) await item.update({ clientId, status: 'queued' });
+    } else {
+      item = await ConvertQueueItem.create({
+        scannedEmailId, clientId: clientId || null,
+        fromEmail: scanned.fromEmail, fromName: scanned.fromName, subject: scanned.subject,
+        status: 'queued'
+      });
+    }
+    setImmediate(runConvertWorker); // kick the worker (no-op if already running)
+    res.status(202).json({ data: item, message: 'Added to queue' });
+  } catch (error) { next(error); }
+});
+
+// POST /api/email-scanner/convert-queue/:id/resolve  { clientId } — assign a client to a parked item.
+router.post('/convert-queue/:id/resolve', async (req, res, next) => {
+  try {
+    const { clientId } = req.body || {};
+    if (!clientId) return res.status(400).json({ error: { message: 'clientId is required' } });
+    const item = await ConvertQueueItem.findByPk(req.params.id);
+    if (!item) return res.status(404).json({ error: { message: 'Queue item not found' } });
+    const client = await Client.findByPk(clientId);
+    await item.update({ clientId, clientName: client?.name || null, status: 'queued', errorMessage: null });
+    setImmediate(runConvertWorker);
+    res.json({ data: item, message: 'Re-queued with client' });
+  } catch (error) { next(error); }
+});
+
+// GET /api/email-scanner/convert-queue — list queue items (most recent first).
+router.get('/convert-queue', async (req, res, next) => {
+  try {
+    const items = await ConvertQueueItem.findAll({ order: [['createdAt', 'DESC']], limit: 100 });
+    const counts = { queued: 0, processing: 0, needs_client: 0, done: 0, error: 0 };
+    items.forEach(i => { counts[i.status] = (counts[i.status] || 0) + 1; });
+    res.json({ data: items, counts });
+  } catch (error) { next(error); }
+});
+
+// DELETE /api/email-scanner/convert-queue/:id — remove an item (dismiss a done/error/parked row).
+router.delete('/convert-queue/:id', async (req, res, next) => {
+  try {
+    await ConvertQueueItem.destroy({ where: { id: req.params.id } });
+    res.json({ data: { ok: true } });
+  } catch (error) { next(error); }
+});
+
+// On boot, resume any items left mid-flight by a restart (processing -> queued) and kick the worker.
+async function resumeConvertQueueOnBoot() {
+  try {
+    await ConvertQueueItem.update({ status: 'queued' }, { where: { status: 'processing' } });
+    const pending = await ConvertQueueItem.count({ where: { status: 'queued' } });
+    if (pending > 0) setImmediate(runConvertWorker);
+  } catch (e) { console.log('[ConvertQueue] resume on boot:', e.message); }
+}
+setTimeout(resumeConvertQueueOnBoot, 8000); // after DB/migrations settle
 
 module.exports = router;

@@ -1198,9 +1198,13 @@ async function archiveLinkedShipments(workOrderId) {
 // ==================== WORK ORDER PRESENCE ("in machine") ====================
 // A tablet posts a heartbeat while it has a WO detail screen open, and posts a close when it leaves.
 // The office reads active presences to show an "In Machine" overlay and float those jobs to the top.
-const PRESENCE_STALE_MS = 15 * 60 * 1000; // auto-clear after 15 min of no heartbeat
+// "In machine" markers are sticky — set when a tablet claims a job, cleared only when the job completes
+// or the tablet claims another job. There is intentionally no heartbeat timeout.
 
 // POST /api/workorders/:id/presence — heartbeat: mark this device as currently viewing this WO.
+// POST /api/workorders/:id/presence — CLAIM this job as "in machine" for this tablet. The marker is
+// sticky: it stays until the job is completed or this tablet claims a different job. (The Android app
+// still pings periodically, which just refreshes the row; there's no timeout that removes it.)
 router.post('/:id/presence', async (req, res, next) => {
   try {
     const { Op } = require('sequelize');
@@ -1209,10 +1213,7 @@ router.post('/:id/presence', async (req, res, next) => {
     const deviceToken = (req.body && req.body.deviceToken) || req.headers['x-device-token'] || (req.user && req.user.username) || 'unknown';
     const deviceLabel = (req.body && req.body.deviceLabel) || (req.user && req.user.username) || null;
     const now = new Date();
-    // ONE JOB PER DEVICE: a tablet can only be on one work order at a time. Opening a new WO means the
-    // operator has moved on, so clear this device's presence on every OTHER work order first. This is
-    // enforced server-side so it works even if the tablet's clear-on-exit signal never lands (e.g. the
-    // operator hunts through several orders to find the right one — only the current one stays flagged).
+    // ONE JOB PER DEVICE: claiming a new WO moves this tablet's marker off any other WO.
     await WorkOrderPresence.destroy({ where: { deviceToken, workOrderId: { [Op.ne]: workOrderId } } });
     // Upsert on (workOrderId, deviceToken).
     const existing = await WorkOrderPresence.findOne({ where: { workOrderId, deviceToken } });
@@ -1225,24 +1226,27 @@ router.post('/:id/presence', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-// DELETE /api/workorders/:id/presence — the tablet left the WO screen: clear this device's presence now.
+// DELETE /api/workorders/:id/presence — explicitly clear a marker (used when a job is completed, or if
+// the office/tablet needs to manually remove it). NOT called merely on leaving the WO screen anymore.
 router.delete('/:id/presence', async (req, res, next) => {
   try {
     const workOrderId = req.params.id;
-    const deviceToken = (req.body && req.body.deviceToken) || req.headers['x-device-token'] || (req.user && req.user.username) || 'unknown';
-    await WorkOrderPresence.destroy({ where: { workOrderId, deviceToken } });
+    const deviceToken = req.body && req.body.deviceToken;
+    // If a specific device is given, clear just that device's marker; otherwise clear the WO's markers.
+    if (deviceToken) {
+      await WorkOrderPresence.destroy({ where: { workOrderId, deviceToken } });
+    } else {
+      await WorkOrderPresence.destroy({ where: { workOrderId } });
+    }
     res.json({ data: { ok: true } });
   } catch (error) { next(error); }
 });
 
-// GET /api/workorders/presence/active — list WO ids currently open on a tablet (non-stale), with who.
+// GET /api/workorders/presence/active — list WO ids currently marked "in machine". Markers are STICKY:
+// they persist until the job is completed or that tablet opens a different job. No time-based purge.
 router.get('/presence/active', async (req, res, next) => {
   try {
-    const { Op } = require('sequelize');
-    const cutoff = new Date(Date.now() - PRESENCE_STALE_MS);
-    // Opportunistically purge stale rows so the table stays small and lists stay accurate.
-    await WorkOrderPresence.destroy({ where: { lastHeartbeatAt: { [Op.lt]: cutoff } } });
-    const rows = await WorkOrderPresence.findAll({ where: { lastHeartbeatAt: { [Op.gte]: cutoff } } });
+    const rows = await WorkOrderPresence.findAll();
     // Collapse to one entry per WO (a WO could be open on more than one tablet).
     const byWo = {};
     for (const r of rows) {
@@ -2259,6 +2263,8 @@ router.post('/:id/mark-complete', async (req, res, next) => {
       status: 'stored',
       completedAt: now
     });
+    // Job is done — clear its "in machine" marker(s) so it stops showing as being worked.
+    try { await WorkOrderPresence.destroy({ where: { workOrderId: workOrder.id } }); } catch {}
     
     res.json({ data: workOrder, message: 'Order marked complete and moved to Stored' });
 
@@ -2895,6 +2901,10 @@ router.put('/:id', async (req, res, next) => {
         updates.pickedUpAt = new Date();
         if (pickedUpBy) updates.pickedUpBy = pickedUpBy;
         if (signatureData) updates.signatureData = signatureData;
+      }
+      // Job reached a done state — clear its "in machine" marker(s).
+      if (['completed', 'stored', 'shipped', 'archived'].includes(status)) {
+        try { await WorkOrderPresence.destroy({ where: { workOrderId: workOrder.id } }); } catch {}
       }
     }
 

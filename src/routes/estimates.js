@@ -4246,6 +4246,8 @@ router.createEstimateAndParseAttachments = async function(client, scanned, attac
     contactEmail,
     contactPhone,
     projectDescription: scanned.subject || '',
+    emailLink: scanned.gmailLink || null,   // click-through to the source email, like the normal flow
+    scannedEmailId: scanned.id,
     status: 'draft'
   });
   const uploadDir = path.join(__dirname, '..', '..', 'uploads');

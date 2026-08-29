@@ -359,6 +359,9 @@ router.get('/supplier-emails', async (req, res, next) => {
       parseConfidence: e.parseConfidence,
       estimateId: e.estimateId,
       linkedEstimate: e.estimateId ? (estMap[e.estimateId] || null) : null,
+      // Whether the AI classified this as a request-for-quote — used to show the Convert button only
+      // on RFQ emails. Covers both the AI emailType and the Comm Center quote-request flag.
+      isRfq: e.emailType === 'rfq' || e.commIsQuoteRequest === true,
       rawBody: e.rawBody ? String(e.rawBody).substring(0, 5000) : null,
     }));
     res.json({ data });

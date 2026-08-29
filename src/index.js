@@ -2611,6 +2611,7 @@ async function startServer() {
         `);
         await sequelize.query(`CREATE UNIQUE INDEX IF NOT EXISTS wop_wo_device_uniq ON work_order_presence ("workOrderId", "deviceToken")`);
         await sequelize.query(`CREATE INDEX IF NOT EXISTS wop_wo_idx ON work_order_presence ("workOrderId")`);
+        await sequelize.query(`ALTER TABLE work_order_presence ADD COLUMN IF NOT EXISTS "isEstimator" BOOLEAN NOT NULL DEFAULT false`);
         console.log('Ensured work_order_presence table');
       } catch (e) { console.log('work_order_presence migration:', e.message); }
       // Convert-to-Estimate queue.

@@ -1212,15 +1212,16 @@ router.post('/:id/presence', async (req, res, next) => {
     // Identify the device: prefer an explicit token/label in the body, fall back to auth context.
     const deviceToken = (req.body && req.body.deviceToken) || req.headers['x-device-token'] || (req.user && req.user.username) || 'unknown';
     const deviceLabel = (req.body && req.body.deviceLabel) || (req.user && req.user.username) || null;
+    const isEstimator = !!(req.body && req.body.isEstimator);
     const now = new Date();
     // ONE JOB PER DEVICE: claiming a new WO moves this tablet's marker off any other WO.
     await WorkOrderPresence.destroy({ where: { deviceToken, workOrderId: { [Op.ne]: workOrderId } } });
     // Upsert on (workOrderId, deviceToken).
     const existing = await WorkOrderPresence.findOne({ where: { workOrderId, deviceToken } });
     if (existing) {
-      await existing.update({ lastHeartbeatAt: now, deviceLabel: deviceLabel || existing.deviceLabel });
+      await existing.update({ lastHeartbeatAt: now, deviceLabel: deviceLabel || existing.deviceLabel, isEstimator });
     } else {
-      await WorkOrderPresence.create({ workOrderId, deviceToken, deviceLabel, lastHeartbeatAt: now });
+      await WorkOrderPresence.create({ workOrderId, deviceToken, deviceLabel, isEstimator, lastHeartbeatAt: now });
     }
     res.json({ data: { ok: true } });
   } catch (error) { next(error); }
@@ -1246,6 +1247,11 @@ router.delete('/:id/presence', async (req, res, next) => {
 // they persist until the job is completed or that tablet opens a different job. No time-based purge.
 router.get('/presence/active', async (req, res, next) => {
   try {
+    const { Op } = require('sequelize');
+    // Operator markers are sticky (no timeout). ESTIMATOR markers time out after 3 min of no heartbeat,
+    // so an estimator/owner glancing at a job to inspect it doesn't leave a lingering "in machine" tag.
+    const estimatorCutoff = new Date(Date.now() - 3 * 60 * 1000);
+    await WorkOrderPresence.destroy({ where: { isEstimator: true, lastHeartbeatAt: { [Op.lt]: estimatorCutoff } } });
     const rows = await WorkOrderPresence.findAll();
     // Collapse to one entry per WO (a WO could be open on more than one tablet).
     const byWo = {};

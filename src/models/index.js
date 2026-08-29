@@ -3063,6 +3063,7 @@ const WorkOrderPresence = sequelize.define('WorkOrderPresence', {
   workOrderId: { type: DataTypes.UUID, allowNull: false },
   deviceLabel: { type: DataTypes.STRING, allowNull: true },   // operator / tablet name for display
   deviceToken: { type: DataTypes.TEXT, allowNull: true },     // which device (for de-dupe)
+  isEstimator: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false }, // estimator markers time out; operator markers are sticky
   lastHeartbeatAt: { type: DataTypes.DATE, allowNull: false, defaultValue: DataTypes.NOW }
 }, {
   tableName: 'work_order_presence',

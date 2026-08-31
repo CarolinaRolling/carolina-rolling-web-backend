@@ -220,23 +220,37 @@ router.post('/', upload.single('file'), async (req, res, next) => {
     if (!process.env.ANTHROPIC_API_KEY) return res.status(400).json({ error: { message: 'ANTHROPIC_API_KEY not configured' } });
     if (!req.file) return res.status(400).json({ error: { message: 'No file uploaded' } });
 
+    // Sanitize + cap the original name. Scanner/watcher leftovers can produce absurdly long or odd names
+    // (e.g. chained UUIDs) that could blow past column limits or upset the storage key — never let that 500.
+    const rawName = req.file.originalname || 'scan.pdf';
+    const ext = path.extname(rawName) || '.pdf';
+    let safeName = path.basename(rawName, ext).replace(/[^\w.\- ]/g, '').slice(0, 120).trim() || 'scan';
+    safeName = `${safeName}${ext}`;
+
     // Store a permanent copy so the review card can show the scan.
     let stored = { url: null, storageId: null };
     try {
       stored = await fileStorage.uploadFile(req.file.path, {
         folder: 'inbound-paperwork',
-        originalName: req.file.originalname,
+        originalName: safeName,
         mimeType: req.file.mimetype
       });
     } catch (e) { console.warn('[InboundPaperwork] store copy failed:', e.message); }
 
-    const item = await InboundPaperwork.create({
-      originalName: req.file.originalname,
-      fileUrl: stored.url,
-      storageId: stored.storageId,
-      mimeType: req.file.mimetype,
-      status: 'queued'
-    });
+    let item;
+    try {
+      item = await InboundPaperwork.create({
+        originalName: safeName,
+        fileUrl: stored.url,
+        storageId: stored.storageId,
+        mimeType: req.file.mimetype,
+        status: 'queued'
+      });
+    } catch (e) {
+      console.error('[InboundPaperwork] create failed:', e.message);
+      try { fs.unlinkSync(req.file.path); } catch {}
+      return res.status(400).json({ error: { message: 'Could not queue this scan: ' + e.message } });
+    }
 
     res.status(202).json({ data: item, message: 'Uploaded — classifying' });
 
@@ -273,6 +287,7 @@ router.post('/:id/confirm', async (req, res, next) => {
 
     if (action === 'receive_supplier_material') {
       // Mark the inbound order received + flip its WO out of waiting_for_materials, and attach the scan.
+      let woForCheck = null;
       if (inboundOrderId) {
         const inbound = await InboundOrder.findByPk(inboundOrderId);
         if (inbound) {
@@ -281,12 +296,26 @@ router.post('/:id/confirm', async (req, res, next) => {
             const { WorkOrderPart } = require('../models');
             await WorkOrderPart.update({ materialReceived: true, materialReceivedAt: new Date() }, { where: { workOrderId: inbound.workOrderId, materialOrdered: true } });
             const wo = await WorkOrder.findByPk(inbound.workOrderId);
+            woForCheck = wo;
             if (wo && wo.status === 'waiting_for_materials') await wo.update({ status: 'received', allMaterialReceived: true });
             resultRef = wo ? (wo.drNumber ? `DR-${wo.drNumber}` : wo.orderNumber) : null;
           }
         }
       }
       await attachScanToWorkOrder(item, workOrderId);
+      // Did the dock employee actually register a shipment for this work order? If NOT, the office is
+      // receiving off the paper alone — flag it so they can ask the receiving employee to receive it.
+      if (woForCheck) {
+        try {
+          const { Shipment } = require('../models');
+          const shipCount = await Shipment.count({ where: { workOrderId: woForCheck.id } });
+          if (shipCount === 0) {
+            // Park on a follow-up state instead of fully done, so the office sees the open task.
+            await item.update({ status: 'awaiting_dock_receive', resolvedAction: 'receive_supplier_material', resultRef, clientId, matchedWorkOrderId: workOrderId, matchedInboundOrderId: inboundOrderId, recommendationNote: `Received from the scan, but no shipment was registered on the dock for ${resultRef || 'this order'}. Ask receiving to register/receive the shipment, then clear this.`, errorMessage: null });
+            return res.json({ data: await InboundPaperwork.findByPk(item.id), message: 'Received — but no dock shipment; flagged for follow-up' });
+          }
+        } catch (e) { /* if the check fails, don't block the receive */ }
+      }
     } else if (action === 'attach_to_order') {
       await attachScanToWorkOrder(item, workOrderId);
       const wo = workOrderId ? await WorkOrder.findByPk(workOrderId) : null;
@@ -339,6 +368,57 @@ async function attachScanToWorkOrder(item, workOrderId) {
   } catch (e) { console.warn('[InboundPaperwork] attach to WO failed:', e.message); }
 }
 
+// POST /api/inbound-paperwork/:id/clear-dock-receive — office confirms the shipment is now received.
+router.post('/:id/clear-dock-receive', async (req, res, next) => {
+  try {
+    const item = await InboundPaperwork.findByPk(req.params.id);
+    if (!item) return res.status(404).json({ error: { message: 'Item not found' } });
+    // Compute the filing destination now that it's fully done.
+    let destClientName = item.clientName;
+    const nasDestination = computeNasDestination(item.docType, destClientName, item.createdAt);
+    await item.update({ status: 'confirmed', recommendationNote: null, nasDestination });
+    res.json({ data: item, message: 'Cleared' });
+  } catch (error) { next(error); }
+});
+
+// POST /api/inbound-paperwork/:id/convert-to-estimate — turn a scanned RFQ/estimate into a draft estimate.
+// Resolves a client first (matched or provided via body.clientId). If none, returns 409 NO_CLIENT so the
+// UI can prompt (mirrors the Comm Center convert). On success, runs the estimate AI parser on the scan.
+router.post('/:id/convert-to-estimate', async (req, res, next) => {
+  try {
+    const item = await InboundPaperwork.findByPk(req.params.id);
+    if (!item) return res.status(404).json({ error: { message: 'Item not found' } });
+
+    // Resolve client.
+    let client = null;
+    if (req.body && req.body.clientId) client = await Client.findByPk(req.body.clientId);
+    if (!client && item.clientId) client = await Client.findByPk(item.clientId);
+    if (!client && item.clientName) client = await matchClientByName(item.clientName);
+    if (!client) {
+      return res.status(409).json({
+        error: { code: 'NO_CLIENT', message: 'No matching client. Pick or create one, then convert.' },
+        data: { clientName: item.clientName, docType: item.docType }
+      });
+    }
+
+    // Get the scan bytes back from storage and hand them to the shared convert helper.
+    let buffer;
+    try { buffer = await fileStorage.downloadToBuffer(item.storageId, item.fileUrl); }
+    catch (e) { return res.status(400).json({ error: { message: 'Could not read the scan file: ' + e.message } }); }
+
+    const scannedLike = { id: null, fromName: '', fromEmail: '', subject: item.originalName || 'Scanned RFQ', gmailLink: null, contacts: client.contacts };
+    const attachments = [{ originalName: item.originalName || 'scan.pdf', buffer }];
+    const estimatesRouter = require('./estimates');
+    const { estimate, jobId } = await estimatesRouter.createEstimateAndParseAttachments(client, scannedLike, attachments, '');
+
+    // Mark the paperwork item done + point it at the new estimate. Compute filing destination.
+    const nasDestination = computeNasDestination(item.docType, client.name, item.createdAt);
+    await item.update({ status: 'confirmed', resolvedAction: 'converted_to_estimate', resultRef: estimate.estimateNumber, clientId: client.id, clientName: client.name, matchedEstimateId: estimate.id, nasDestination });
+
+    res.status(202).json({ data: { estimateId: estimate.id, estimateNumber: estimate.estimateNumber, jobId, clientName: client.name }, message: 'Estimate created; parsing scan' });
+  } catch (error) { next(error); }
+});
+
 // POST /api/inbound-paperwork/:id/reclassify — employee corrects the type; re-runs recommendation.
 router.post('/:id/reclassify', async (req, res, next) => {
   try {
@@ -363,6 +443,17 @@ router.delete('/:id', async (req, res, next) => {
   try {
     await InboundPaperwork.destroy({ where: { id: req.params.id } });
     res.json({ data: { ok: true } });
+  } catch (error) { next(error); }
+});
+
+// POST /api/inbound-paperwork/dismiss-all — clear items in the review list (not yet confirmed/filed).
+// Body: { status } optional to target a specific status; default clears the active review states.
+router.post('/dismiss-all', async (req, res, next) => {
+  try {
+    const status = req.body && req.body.status;
+    const where = status ? { status } : { status: { [Op.in]: ['needs_review', 'queued', 'processing', 'error'] } };
+    const n = await InboundPaperwork.destroy({ where });
+    res.json({ data: { dismissed: n } });
   } catch (error) { next(error); }
 });
 

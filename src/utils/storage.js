@@ -203,6 +203,35 @@ async function streamToResponse(storageId, res, options = {}) {
   return true;
 }
 
+// Read a stored file back into a Buffer. Supports S3 (via GetObject) and Cloudinary/https URLs.
+async function downloadToBuffer(storageId, fileUrl) {
+  // S3
+  if (storageId && storageId.startsWith('s3:') && useS3()) {
+    const key = storageId.slice(3);
+    const command = new GetObjectCommand({ Bucket: BUCKET(), Key: key });
+    const response = await getS3().send(command);
+    const chunks = [];
+    for await (const chunk of response.Body) chunks.push(chunk);
+    return Buffer.concat(chunks);
+  }
+  // Fallback: fetch the URL (Cloudinary secure_url or any https link we stored).
+  const url = fileUrl;
+  if (!url) throw new Error('No storageId or fileUrl to download');
+  return await new Promise((resolve, reject) => {
+    const https = require('https');
+    https.get(url, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        // follow one redirect
+        https.get(res.headers.location, (r2) => {
+          const c = []; r2.on('data', d => c.push(d)); r2.on('end', () => resolve(Buffer.concat(c)));
+        }).on('error', reject);
+        return;
+      }
+      const c = []; res.on('data', d => c.push(d)); res.on('end', () => resolve(Buffer.concat(c)));
+    }).on('error', reject);
+  });
+}
+
 module.exports = {
   uploadFile,
   uploadBuffer,
@@ -210,5 +239,6 @@ module.exports = {
   getProvider,
   useS3,
   getPresignedUrl,
-  streamToResponse
+  streamToResponse,
+  downloadToBuffer
 };

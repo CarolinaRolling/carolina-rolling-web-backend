@@ -188,7 +188,17 @@ async function buildRecommendation(parsed) {
 async function processPaperwork(item, filePath, mimeType) {
   await item.update({ status: 'processing', attempts: (item.attempts || 0) + 1 });
   try {
-    const base64 = fs.readFileSync(filePath).toString('base64');
+    const raw = fs.readFileSync(filePath);
+    // Diagnostic + guard: confirm the backend actually received a valid file before sending it to the AI.
+    const looksPdf = /\.pdf$/i.test(item.originalName || '') || (mimeType || '').includes('pdf');
+    if (raw.length === 0) throw new Error('The uploaded scan was empty (0 bytes) — the upload may have been truncated.');
+    if (looksPdf) {
+      const head = raw.slice(0, 5).toString('latin1');
+      if (head !== '%PDF-') {
+        throw new Error(`The uploaded file isn't a valid PDF (starts with "${head.replace(/[^\x20-\x7e]/g, '?')}", size ${raw.length}). The scan may have been corrupted in transit — try re-scanning.`);
+      }
+    }
+    const base64 = raw.toString('base64');
     const parsed = await classifyDocument(base64, mimeType, item.originalName);
     const rec = await buildRecommendation(parsed);
     await item.update({

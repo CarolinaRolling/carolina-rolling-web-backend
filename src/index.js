@@ -10,6 +10,7 @@ const shipmentRoutes = require('./routes/shipments');
 const settingsRoutes = require('./routes/settings');
 const { sendScheduleEmail } = require('./routes/settings');
 const inboundRoutes = require('./routes/inbound');
+const inboundPaperworkRoutes = require('./routes/inbound-paperwork');
 const workordersRoutes = require('./routes/workorders');
 const estimatesRoutes = require('./routes/estimates');
 const backupRoutes = require('./routes/backup');
@@ -540,6 +541,7 @@ app.get('/api/settings/available-models', authenticate, async (req, res) => {
 
 app.use('/api/settings', authenticate, settingsRoutes);
 app.use('/api/inbound', authenticate, inboundRoutes);
+app.use('/api/inbound-paperwork', authenticate, inboundPaperworkRoutes);
 // Middleware to block portal/vendor API keys from accessing internal routes
 // Middleware to block portal/vendor API keys from write operations on internal routes
 // Client portal keys (clientName set) may still do GET reads on workorders
@@ -2641,6 +2643,42 @@ async function startServer() {
         await sequelize.query(`CREATE INDEX IF NOT EXISTS cqi_email_idx ON convert_queue_items ("scannedEmailId")`);
         console.log('Ensured convert_queue_items table');
       } catch (e) { console.log('convert_queue_items migration:', e.message); }
+      // Inbound Paperwork (AI scan intake review queue).
+      try {
+        await sequelize.query(`
+          CREATE TABLE IF NOT EXISTS inbound_paperwork (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            "originalName" VARCHAR(255),
+            "fileUrl" TEXT,
+            "storageId" VARCHAR(255),
+            "mimeType" VARCHAR(255),
+            "docType" VARCHAR(64),
+            "classifyConfidence" VARCHAR(32),
+            "parsedData" JSONB,
+            "aiSummary" TEXT,
+            "recommendedAction" VARCHAR(64),
+            "recommendationNote" TEXT,
+            "clientId" UUID,
+            "clientName" VARCHAR(255),
+            "matchedWorkOrderId" UUID,
+            "matchedEstimateId" UUID,
+            "matchedInboundOrderId" UUID,
+            "poNumber" VARCHAR(255),
+            status VARCHAR(32) NOT NULL DEFAULT 'queued',
+            "resolvedAction" VARCHAR(64),
+            "resultRef" VARCHAR(255),
+            "nasDestination" VARCHAR(512),
+            "nasProcessingRef" VARCHAR(255),
+            "errorMessage" TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            "createdAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+            "updatedAt" TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+          )
+        `);
+        await sequelize.query(`CREATE INDEX IF NOT EXISTS ip_status_idx ON inbound_paperwork (status)`);
+        await sequelize.query(`CREATE INDEX IF NOT EXISTS ip_doctype_idx ON inbound_paperwork ("docType")`);
+        console.log('Ensured inbound_paperwork table');
+      } catch (e) { console.log('inbound_paperwork migration:', e.message); }
       await sequelize.query(`ALTER TABLE work_order_part_files ADD COLUMN IF NOT EXISTS "vendorPortalVisible" BOOLEAN DEFAULT false NOT NULL`);
       await sequelize.query(`
         CREATE TABLE IF NOT EXISTS vendor_issues (

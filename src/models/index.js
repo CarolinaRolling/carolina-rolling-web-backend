@@ -3058,6 +3058,45 @@ const ConvertQueueItem = sequelize.define('ConvertQueueItem', {
   indexes: [ { fields: ['status'] }, { fields: ['scannedEmailId'] } ]
 });
 
+// Inbound Paperwork — a scanned document (estimate / purchase_order / delivery_form) awaiting review.
+// AI classifies it, attempts a match, and recommends an action; an employee confirms in the Review
+// Center "Inbound Paperwork" tab. Nothing auto-files. (Phase 1: manual upload; NAS hot-folder later.)
+const InboundPaperwork = sequelize.define('InboundPaperwork', {
+  id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+  originalName: { type: DataTypes.STRING, allowNull: true },   // uploaded filename
+  fileUrl: { type: DataTypes.TEXT, allowNull: true },          // where the scan copy is stored (CR Admin)
+  storageId: { type: DataTypes.STRING, allowNull: true },      // storage backend id
+  mimeType: { type: DataTypes.STRING, allowNull: true },
+  // AI classification
+  docType: { type: DataTypes.STRING, allowNull: true },        // estimate | purchase_order | delivery_form | unknown
+  classifyConfidence: { type: DataTypes.STRING, allowNull: true }, // high | low
+  parsedData: { type: DataTypes.JSON, allowNull: true },       // fields AI pulled (po#, client, etc.)
+  aiSummary: { type: DataTypes.TEXT, allowNull: true },        // human-readable AI note
+  // AI recommendation for what to do
+  recommendedAction: { type: DataTypes.STRING, allowNull: true }, // create_estimate | create_pending_order | receive_supplier_material | attach_to_order | needs_instructions | unknown
+  recommendationNote: { type: DataTypes.TEXT, allowNull: true },
+  // Match candidates (best guess)
+  clientId: { type: DataTypes.UUID, allowNull: true },
+  clientName: { type: DataTypes.STRING, allowNull: true },
+  matchedWorkOrderId: { type: DataTypes.UUID, allowNull: true },
+  matchedEstimateId: { type: DataTypes.UUID, allowNull: true },
+  matchedInboundOrderId: { type: DataTypes.UUID, allowNull: true },
+  poNumber: { type: DataTypes.STRING, allowNull: true },
+  // Workflow: queued -> processing -> needs_review -> confirmed(->filed) | error
+  status: { type: DataTypes.STRING, allowNull: false, defaultValue: 'queued' },
+  // Outcome after an employee confirms
+  resolvedAction: { type: DataTypes.STRING, allowNull: true }, // what was actually done
+  resultRef: { type: DataTypes.STRING, allowNull: true },      // e.g. created estimate #, DR-#, etc.
+  nasDestination: { type: DataTypes.STRING, allowNull: true }, // Type/Client/Year/Month path (Phase 2)
+  nasProcessingRef: { type: DataTypes.STRING, allowNull: true },// id the NAS holds while awaiting filing (Phase 2)
+  errorMessage: { type: DataTypes.TEXT, allowNull: true },
+  attempts: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 }
+}, {
+  tableName: 'inbound_paperwork',
+  timestamps: true,
+  indexes: [ { fields: ['status'] }, { fields: ['docType'] } ]
+});
+
 const WorkOrderPresence = sequelize.define('WorkOrderPresence', {
   id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
   workOrderId: { type: DataTypes.UUID, allowNull: false },
@@ -3920,6 +3959,7 @@ module.exports = {
   DeviceToken,
   WorkOrderPresence,
   ConvertQueueItem,
+  InboundPaperwork,
   ShopSupply,
   ShopSupplyLog,
   TodoItem,

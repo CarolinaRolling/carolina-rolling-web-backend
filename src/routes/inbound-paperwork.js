@@ -301,10 +301,27 @@ router.post('/:id/confirm', async (req, res, next) => {
       resultRef = 'manual';
     }
 
-    await item.update({ status: 'confirmed', resolvedAction: action, resultRef, clientId, matchedWorkOrderId: workOrderId, matchedInboundOrderId: inboundOrderId, errorMessage: null });
+    // Compute the NAS filing destination: Type / Client / Year / Month. The NAS watcher polls for this
+    // and moves the physical scan there (Phase 2). Client falls back to _Unidentified.
+    let destClientName = item.clientName;
+    if (!destClientName && clientId) { try { const c = await Client.findByPk(clientId); destClientName = c?.name || null; } catch {} }
+    const nasDestination = computeNasDestination(item.docType, destClientName, item.createdAt);
+
+    await item.update({ status: 'confirmed', resolvedAction: action, resultRef, clientId, matchedWorkOrderId: workOrderId, matchedInboundOrderId: inboundOrderId, nasDestination, errorMessage: null });
     res.json({ data: item, message: 'Confirmed' });
   } catch (error) { next(error); }
 });
+
+// Build "Type / Client / Year / Month" for NAS filing. Sanitizes each segment for a filesystem path.
+function computeNasDestination(docType, clientName, createdAt) {
+  const typeFolder = { estimate: 'Estimates', purchase_order: 'Purchase Orders', delivery_form: 'Delivery Forms' }[docType] || 'Other';
+  const safe = (s) => String(s || '').replace(/[\/\\:*?"<>|]/g, '').replace(/\s+/g, ' ').trim();
+  const client = safe(clientName) || '_Unidentified';
+  const d = createdAt ? new Date(createdAt) : new Date();
+  const year = String(d.getFullYear());
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  return `${typeFolder}/${client}/${year}/${month}`;
+}
 
 // Attach the stored scan to a work order's documents.
 async function attachScanToWorkOrder(item, workOrderId) {
@@ -345,6 +362,32 @@ router.post('/:id/reclassify', async (req, res, next) => {
 router.delete('/:id', async (req, res, next) => {
   try {
     await InboundPaperwork.destroy({ where: { id: req.params.id } });
+    res.json({ data: { ok: true } });
+  } catch (error) { next(error); }
+});
+
+// ==================== NAS FILING ROUND-TRIP (Phase 2) ====================
+// The NAS watcher uploads scans (POST /), holds each file locally keyed by the returned item id, then
+// polls pending-filing for confirmed items that have a destination, moves the file there, and reports back.
+
+// GET /api/inbound-paperwork/nas/pending-filing — confirmed items with a destination not yet filed.
+router.get('/nas/pending-filing', async (req, res, next) => {
+  try {
+    const items = await InboundPaperwork.findAll({
+      where: { status: 'confirmed', nasDestination: { [Op.ne]: null } },
+      order: [['updatedAt', 'ASC']], limit: 100
+    });
+    res.json({ data: items.map(i => ({ id: i.id, originalName: i.originalName, nasDestination: i.nasDestination, docType: i.docType, clientName: i.clientName })) });
+  } catch (error) { next(error); }
+});
+
+// POST /api/inbound-paperwork/:id/nas-filed — the watcher reports it moved the file into place.
+// Body: { filedPath } (optional, the final path on the NAS).
+router.post('/:id/nas-filed', async (req, res, next) => {
+  try {
+    const item = await InboundPaperwork.findByPk(req.params.id);
+    if (!item) return res.status(404).json({ error: { message: 'Item not found' } });
+    await item.update({ status: 'filed', nasProcessingRef: (req.body && req.body.filedPath) || item.nasProcessingRef });
     res.json({ data: { ok: true } });
   } catch (error) { next(error); }
 });

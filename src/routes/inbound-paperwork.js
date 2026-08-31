@@ -419,6 +419,72 @@ router.post('/:id/convert-to-estimate', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// POST /api/inbound-paperwork/:id/convert-to-order — turn a scanned client PO into a Pending Order.
+// Resolves a client first (409 NO_CLIENT if none, like the estimate convert), tries to auto-match an
+// existing estimate by PO#/reference, and creates a PendingOrder that flows into the Review Center Orders tab.
+router.post('/:id/convert-to-order', async (req, res, next) => {
+  try {
+    const item = await InboundPaperwork.findByPk(req.params.id);
+    if (!item) return res.status(404).json({ error: { message: 'Item not found' } });
+
+    // Resolve client.
+    let client = null;
+    if (req.body && req.body.clientId) client = await Client.findByPk(req.body.clientId);
+    if (!client && item.clientId) client = await Client.findByPk(item.clientId);
+    if (!client && item.clientName) client = await matchClientByName(item.clientName);
+    if (!client) {
+      return res.status(409).json({
+        error: { code: 'NO_CLIENT', message: 'No matching client. Pick or create one, then convert.' },
+        data: { clientName: item.clientName, docType: item.docType }
+      });
+    }
+
+    const parsed = item.parsedData || {};
+    const poNumber = item.poNumber || parsed.poNumber || null;
+    const referenceNumber = parsed.referenceNumber || parsed.referencesQuote || null;
+
+    // Don't create a duplicate pending order for the same PO + client.
+    const { PendingOrder } = require('../models');
+    if (poNumber) {
+      const dup = await PendingOrder.findOne({ where: { poNumber, clientId: client.id, status: 'pending' } });
+      if (dup) {
+        await item.update({ status: 'confirmed', resolvedAction: 'converted_to_order', resultRef: poNumber, clientId: client.id, clientName: client.name, nasDestination: computeNasDestination(item.docType, client.name, item.createdAt) });
+        return res.json({ data: { pendingOrderId: dup.id, poNumber, duplicate: true }, message: 'A pending order for this PO already exists' });
+      }
+    }
+
+    // Try to auto-match an existing estimate by PO#/reference for this client.
+    let matchedEstimate = null;
+    const tryMatch = async (num) => {
+      if (!num || matchedEstimate) return;
+      matchedEstimate = await Estimate.findOne({
+        where: { clientId: client.id, [Op.or]: [ { estimateNumber: num }, { estimateNumber: { [Op.iLike]: `%${num}%` } } ] }
+      });
+    };
+    await tryMatch(referenceNumber);
+    await tryMatch(poNumber);
+
+    const pending = await PendingOrder.create({
+      clientId: client.id,
+      clientName: client.name,
+      poNumber: poNumber,
+      referenceNumber: referenceNumber,
+      matchedEstimateId: matchedEstimate?.id || null,
+      matchedEstimateNumber: matchedEstimate?.estimateNumber || null,
+      subject: item.originalName || 'Scanned PO',
+      parsedData: parsed,
+      status: 'pending'
+    });
+
+    // Attach the scan to the pending order? PendingOrder has no doc store; the scan stays on the paperwork
+    // item and gets filed to the archive. Mark the item done + compute filing destination.
+    const nasDestination = computeNasDestination(item.docType, client.name, item.createdAt);
+    await item.update({ status: 'confirmed', resolvedAction: 'converted_to_order', resultRef: poNumber || 'PO', clientId: client.id, clientName: client.name, matchedEstimateId: matchedEstimate?.id || null, nasDestination });
+
+    res.status(201).json({ data: { pendingOrderId: pending.id, poNumber, matchedEstimateNumber: matchedEstimate?.estimateNumber || null, clientName: client.name }, message: 'Pending order created' });
+  } catch (error) { next(error); }
+});
+
 // POST /api/inbound-paperwork/:id/reclassify — employee corrects the type; re-runs recommendation.
 router.post('/:id/reclassify', async (req, res, next) => {
   try {

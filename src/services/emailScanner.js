@@ -4,6 +4,15 @@ const { getParsingModel } = require('./aiConfig');
 const { Op } = require('sequelize');
 const fileStorage = require('../utils/storage');
 
+// Extract all text from an Anthropic response body — joins every text block, so a non-text leading block
+// (thinking/tool_use on some models) doesn't make it look empty. Accepts a parsed body or raw JSON string.
+function aiText(bodyOrJson) {
+  let body = bodyOrJson;
+  if (typeof bodyOrJson === 'string') { try { body = JSON.parse(bodyOrJson); } catch { return ''; } }
+  if (!body || !Array.isArray(body.content)) return (body && body.content && body.content[0] && body.content[0].text) || '';
+  return body.content.filter(b => b && b.type === 'text' && typeof b.text === 'string').map(b => b.text).join('');
+}
+
 // Google OAuth2 client
 function getOAuth2Client() {
   return new google.auth.OAuth2(
@@ -164,7 +173,7 @@ Reply with ONLY JSON: {"hasPricing":boolean,"pricingText":string}
       const req = https.request({
         hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(reqBody) },
-      }, (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => { try { resolve(JSON.parse(d).content?.[0]?.text || ''); } catch { resolve(''); } }); });
+      }, (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => { try { resolve(aiText(d)); } catch { resolve(''); } }); });
       req.on('error', () => resolve(''));
       req.setTimeout(30000, () => { req.destroy(); resolve(''); });
       req.write(reqBody); req.end();
@@ -489,7 +498,7 @@ Add a "summary" field in your response: a 1-2 sentence plain-English summary of 
 
     const data = JSON.parse(responseText);
     await aiUsage.record(data.usage, 'emailScanner.parse');
-    const text = data.content?.[0]?.text || '';
+    const text = aiText(data);
     console.log(`[EmailScanner] AI response (first 200): ${text.substring(0, 200)}`);
     
     // Clean and parse JSON
@@ -1517,7 +1526,7 @@ async function _runScanInternal() {
                     res.on('data', chunk => data += chunk);
                     res.on('end', () => {
                       if (res.statusCode === 200) {
-                        try { resolve(JSON.parse(data).content?.[0]?.text || ''); } catch { resolve(''); }
+                        try { resolve(aiText(data)); } catch { resolve(''); }
                       } else { resolve(''); }
                     });
                   });
@@ -1667,7 +1676,7 @@ async function _runScanInternal() {
                     res.on('data', chunk => data += chunk);
                     res.on('end', () => {
                       if (res.statusCode === 200) {
-                        try { resolve(JSON.parse(data).content?.[0]?.text || ''); } catch { resolve(''); }
+                        try { resolve(aiText(data)); } catch { resolve(''); }
                       } else { console.error(`[EmailScanner] Invoice AI error: ${res.statusCode}`); resolve(''); }
                     });
                   });
@@ -1890,7 +1899,7 @@ async function _runScanInternal() {
                       }, (res) => {
                         let data = '';
                         res.on('data', chunk => data += chunk);
-                        res.on('end', () => { try { resolve(res.statusCode === 200 ? JSON.parse(data).content?.[0]?.text || '' : ''); } catch { resolve(''); } });
+                        res.on('end', () => { try { resolve(res.statusCode === 200 ? aiText(data) : ''); } catch { resolve(''); } });
                       });
                       req.on('error', () => resolve(''));
                       req.write(sumBody); req.end();
@@ -2545,7 +2554,7 @@ async function parseDocumentWithAI(fileBuffer, mimeType, clientName, parsingNote
     });
 
     const data = JSON.parse(responseText);
-    const text = data.content?.[0]?.text || '';
+    const text = aiText(data);
     console.log(`[DocParser] AI response (first 300): ${text.substring(0, 300)}`);
 
     const clean = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();

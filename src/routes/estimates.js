@@ -3737,7 +3737,12 @@ MATCHING RULES (when multiple files are provided):
 
     let data;
     try { data = JSON.parse(responseText); } catch { throw new Error('AI returned an unreadable response.'); }
-    const text = data.content?.[0]?.text || '';
+    // Concatenate ALL text blocks — the response content array may lead with a non-text block (e.g. a
+    // thinking or tool_use block on some models), so content[0].text alone can be empty even when the AI
+    // did reply with text in a later block.
+    const text = Array.isArray(data.content)
+      ? data.content.filter(b => b && b.type === 'text' && typeof b.text === 'string').map(b => b.text).join('')
+      : (data.content?.[0]?.text || '');
     if (!text) throw new Error('AI returned an empty response — try re-uploading or a clearer scan.');
     console.log(`[AI-Parse] Response (first 300): ${text.substring(0, 300)}`);
 

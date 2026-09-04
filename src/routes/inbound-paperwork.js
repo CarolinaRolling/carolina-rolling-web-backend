@@ -199,6 +199,11 @@ async function processPaperwork(item, filePath, mimeType) {
       }
     }
     const base64 = raw.toString('base64');
+    // Guard against the Anthropic ~32MB request cap (base64 inflates ~33%).
+    if (base64.length > 28 * 1024 * 1024) {
+      const mb = (base64.length / 1024 / 1024).toFixed(1);
+      throw new Error(`This scan is too large for the AI (about ${mb}MB after encoding; limit ~28MB) — usually high-resolution photos. Scan at lower quality (150–200 DPI) or reduce the file size, then re-scan.`);
+    }
     const parsed = await classifyDocument(base64, mimeType, item.originalName);
     const rec = await buildRecommendation(parsed);
     await item.update({
@@ -331,9 +336,30 @@ router.post('/:id/confirm', async (req, res, next) => {
       const wo = workOrderId ? await WorkOrder.findByPk(workOrderId) : null;
       resultRef = wo ? (wo.drNumber ? `DR-${wo.drNumber}` : wo.orderNumber) : null;
     } else if (action === 'needs_instructions') {
-      // Nothing to create; this simply records the decision. The scan stays attached to the queue item
-      // (and, in Phase 2, gets filed under the client's "needs instructions" area on the NAS).
-      resultRef = item.clientName || 'unassigned';
+      // Material physically arrived but there's no order telling the shop what to do with it. Create an
+      // UNLINKED shipment (workOrderId null) so it shows up in the "Waiting for Instructions" list where
+      // it gets assigned to a job — same as a walk-in delivery the office logs manually.
+      const { Shipment } = require('../models');
+      const parsed = item.parsedData || {};
+      const qrCode = `SHIP-${Date.now()}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}`;
+      const ship = await Shipment.create({
+        qrCode,
+        clientName: item.clientName || parsed.clientName || parsed.supplierName || 'Unknown',
+        clientPurchaseOrderNumber: item.poNumber || parsed.poNumber || null,
+        description: parsed.summary || item.aiSummary || item.originalName || 'Scanned delivery',
+        quantity: 1,
+        notes: `Created from scanned delivery paperwork (${item.originalName || 'scan'}).`,
+        receivedAt: new Date(),
+        workOrderId: null
+      });
+      // Attach the scan image to the shipment so the office can see the paperwork.
+      if (item.fileUrl) {
+        try {
+          const { ShipmentDocument } = require('../models');
+          if (ShipmentDocument) await ShipmentDocument.create({ shipmentId: ship.id, filename: item.originalName || 'scan.pdf', originalName: item.originalName || 'scan.pdf', mimeType: item.mimeType || 'application/pdf', url: item.fileUrl, cloudinaryId: item.storageId });
+        } catch (e) { /* shipment doc attach is best-effort */ }
+      }
+      resultRef = ship.qrCode;
     } else if (action === 'create_estimate' || action === 'create_pending_order') {
       // Phase 1: record intent + point the user to the existing flow. (Full auto-create via the existing
       // estimate/PO parsers is a fast follow — kept explicit here so nothing is created without review.)
@@ -419,13 +445,20 @@ router.post('/:id/convert-to-estimate', async (req, res, next) => {
     const scannedLike = { id: null, fromName: '', fromEmail: '', subject: item.originalName || 'Scanned RFQ', gmailLink: null, contacts: client.contacts };
     const attachments = [{ originalName: item.originalName || 'scan.pdf', buffer }];
     const estimatesRouter = require('./estimates');
-    const { estimate, jobId } = await estimatesRouter.createEstimateAndParseAttachments(client, scannedLike, attachments, '');
+    const { estimate, jobId, error: convertErr } = await estimatesRouter.createEstimateAndParseAttachments(client, scannedLike, attachments, '');
+
+    if (!estimate) {
+      // Parse failed / no parts — nothing created (rolled back). Leave the paperwork item in review so it
+      // can be retried, and surface why.
+      await item.update({ status: 'needs_review', errorMessage: convertErr || 'AI parse failed' });
+      return res.status(422).json({ error: { message: convertErr || 'Could not convert this scan to an estimate.' } });
+    }
 
     // Mark the paperwork item done + point it at the new estimate. Compute filing destination.
     const nasDestination = computeNasDestination(item.docType, client.name, item.createdAt);
     await item.update({ status: 'confirmed', resolvedAction: 'converted_to_estimate', resultRef: estimate.estimateNumber, clientId: client.id, clientName: client.name, matchedEstimateId: estimate.id, nasDestination });
 
-    res.status(202).json({ data: { estimateId: estimate.id, estimateNumber: estimate.estimateNumber, jobId, clientName: client.name }, message: 'Estimate created; parsing scan' });
+    res.status(202).json({ data: { estimateId: estimate.id, estimateNumber: estimate.estimateNumber, jobId, clientName: client.name }, message: 'Estimate created' });
   } catch (error) { next(error); }
 });
 

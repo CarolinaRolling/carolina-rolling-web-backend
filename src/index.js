@@ -635,9 +635,8 @@ app.get('/api/com-center/emails/:id/gmail-url', authenticate, async (req, res) =
     let url = email.gmailLink; // fallback to stored link
     if (account && email.gmailMessageId) {
       try {
-        const oauth2 = new google.auth.OAuth2(process.env.GMAIL_CLIENT_ID, process.env.GMAIL_CLIENT_SECRET);
-        oauth2.setCredentials({ access_token: account.accessToken, refresh_token: account.refreshToken, expiry_date: account.tokenExpiry });
-        const gmail = google.gmail({ version: 'v1', auth: oauth2 });
+        const { getGmailClient } = require('./services/emailScanner');
+        const gmail = await getGmailClient(account);
         const detail = await gmail.users.messages.get({ userId: 'me', id: email.gmailMessageId, format: 'metadata', metadataHeaders: ['Message-ID', 'Message-Id'] });
         const headers = detail.data.payload?.headers || [];
         const mid = (headers.find(h => (h.name || '').toLowerCase() === 'message-id')?.value || '').replace(/[<>]/g, '').trim();
@@ -3040,9 +3039,12 @@ Please confirm with the operator and mark the order complete if ready.`,
         const ownEmailsCron = new Set(accounts.map(a => (a.email || '').toLowerCase().trim()).filter(Boolean));
         for (const account of accounts) {
           try {
-            const oauth2 = new google.auth.OAuth2(process.env.GMAIL_CLIENT_ID, process.env.GMAIL_CLIENT_SECRET);
-            oauth2.setCredentials({ access_token: account.accessToken, refresh_token: account.refreshToken, expiry_date: account.tokenExpiry });
-            const gmail = google.gmail({ version: 'v1', auth: oauth2 });
+            // Use the shared helper: it formats expiry_date correctly (ms number, not a Date object) AND
+            // attaches a token auto-refresh listener that persists new tokens. The old manual OAuth client
+            // here passed a raw Date as expiry_date and had no refresh handler, so overnight (expired-token)
+            // runs failed the token refresh with "invalid_request" on every account, every cron.
+            const { getGmailClient } = require('./services/emailScanner');
+            const gmail = await getGmailClient(account);
 
             // Fetch emails NOT labeled cr-processed AND NOT labeled cr-comm-scanned, last 2 days
             const res = await gmail.users.messages.list({

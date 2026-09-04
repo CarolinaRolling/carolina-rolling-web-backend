@@ -2804,7 +2804,10 @@ router.get('/:id/pdf', async (req, res, next) => {
           const effectiveBase = baseLabEach; // rolling labor (0 for pure OP parts)
           labEach = effectiveBase + opCostPerPart + opProfitPerPart;
         } else {
-          labEach = parseFloat(part.laborTotal) || 0;
+          // Most types store the billed labor in laborTotal. Legacy types (notably 'other') store their
+          // price in rollingCost instead — fall back to it so those lines render with a price on the PDF
+          // (otherwise 'other' parts showed $0 and effectively disappeared from the quote).
+          labEach = parseFloat(part.laborTotal) || parseFloat(part.rollingCost) || 0;
         }
         unitPrice = matEach + labEach;
         lineTotal = unitPrice * qty;
@@ -2945,7 +2948,7 @@ router.get('/:id/pdf', async (req, res, next) => {
 
       // Material/Rolling pricing breakdown
       if (matEach > 0) descLines.push(`Material: ${formatCurrency(matEach)}`);
-      if (labEach > 0) descLines.push(`${part.partType === 'fab_service' ? 'Service' : part.partType === 'shop_rate' ? 'Shop Rate' : (part.partType === 'flat_stock' ? 'Handling' : 'Rolling')}: ${formatCurrency(labEach)}`);
+      if (labEach > 0) descLines.push(`${part.partType === 'fab_service' ? 'Service' : part.partType === 'shop_rate' ? 'Shop Rate' : part.partType === 'other' ? 'Service' : (part.partType === 'flat_stock' ? 'Handling' : 'Rolling')}: ${formatCurrency(labEach)}`);
 
       // Shop rate warning
       if (part.partType === 'shop_rate') {
@@ -3544,6 +3547,7 @@ async function runAiParse(estimate, uploaded, quoteIndex, extraNotes, jobId, quo
     }
 
     const fileMeta = []; // parallel: { index, originalName, isQuote }
+    let totalPayloadBytes = 0;
     uploaded.forEach((f, idx) => {
       const ext = path.extname(f.originalname).toLowerCase();
       // When a quote text is provided, no file is the quote — all files are prints.
@@ -3555,6 +3559,7 @@ async function runAiParse(estimate, uploaded, quoteIndex, extraNotes, jobId, quo
       });
       const buf = fs.readFileSync(f.path);
       const base64Data = buf.toString('base64');
+      totalPayloadBytes += base64Data.length;
       if (ext === '.pdf') {
         contentItems.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64Data } });
       } else {
@@ -3563,6 +3568,13 @@ async function runAiParse(estimate, uploaded, quoteIndex, extraNotes, jobId, quo
         contentItems.push({ type: 'image', source: { type: 'base64', media_type: mediaType, data: base64Data } });
       }
     });
+
+    // Guard against the Anthropic ~32MB request cap. base64 inflates files ~33%; keep a safety margin.
+    const MAX_PAYLOAD = 28 * 1024 * 1024; // ~28MB of base64 across all files
+    if (totalPayloadBytes > MAX_PAYLOAD) {
+      const mb = (totalPayloadBytes / 1024 / 1024).toFixed(1);
+      throw new Error(`These files are too large for the AI (about ${mb}MB after encoding; the limit is ~28MB). This usually means high-resolution photos. Try scanning at a lower quality (150–200 DPI / "document" not "photo"), splitting into fewer files, or reducing the image size before uploading.`);
+    }
 
     // Prints exist to match whenever there are files and the quote is either pasted text or a marked file.
     const anyPrints = hasQuoteText ? fileMeta.length > 0 : (fileMeta.some(m => !m.isQuote) && fileMeta.length > 1);
@@ -4261,8 +4273,26 @@ router.createEstimateAndParseAttachments = async function(client, scanned, attac
   const jobId = require('crypto').randomBytes(8).toString('hex');
   aiParseJobs.set(jobId, { status: 'pending', createdAt: Date.now() });
   // autoCreate=true: no interactive Accept step in the convert flow, so persist parts automatically.
+  // We AWAIT the parse here (instead of fire-and-forget) so we can ROLL BACK the estimate if the parse
+  // fails or produces zero parts — that prevents blank estimates being left behind on a failed convert.
   runAiParse(estimate, uploaded, -1, (notes || ''), jobId, undefined, true);
-  return { estimate, jobId };
+  const started = Date.now();
+  let parseErr = null, partsCreated = 0, done = false;
+  while (Date.now() - started < 4 * 60 * 1000 && !done) {
+    await new Promise(r => setTimeout(r, 2000));
+    const job = aiParseJobs.get(jobId);
+    if (job && job.status === 'done') { partsCreated = job.autoCreated ?? job.result?.autoCreated ?? 0; done = true; }
+    else if (job && job.status === 'error') { parseErr = job.error || 'AI parse failed'; done = true; }
+  }
+  if (!done) parseErr = 'AI parse timed out';
+
+  if (parseErr || partsCreated === 0) {
+    // Roll back — don't leave a blank/half estimate behind.
+    try { const { EstimatePart } = require('../models'); await EstimatePart.destroy({ where: { estimateId: estimate.id } }); } catch {}
+    try { await estimate.destroy(); } catch {}
+    return { estimate: null, jobId, error: parseErr || 'The AI did not find any parts to add.', partsCreated: 0 };
+  }
+  return { estimate, jobId, partsCreated };
 };
 
 module.exports = router;

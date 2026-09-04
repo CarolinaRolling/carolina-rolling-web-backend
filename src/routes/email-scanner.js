@@ -1283,11 +1283,15 @@ router.post('/convert-to-estimate/:scannedEmailId', async (req, res, next) => {
     // local estimate-number generator and the shared runAiParse worker).
     try { if (!scanned.clientId) await scanned.update({ clientId: client.id }); } catch {}
     const estimatesRouter = require('./estimates');
-    const { estimate, jobId } = await estimatesRouter.createEstimateAndParseAttachments(client, scanned, attachments, req.body.notes || '');
+    const { estimate, jobId, error: convertErr, partsCreated } = await estimatesRouter.createEstimateAndParseAttachments(client, scanned, attachments, req.body.notes || '');
+
+    if (!estimate) {
+      return res.status(422).json({ error: { message: convertErr || 'Could not convert this email to an estimate.' } });
+    }
 
     res.status(202).json({
-      data: { estimateId: estimate.id, estimateNumber: estimate.estimateNumber, clientId: client.id, clientName: client.name, matchReason, jobId, attachmentCount: attachments.length },
-      message: 'Estimate created; parsing attachments'
+      data: { estimateId: estimate.id, estimateNumber: estimate.estimateNumber, clientId: client.id, clientName: client.name, matchReason, jobId, attachmentCount: attachments.length, partsCreated },
+      message: 'Estimate created'
     });
   } catch (error) { next(error); }
 });
@@ -1332,22 +1336,19 @@ async function processConvertItem(item) {
 
   try { if (!scanned.clientId) await scanned.update({ clientId: client.id }); } catch {}
   const estimatesRouter = require('./estimates');
-  const { estimate, jobId } = await estimatesRouter.createEstimateAndParseAttachments(client, scanned, attachments, '');
+  const { estimate, error: convertErr, partsCreated } = await estimatesRouter.createEstimateAndParseAttachments(client, scanned, attachments, '');
 
-  // Wait for the parse+auto-create to finish so we can record the part count on the queue item.
-  const started = Date.now();
-  let parts = null, parseErr = null;
-  while (Date.now() - started < 3 * 60 * 1000) {
-    await new Promise(r => setTimeout(r, 2500));
-    const job = estimatesRouter.getAiJob ? estimatesRouter.getAiJob(jobId) : null;
-    if (job && job.status === 'done') { parts = job.autoCreated ?? (job.result?.autoCreated) ?? 0; break; }
-    if (job && job.status === 'error') { parseErr = job.error || 'parse failed'; break; }
+  if (!estimate) {
+    // Parse failed or found no parts — nothing was created (rolled back). Mark the item so Retry re-runs
+    // cleanly without leaving or duplicating a blank estimate.
+    await item.update({ status: 'error', clientId: client.id, clientName: client.name, estimateId: null, estimateNumber: null, partsCreated: 0, errorMessage: convertErr || 'AI parse failed' });
+    return;
   }
   await item.update({
-    status: parseErr ? 'error' : 'done',
+    status: 'done',
     clientId: client.id, clientName: client.name,
     estimateId: estimate.id, estimateNumber: estimate.estimateNumber,
-    partsCreated: parts, errorMessage: parseErr || null
+    partsCreated: partsCreated ?? 0, errorMessage: null
   });
 }
 

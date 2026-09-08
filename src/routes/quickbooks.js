@@ -1786,18 +1786,40 @@ router.put('/invoice-number/:id', async (req, res, next) => {
 
     if (wo.invoiceNumber === newNum) return res.json({ data: wo.toJSON(), message: 'No change' });
 
-    // Check uniqueness — scan both WorkOrder and InvoiceNumber tables
+    // Check uniqueness — but a VOIDED order/invoice number does NOT hold the number; it can be reclaimed.
     const existingWO = await WorkOrder.findOne({ where: { invoiceNumber: newNum } });
-    if (existingWO && existingWO.id !== wo.id) {
+    if (existingWO && existingWO.id !== wo.id && !existingWO.isVoided && existingWO.status !== 'void') {
       const drRef = existingWO.drNumber ? `DR-${existingWO.drNumber}` : existingWO.orderNumber;
       return res.status(409).json({ error: { message: `Invoice #${newNum} is already assigned to ${drRef} (${existingWO.clientName})` } });
     }
 
     const existingInv = await InvoiceNumber.findOne({ where: { invoiceNumber: parseInt(newNum) || 0 } });
-    if (existingInv && existingInv.workOrderId !== wo.id) {
-      const refWO = await WorkOrder.findByPk(existingInv.workOrderId, { attributes: ['drNumber','orderNumber','clientName'] });
-      const drRef = refWO?.drNumber ? `DR-${refWO.drNumber}` : refWO?.orderNumber;
-      return res.status(409).json({ error: { message: `Invoice #${newNum} is already in use${drRef ? ` on ${drRef}` : ''}` } });
+    // Only block if the tracking record is ACTIVE (not voided) and points at a different, non-voided WO.
+    if (existingInv && existingInv.workOrderId !== wo.id && !existingInv.voidedAt && existingInv.status !== 'void' && existingInv.status !== 'voided') {
+      const refWO = await WorkOrder.findByPk(existingInv.workOrderId, { attributes: ['drNumber','orderNumber','clientName','isVoided','status'] });
+      // If the WO it points at is itself voided/gone, the number is free — don't block.
+      if (refWO && !refWO.isVoided && refWO.status !== 'void') {
+        const drRef = refWO.drNumber ? `DR-${refWO.drNumber}` : refWO.orderNumber;
+        return res.status(409).json({ error: { message: `Invoice #${newNum} is already in use${drRef ? ` on ${drRef}` : ''}` } });
+      }
+    }
+
+    // WARNING: if the number being (re)assigned was already exported to QuickBooks on its prior (now
+    // voided) life, reusing it can create a DUPLICATE invoice number in QB. Make the user confirm.
+    const numInt = parseInt(newNum) || 0;
+    if (numInt > 0 && !(req.body && req.body.confirmReuseExported)) {
+      const priorExported = await InvoiceNumber.findOne({
+        where: { invoiceNumber: numInt, iifExportedAt: { [Op.ne]: null } }
+      });
+      if (priorExported && priorExported.workOrderId !== wo.id) {
+        return res.status(409).json({
+          error: {
+            code: 'QB_EXPORTED',
+            message: `Invoice #${newNum} was already exported to QuickBooks (on ${priorExported.iifExportedAt ? new Date(priorExported.iifExportedAt).toLocaleDateString() : 'a prior batch'}). Reusing it can create a duplicate in QuickBooks. Make sure the old invoice was voided/removed in QuickBooks first. Reuse this number anyway?`
+          },
+          data: { requiresConfirm: true, invoiceNumber: newNum }
+        });
+      }
     }
 
     // Update WO invoice number
@@ -1806,7 +1828,6 @@ router.put('/invoice-number/:id', async (req, res, next) => {
 
     // Update the InvoiceNumber tracking record if it exists; create it if it doesn't, so the number
     // always appears on the tracking page regardless of how it was first recorded.
-    const numInt = parseInt(newNum) || 0;
     const [affected] = await InvoiceNumber.update(
       { invoiceNumber: numInt || newNum },
       { where: { workOrderId: wo.id } }
@@ -1815,7 +1836,15 @@ router.put('/invoice-number/:id', async (req, res, next) => {
       const dup = await InvoiceNumber.findOne({ where: { invoiceNumber: numInt } });
       if (!dup) {
         await InvoiceNumber.create({ invoiceNumber: numInt, workOrderId: wo.id, clientId: wo.clientId || null, clientName: wo.clientName || null });
+      } else if (dup.voidedAt || dup.status === 'void' || dup.status === 'voided') {
+        // RECLAIM: the existing tracking row for this number was voided — reassign it to this WO and clear
+        // its voided state so the number is properly owned again (and the tracking page stays accurate).
+        await dup.update({
+          workOrderId: wo.id, clientId: wo.clientId || null, clientName: wo.clientName || null,
+          status: 'active', voidedAt: null, voidedBy: null, voidReason: null
+        });
       }
+      // If dup is active (belongs to a live WO) we never get here — the uniqueness check above already 409'd.
     }
 
     res.json({ data: wo.toJSON(), message: `Invoice number changed from #${oldNum || '?'} to #${newNum}` });

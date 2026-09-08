@@ -1777,6 +1777,7 @@ router.post('/invoice-sends/:id', async (req, res, next) => {
 // PUT /api/quickbooks/invoice-number/:id — Update invoice number with uniqueness check
 router.put('/invoice-number/:id', async (req, res, next) => {
   try {
+    const { Op } = require('sequelize');
     const { invoiceNumber } = req.body;
     const newNum = String(invoiceNumber).trim();
     if (!newNum) return res.status(400).json({ error: { message: 'Invoice number required' } });

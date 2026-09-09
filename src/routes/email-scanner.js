@@ -1266,24 +1266,36 @@ router.post('/convert-to-estimate/:scannedEmailId', async (req, res, next) => {
       });
     }
 
-    // Fetch the email's attachments via the reliable known-id path.
+    // Fetch the email's attachments AND body via the reliable known-id path.
     const { fetchAttachmentsByMessageId } = require('../services/emailScanner');
-    let attachments = [];
+    let attachments = [], bodyText = '';
     try {
       const r = await fetchAttachmentsByMessageId(scanned.gmailMessageId, scanned.gmailAccountId);
       attachments = r.attachments || [];
+      bodyText = r.bodyText || '';
     } catch (e) {
-      return res.status(400).json({ error: { message: 'Could not read the email attachments: ' + e.message } });
+      return res.status(400).json({ error: { message: 'Could not read the email: ' + e.message } });
     }
-    if (attachments.length === 0) {
-      return res.status(400).json({ error: { message: 'This email has no PDF or image attachments to parse.' } });
+    // Parts can be in attachments OR written in the email body. Need at least one.
+    if (attachments.length === 0 && !bodyText.trim()) {
+      return res.status(400).json({ error: { message: 'This email has no attachments and no readable body text to parse.' } });
     }
 
     // Create the draft estimate + start the parse (helper lives in estimates.js so it can use the
-    // local estimate-number generator and the shared runAiParse worker).
+    // local estimate-number generator and the shared runAiParse worker). When there are no attachments,
+    // the email body is passed as the quote text to parse.
     try { if (!scanned.clientId) await scanned.update({ clientId: client.id }); } catch {}
     const estimatesRouter = require('./estimates');
-    const { estimate, jobId, error: convertErr, partsCreated } = await estimatesRouter.createEstimateAndParseAttachments(client, scanned, attachments, req.body.notes || '');
+    // Give the AI the body text in the right role: if there are NO attachments, the body IS the quote.
+    // If attachments ARE present, pass the body as extra CONTEXT (it might carry quantities/notes) but let
+    // the AI decide the quote from the files — so a "see attached" throwaway body doesn't get mistaken for
+    // the quote, while a body with quantities still informs the parse + print matching.
+    const bodyClean = (bodyText || '').trim();
+    const quoteText = attachments.length === 0 ? bodyClean : '';
+    const extraNotes = (attachments.length > 0 && bodyClean)
+      ? `${req.body.notes ? req.body.notes + '\n\n' : ''}The email body says:\n${bodyClean}`
+      : (req.body.notes || '');
+    const { estimate, jobId, error: convertErr, partsCreated } = await estimatesRouter.createEstimateAndParseAttachments(client, scanned, attachments, extraNotes, quoteText);
 
     if (!estimate) {
       return res.status(422).json({ error: { message: convertErr || 'Could not convert this email to an estimate.' } });
@@ -1321,22 +1333,27 @@ async function processConvertItem(item) {
 
   // Fetch attachments.
   const { fetchAttachmentsByMessageId } = require('../services/emailScanner');
-  let attachments = [];
+  let attachments = [], bodyText = '';
   try {
     const r = await fetchAttachmentsByMessageId(scanned.gmailMessageId, scanned.gmailAccountId);
     attachments = r.attachments || [];
+    bodyText = r.bodyText || '';
   } catch (e) {
-    await item.update({ status: 'error', errorMessage: 'Could not read attachments: ' + e.message, clientId: client.id, clientName: client.name });
+    await item.update({ status: 'error', errorMessage: 'Could not read the email: ' + e.message, clientId: client.id, clientName: client.name });
     return;
   }
-  if (attachments.length === 0) {
-    await item.update({ status: 'error', errorMessage: 'No PDF/image attachments to parse.', clientId: client.id, clientName: client.name });
+  if (attachments.length === 0 && !bodyText.trim()) {
+    await item.update({ status: 'error', errorMessage: 'No attachments and no readable body text to parse.', clientId: client.id, clientName: client.name });
     return;
   }
 
   try { if (!scanned.clientId) await scanned.update({ clientId: client.id }); } catch {}
   const estimatesRouter = require('./estimates');
-  const { estimate, error: convertErr, partsCreated } = await estimatesRouter.createEstimateAndParseAttachments(client, scanned, attachments, '');
+  // Body as quote when no attachments; as context notes when attachments are present (see direct route).
+  const bodyClean = (bodyText || '').trim();
+  const quoteText = attachments.length === 0 ? bodyClean : '';
+  const extraNotes = (attachments.length > 0 && bodyClean) ? `The email body says:\n${bodyClean}` : '';
+  const { estimate, error: convertErr, partsCreated } = await estimatesRouter.createEstimateAndParseAttachments(client, scanned, attachments, extraNotes, quoteText);
 
   if (!estimate) {
     // Parse failed or found no parts — nothing was created (rolled back). Mark the item so Retry re-runs

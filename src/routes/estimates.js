@@ -4235,7 +4235,7 @@ router.delete('/:id/shipment-charges/:chargeId', async (req, res, next) => {
 
 // Create a draft estimate for a client and start an AI parse of in-memory attachments (used by Comm
 // Center "Convert to Estimate"). Returns { estimate, jobId }.
-router.createEstimateAndParseAttachments = async function(client, scanned, attachments, notes) {
+router.createEstimateAndParseAttachments = async function(client, scanned, attachments, notes, quoteText) {
   const estimateNumber = generateEstimateNumber();
   // Pick the specific contact who sent the email, if they're in the client's contacts — not just the
   // client's default contact. Match by email first, then by name.
@@ -4280,7 +4280,8 @@ router.createEstimateAndParseAttachments = async function(client, scanned, attac
   // autoCreate=true: no interactive Accept step in the convert flow, so persist parts automatically.
   // We AWAIT the parse here (instead of fire-and-forget) so we can ROLL BACK the estimate if the parse
   // fails or produces zero parts — that prevents blank estimates being left behind on a failed convert.
-  runAiParse(estimate, uploaded, -1, (notes || ''), jobId, undefined, true);
+  // quoteText (the email body) is used when there are no attachments — the parts are written in the body.
+  runAiParse(estimate, uploaded, -1, (notes || ''), jobId, (quoteText || undefined), true);
   const started = Date.now();
   let parseErr = null, partsCreated = 0, done = false;
   while (Date.now() - started < 4 * 60 * 1000 && !done) {

@@ -2399,6 +2399,10 @@ async function fetchAttachmentsByMessageId(gmailMessageId, gmailAccountId) {
       const headers = full.data.payload?.headers || [];
       const subject = (headers.find(h => h.name === 'Subject') || {}).value || '';
       const fromRaw = (headers.find(h => h.name === 'From') || {}).value || '';
+      // Also extract the plain-text body — needed when the parts are written in the email body with no
+      // attachment (the "Convert to Estimate" fallback parses the body as the quote).
+      let bodyText = '';
+      try { bodyText = extractEmailBody(full.data.payload) || ''; } catch {}
       const attachments = [];
       const walk = async (part) => {
         if (!part) return;
@@ -2422,7 +2426,7 @@ async function fetchAttachmentsByMessageId(gmailMessageId, gmailAccountId) {
         for (const sub of (part.parts || [])) await walk(sub);
       };
       await walk(full.data.payload);
-      return { attachments, subject, fromEmail: extractEmail(fromRaw), fromName: extractName(fromRaw) };
+      return { attachments, subject, fromEmail: extractEmail(fromRaw), fromName: extractName(fromRaw), bodyText };
     } catch (e) { lastErr = e; }
   }
   throw new Error(`Could not fetch that email${lastErr ? ': ' + lastErr.message : ''}.`);

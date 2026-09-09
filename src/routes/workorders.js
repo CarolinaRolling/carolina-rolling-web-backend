@@ -1676,6 +1676,23 @@ router.get('/:id', async (req, res, next) => {
       woJson.vendorIssues = [];
     }
 
+    // canBackfillPricing: true ONLY when at least one part is missing a price on the WORK ORDER but the
+    // linked ESTIMATE has a price for that same part. Drives whether the "Fix Pricing" button shows —
+    // no point offering it when the estimate is also blank (nothing to copy) or nothing is missing.
+    woJson.canBackfillPricing = false;
+    try {
+      if (workOrder.estimateId) {
+        const hasVal = (v) => v !== null && v !== undefined && v !== '' && parseFloat(v) > 0;
+        const woMissing = (workOrder.parts || []).filter(p => !hasVal(p.partTotal));
+        if (woMissing.length > 0) {
+          const estParts = await EstimatePart.findAll({ where: { estimateId: workOrder.estimateId }, attributes: ['partNumber', 'partTotal'] });
+          const estPriceByNum = {};
+          for (const ep of estParts) estPriceByNum[ep.partNumber] = ep.partTotal;
+          woJson.canBackfillPricing = woMissing.some(p => hasVal(estPriceByNum[p.partNumber]));
+        }
+      }
+    } catch (e) { /* best-effort flag; default false */ }
+
     if (req.apiKey && req.apiKey.clientName && !req.apiKey.deviceName) {
       res.json({ data: portalSanitizeWO(woJson) });
       return;

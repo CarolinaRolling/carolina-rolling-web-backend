@@ -3960,15 +3960,16 @@ router.post('/:id/ai-parse-email', async (req, res, next) => {
     if (!emailRef) return res.status(400).json({ error: { message: 'Paste a Gmail message id or URL.' } });
 
     const { fetchEmailAttachments } = require('../services/emailScanner');
-    const { attachments } = await fetchEmailAttachments(emailRef);
-    if (!attachments || attachments.length === 0) {
-      return res.status(400).json({ error: { message: 'That email has no PDF or image attachments to parse.' } });
+    const { attachments, bodyText } = await fetchEmailAttachments(emailRef);
+    const bodyClean = (bodyText || '').trim();
+    if ((!attachments || attachments.length === 0) && !bodyClean) {
+      return res.status(400).json({ error: { message: 'That email has no attachments and no readable body text to parse.' } });
     }
 
     // Write attachments to temp files shaped like multer uploads.
     const uploadDir = path.join(__dirname, '..', '..', 'uploads');
     try { fs.mkdirSync(uploadDir, { recursive: true }); } catch {}
-    const uploaded = attachments.map((a, i) => {
+    const uploaded = (attachments || []).map((a, i) => {
       const safe = a.originalName.replace(/[^\w.\-]/g, '_');
       const fp = path.join(uploadDir, `email-${Date.now()}-${i}-${safe}`);
       fs.writeFileSync(fp, a.buffer);
@@ -3983,7 +3984,13 @@ router.post('/:id/ai-parse-email', async (req, res, next) => {
     aiParseJobs.set(jobId, { status: 'pending', createdAt: Date.now() });
     res.status(202).json({ data: { jobId, fileCount: uploaded.length }, message: 'Parsing started' });
 
-    runAiParse(estimate, uploaded, quoteIndex, (req.body.notes || ''), jobId);
+    // Body-text role: no attachments -> body is the quote; attachments present -> body as context notes,
+    // AI decides the quote from the files. Same handling as the Comm Center Convert path.
+    const quoteText = uploaded.length === 0 ? bodyClean : '';
+    const extraNotes = (uploaded.length > 0 && bodyClean)
+      ? `${req.body.notes ? req.body.notes + '\n\n' : ''}The email body says:\n${bodyClean}`
+      : (req.body.notes || '');
+    runAiParse(estimate, uploaded, quoteIndex, extraNotes, jobId, (quoteText || undefined));
   } catch (error) {
     tempPaths.forEach(pth => { try { fs.unlinkSync(pth); } catch {} });
     if (jobId) aiParseJobs.set(jobId, { status: 'error', error: error.message, createdAt: Date.now() });

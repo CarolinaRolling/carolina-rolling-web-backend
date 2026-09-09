@@ -271,33 +271,53 @@ function stripQuoted(text) {
 }
 
 // Pull readable text out of a Gmail message payload (prefers text/plain, falls back to stripped HTML)
-function extractEmailBody(payload) {
+function extractEmailBody(payload, opts = {}) {
   if (!payload) return '';
+  const { gmail, messageId } = opts; // if provided, we can fetch body parts stored as attachments
   let plain = '';
   let html = '';
+  const pendingFetches = [];
   const decode = (data) => {
     try { return Buffer.from(String(data).replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'); }
     catch { return ''; }
   };
   const walk = (p) => {
     if (!p) return;
-    if (p.mimeType === 'text/plain' && p.body && p.body.data) plain += decode(p.body.data) + '\n';
-    else if (p.mimeType === 'text/html' && p.body && p.body.data) html += decode(p.body.data) + '\n';
+    const mt = p.mimeType || '';
+    if (mt === 'text/plain' && p.body && p.body.data) plain += decode(p.body.data) + '\n';
+    else if (mt === 'text/html' && p.body && p.body.data) html += decode(p.body.data) + '\n';
+    // Larger bodies are sometimes stored as a fetch-by-id part (body.attachmentId, no inline data).
+    else if ((mt === 'text/plain' || mt === 'text/html') && p.body && p.body.attachmentId && gmail && messageId) {
+      pendingFetches.push({ attachmentId: p.body.attachmentId, isHtml: mt === 'text/html' });
+    }
     (p.parts || []).forEach(walk);
   };
   walk(payload);
+
+  const stripHtml = (h) => h
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/\s+/g, ' ').trim();
+
+  // If we found inline text, use it (no async needed).
   if (plain.trim()) return plain;
-  // strip HTML tags as a fallback
-  return html
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/\s+/g, ' ')
-    .trim();
+  if (html.trim()) return stripHtml(html);
+
+  // Otherwise, if there are fetch-by-id body parts and we have a client, go get them (async).
+  if (pendingFetches.length && gmail && messageId) {
+    return (async () => {
+      let p2 = '', h2 = '';
+      for (const f of pendingFetches) {
+        try {
+          const att = await gmail.users.messages.attachments.get({ userId: 'me', messageId, id: f.attachmentId });
+          const txt = decode(att.data.data);
+          if (f.isHtml) h2 += txt + '\n'; else p2 += txt + '\n';
+        } catch {}
+      }
+      return p2.trim() ? p2 : stripHtml(h2);
+    })();
+  }
+  return '';
 }
 
 // --- Bills: extract structured fields from a PDF invoice using a vision model ---

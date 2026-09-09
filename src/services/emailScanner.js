@@ -2402,7 +2402,9 @@ async function fetchAttachmentsByMessageId(gmailMessageId, gmailAccountId) {
       // Also extract the plain-text body — needed when the parts are written in the email body with no
       // attachment (the "Convert to Estimate" fallback parses the body as the quote).
       let bodyText = '';
-      try { bodyText = extractEmailBody(full.data.payload) || ''; } catch {}
+      try { bodyText = await Promise.resolve(extractEmailBody(full.data.payload, { gmail, messageId: gmailMessageId })) || ''; } catch {}
+      // Last-resort fallback: Gmail's snippet (a short preview) if we couldn't extract a full body.
+      if (!bodyText.trim() && full.data.snippet) bodyText = full.data.snippet;
       const attachments = [];
       const walk = async (part) => {
         if (!part) return;
@@ -2461,10 +2463,13 @@ async function fetchEmailAttachments(idOrUrl) {
       }
       const attachments = [];
       let subject = '';
+      let bodyText = '';
       for (const mid of msgIds) {
         const full = await gmail.users.messages.get({ userId: 'me', id: mid, format: 'full' });
         const headers = full.data.payload?.headers || [];
         if (!subject) subject = (headers.find(h => h.name === 'Subject') || {}).value || '';
+        if (!bodyText) { try { bodyText = await Promise.resolve(extractEmailBody(full.data.payload, { gmail, messageId: mid })) || ''; } catch {} }
+        if (!bodyText && full.data.snippet) bodyText = full.data.snippet;
         const walk = async (part) => {
           if (!part) return;
           const filename = part.filename || '';
@@ -2482,7 +2487,7 @@ async function fetchEmailAttachments(idOrUrl) {
         };
         await walk(full.data.payload);
       }
-      return { attachments, subject };
+      return { attachments, subject, bodyText };
     } catch (e) { lastErr = e; }
   }
   throw new Error(`Could not fetch that email from any connected account${lastErr ? ': ' + lastErr.message : ''}.`);

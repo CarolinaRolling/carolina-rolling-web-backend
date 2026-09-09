@@ -3766,8 +3766,10 @@ MATCHING RULES (when multiple files are provided):
     const { buildFormData } = require('../services/emailScanner');
 
     // Persist the uploaded prints to a holding area so they survive past this request and can be
-    // attached to parts when the user accepts. Keyed by file index.
-    const holdDir = path.join(path.dirname(uploaded[0].path), 'ai-prints', jobId);
+    // attached to parts when the user accepts. Keyed by file index. Use a stable uploads path — NOT
+    // uploaded[0].path, which is undefined when there are no files (body-only / text-only parse).
+    const uploadsRoot = uploaded[0]?.path ? path.dirname(uploaded[0].path) : path.join(__dirname, '..', '..', 'uploads');
+    const holdDir = path.join(uploadsRoot, 'ai-prints', jobId);
     fs.mkdirSync(holdDir, { recursive: true });
     const heldFiles = {}; // index -> { path, originalName }
     uploaded.forEach((f, idx) => {

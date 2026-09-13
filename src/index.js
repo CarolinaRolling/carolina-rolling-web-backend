@@ -331,8 +331,10 @@ app.post('/api/debug/push/test', authenticate, sendTestPush);
 // === Pricing calibration worksheet — bootstraps the recommender when data is thin ===
 app.get('/api/settings/pricing-worksheet', authenticate, async (req, res) => {
   try {
-    const { buildWorksheet } = require('./services/pricingCalibration');
-    res.json({ data: buildWorksheet(req.query.partType || 'plate_roll') });
+    const { buildWorksheetFromHistory } = require('./services/pricingCalibration');
+    const models = require('./models');
+    const ws = await buildWorksheetFromHistory(req.query.partType || 'plate_roll', models);
+    res.json({ data: ws });
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
@@ -340,8 +342,9 @@ app.post('/api/settings/pricing-worksheet', authenticate, async (req, res) => {
   try {
     const { buildWorksheet, fitFromWorksheet } = require('./services/pricingCalibration');
     const partType = req.body.partType || 'plate_roll';
-    const ws = buildWorksheet(partType);
-    const fit = fitFromWorksheet(partType, ws.rows, req.body.answers || {});
+    // Prefer the exact rows the UI showed (may be history-seeded); fall back to rebuilding defaults.
+    const rows = (Array.isArray(req.body.rows) && req.body.rows.length) ? req.body.rows : buildWorksheet(partType).rows;
+    const fit = fitFromWorksheet(partType, rows, req.body.answers || {});
     if (!fit.ok) return res.status(400).json({ error: { message: fit.message } });
 
     // Save the fitted numbers straight into the pricing config for this part type

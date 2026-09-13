@@ -26,7 +26,7 @@ const BASELINE = {
   angle_roll:   { thickness: '3/8', width: 4, length: 188.5, diameter: 60, material: 'A36', quantity: 1 },
   // Round tube/pipe: described by OD + wall thickness, rolled to a diameter (not plate width).
   pipe_roll:    { section: 'round', outerDiameter: 6, wallThickness: '0.280', length: 188.5, diameter: 60, material: 'A36', quantity: 1 },
-  tube_roll:    { section: 'square', tubeSize: '4x4', wallThickness: '1/4', length: 188.5, diameter: 60, material: 'A36', quantity: 1 },
+  tube_roll:    { section: 'square', tubeSize: '4x2', wallThickness: '1/4', length: 188.5, diameter: 60, material: 'A36', quantity: 1 },
   // Structural sections: sized by their section (e.g. C8, W8), rolled the hard/easy way to a diameter.
   channel_roll: { section: 'C8', wallThickness: '', length: 188.5, diameter: 72, material: 'A36', quantity: 1 },
   beam_roll:    { section: 'W8', wallThickness: '', length: 188.5, diameter: 96, material: 'A36', quantity: 1 },
@@ -129,9 +129,85 @@ function buildWorksheet(partType) {
 }
 
 /**
- * Fit setup, rate and material factors from the owner's filled-in prices.
- * answers: { [rowId]: priceEach }
+ * Build a worksheet seeded from ACTUAL order history when we have it. Scans won/converted parts of this
+ * type, finds the most commonly-ordered real sizes, and turns the top few into calibration rows — so the
+ * owner calibrates against jobs he actually runs, not invented ones. Falls back to buildWorksheet()'s
+ * sensible defaults when there's too little history.
+ *
+ * models: { EstimatePart, WorkOrder } from require('../models')
  */
+async function buildWorksheetFromHistory(partType, models) {
+  const base = BASELINE[partType] || BASELINE.plate_roll;
+  try {
+    const { EstimatePart, Estimate } = models;
+    if (!EstimatePart) return buildWorksheet(partType);
+    const { Op } = require('sequelize');
+
+    // Pull recent parts of this type from WON estimates (accepted/converted).
+    const parts = await EstimatePart.findAll({
+      where: { partType },
+      include: [{ model: Estimate, as: 'estimate', attributes: ['status'], where: { status: { [Op.in]: ['accepted', 'converted'] } }, required: true }],
+      attributes: ['material', 'thickness', 'width', 'length', 'outerDiameter', 'wallThickness', 'sectionSize', 'diameter'],
+      limit: 400, order: [['createdAt', 'DESC']]
+    });
+    if (!parts || parts.length < 5) return buildWorksheet(partType); // too thin — use defaults
+
+    // Which fields identify a "size" for this part-type family?
+    const sig = (p) => {
+      if (base.section === 'round') return `${p.outerDiameter || ''}|${p.wallThickness || ''}`;
+      if (base.section === 'square') return `${p.sectionSize || p.width || ''}|${p.wallThickness || p.thickness || ''}`;
+      if (base.section && /^[CW]\d/.test(String(base.section))) return `${p.sectionSize || ''}`;
+      return `${p.thickness || ''}|${p.width || ''}`; // plate/flat/angle
+    };
+    const counts = {};
+    for (const p of parts) {
+      const s = sig(p);
+      if (!s.replace(/\|/g, '').trim()) continue; // skip blank sizes
+      counts[s] = counts[s] || { n: 0, sample: p };
+      counts[s].n++;
+    }
+    const top = Object.entries(counts).sort((a, b) => b[1].n - a[1].n).slice(0, 5);
+    if (top.length < 2) return buildWorksheet(partType); // not enough distinct real sizes — use defaults
+
+    // Build rows from the real top sizes. Row 1 (most common) is the baseline anchor.
+    const rows = [];
+    const mkRow = (p, purpose, teaches) => {
+      const row = Object.assign({}, base);
+      // copy the size fields that exist on the historical part
+      ['material', 'thickness', 'width', 'length', 'outerDiameter', 'wallThickness', 'sectionSize', 'diameter']
+        .forEach(f => { if (p[f] !== null && p[f] !== undefined && p[f] !== '') row[f] = p[f]; });
+      row.material = row.material || 'A36';
+      row.quantity = 1;
+      row.id = `${purpose}_${rows.length}`;
+      row.purpose = purpose;
+      row.teaches = teaches;
+      row.description = describe(row);
+      row.estWeightLbs = Math.round(billableWeightLbs(row) || 0);
+      rows.push(row);
+    };
+    mkRow(top[0][1].sample, 'baseline', `Your most commonly ordered ${partType.replace('_', ' ')} (${top[0][1].n} recent jobs) — anchors setup + rate.`);
+    top.slice(1).forEach(([, v]) => mkRow(v.sample, 'common', `Another common size (${v.n} recent jobs).`));
+
+    // Material rows — same geometry as the baseline, different metal (teaches difficulty factors).
+    const baseSample = top[0][1].sample;
+    for (const m of MATERIALS_TO_CALIBRATE) {
+      if (m === 'A36') continue;
+      const p = {}; ['thickness', 'width', 'length', 'outerDiameter', 'wallThickness', 'sectionSize', 'diameter'].forEach(f => p[f] = baseSample[f]);
+      p.material = m;
+      mkRow(p, 'material', `Same as your baseline size, but in ${m} — teaches how much more/less than A36 you charge.`);
+    }
+
+    return {
+      partType,
+      baseline: rows[0]?.description,
+      note: `Seeded from your ${parts.length} most recent won ${partType.replace('_', ' ')} jobs. Price each the way you actually would; blanks are skipped.`,
+      fromHistory: true,
+      rows
+    };
+  } catch (e) {
+    return buildWorksheet(partType); // any error -> safe fallback
+  }
+}
 function fitFromWorksheet(partType, rows, answers) {
   const filled = rows
     .map(r => ({ ...r, price: parseFloat(answers[r.id]) }))
@@ -197,4 +273,4 @@ function fitFromWorksheet(partType, rows, answers) {
   };
 }
 
-module.exports = { buildWorksheet, fitFromWorksheet, MATERIALS_TO_CALIBRATE, DEFAULT_MATERIAL_FACTORS };
+module.exports = { buildWorksheet, buildWorksheetFromHistory, fitFromWorksheet, MATERIALS_TO_CALIBRATE, DEFAULT_MATERIAL_FACTORS };

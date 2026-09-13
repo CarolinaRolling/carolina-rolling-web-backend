@@ -114,6 +114,34 @@ function materialFamily(s) {
 // The flat plate that gets rolled. If length isn't given, derive it from the rolled diameter
 // (developed length = pi x diameter) - that's the plate actually fed through the roller.
 function plateDims(part) {
+  // Tube / pipe / structural sections don't store plate width+thickness — their size lives in
+  // sectionSize ("6x3"), wallThickness, or outerDiameter. Without this, billableWeightLbs() returns null
+  // for every tube/pipe part and suggestPrice silently SKIPS them ("no comparable won jobs" even when
+  // you've done the job). Map each shape to an equivalent (thickness = wall, width = developed perimeter)
+  // so a real weight can be computed and the comparable is usable.
+  const wall = parseNum(part.wallThickness);
+  const od = parseNum(part.outerDiameter);
+  const section = (part.sectionSize || '').toString().trim();
+
+  // Round pipe/tube: OD + wall -> developed perimeter = pi * OD
+  if (od && wall) {
+    let l = parseNum(part.length);
+    if (!l) { const d = parseNum(part.diameter) || parseNum(part.innerDiameter); if (d) l = Math.PI * d; }
+    return { t: wall, w: Math.PI * od, l };
+  }
+  // Square/rect tube from sectionSize "AxB" (or "A" square) + wall
+  const m = section.match(/^\s*(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)/i);
+  if ((m || /^\d/.test(section)) && wall) {
+    const a = m ? parseFloat(m[1]) : parseFloat(section);
+    const b = m ? parseFloat(m[2]) : a;
+    if (a > 0 && b > 0) {
+      let l = parseNum(part.length);
+      if (!l) { const d = parseNum(part.diameter) || parseNum(part.innerDiameter); if (d) l = Math.PI * d; }
+      return { t: wall, w: 2 * (a + b), l }; // developed perimeter of the tube wall
+    }
+  }
+
+  // Plate / flat / angle (original behavior)
   const t = parseNum(part.thickness);
   const w = parseNum(part.width);
   let l = parseNum(part.length);
@@ -147,7 +175,11 @@ function billableWidth(w) {
 function billableWeightLbs(part) {
   const { t, w, l } = plateDims(part);
   if (!t || !w || !l) return null;
-  const bw = billableWidth(w);
+  // Plate work is billed by width BAND (you sell band capacity). Tube/pipe/section parts have no plate
+  // width band — their "width" here is a developed perimeter, so use it directly instead of snapping it
+  // to a plate band (which would inflate the weight).
+  const isTubeLike = !!(parseNum(part.wallThickness) && (parseNum(part.outerDiameter) || /\d/.test(String(part.sectionSize || ''))));
+  const bw = isTubeLike ? w : billableWidth(w);
   if (!bw) return null;
   const d = DENSITY[materialFamily(part.material)] !== undefined ? DENSITY[materialFamily(part.material)] : DENSITY.carbon;
   return t * bw * l * d;

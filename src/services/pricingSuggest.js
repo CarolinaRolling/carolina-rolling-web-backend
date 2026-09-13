@@ -80,6 +80,12 @@ function parseNum(s) {
   if (s === null || s === undefined || s === '') return null;
   if (typeof s === 'number') return s;
   let str = String(s).replace(/["\u2033]|in\.?|inch(es)?/gi, ' ').trim();
+  // Feet: "20'" or "20 ft" -> inches, before the plain-number fallback (else a 20-foot length
+  // reads as 20 inches and long tube/pipe jobs look ~12x too light).
+  {
+    const feetMatch = str.match(/^(\d*\.?\d+)\s*(?:'|\u2032|ft|feet|foot)\s*$/i);
+    if (feetMatch) return parseFloat(feetMatch[1]) * 12;
+  }
   // Gauge thickness must convert to its decimal inch value BEFORE the plain-number fallback below.
   // Otherwise "10 ga" parses as the number 10, and weight (t*w*l*density) comes out ~100x too high
   // — 10ga 48x120 was read as 10" thick, giving ~16,000 lb instead of ~220 lb. Matches the

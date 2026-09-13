@@ -1474,28 +1474,29 @@ async function _runScanInternal() {
                     const pdfData = Buffer.from(attachment.data.data, 'base64');
                     const fileName = part.filename || `vendor-quote-${vendorName}.pdf`;
 
-                    const cloudinary = require('cloudinary').v2;
-                    const uploadResult = await new Promise((resolve, reject) => {
-                      const stream = cloudinary.uploader.upload_stream(
-                        { resource_type: 'raw', folder: 'estimate-files', public_id: `vendor-quote-${rfqEstimate.estimateNumber}-${Date.now()}` },
-                        (error, result) => { if (error) reject(error); else resolve(result); }
-                      );
-                      stream.end(pdfData);
+                    // Store through the app's central file storage (S3 for new files) — the SAME path every
+                    // other estimate/WO file uses, so the viewer can open it. The old code uploaded a
+                    // Cloudinary "raw" object directly, whose delivery URL the viewer couldn't open (raw
+                    // delivery is blocked on many Cloudinary accounts) — that's why clicking it errored.
+                    const uploadResult = await fileStorage.uploadBuffer(pdfData, {
+                      folder: `estimates/${rfqEstimate.id}/vendor-quotes`,
+                      filename: fileName,
+                      mimeType: 'application/pdf'
                     });
 
                     await EstimateFile.create({
                       estimateId: rfqEstimate.id,
-                      filename: uploadResult.public_id,
+                      filename: uploadResult.storageId,
                       originalName: fileName,
                       mimeType: 'application/pdf',
                       size: pdfData.length,
-                      url: uploadResult.secure_url,
-                      cloudinaryId: uploadResult.public_id,
+                      url: uploadResult.url,
+                      cloudinaryId: uploadResult.storageId,
                       fileType: 'vendor_quote'
                     });
 
                     attachedPdf = true;
-                    console.log(`[EmailScanner] Saved vendor PDF: ${fileName} → ${rfqEstimate.estimateNumber}`);
+                    console.log(`[EmailScanner] Saved vendor PDF: ${fileName} → ${rfqEstimate.estimateNumber} (${uploadResult.provider})`);
                   } catch (pdfErr) {
                     console.error(`[EmailScanner] Failed to save vendor PDF:`, pdfErr.message);
                   }

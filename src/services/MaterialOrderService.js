@@ -3,6 +3,7 @@
 
 const { Op } = require('sequelize');
 const cloudinary = require('cloudinary').v2;
+const fileStorage = require('../utils/storage');
 
 class MaterialOrderService {
   constructor(models) {
@@ -144,20 +145,13 @@ class MaterialOrderService {
             poNumberFormatted, supplier, parts, workOrder
           );
 
-          const uploadResult = await new Promise((resolve, reject) => {
-            const uploadStream = cloudinary.uploader.upload_stream(
-              {
-                resource_type: 'raw',
-                folder: `work-orders/${workOrder.id}/purchase-orders`,
-                public_id: `${poNumberFormatted}`,
-                format: 'pdf'
-              },
-              (error, result) => {
-                if (error) reject(error);
-                else resolve(result);
-              }
-            );
-            uploadStream.end(pdfBuffer);
+          // Store through the app's central file storage (S3) — same path as all other documents, so the
+          // PO PDF opens correctly. (The old direct Cloudinary raw upload produced a link the viewer
+          // couldn't open, the same issue the vendor-quote PDF had.)
+          const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, {
+            folder: `work-orders/${workOrder.id}/purchase-orders`,
+            filename: `${poNumberFormatted}.pdf`,
+            mimeType: 'application/pdf'
           });
 
           // Save document reference
@@ -167,8 +161,8 @@ class MaterialOrderService {
             originalName: `${poNumberFormatted}.pdf`,
             mimeType: 'application/pdf',
             size: pdfBuffer.length,
-            url: uploadResult.secure_url,
-            cloudinaryId: uploadResult.public_id,
+            url: uploadResult.url,
+            cloudinaryId: uploadResult.storageId,
             documentType: 'purchase_order'
           }, { transaction });
 

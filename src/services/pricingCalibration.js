@@ -23,7 +23,14 @@ const BASELINE = {
   cone_roll:    { thickness: '1/4', width: 48, length: 150, diameter: 48, material: 'A36', quantity: 1 },
   press_brake:  { thickness: '1/4', width: 48, length: 120, material: 'A36', quantity: 1 },
   flat_stock:   { thickness: '1/4', width: 48, length: 120, material: 'A36', quantity: 1 },
-  angle_roll:   { thickness: '3/8', width: 4, length: 188.5, diameter: 60, material: 'A36', quantity: 1 }
+  angle_roll:   { thickness: '3/8', width: 4, length: 188.5, diameter: 60, material: 'A36', quantity: 1 },
+  // Round tube/pipe: described by OD + wall thickness, rolled to a diameter (not plate width).
+  pipe_roll:    { section: 'round', outerDiameter: 6, wallThickness: '0.280', length: 188.5, diameter: 60, material: 'A36', quantity: 1 },
+  tube_roll:    { section: 'square', tubeSize: '4x4', wallThickness: '1/4', length: 188.5, diameter: 60, material: 'A36', quantity: 1 },
+  // Structural sections: sized by their section (e.g. C8, W8), rolled the hard/easy way to a diameter.
+  channel_roll: { section: 'C8', wallThickness: '', length: 188.5, diameter: 72, material: 'A36', quantity: 1 },
+  beam_roll:    { section: 'W8', wallThickness: '', length: 188.5, diameter: 96, material: 'A36', quantity: 1 },
+  flat_bar:     { thickness: '1/2', width: 4, length: 188.5, diameter: 48, material: 'A36', quantity: 1 }
 };
 
 const MATERIALS_TO_CALIBRATE = ['A36', 'A516 Gr 70', 'A572 Gr 50', '304 S/S', '316 S/S', 'AR400', '6061', '5052'];
@@ -32,8 +39,22 @@ function fmt(v) { return typeof v === 'number' ? String(v) : v; }
 
 function describe(row) {
   const bits = [];
-  bits.push(`${row.thickness}"`);
-  if (row.width) bits.push(`${fmt(row.width)}" wide`);
+  if (row.section === 'round') {
+    // Round pipe/tube: OD × wall
+    bits.push(`${fmt(row.outerDiameter)}" OD`);
+    if (row.wallThickness) bits.push(`${row.wallThickness}" wall`);
+  } else if (row.section === 'square') {
+    // Square/rect tube: size × wall
+    if (row.tubeSize) bits.push(`${row.tubeSize} tube`);
+    if (row.wallThickness) bits.push(`${row.wallThickness}" wall`);
+  } else if (row.section && /^[CW]\d/.test(row.section)) {
+    // Structural channel/beam section
+    bits.push(row.section);
+  } else {
+    // Plate / flat / angle style
+    bits.push(`${row.thickness}"`);
+    if (row.width) bits.push(`${fmt(row.width)}" wide`);
+  }
   if (row.length) bits.push(`${fmt(row.length)}" long`);
   if (row.diameter) bits.push(`rolled to ${fmt(row.diameter)}" dia`);
   bits.push(row.material);
@@ -58,12 +79,25 @@ function buildWorksheet(partType) {
 
   add('baseline', 'Anchors your setup cost and base rate — everything else is measured against this.', {});
 
-  // Thickness — how much harder does thicker steel get?
-  add('thickness', 'How price scales with thickness (thin).', { thickness: '1/4' });
-  add('thickness', 'How price scales with thickness (heavy).', { thickness: '3/4' });
+  const isRoundOrSquare = base.section === 'round' || base.section === 'square';
+  const isSection = base.section && /^[CW]\d/.test(base.section);
 
-  // Width bands — the machine-capacity steps
-  if (partType !== 'angle_roll') {
+  if (isRoundOrSquare) {
+    // Tube/pipe: wall thickness drives difficulty, not plate thickness.
+    add('wall', 'How price scales with a THIN wall (springier, harder to control).', { wallThickness: base.section === 'round' ? '0.120' : '1/8' });
+    add('wall', 'How price scales with a HEAVY wall.', { wallThickness: base.section === 'round' ? '0.500' : '1/2' });
+  } else if (isSection) {
+    // Channel/beam: the section size itself is the driver.
+    add('section', 'A lighter section (easier).', { section: base.section === 'W8' ? 'W6' : 'C6' });
+    add('section', 'A heavier section (harder, more passes).', { section: base.section === 'W8' ? 'W12' : 'C12' });
+  } else {
+    // Plate / flat / angle: thickness rows.
+    add('thickness', 'How price scales with thickness (thin).', { thickness: '1/4' });
+    add('thickness', 'How price scales with thickness (heavy).', { thickness: '3/4' });
+  }
+
+  // Width bands only apply to plate-style flat work (a plate roller's machine-capacity steps).
+  if (!isRoundOrSquare && !isSection && partType !== 'angle_roll') {
     add('width', 'Narrow work (0–24" band).', { width: 24 });
     add('width', 'Mid work (24–60" band).', { width: 60 });
     add('width', 'Full-width work (96–120" band).', { width: 120 });

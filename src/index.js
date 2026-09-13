@@ -328,7 +328,27 @@ const sendTestPush = async (req, res) => {
 app.get('/api/debug/push/test', sendTestPush);
 app.post('/api/debug/push/test', authenticate, sendTestPush);
 
-// === Pricing calibration worksheet — bootstraps the recommender when data is thin ===
+
+// === Pricing calibration worksheet + diagnostics ===
+app.get('/api/settings/pricing-debug', authenticate, async (req, res) => {
+  try {
+    const { EstimatePart, Estimate } = require('./models');
+    const { Op } = require('sequelize');
+    const rows = await EstimatePart.findAll({
+      where: { partType: req.query.partType || 'tube_roll' },
+      include: [{ model: Estimate, as: 'estimate', required: true, where: { status: { [Op.in]: ['accepted', 'converted'] }, trashedAt: null }, attributes: ['clientName', 'status'] }],
+      attributes: ['id', 'partType', 'material', 'thickness', 'width', 'length', 'diameter', 'outerDiameter', 'wallThickness', 'sectionSize', 'quantity', 'laborTotal'],
+      limit: 50, order: [['createdAt', 'DESC']]
+    });
+    res.json({ data: rows.map(r => ({
+      client: r.estimate && r.estimate.clientName, material: r.material,
+      thickness: r.thickness, width: r.width, length: r.length, diameter: r.diameter,
+      outerDiameter: r.outerDiameter, wallThickness: r.wallThickness, sectionSize: r.sectionSize,
+      qty: r.quantity, labor: r.laborTotal
+    })) });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
 app.get('/api/settings/pricing-worksheet', authenticate, async (req, res) => {
   try {
     const { buildWorksheetFromHistory } = require('./services/pricingCalibration');

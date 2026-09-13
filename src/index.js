@@ -328,6 +328,25 @@ const sendTestPush = async (req, res) => {
 app.get('/api/debug/push/test', sendTestPush);
 app.post('/api/debug/push/test', authenticate, sendTestPush);
 
+app.get('/api/debug/pricing-data', async (req, res) => {
+  try {
+    if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube to the URL.' } });
+    const { EstimatePart, Estimate } = require('./models');
+    const { Op } = require('sequelize');
+    const rows = await EstimatePart.findAll({
+      where: { partType: req.query.partType || 'tube_roll' },
+      include: [{ model: Estimate, as: 'estimate', required: true, where: { status: { [Op.in]: ['accepted', 'converted'] }, trashedAt: null }, attributes: ['clientName', 'status'] }],
+      attributes: ['id', 'material', 'thickness', 'width', 'length', 'diameter', 'outerDiameter', 'wallThickness', 'sectionSize', 'quantity'],
+      limit: 50, order: [['createdAt', 'DESC']]
+    });
+    res.json({ count: rows.length, partType: req.query.partType || 'tube_roll', data: rows.map(function(r){ return {
+      client: r.estimate && r.estimate.clientName, material: r.material,
+      thickness: r.thickness, width: r.width, length: r.length, diameter: r.diameter,
+      outerDiameter: r.outerDiameter, wallThickness: r.wallThickness, sectionSize: r.sectionSize, qty: r.quantity
+    }; }) });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
 
 // === Pricing calibration worksheet + diagnostics ===
 

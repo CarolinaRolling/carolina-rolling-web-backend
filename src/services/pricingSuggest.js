@@ -115,10 +115,20 @@ function materialFamily(s) {
 // (developed length = pi x diameter) - that's the plate actually fed through the roller.
 function plateDims(part) {
   // Tube / pipe / structural sections don't store plate width+thickness — their size lives in
-  // sectionSize ("6x3"), wallThickness, or outerDiameter. Without this, billableWeightLbs() returns null
-  // for every tube/pipe part and suggestPrice silently SKIPS them ("no comparable won jobs" even when
-  // you've done the job). Map each shape to an equivalent (thickness = wall, width = developed perimeter)
-  // so a real weight can be computed and the comparable is usable.
+  // sectionSize ("6x3"), wallThickness, or outerDiameter. Map each shape to an equivalent
+  // (thickness = wall, width = developed perimeter) so a real weight can be computed.
+  const od = parseNum(part.outerDiameter);
+  const section = (part.sectionSize || '').toString().trim();
+  // Square/rect tube stores its wall in `thickness`; round pipe uses wallThickness. Accept either.
+  const wall = parseNum(part.wallThickness) || (section ? parseNum(part.thickness) : 0);
+
+  // Round pipe/tube: OD + wall -> developed perimeter = pi * OD
+  if (od && (parseNum(part.wallThickness) || parseNum(part.thickness))) {
+    const rwall = parseNum(part.wallThickness) || parseNum(part.thickness);
+    let lp = parseNum(part.length);
+    if (!lp) { const d = parseNum(part.diameter) || parseNum(part.innerDiameter); if (d) lp = Math.PI * d; }
+    return { t: rwall, w: Math.PI * od, l: lp };
+  }
 
   // Square/rect tube from sectionSize "AxB" (or "A" square) + wall
   const m = section.match(/^\s*(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)/i);
@@ -128,7 +138,7 @@ function plateDims(part) {
     if (a > 0 && b > 0) {
       let l = parseNum(part.length);
       if (!l) { const d = parseNum(part.diameter) || parseNum(part.innerDiameter); if (d) l = Math.PI * d; }
-      return { t: wall, w: 2 * (a + b), l }; // developed perimeter of the tube wall
+      return { t: wall, w: 2 * (a + b), l };
     }
   }
 

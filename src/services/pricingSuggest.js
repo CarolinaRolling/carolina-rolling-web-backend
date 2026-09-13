@@ -119,43 +119,73 @@ function materialFamily(s) {
 
 // The flat plate that gets rolled. If length isn't given, derive it from the rolled diameter
 // (developed length = pi x diameter) - that's the plate actually fed through the roller.
+function parseSection(section) {
+  // Parse "AxB" style sizes into two numbers, tolerating fractions, inch marks and spaces:
+  // "2x2", "1.5x1.5", "6x3", "1-1/2\" x 1\"", "2 1/2 x 2 1/2". Returns [a,b] or null.
+  if (!section) return null;
+  const parts = String(section).split(/x/i);
+  if (parts.length < 1) return null;
+  const a = parseNum(parts[0]);
+  const b = parts.length > 1 ? parseNum(parts[1]) : a;
+  if (!a || a <= 0) return null;
+  return [a, b && b > 0 ? b : a];
+}
+
+// Shape families for the price recommender. Each part type maps to how its "billable width" (the linear
+// dimension the weight scales with) is derived from its size. Kept explicit so an ANGLE only ever compares
+// to angles, a TUBE to tubes, etc. — and each uses the right developed width.
+const SHAPE_FAMILY = {
+  plate_roll: 'plate', shaped_plate: 'plate', flat_stock: 'plate', press_brake: 'plate',
+  pipe_roll: 'round',
+  tube_roll: 'tube',            // closed rect/square tube: perimeter 2*(a+b)
+  angle_roll: 'angle',          // open L: developed width a+b
+  channel_roll: 'channel', beam_roll: 'beam',
+  flat_bar: 'bar'               // solid bar: width = the bar width
+};
+
 function plateDims(part) {
-  // Tube / pipe / structural sections don't store plate width+thickness — their size lives in
-  // sectionSize ("6x3"), wallThickness, or outerDiameter. Map each shape to an equivalent
-  // (thickness = wall, width = developed perimeter) so a real weight can be computed.
+  const fam = SHAPE_FAMILY[part.partType] || 'plate';
+  const wall = parseNum(part.wallThickness) || parseNum(part.thickness);
   const od = parseNum(part.outerDiameter);
-  const section = (part.sectionSize || '').toString().trim();
-  // Square/rect tube stores its wall in `thickness`; round pipe uses wallThickness. Accept either.
-  const wall = parseNum(part.wallThickness) || (section ? parseNum(part.thickness) : 0);
+  let l = parseNum(part.length);
+  const dia = () => parseNum(part.diameter) || parseNum(part.innerDiameter);
+  if (!l) { const d = dia() || od; if (d) l = Math.PI * d; }
 
-  // Round pipe/tube: OD + wall -> developed perimeter = pi * OD
-  if (od && (parseNum(part.wallThickness) || parseNum(part.thickness))) {
-    const rwall = parseNum(part.wallThickness) || parseNum(part.thickness);
-    let lp = parseNum(part.length);
-    if (!lp) { const d = parseNum(part.diameter) || parseNum(part.innerDiameter); if (d) lp = Math.PI * d; }
-    return { t: rwall, w: Math.PI * od, l: lp };
+  if (fam === 'round') {
+    // Round pipe/tube: developed width = circumference of the OD.
+    if (od && wall) return { t: wall, w: Math.PI * od, l };
+    return { t: null, w: null, l }; // no size -> skip
+  }
+  if (fam === 'tube') {
+    const s = parseSection(part.sectionSize);
+    if (s && wall) return { t: wall, w: 2 * (s[0] + s[1]), l };
+    return { t: null, w: null, l };
+  }
+  if (fam === 'angle') {
+    // Open L-section: developed width = sum of the two legs.
+    const s = parseSection(part.sectionSize);
+    if (s && wall) return { t: wall, w: s[0] + s[1], l };
+    return { t: null, w: null, l };
+  }
+  if (fam === 'channel' || fam === 'beam') {
+    // Structural section: approximate developed width from the section box perimeter as a proxy for
+    // material/rolling effort (true weight is lb/ft, not stored). Better than nothing for similarity.
+    const s = parseSection(part.sectionSize);
+    if (s && wall) return { t: wall, w: (fam === 'beam' ? 2 * (s[0] + s[1]) : (2 * s[1] + s[0])), l };
+    return { t: null, w: null, l };
+  }
+  if (fam === 'bar') {
+    // Solid flat/square bar: width = bar width, thickness = bar thickness.
+    const s = parseSection(part.sectionSize);
+    const t = parseNum(part.thickness);
+    if (s) return { t: t || s[1], w: s[0], l };
+    const w = parseNum(part.width);
+    return { t, w, l };
   }
 
-  // Square/rect tube from sectionSize "AxB" (or "A" square) + wall
-  const m = section.match(/^\s*(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)/i);
-  if ((m || /^\d/.test(section)) && wall) {
-    const a = m ? parseFloat(m[1]) : parseFloat(section);
-    const b = m ? parseFloat(m[2]) : a;
-    if (a > 0 && b > 0) {
-      let l = parseNum(part.length);
-      if (!l) { const d = parseNum(part.diameter) || parseNum(part.innerDiameter); if (d) l = Math.PI * d; }
-      return { t: wall, w: 2 * (a + b), l };
-    }
-  }
-
-  // Plate / flat / angle (original behavior)
+  // plate family: thickness x width x length
   const t = parseNum(part.thickness);
   const w = parseNum(part.width);
-  let l = parseNum(part.length);
-  if (!l) {
-    const d = parseNum(part.diameter) || parseNum(part.innerDiameter) || parseNum(part.outerDiameter);
-    if (d) l = Math.PI * d;
-  }
   return { t, w, l };
 }
 
@@ -184,8 +214,8 @@ function billableWeightLbs(part) {
   if (!t || !w || !l) return null;
   // Plate work is billed by width BAND. Tube/pipe/section parts have no plate band — their "width" is a
   // developed perimeter, so use it directly instead of snapping to a band (which would inflate weight).
-  const isTubeLike = !!(parseNum(part.outerDiameter) || /\d/.test(String(part.sectionSize || '')));
-  const bw = isTubeLike ? w : billableWidth(w);
+  const fam = SHAPE_FAMILY[part.partType] || 'plate';
+  const bw = fam === 'plate' ? billableWidth(w) : w;  // non-plate shapes use developed width directly
   if (!bw) return null;
   const d = DENSITY[materialFamily(part.material)] !== undefined ? DENSITY[materialFamily(part.material)] : DENSITY.carbon;
   return t * bw * l * d;
@@ -214,7 +244,7 @@ async function suggestPrice(target, opts = {}) {
   const tWeight = weightLbs(target);              // real weight — what the crane lifts
   const tBillable = billableWeightLbs(target);    // band-max weight — what you charge for
   const tDims = plateDims(target);
-  const targetIsTubeShaped = !!(parseNum(target.outerDiameter) || /\d/.test(String(target.sectionSize || '')));
+  const targetFamily = SHAPE_FAMILY[target.partType] || 'plate';
   const tBand = widthBand(tDims.w);
   const tThk = tDims.t;
   const tDia = parseNum(target.diameter || target.innerDiameter || target.outerDiameter);
@@ -248,11 +278,9 @@ async function suggestPrice(target, opts = {}) {
 
     const w = billableWeightLbs(p);          // rate is computed on BILLABLE weight, consistently
     if (!w || w <= 0) continue;              // need size to compute a rate
-    // SHAPE GUARD: only compare like-shaped parts. A tube quote must not be priced off plate-dimensioned
-    // records (and vice-versa) — even within the same partType, legacy/mis-entered rows can carry the wrong
-    // geometry, which mixes perimeter-weight and plate-weight and skews the rate.
-    const pIsTubeShaped = !!(parseNum(p.outerDiameter) || /\d/.test(String(p.sectionSize || '')));
-    if (targetIsTubeShaped !== pIsTubeShaped) continue;
+    // SHAPE GUARD: only compare within the SAME shape family (angle<->angle, tube<->tube, etc.).
+    const pFamily = SHAPE_FAMILY[p.partType] || 'plate';
+    if (pFamily !== targetFamily) continue;
     const dims = plateDims(p);
     // DIFFICULTY-ADJUSTED weight: an AR400 job of the same size is much more work than A36, so we
     // normalise every comparable to "A36-equivalent pounds". That lets an A36 job inform an AR400

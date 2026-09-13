@@ -1219,20 +1219,9 @@ async function matchClientForEmail(fromEmail, fromName) {
       if (emails.some(e => e.includes('@') && e.split('@')[1] === domain)) return { client: c, reason: 'email domain' };
     }
   }
-  // 3) company name appears in the sender name or the email local part
-  const haystack = `${name} ${email}`;
-  for (const c of clients) {
-    const cn = (c.name || '').trim().toLowerCase();
-    if (cn && cn.length >= 3 && haystack.includes(cn)) return { client: c, reason: 'company name' };
-  }
-  // 4) contact person name matches the sender name
-  if (name) {
-    for (const c of clients) {
-      const names = [c.contactName, ...(Array.isArray(c.contacts) ? c.contacts.map(k => k.name) : [])]
-        .filter(Boolean).map(n => n.trim().toLowerCase());
-      if (names.some(n => n.length >= 4 && (n === name || name.includes(n) || n.includes(name)))) return { client: c, reason: 'contact name' };
-    }
-  }
+  // Fuzzy company-name and contact-name substring matching was REMOVED on purpose — it produced wrong
+  // matches (e.g. "Ace" matching "Aceituno Metals"). Only exact email or exact (non-generic) domain
+  // auto-match now. Everything else returns no match so the employee picks/creates the client.
   return { client: null };
 }
 

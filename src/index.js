@@ -477,7 +477,9 @@ async function recommendModelsWithAI(list, apiKey) {
     r.write(body); r.end();
   });
   const parsed = JSON.parse(respText);
-  const text = (parsed.content && parsed.content[0] && parsed.content[0].text) || '';
+  const text = (Array.isArray(parsed.content)
+    ? parsed.content.filter(b => b && b.type === 'text' && typeof b.text === 'string').map(b => b.text).join('')
+    : ((parsed.content && parsed.content[0] && parsed.content[0].text) || ''));
   const rec = JSON.parse(text.replace(/```json|```/g, '').trim());
   const ok = (id) => list.some(m => m.id === id);
   return (rec && ok(rec.parsing) && ok(rec.triage)) ? { parsing: rec.parsing, triage: rec.triage } : null;
@@ -986,6 +988,9 @@ app.get('/api/operations/my-queue', authenticate, async (req, res) => {
       where: { assignedOperator: operator, status: { [Op.notIn]: ASSIGN_DONE }, isVoided: { [Op.not]: true } },
       attributes: ['id', 'drNumber', 'orderNumber', 'clientName', 'status', 'promisedDate', 'assignedSequence'],
       order: [['assignedSequence', 'ASC']],
+      limit: 5, // Tablet shows only the top 5 of the operator's queue ("deep queue, shallow view"); as a
+                // job completes it leaves the non-done filter and #6 becomes part of the top 5. The office
+                // manages the full ranked queue on the Scheduling > Operator Queues tab.
     });
     const tasks = await OperatorTask.findAll({
       where: { operator, done: false },

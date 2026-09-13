@@ -344,14 +344,20 @@ async function extractBill(gmail, messageId) {
     const raw = await new Promise((resolve, reject) => {
       const req = https.request({
         hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(reqBody) },
+        headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'anthropic-beta': 'pdfs-2024-09-25', 'Content-Length': Buffer.byteLength(reqBody) },
       }, (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve(d)); });
       req.on('error', reject);
       req.setTimeout(45000, () => req.destroy(new Error('bill extract timeout')));
       req.write(reqBody); req.end();
     });
     const data = JSON.parse(raw);
-    const text = (data.content?.[0]?.text || '').replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+    // Read ALL text blocks — some models lead with a non-text block (thinking/tool_use), so content[0].text
+    // alone can be empty even when the AI replied. (Same fix applied across the other AI callers.)
+    const joined = Array.isArray(data.content)
+      ? data.content.filter(b => b && b.type === 'text' && typeof b.text === 'string').map(b => b.text).join('')
+      : (data.content?.[0]?.text || '');
+    const text = joined.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+    if (!text) throw new Error('AI returned an empty response for the bill');
     return JSON.parse(text);
   };
 

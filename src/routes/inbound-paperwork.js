@@ -32,12 +32,9 @@ async function matchClientByName(name) {
   const n = (name || '').trim().toLowerCase();
   if (!n || n.length < 3) return null;
   const clients = await Client.findAll();
-  // exact, then contains-either-way on the company name
+  // EXACT company-name match only. Fuzzy substring matching was removed — it mis-assigned scans to the
+  // wrong client (e.g. "Ace" -> "Aceituno Metals"). No exact match -> return null so the employee picks.
   for (const c of clients) if ((c.name || '').trim().toLowerCase() === n) return c;
-  for (const c of clients) {
-    const cn = (c.name || '').trim().toLowerCase();
-    if (cn && cn.length >= 3 && (n.includes(cn) || cn.includes(n))) return c;
-  }
   return null;
 }
 

@@ -204,9 +204,11 @@ async function suggestPrice(target, opts = {}) {
   const tFam = materialFamily(target.material);
   const matFactors = opts.materialFactors || {};
   const tFactor = materialFactor(target.material, matFactors);
-  const tDims = plateDims(target);
+
   const tWeight = weightLbs(target);              // real weight — what the crane lifts
   const tBillable = billableWeightLbs(target);    // band-max weight — what you charge for
+  const tDims = plateDims(target);
+  const targetIsTubeShaped = !!(parseNum(target.outerDiameter) || /\d/.test(String(target.sectionSize || '')));
   const tBand = widthBand(tDims.w);
   const tThk = tDims.t;
   const tDia = parseNum(target.diameter || target.innerDiameter || target.outerDiameter);
@@ -240,6 +242,11 @@ async function suggestPrice(target, opts = {}) {
 
     const w = billableWeightLbs(p);          // rate is computed on BILLABLE weight, consistently
     if (!w || w <= 0) continue;              // need size to compute a rate
+    // SHAPE GUARD: only compare like-shaped parts. A tube quote must not be priced off plate-dimensioned
+    // records (and vice-versa) — even within the same partType, legacy/mis-entered rows can carry the wrong
+    // geometry, which mixes perimeter-weight and plate-weight and skews the rate.
+    const pIsTubeShaped = !!(parseNum(p.outerDiameter) || /\d/.test(String(p.sectionSize || '')));
+    if (targetIsTubeShaped !== pIsTubeShaped) continue;
     const dims = plateDims(p);
     // DIFFICULTY-ADJUSTED weight: an AR400 job of the same size is much more work than A36, so we
     // normalise every comparable to "A36-equivalent pounds". That lets an A36 job inform an AR400

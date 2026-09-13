@@ -176,10 +176,9 @@ function billableWidth(w) {
 function billableWeightLbs(part) {
   const { t, w, l } = plateDims(part);
   if (!t || !w || !l) return null;
-  // Plate work is billed by width BAND (you sell band capacity). Tube/pipe/section parts have no plate
-  // width band — their "width" here is a developed perimeter, so use it directly instead of snapping it
-  // to a plate band (which would inflate the weight).
-
+  // Plate work is billed by width BAND. Tube/pipe/section parts have no plate band — their "width" is a
+  // developed perimeter, so use it directly instead of snapping to a band (which would inflate weight).
+  const isTubeLike = !!(parseNum(part.outerDiameter) || /\d/.test(String(part.sectionSize || '')));
   const bw = isTubeLike ? w : billableWidth(w);
   if (!bw) return null;
   const d = DENSITY[materialFamily(part.material)] !== undefined ? DENSITY[materialFamily(part.material)] : DENSITY.carbon;

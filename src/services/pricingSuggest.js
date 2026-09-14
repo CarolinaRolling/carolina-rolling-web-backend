@@ -301,12 +301,7 @@ async function suggestPrice(target, opts = {}) {
     score += Math.min(ageDays / 365, 3) * 0.3;
 
     const qty = Math.max(1, parseInt(p.quantity, 10) || 1);
-    comps.push({
-      labor, weight: w, weightAdj: wAdj, factor: cFactor, rate, qty,
-      thickness: dims.t, width: dims.w, length: dims.l, diameter: dia,
-      material: p.material, clientName: p.estimate.clientName,
-      ageDays: Math.floor(ageDays), score
-    });
+
   }
 
   if (!comps.length || !tBillable) {
@@ -418,18 +413,7 @@ async function suggestPrice(target, opts = {}) {
     minCharge,
     isNewClient,
     upliftPct: isNewClient ? upliftPct : 0,
-    samples: top.slice(0, 6).map(c => ({
-      labor: c.labor,
-      qty: c.qty,
-      weight: Math.round(c.weight),
-      rate: Math.round(c.rate * 1000) / 1000,
-      material: c.material,
-      thickness: c.thickness,
-      width: c.width,
-      diameter: c.diameter,
-      client: c.clientName,
-      ageDays: c.ageDays
-    }))
+
   });
 }
 

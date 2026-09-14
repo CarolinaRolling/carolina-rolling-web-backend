@@ -276,25 +276,24 @@ async function suggestPrice(target, opts = {}) {
     const fam = materialFamily(p.material);
     const cFactor = materialFactor(p.material, matFactors);
 
-    const w = billableWeightLbs(p);          // rate is computed on BILLABLE weight, consistently
+    const w = billableWeightLbs(p);          // billable weight for a consistent rate
     if (!w || w <= 0) continue;              // need size to compute a rate
-    // SHAPE GUARD: only compare within the SAME shape family (angle<->angle, tube<->tube, etc.).
+    // SHAPE GUARD: only compare within the same shape family (angle<->angle, tube<->tube, etc.).
     const pFamily = SHAPE_FAMILY[p.partType] || 'plate';
     if (pFamily !== targetFamily) continue;
     const dims = plateDims(p);
-    // DIFFICULTY-ADJUSTED weight: an AR400 job of the same size is much more work than A36, so we
-    // normalise every comparable to "A36-equivalent pounds". That lets an A36 job inform an AR400
-    // quote (scaled up) instead of the data being siloed per material.
+    // Difficulty-adjusted weight: normalise every comparable to A36-equivalent pounds so an A36 job
+    // can inform a tougher-material quote (scaled) instead of siloing data per material.
     const wAdj = w * cFactor;
     const rate = labor / wAdj;               // $ per A36-equivalent lb
     if (!isFinite(rate) || rate <= 0) continue;
 
-    // Similarity: thickness matters most, then width band, then diameter, then age.
+    // Similarity score: metal family, thickness, width band, diameter, age.
     let score = 0;
-    if (fam !== tFam) score += 1.2;          // different metal family — usable, but less similar
+    if (fam !== tFam) score += 1.2;
     if (tThk && dims.t) score += Math.abs(dims.t - tThk) / tThk * 3;
     const band = widthBand(dims.w);
-    if (tBand !== null && band !== null) score += Math.abs(band - tBand) * 0.6; // SOFT, not a wall
+    if (tBand !== null && band !== null) score += Math.abs(band - tBand) * 0.6;
     const dia = parseNum(p.diameter) || parseNum(p.innerDiameter);
     if (tDia && dia) score += Math.abs(dia - tDia) / tDia * 0.5;
     const ageDays = (now - new Date(p.estimate.createdAt).getTime()) / 86400000;
@@ -302,6 +301,14 @@ async function suggestPrice(target, opts = {}) {
 
     const qty = Math.max(1, parseInt(p.quantity, 10) || 1);
 
+    comps.push({
+      labor, weight: w, weightAdj: wAdj, factor: cFactor, rate, qty,
+      thickness: dims.t, width: dims.w, length: dims.l, diameter: dia,
+      rawThickness: p.thickness, rawWidth: p.width, sectionSize: p.sectionSize,
+      outerDiameter: p.outerDiameter, wallThickness: p.wallThickness,
+      material: p.material, clientName: p.estimate.clientName,
+      ageDays: Math.floor(ageDays), score
+    });
   }
 
   if (!comps.length || !tBillable) {
@@ -413,7 +420,15 @@ async function suggestPrice(target, opts = {}) {
     minCharge,
     isNewClient,
     upliftPct: isNewClient ? upliftPct : 0,
-
+    shapeFamily: targetFamily,
+    samples: top.slice(0, 6).map(c => ({
+      labor: c.labor, qty: c.qty, weight: Math.round(c.weight),
+      rate: Math.round(c.rate * 1000) / 1000, material: c.material,
+      thickness: c.thickness, width: c.width, diameter: c.diameter,
+      rawThickness: c.rawThickness, rawWidth: c.rawWidth, sectionSize: c.sectionSize,
+      outerDiameter: c.outerDiameter, wallThickness: c.wallThickness,
+      client: c.clientName, ageDays: c.ageDays
+    }))
   });
 }
 

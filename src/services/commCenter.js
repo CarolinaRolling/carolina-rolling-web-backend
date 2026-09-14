@@ -411,15 +411,7 @@ async function runBillScan({ limit = 25 } = {}) {
   const since = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000);
   let extracted = 0;
   for (const account of accounts) {
-    const bills = await ScannedEmail.findAll({
-      where: {
-        gmailAccountId: account.id, emailType: 'comm_center', commCategory: 'bill', commArchived: false,
-        receivedAt: { [Op.gte]: since },
-        // No data yet, OR a prior attempt failed only because there was no PDF — now we can read the email body
-        [Op.or]: [{ billData: null }, { 'billData.error': 'no_pdf' }],
-      },
-      order: [['receivedAt', 'DESC']], limit,
-    });
+
     if (!bills.length) continue;
     let gmail;
     try { gmail = buildGmailClient(account); } catch { continue; }

@@ -1,6 +1,7 @@
 const { google } = require('googleapis');
 const { GmailAccount, ScannedEmail, PendingOrder, Client, Vendor, Estimate, EstimatePart, EstimateFile, EstimatePartFile, TodoItem, User, AppSettings } = require('../models');
-const { getParsingModel } = require('./aiConfig');
+const { getParsingModel, getTriageModel } = require('./aiConfig');
+
 const { Op } = require('sequelize');
 const fileStorage = require('../utils/storage');
 
@@ -164,24 +165,15 @@ async function extractOutboundPricing(bodyText) {
 Reply with ONLY JSON: {"hasPricing":boolean,"pricingText":string}
 - hasPricing = true only if the email contains actual prices the estimator is quoting (e.g. "$5 ea", "$30 per bend", "1200 total"). Order confirmations, questions, or scheduling are NOT pricing.
 - pricingText = the pricing portion of the email, copied VERBATIM (keep every price line and any conditional notes like "if the client allows X, increase labor to $Y"). Do NOT summarize, reformat, or map prices to parts. Preserve the estimator's exact wording and line breaks. Empty string if hasPricing is false.`;
+  // Text-only "is there pricing, copy the lines" task -> cheap TRIAGE model, not the expensive parser.
   const reqBody = JSON.stringify({
-    model: getParsingModel(), max_tokens: 800, system: sys,
+    model: getTriageModel(), max_tokens: 800, system: sys,
     messages: [{ role: 'user', content: bodyText.substring(0, 4000) }],
   });
+  const aiUsage = require('./aiUsage');
   try {
-    const raw = await new Promise((resolve) => {
-      const req = https.request({
-        hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(reqBody) },
-      }, (res) => { let d = ''; res.on('data', c => d += c); res.on('end', () => { try { resolve(aiText(d)); } catch { resolve(''); } }); });
-      req.on('error', () => resolve(''));
-      req.setTimeout(30000, () => { req.destroy(); resolve(''); });
-      req.write(reqBody); req.end();
-    });
-    if (!raw.trim()) return null;
-    const parsed = JSON.parse(raw.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim());
-    if (parsed.hasPricing && parsed.pricingText && parsed.pricingText.trim()) return parsed.pricingText.trim();
-    return null;
+    await aiUsage.assertWithinBudget('emailScanner.draftPricing');
+
   } catch (e) {
     return null;
   }
@@ -1215,82 +1207,63 @@ async function scanDraftsForPricing() {
   const accounts = await GmailAccount.findAll({ where: { isActive: true } });
   if (!accounts.length) return { skipped: true, reason: 'No Gmail accounts connected' };
 
-  // Draft estimates that came from an email (have a scannedEmailId) and haven't been flagged yet.
-  const drafts = await Estimate.findAll({
-    where: { status: 'draft', pricingQuotedNeedsEntry: false, scannedEmailId: { [Op.ne]: null } },
-    order: [['createdAt', 'DESC']],
-    limit: 100,
-  });
-  if (!drafts.length) return { checked: 0, flagged: 0, reason: 'No draft estimates awaiting pricing' };
+  // EVENT-DRIVEN by design: instead of re-reading every open draft's whole thread every cycle (which re-sent
+  // the same sent emails to the AI forever), we look only at emails WE SENT in the recent window. If nothing
+  // was sent, zero AI calls happen. Each fresh sent email is mapped back to a draft estimate via its thread;
+  // only then do we scan it for quoted pricing.
+  const WINDOW_MIN = parseInt(process.env.DRAFT_PRICING_WINDOW_MIN, 10) || 45; // a bit wider than the 30-min cron
+  const afterSec = Math.floor((Date.now() - WINDOW_MIN * 60 * 1000) / 1000);
+  const result = { checked: 0, flagged: 0, errors: 0, sentSeen: 0 };
 
-  const result = { checked: 0, flagged: 0, errors: 0 };
-
-  for (const est of drafts) {
+  for (const account of accounts) {
+    let gmail;
+    try { gmail = await getGmailClient(account); } catch { continue; }
+    // Recent SENT messages only.
+    let sent;
     try {
-      // Resolve this estimate's Gmail thread via its originating scanned email.
-      const se = await ScannedEmail.findByPk(est.scannedEmailId);
-      const threadId = se?.gmailThreadId;
-      if (!threadId) continue;
+      sent = await gmail.users.messages.list({ userId: 'me', q: `in:sent after:${afterSec}`, maxResults: 25 });
+    } catch (e) { result.errors++; continue; }
+    const sentMsgs = (sent.data.messages || []);
+    result.sentSeen += sentMsgs.length;
 
-      // Which account owns this thread? Prefer the scanned email's account; else try each.
-      const acctForThread = accounts.find(a => a.id === se.gmailAccountId) || accounts[0];
-      const gmail = await getGmailClient(acctForThread);
-
-      result.checked++;
-
-      // Pull the whole conversation.
-      let thread;
+    for (const sm of sentMsgs) {
       try {
-        thread = await gmail.users.threads.get({ userId: 'me', id: threadId, format: 'full' });
-      } catch (e) {
-        // Thread might belong to a different account — try the others.
-        let found = false;
-        for (const a of accounts) {
-          if (a.id === acctForThread.id) continue;
-          try { const g = await getGmailClient(a); thread = await g.users.threads.get({ userId: 'me', id: threadId, format: 'full' }); found = true; break; } catch {}
-        }
-        if (!found) continue;
-      }
+        // Get this sent message + its threadId.
+        const full = await gmail.users.messages.get({ userId: 'me', id: sm.id, format: 'full' });
+        const threadId = full.data.threadId;
+        if (!threadId) continue;
 
-      const messages = thread?.data?.messages || [];
-      // Find messages the ESTIMATOR sent (from our account) — those may contain the quoted pricing.
-      // Read newest-first so we capture the latest pricing if there were several.
-      const ourAddrs = accounts.map(a => a.email.toLowerCase());
-      const ourMessages = messages.filter(m => {
-        const fromHdr = (m.payload?.headers || []).find(h => h.name.toLowerCase() === 'from');
-        const fromEmail = extractEmail(fromHdr?.value || '');
-        return ourAddrs.includes(fromEmail);
-      }).reverse();
+        // Is this thread connected to a DRAFT estimate still awaiting pricing entry?
+        const se = await ScannedEmail.findOne({ where: { gmailThreadId: threadId } });
+        if (!se) continue;
+        const est = await Estimate.findOne({
+          where: { scannedEmailId: se.id, status: 'draft', pricingQuotedNeedsEntry: false },
+        });
+        if (!est) continue; // no matching draft, or pricing already captured
 
-      let captured = false;
-      for (const m of ourMessages) {
-        const body = extractTextFromParts(m.payload);
+        result.checked++;
+        const body = extractTextFromParts(full.data.payload);
         if (!body || !body.trim()) continue;
         const quoted = await extractOutboundPricing(body);
         if (quoted) {
           const ts = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' });
-          const gmLink = `https://mail.google.com/mail/?authuser=${encodeURIComponent(acctForThread.email)}#sent/${m.id}`;
-          const noteBlock = `\n\n***Pricing you quoted the client (${ts})***\n📧 ${gmLink}\n${quoted}\n(Verify and enter these into the estimate, then generate the PDF.)\n***Quoted pricing: end***`;
+          const gmLink = `https://mail.google.com/mail/?authuser=${encodeURIComponent(account.email)}#sent/${sm.id}`;
+          const noteBlock = `\n\n***Pricing you quoted the client (${ts})***\n\u{1F4E7} ${gmLink}\n${quoted}\n(Verify and enter these into the estimate, then generate the PDF.)\n***Quoted pricing: end***`;
           await est.update({
             internalNotes: (est.internalNotes || '') + noteBlock,
             pricingQuotedNeedsEntry: true,
           });
-          console.log(`[DraftPricingScan] Captured pricing into ${est.estimateNumber} from thread ${threadId}`);
+          console.log(`[DraftPricingScan] Captured pricing into ${est.estimateNumber} from sent msg ${sm.id}`);
           result.flagged++;
-          captured = true;
-          break;
         }
+      } catch (e) {
+        result.errors++;
+        console.warn('[DraftPricingScan] error on a sent message:', e.message);
       }
-      if (!captured) {
-        // no pricing found in this thread yet — leave unflagged so a later send is caught
-      }
-    } catch (e) {
-      result.errors++;
-      console.warn(`[DraftPricingScan] error on estimate ${est.estimateNumber}:`, e.message);
     }
   }
 
-  console.log(`[DraftPricingScan] checked ${result.checked} drafts, flagged ${result.flagged}`);
+  console.log(`[DraftPricingScan] ${result.sentSeen} recent sent, checked ${result.checked} draft-linked, flagged ${result.flagged}`);
   return result;
 }
 
@@ -1512,8 +1485,10 @@ async function _runScanInternal() {
             if (process.env.ANTHROPIC_API_KEY && bodyText.trim()) {
               try {
                 const https = require('https');
+                const aiUsage = require('./aiUsage');
+                await aiUsage.assertWithinBudget('emailScanner.vendorPricingSummary');
                 const summaryBody = JSON.stringify({
-                  model: getParsingModel(),
+                  model: getTriageModel(),
                   max_tokens: 500,
                   system: 'Extract material pricing from this vendor quote email. Format as a SHORT list:\nMaterial pricing:\nPart #1: $XX ea (brief description)\nPart #2: $XX ea (brief description)\n\nIf lead time or availability is mentioned, add one line for that. Keep it very concise. No other text.',
                   messages: [{ role: 'user', content: bodyText.substring(0, 3000) }]
@@ -1527,6 +1502,7 @@ async function _runScanInternal() {
                     res.on('data', chunk => data += chunk);
                     res.on('end', () => {
                       if (res.statusCode === 200) {
+                        try { const b = JSON.parse(data); require('./aiUsage').record(b.usage, 'emailScanner.vendorPricingSummary').catch(()=>{}); } catch {}
                         try { resolve(aiText(data)); } catch { resolve(''); }
                       } else { resolve(''); }
                     });
@@ -1668,6 +1644,7 @@ async function _runScanInternal() {
                   messages
                 });
 
+                await require('./aiUsage').assertWithinBudget('emailScanner.vendorInvoice');
                 const parseText = await new Promise((resolve, reject) => {
                   const req = https.request({
                     hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
@@ -1677,6 +1654,7 @@ async function _runScanInternal() {
                     res.on('data', chunk => data += chunk);
                     res.on('end', () => {
                       if (res.statusCode === 200) {
+                        try { const b = JSON.parse(data); require('./aiUsage').record(b.usage, 'emailScanner.vendorInvoice').catch(()=>{}); } catch {}
                         try { resolve(aiText(data)); } catch { resolve(''); }
                       } else { console.error(`[EmailScanner] Invoice AI error: ${res.statusCode}`); resolve(''); }
                     });
@@ -1885,28 +1863,7 @@ async function _runScanInternal() {
                 } else if (parsed && parsed.aiNotes) {
                   summary = parsed.aiNotes;
                 } else {
-                  // Quick AI summary
-                  try {
-                    const https = require('https');
-                    const sumBody = JSON.stringify({
-                      model: getParsingModel(), max_tokens: 200,
-                      system: 'Summarize this email in 1-2 sentences. Be concise. Just the key point.',
-                      messages: [{ role: 'user', content: bodyText.substring(0, 2000) }]
-                    });
-                    const sumText = await new Promise((resolve, reject) => {
-                      const req = https.request({
-                        hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
-                        headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(sumBody) }
-                      }, (res) => {
-                        let data = '';
-                        res.on('data', chunk => data += chunk);
-                        res.on('end', () => { try { resolve(res.statusCode === 200 ? aiText(data) : ''); } catch { resolve(''); } });
-                      });
-                      req.on('error', () => resolve(''));
-                      req.write(sumBody); req.end();
-                    });
-                    if (sumText.trim()) summary = sumText.trim();
-                  } catch {}
+                  // (quick-summary AI call removed — it referenced an undefined body and duplicated the summary already set above)
                 }
 
                 const headEstimator = await User.findOne({ where: { isHeadEstimator: true, isActive: true } });
@@ -2535,6 +2492,7 @@ async function parseDocumentWithAI(fileBuffer, mimeType, clientName, parsingNote
     });
 
     const https = require('https');
+    await require('./aiUsage').assertWithinBudget('emailScanner.docParse');
     const responseText = await new Promise((resolve, reject) => {
       const req = https.request({
         hostname: 'api.anthropic.com',
@@ -2564,6 +2522,7 @@ async function parseDocumentWithAI(fileBuffer, mimeType, clientName, parsingNote
     });
 
     const data = JSON.parse(responseText);
+    try { await require('./aiUsage').record(data.usage, 'emailScanner.docParse'); } catch {}
     const text = aiText(data);
     console.log(`[DocParser] AI response (first 300): ${text.substring(0, 300)}`);
 

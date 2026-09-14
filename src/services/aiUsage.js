@@ -1,19 +1,23 @@
 /**
- * Token accounting + a daily cap for Anthropic API calls, with per-feature tracking.
+ * Token accounting + daily cap + per-minute rate limit for Anthropic API calls, with per-feature tracking.
  *
- * Every AI call site calls assertWithinBudget() before the request (throws once the daily budget is spent —
- * fails closed so a runaway loop STOPS) and record() after, with the API's usage block and a feature label.
- * Usage is tallied per feature so the Admin panel can show which feature spends what, and a 7-day rolling
- * history is kept for trend. Counters live in AppSettings so they survive restarts and are shared across dynos.
+ * Every AI call site calls assertWithinBudget() before the request (throws if the daily token budget is spent
+ * OR too many calls happened in the last minute — fails closed so a runaway STOPS) and record() after, with
+ * the API usage block and a feature label. Usage is tallied per feature for the Admin panel, with a 7-day
+ * history. Counters live in AppSettings so they survive restarts and are shared across dynos.
  */
 
 const SETTING_KEY = 'ai_usage_daily';
 const HISTORY_KEY = 'ai_usage_history';
 
-// Default set to catch a runaway while allowing a busy legitimate day. Normal baseline is ~2M tokens/day;
-// a stuck loop pushed it to ~4.3M. 3M trips before a runaway but clears normal use. Override with
-// AI_DAILY_TOKEN_BUDGET.
+// Daily token ceiling (durable). Normal baseline ~2M/day; a runaway hit ~4.3M. Override AI_DAILY_TOKEN_BUDGET.
 const DEFAULT_DAILY_BUDGET = parseInt(process.env.AI_DAILY_TOKEN_BUDGET, 10) || 3000000;
+
+// Fast tripwire: max AI calls per rolling minute. Catches a "many small calls fast" runaway that the daily
+// token cap is too slow to stop. In-memory (resets on restart — fine, it's a tripwire). Override AI_MAX_CALLS_PER_MIN.
+const RATE_WINDOW_MS = 60 * 1000;
+const RATE_MAX_CALLS = parseInt(process.env.AI_MAX_CALLS_PER_MIN, 10) || 20;
+let callTimes = [];
 
 function today() {
   return new Date().toISOString().slice(0, 10);
@@ -23,7 +27,6 @@ async function readUsage() {
   const { AppSettings } = require('../models');
   const row = await AppSettings.findOne({ where: { key: SETTING_KEY } });
   const val = (row && row.value) || {};
-  // A new day resets the counters.
   if (val.date !== today()) {
     return { date: today(), inputTokens: 0, outputTokens: 0, calls: 0, blocked: 0, byFeature: {}, row };
   }
@@ -52,7 +55,6 @@ async function writeUsage(usage) {
   else await AppSettings.upsert({ key: SETTING_KEY, value });
 }
 
-// Rolling 7-day history so the panel can show a trend, not just today.
 async function rollHistory(usage) {
   try {
     const { AppSettings } = require('../models');
@@ -63,14 +65,25 @@ async function rollHistory(usage) {
     days = days.slice(-7);
     if (row) await row.update({ value: { days } });
     else await AppSettings.upsert({ key: HISTORY_KEY, value: { days } });
-  } catch (e) { /* history is best-effort */ }
+  } catch (e) { /* best-effort */ }
 }
 
-/**
- * Call before an API request. Throws AI_BUDGET_EXHAUSTED if today's budget is already spent.
- */
 async function assertWithinBudget(label = 'ai') {
   try {
+    // 1) Fast tripwire — too many calls in the last minute means something is looping.
+    const now = Date.now();
+    callTimes = callTimes.filter(t => now - t < RATE_WINDOW_MS);
+    if (callTimes.length >= RATE_MAX_CALLS) {
+      const err = new Error(
+        `AI call rate limit hit (${callTimes.length} calls in the last minute, max ${RATE_MAX_CALLS}). ` +
+        `Blocked: ${label}. Something is likely looping. Raise AI_MAX_CALLS_PER_MIN if this is real volume.`
+      );
+      err.code = 'AI_RATE_LIMITED';
+      throw err;
+    }
+    callTimes.push(now);
+
+    // 2) Durable daily token ceiling.
     const usage = await readUsage();
     const total = usage.inputTokens + usage.outputTokens;
     if (total >= DEFAULT_DAILY_BUDGET) {
@@ -85,15 +98,12 @@ async function assertWithinBudget(label = 'ai') {
     }
     return { spent: total, budget: DEFAULT_DAILY_BUDGET };
   } catch (e) {
-    if (e.code === 'AI_BUDGET_EXHAUSTED') throw e;
+    if (e.code === 'AI_BUDGET_EXHAUSTED' || e.code === 'AI_RATE_LIMITED') throw e;
     console.warn('[aiUsage] budget check unavailable:', e.message);
     return null;
   }
 }
 
-/**
- * Call after a successful API response with the `usage` block Anthropic returns + a feature label.
- */
 async function record(apiUsage, label = 'ai') {
   if (!apiUsage) return;
   try {
@@ -149,6 +159,7 @@ async function summary() {
     budget: DEFAULT_DAILY_BUDGET,
     percentUsed: Math.round((total / DEFAULT_DAILY_BUDGET) * 100),
     blockedCalls: usage.blocked,
+    callsLastMinute: callTimes.length,
     features,
     history,
   };

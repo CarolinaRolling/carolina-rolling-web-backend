@@ -172,6 +172,8 @@ async function enhanceWithAI(findings) {
       messages: [{ role: 'user', content: JSON.stringify(compact) }],
     });
     const https = require('https');
+    const aiUsage = require('./aiUsage');
+    await aiUsage.assertWithinBudget('gingerScan');
     const responseText = await new Promise((resolve, reject) => {
       const req = https.request({
         hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
@@ -192,7 +194,8 @@ async function enhanceWithAI(findings) {
       req.end();
     });
     const data = JSON.parse(responseText);
-    const text = (data.content?.[0]?.text || '').replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+    try { await aiUsage.record(data.usage, 'gingerScan'); } catch {}
+    const text = (data.content && data.content[0] && data.content[0].text || '').replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
     const lines = JSON.parse(text);
     for (const item of lines) {
       if (findings[item.i] && item.line) findings[item.i].gingerSays = item.line;

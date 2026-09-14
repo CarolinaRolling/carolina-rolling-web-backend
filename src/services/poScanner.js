@@ -20,10 +20,14 @@ Guidance:
 - confidence = your overall confidence in the read: high for a clean typed PO, low for a blurry/handwritten photo.
 - Use null for any field not present. Never invent a PO number or client.`;
 
-function callClaudeVision(content) {
+
+
+async function callClaudeVision(content) {
+  const aiUsage = require('./aiUsage');
+  await aiUsage.assertWithinBudget('poScanner.extract');
   const reqBody = JSON.stringify({ model: getParsingModel(), max_tokens: 1500, system: PO_SYS, messages: [{ role: 'user', content }] });
   const https = require('https');
-  return new Promise((resolve, reject) => {
+  const raw = await new Promise((resolve, reject) => {
     const req = https.request({
       hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(reqBody) },
@@ -32,6 +36,8 @@ function callClaudeVision(content) {
     req.setTimeout(60000, () => req.destroy(new Error('PO extract timeout')));
     req.write(reqBody); req.end();
   });
+  try { const parsed = JSON.parse(raw); await aiUsage.record(parsed.usage, 'poScanner.extract'); } catch {}
+  return raw;
 }
 
 /**

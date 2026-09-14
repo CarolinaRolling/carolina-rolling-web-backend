@@ -328,6 +328,14 @@ const sendTestPush = async (req, res) => {
 app.get('/api/debug/push/test', sendTestPush);
 app.post('/api/debug/push/test', authenticate, sendTestPush);
 
+app.get('/api/debug/ai-usage', async (req, res) => {
+  try {
+    if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });
+    const { summary } = require('./services/aiUsage');
+    res.json({ data: await summary() });
+  } catch (e) { res.status(500).json({ error: { message: e.message, stack: (e.stack||'').split('\n').slice(0,4) } }); }
+});
+
 app.get('/api/debug/pricing-data', async (req, res) => {
   try {
     if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube to the URL.' } });

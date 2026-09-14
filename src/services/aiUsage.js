@@ -17,9 +17,10 @@
 
 const SETTING_KEY = 'ai_usage_daily';
 
-// Generous by default: normal scanning is a few thousand tokens per email. Override with
-// AI_DAILY_TOKEN_BUDGET when you know your real volume.
-const DEFAULT_DAILY_BUDGET = parseInt(process.env.AI_DAILY_TOKEN_BUDGET, 10) || 2000000;
+// Default set to catch a runaway while allowing a busy legitimate day. Normal baseline here is ~2M
+// tokens/day; a stuck loop pushed it to ~4.3M. 3M trips well before that but clears normal use. Override
+// with AI_DAILY_TOKEN_BUDGET once you know your real ceiling.
+const DEFAULT_DAILY_BUDGET = parseInt(process.env.AI_DAILY_TOKEN_BUDGET, 10) || 3000000;
 
 function today() {
   return new Date().toISOString().slice(0, 10);

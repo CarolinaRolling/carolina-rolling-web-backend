@@ -3698,6 +3698,8 @@ MATCHING RULES (when multiple files are provided):
     });
 
     const https = require('https');
+    const aiUsage = require('../services/aiUsage');
+    await aiUsage.assertWithinBudget('estimates.aiParse');
     const responseText = await new Promise((resolve, reject) => {
       const apiReq = https.request({
         hostname: 'api.anthropic.com',
@@ -3740,9 +3742,10 @@ MATCHING RULES (when multiple files are provided):
 
     let data;
     try { data = JSON.parse(responseText); } catch { throw new Error('AI returned an unreadable response.'); }
-    // Concatenate ALL text blocks — the response content array may lead with a non-text block (e.g. a
-    // thinking or tool_use block on some models), so content[0].text alone can be empty even when the AI
-    // did reply with text in a later block.
+    try { const aiU = require('../services/aiUsage'); await aiU.record(data.usage, 'estimates.aiParse'); } catch {}
+
+    // Concatenate ALL text blocks — the response content array may lead with a non-text block (thinking/
+    // tool_use on some models), so content[0].text alone can be empty even when the AI did reply.
     const text = Array.isArray(data.content)
       ? data.content.filter(b => b && b.type === 'text' && typeof b.text === 'string').map(b => b.text).join('')
       : (data.content?.[0]?.text || '');

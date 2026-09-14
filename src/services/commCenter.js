@@ -93,6 +93,8 @@ CRITICAL RULES:
     messages: [{ role: 'user', content: `From: ${from}\nSubject: ${subject}\nBody:\n${emailText}` }],
   });
   try {
+    const aiUsage = require('./aiUsage');
+    await aiUsage.assertWithinBudget('commCenter.classify');
     const https = require('https');
     const raw = await new Promise((resolve, reject) => {
       const req = https.request({
@@ -104,6 +106,7 @@ CRITICAL RULES:
       req.write(reqBody); req.end();
     });
     const data = JSON.parse(raw);
+    try { await aiUsage.record(data.usage, 'commCenter.classify'); } catch {}
     const text = (data.content?.[0]?.text || '').replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
     const parsed = JSON.parse(text);
     let category = VALID_CATEGORIES.includes(parsed.category) ? parsed.category : 'general';
@@ -339,6 +342,8 @@ async function extractBill(gmail, messageId) {
   const SYS = 'You extract fields from a vendor invoice/bill for a metal fabrication shop. Reply with ONLY JSON, no markdown:\n{"vendorName":string|null,"invoiceNumber":string|null,"invoiceDate":"YYYY-MM-DD"|null,"dueDate":"YYYY-MM-DD"|null,"amount":number|null,"currency":string,"poNumber":string|null,"category":"materials|insurance|supplies|utilities|rent|equipment|payroll|other","summary":string}\nAmount = total amount due as a number (no symbols). dueDate = the payment due date as YYYY-MM-DD; look hard for "due date", "payment due", "please pay by", "net 30", or a due line (if only terms like "Net 30" are given, compute from the invoice date); null only if truly absent. category = the best expense bucket for a metal fabrication shop: materials (steel/metal/consumables/gas), utilities (power/water/internet/phone), rent (building lease), supplies (shop supplies), equipment (machines/tools/repairs), insurance, payroll, or other. summary = one short line of what it is for. Use null when a field is not present.';
 
   const callClaude = async (content) => {
+    const aiUsage = require('./aiUsage');
+    await aiUsage.assertWithinBudget('commCenter.extractBill');
     const reqBody = JSON.stringify({ model: getParsingModel(), max_tokens: 700, system: SYS, messages: [{ role: 'user', content }] });
     const https = require('https');
     const raw = await new Promise((resolve, reject) => {
@@ -351,6 +356,7 @@ async function extractBill(gmail, messageId) {
       req.write(reqBody); req.end();
     });
     const data = JSON.parse(raw);
+    try { await aiUsage.record(data.usage, 'commCenter.extractBill'); } catch {}
     // Read ALL text blocks — some models lead with a non-text block (thinking/tool_use), so content[0].text
     // alone can be empty even when the AI replied. (Same fix applied across the other AI callers.)
     const joined = Array.isArray(data.content)

@@ -76,6 +76,8 @@ RULES:
     messages: [{ role: 'user', content: [ fileBlock, { type: 'text', text: `Filename: "${originalName || 'scan'}". Classify and extract.` } ] }]
   });
 
+  const aiUsage = require('../services/aiUsage');
+  await aiUsage.assertWithinBudget('inboundPaperwork.classify');
   const responseText = await new Promise((resolve, reject) => {
     const apiReq = https.request({
       hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
@@ -102,6 +104,7 @@ RULES:
   });
 
   const body = JSON.parse(responseText);
+  try { await aiUsage.record(body.usage, 'inboundPaperwork.classify'); } catch {}
   const text = (body.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   if (!jsonMatch) throw new Error('AI did not return JSON');

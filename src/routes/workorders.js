@@ -4144,181 +4144,133 @@ router.post('/:id/duplicate-to-estimate', async (req, res, next) => {
   try {
     const { Estimate, EstimatePart, EstimatePartFile } = require('../models');
 
+    // Load the work order WITH ALL its current parts + files. The WORK ORDER is the source of truth for a
+    // reorder: parts are often added/edited on the WO after it was created from the estimate (e.g. the client
+    // added 15 parts to a 1-part estimate). Copying from the original estimate would miss all of those.
     const workOrder = await WorkOrder.findByPk(req.params.id, {
-      include: [{ model: WorkOrderPart, as: 'parts' }]
+      include: [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }]
     });
-
     if (!workOrder) {
       return res.status(404).json({ error: { message: 'Work order not found' } });
     }
 
-    // Generate estimate number
+    // Generate estimate number.
     const now = new Date();
     const year = now.getFullYear().toString().slice(-2);
     const month = (now.getMonth() + 1).toString().padStart(2, '0');
     const day = now.getDate().toString().padStart(2, '0');
     const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
     const estimateNumber = `EST-${year}${month}${day}-${random}`;
-
     const drLabel = workOrder.drNumber ? `DR-${workOrder.drNumber}` : workOrder.orderNumber;
 
-    // Try to find the original estimate to copy from (preserves all pricing)
+    // Pull the original estimate too (if any) — used for header fields and to enrich each part with any
+    // pricing-breakdown fields the WO part might not carry, matched by partNumber.
     let sourceEstimate = null;
     if (workOrder.estimateId) {
       sourceEstimate = await Estimate.findByPk(workOrder.estimateId, {
         include: [{ model: EstimatePart, as: 'parts', include: [{ model: EstimatePartFile, as: 'files' }] }]
       });
     }
-
+    const estPartByNumber = {};
     if (sourceEstimate) {
-      // === DUPLICATE FROM ORIGINAL ESTIMATE (keeps all pricing) ===
-      const newEstimate = await Estimate.create({
-        estimateNumber,
-        clientName: sourceEstimate.clientName,
-        contactName: sourceEstimate.contactName,
-        contactEmail: sourceEstimate.contactEmail,
-        contactPhone: sourceEstimate.contactPhone,
-        clientPurchaseOrderNumber: '',
-        projectDescription: sourceEstimate.projectDescription,
-        notes: sourceEstimate.notes,
-        internalNotes: `Reorder from ${drLabel} (copied from ${sourceEstimate.estimateNumber})`,
-        taxRate: sourceEstimate.taxRate,
-        taxExempt: sourceEstimate.taxExempt,
-        truckingDescription: sourceEstimate.truckingDescription,
-        truckingCost: sourceEstimate.truckingCost,
-        discountPercent: sourceEstimate.discountPercent,
-        discountReason: sourceEstimate.discountReason,
-        status: 'draft'
-      });
-
-      // Copy ALL parts with full pricing
-      for (const origPart of (sourceEstimate.parts || [])) {
-        const newPart = await EstimatePart.create({
-          estimateId: newEstimate.id,
-          partNumber: origPart.partNumber,
-          partType: origPart.partType,
-          clientPartNumber: origPart.clientPartNumber,
-          quantity: origPart.quantity,
-          materialDescription: origPart.materialDescription,
-          supplierName: origPart.supplierName,
-          vendorEstimateNumber: origPart.vendorEstimateNumber,
-          materialUnitCost: origPart.materialUnitCost,
-          materialMarkupPercent: origPart.materialMarkupPercent,
-          rollingCost: origPart.rollingCost,
-          otherServicesCost: origPart.otherServicesCost,
-          otherServicesMarkupPercent: origPart.otherServicesMarkupPercent,
-          material: origPart.material,
-          thickness: origPart.thickness,
-          width: origPart.width,
-          length: origPart.length,
-          outerDiameter: origPart.outerDiameter,
-          wallThickness: origPart.wallThickness,
-          sectionSize: origPart.sectionSize,
-          rollType: origPart.rollType,
-          radius: origPart.radius,
-          diameter: origPart.diameter,
-          arcDegrees: origPart.arcDegrees,
-          flangeOut: origPart.flangeOut,
-          specialInstructions: origPart.specialInstructions,
-          materialSource: origPart.materialSource,
-          materialTotal: origPart.materialTotal,
-          laborTotal: origPart.laborTotal,
-          partTotal: origPart.partTotal,
-          formData: origPart.formData,
-          cutFileReference: origPart.cutFileReference
-        });
-        // Copy part files (prints, STEP, DXF) — point to same Cloudinary/S3 resource
-        for (const origFile of (origPart.files || [])) {
-          await EstimatePartFile.create({
-            partId: newPart.id,
-            filename: origFile.filename,
-            originalName: origFile.originalName,
-            mimeType: origFile.mimeType,
-            size: origFile.size,
-            url: origFile.url,
-            cloudinaryId: origFile.cloudinaryId,
-            fileType: origFile.fileType,
-            fileLastModified: origFile.fileLastModified,
-            portalVisible: false
-          });
-        }
+      for (const ep of (sourceEstimate.parts || [])) {
+        if (ep.partNumber != null) estPartByNumber[String(ep.partNumber)] = ep;
       }
-
-      // Reload with parts
-      const createdEstimate = await Estimate.findByPk(newEstimate.id, {
-        include: [{ model: EstimatePart, as: 'parts' }]
-      });
-
-      return res.status(201).json({
-        data: createdEstimate,
-        message: `Estimate ${estimateNumber} created from ${drLabel} — all pricing copied from ${sourceEstimate.estimateNumber}`
-      });
-    } else {
-      // === FALLBACK: No linked estimate, create from WO data ===
-      const newEstimate = await Estimate.create({
-        estimateNumber,
-        clientName: workOrder.clientName,
-        contactName: workOrder.contactName,
-        contactEmail: workOrder.contactEmail,
-        contactPhone: workOrder.contactPhone,
-        clientPurchaseOrderNumber: '',
-        projectDescription: workOrder.notes || '',
-        internalNotes: `Reorder from ${drLabel} (no linked estimate found, created from WO)`,
-        taxRate: workOrder.taxRate,
-        taxExempt: workOrder.taxExempt,
-        status: 'draft'
-      });
-
-      for (const origPart of (workOrder.parts || [])) {
-        const partJson = origPart.toJSON();
-        let formData = partJson.formData || {};
-        if (typeof formData === 'string') {
-          try { formData = JSON.parse(formData); } catch(e) { formData = {}; }
-        }
-
-        await EstimatePart.create({
-          estimateId: newEstimate.id,
-          partNumber: partJson.partNumber,
-          partType: partJson.partType,
-          clientPartNumber: partJson.clientPartNumber,
-          quantity: partJson.quantity,
-          material: partJson.material,
-          thickness: partJson.thickness,
-          width: partJson.width,
-          length: partJson.length,
-          outerDiameter: partJson.outerDiameter,
-          wallThickness: partJson.wallThickness,
-          sectionSize: partJson.sectionSize,
-          rollType: partJson.rollType,
-          radius: partJson.radius,
-          diameter: partJson.diameter,
-          arcDegrees: partJson.arcDegrees,
-          flangeOut: partJson.flangeOut,
-          specialInstructions: partJson.specialInstructions,
-          materialDescription: partJson.materialDescription,
-          materialSource: partJson.materialSource,
-          supplierName: partJson.supplierName,
-          laborTotal: partJson.laborTotal,
-          rollingCost: partJson.rollingCost,
-          materialUnitCost: partJson.materialUnitCost || 0,
-          materialTotal: partJson.materialTotal || 0,
-          materialMarkupPercent: partJson.materialMarkupPercent || 0,
-          otherServicesCost: partJson.otherServicesCost || 0,
-          otherServicesMarkupPercent: partJson.otherServicesMarkupPercent || 0,
-          partTotal: partJson.partTotal || 0,
-          formData
-        });
-      }
-
-      const createdEstimate = await Estimate.findByPk(newEstimate.id, {
-        include: [{ model: EstimatePart, as: 'parts' }]
-      });
-
-      return res.status(201).json({
-        data: createdEstimate,
-        message: `Estimate ${estimateNumber} created from ${drLabel} — pricing copied from work order`
-      });
     }
+
+    // Header: prefer estimate contact info, fall back to the work order.
+    const newEstimate = await Estimate.create({
+      estimateNumber,
+      clientName: (sourceEstimate && sourceEstimate.clientName) || workOrder.clientName,
+      contactName: (sourceEstimate && sourceEstimate.contactName) || workOrder.contactName,
+      contactEmail: (sourceEstimate && sourceEstimate.contactEmail) || workOrder.contactEmail,
+      contactPhone: (sourceEstimate && sourceEstimate.contactPhone) || workOrder.contactPhone,
+      clientPurchaseOrderNumber: '',
+      projectDescription: (sourceEstimate && sourceEstimate.projectDescription) || workOrder.notes || '',
+      notes: (sourceEstimate && sourceEstimate.notes) || '',
+      internalNotes: `Reorder from ${drLabel}${sourceEstimate ? ` (based on WO parts; header from ${sourceEstimate.estimateNumber})` : ' (based on WO parts)'}`,
+      taxRate: (sourceEstimate && sourceEstimate.taxRate) != null ? sourceEstimate.taxRate : workOrder.taxRate,
+      taxExempt: (sourceEstimate && sourceEstimate.taxExempt) != null ? sourceEstimate.taxExempt : workOrder.taxExempt,
+      truckingDescription: sourceEstimate ? sourceEstimate.truckingDescription : null,
+      truckingCost: sourceEstimate ? sourceEstimate.truckingCost : null,
+      discountPercent: sourceEstimate ? sourceEstimate.discountPercent : null,
+      discountReason: sourceEstimate ? sourceEstimate.discountReason : null,
+      status: 'draft'
+    });
+
+    // Copy EVERY work-order part (the full, current set).
+    let copied = 0;
+    for (const wp of (workOrder.parts || [])) {
+      const wj = typeof wp.toJSON === 'function' ? wp.toJSON() : wp;
+      let formData = wj.formData || {};
+      if (typeof formData === 'string') { try { formData = JSON.parse(formData); } catch { formData = {}; } }
+      const ep = wj.partNumber != null ? estPartByNumber[String(wj.partNumber)] : null; // matching estimate part, if any
+
+      const pick = (woVal, epField) => (woVal !== undefined && woVal !== null && woVal !== '' ? woVal : (ep ? ep[epField] : undefined));
+
+      const newPart = await EstimatePart.create({
+        estimateId: newEstimate.id,
+        partNumber: wj.partNumber,
+        partType: wj.partType,
+        clientPartNumber: wj.clientPartNumber,
+        quantity: wj.quantity,
+        material: wj.material,
+        thickness: wj.thickness,
+        width: wj.width,
+        length: wj.length,
+        outerDiameter: wj.outerDiameter,
+        wallThickness: wj.wallThickness,
+        sectionSize: wj.sectionSize,
+        rollType: wj.rollType,
+        radius: wj.radius,
+        diameter: wj.diameter,
+        arcDegrees: wj.arcDegrees,
+        flangeOut: wj.flangeOut,
+        specialInstructions: wj.specialInstructions,
+        materialDescription: wj.materialDescription,
+        materialSource: wj.materialSource,
+        supplierName: wj.supplierName,
+        vendorEstimateNumber: wj.vendorEstimateNumber,
+        // Pricing: prefer the WO part's values; fall back to the matching estimate part's breakdown.
+        materialUnitCost: pick(wj.materialUnitCost, 'materialUnitCost') || 0,
+        materialMarkupPercent: pick(wj.materialMarkupPercent, 'materialMarkupPercent') || 0,
+        materialTotal: pick(wj.materialTotal, 'materialTotal') || 0,
+        rollingCost: pick(wj.rollingCost, 'rollingCost') || 0,
+        otherServicesCost: ep ? ep.otherServicesCost : 0,
+        otherServicesMarkupPercent: ep ? ep.otherServicesMarkupPercent : 0,
+        laborTotal: pick(wj.laborTotal, 'laborTotal') || 0,
+        partTotal: pick(wj.partTotal, 'partTotal') || 0,
+        cutFileReference: wj.cutFileReference,
+        formData
+      });
+      copied++;
+
+      // Copy part files: prefer the WO part's files; else the matching estimate part's files.
+      const files = (wj.files && wj.files.length) ? wj.files : (ep && ep.files ? ep.files : []);
+      for (const f of files) {
+        await EstimatePartFile.create({
+          partId: newPart.id,
+          filename: f.filename,
+          originalName: f.originalName,
+          mimeType: f.mimeType,
+          size: f.size,
+          url: f.url,
+          cloudinaryId: f.cloudinaryId,
+          fileType: f.fileType,
+          fileLastModified: f.fileLastModified,
+          portalVisible: false
+        });
+      }
+    }
+
+    const createdEstimate = await Estimate.findByPk(newEstimate.id, {
+      include: [{ model: EstimatePart, as: 'parts' }]
+    });
+
+    return res.status(201).json({
+      data: createdEstimate,
+      message: `Estimate ${estimateNumber} created from ${drLabel} — ${copied} part(s) copied from the work order`
+    });
   } catch (error) {
     next(error);
   }

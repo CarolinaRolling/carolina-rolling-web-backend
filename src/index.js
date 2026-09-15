@@ -958,6 +958,41 @@ app.get('/api/operations/workorders', authenticate, async (req, res) => {
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
+// Schedule view — work orders with received + promised dates and assigned worker (CR Admin-style list
+// for the estimator tablet). Supports ?q= search and optional ?status= filter.
+app.get('/api/operations/schedule', authenticate, async (req, res) => {
+  try {
+    const { WorkOrder } = require('./models');
+    const { Op, where: seqWhere, cast, col } = require('sequelize');
+    const q = (req.query.q || '').trim();
+    const where = { isVoided: { [Op.not]: true } };
+    // By default hide fully-done jobs; allow ?all=1 to include everything.
+    if (req.query.all !== '1') where.status = { [Op.notIn]: ASSIGN_DONE };
+    if (req.query.status) where.status = req.query.status;
+    if (q) where[Op.or] = [
+      seqWhere(cast(col('drNumber'), 'text'), { [Op.iLike]: `%${q}%` }),
+      { clientName: { [Op.iLike]: `%${q}%` } },
+      { clientPurchaseOrderNumber: { [Op.iLike]: `%${q}%` } },
+      { orderNumber: { [Op.iLike]: `%${q}%` } }
+    ];
+    const rows = await WorkOrder.findAll({
+      where,
+      attributes: ['id', 'drNumber', 'orderNumber', 'clientName', 'status', 'receivedAt', 'promisedDate', 'assignedOperator'],
+      order: [['promisedDate', 'ASC'], ['receivedAt', 'ASC']],
+      limit: q ? 300 : 200,
+    });
+    res.json({ data: rows.map(w => ({
+      id: w.id,
+      dr: w.drNumber || w.orderNumber,
+      clientName: w.clientName,
+      status: w.status,
+      receivedAt: w.receivedAt,
+      promisedDate: w.promisedDate,
+      assignedOperator: w.assignedOperator || null,
+    })) });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
 // Current assignments (optionally filtered to one operator), ordered by queue position
 app.get('/api/operations/assignments', authenticate, async (req, res) => {
   try {

@@ -3691,7 +3691,8 @@ MATCHING RULES (when multiple files are provided):
 
     const { getParsingModel } = require('../services/aiConfig');
     const requestBody = JSON.stringify({
-
+      model: getParsingModel(),
+      max_tokens: 16000,
       system: systemPrompt,
       messages: [{ role: 'user', content: contentItems }]
     });

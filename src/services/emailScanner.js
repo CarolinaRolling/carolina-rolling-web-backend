@@ -288,6 +288,7 @@ IMPORTANT RULES:
 - Each unique part line in the email = ONE entry in the parts array. Do NOT split a single part into multiple entries.
 - For plate rolls: "width" = height of the shell, "length" = flat developed length
 - If they say "rolled and tack welded" or "R/T", put that in the ROLLING PART's specialInstructions — do NOT create a separate fab_service for tack welding
+- specialInstructions is ONLY for genuine fabrication instructions found in the document: rolled & tacked (R/T), bevel, weld/weld prep, grind, fit-up, hole/notch details, tolerance callouts, or an explicit note the shop must follow. Do NOT fill it with descriptive filler, restated dimensions, material names, quantities, or a summary of the part. If there is no explicit fabrication instruction for a part, leave specialInstructions as null.
 - Only create a separate fab_service part for explicit services like "100% weld", "full pen weld", "bevel", "fit and weld", "grind smooth"
 - Every fab_service MUST include "parentPartIndex" pointing to which rolling part it belongs to (0-based index in the parts array)
 - If the email mentions a requested delivery date, need-by date, due date, or ship date, extract it as "requestedDate" in YYYY-MM-DD format. Convert relative dates like "next Friday" or "2 weeks" to actual dates based on today's date.
@@ -2628,7 +2629,7 @@ Respond ONLY with valid JSON (no markdown, no backticks). Format:
       "flangeOut": false,
       "fabType": null,
       "parentPartIndex": null,
-      "specialInstructions": "notes about this part",
+      "specialInstructions": null,
       "clientPartNumber": "if visible on drawing",
       "description": "auto-generated material description",
       "measurePoint": "ID or OD or CL — how the diameter was specified on the drawing",

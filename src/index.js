@@ -975,21 +975,49 @@ app.get('/api/operations/schedule', authenticate, async (req, res) => {
       { clientPurchaseOrderNumber: { [Op.iLike]: `%${q}%` } },
       { orderNumber: { [Op.iLike]: `%${q}%` } }
     ];
+    const { WorkOrderPart } = require('./models');
     const rows = await WorkOrder.findAll({
       where,
-      attributes: ['id', 'drNumber', 'orderNumber', 'clientName', 'status', 'receivedAt', 'promisedDate', 'assignedOperator'],
+      attributes: ['id', 'drNumber', 'orderNumber', 'clientName', 'status', 'receivedAt', 'promisedDate', 'requestedDueDate', 'priority', 'assignedOperator'],
+      include: [{ model: WorkOrderPart, as: 'parts', attributes: ['partType'], required: false }],
       order: [['promisedDate', 'ASC'], ['receivedAt', 'ASC']],
       limit: q ? 300 : 200,
     });
-    res.json({ data: rows.map(w => ({
-      id: w.id,
-      dr: w.drNumber || w.orderNumber,
-      clientName: w.clientName,
-      status: w.status,
-      receivedAt: w.receivedAt,
-      promisedDate: w.promisedDate,
-      assignedOperator: w.assignedOperator || null,
-    })) });
+    const now = new Date();
+    const DONE = ['stored', 'shipped', 'archived', 'completed'];
+    // Mirror CR Admin getDateStatus: overdue / today / urgent(<=3) / soon(<=7) / normal / none.
+    const dateStatus = (dateStr) => {
+      if (!dateStr) return 'none';
+      const d = new Date(dateStr);
+      if (isNaN(d)) return 'none';
+      const days = Math.floor((d - now) / 86400000);
+      if (days < 0) return 'overdue';
+      if (days === 0) return 'today';
+      if (days <= 3) return 'urgent';
+      if (days <= 7) return 'soon';
+      return 'normal';
+    };
+    res.json({ data: rows.map(w => {
+      const parts = w.parts || [];
+      const isRush = parts.some(pt => pt.partType === 'rush_service') || w.priority === 'rush' || w.priority === 'emergency';
+      const due = w.promisedDate || w.requestedDueDate;
+      const isOverdue = !!due && new Date(due) < now && !DONE.includes(w.status);
+      return {
+        id: w.id,
+        dr: w.drNumber || w.orderNumber,
+        clientName: w.clientName,
+        status: w.status,
+        priority: w.priority || 'normal',
+        receivedAt: w.receivedAt,
+        promisedDate: w.promisedDate,
+        requestedDueDate: w.requestedDueDate,
+        assignedOperator: w.assignedOperator || null,
+        isRush,
+        isOverdue,
+        promisedStatus: dateStatus(w.promisedDate),
+        requestedStatus: dateStatus(w.requestedDueDate),
+      };
+    }) });
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 

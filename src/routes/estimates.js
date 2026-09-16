@@ -3691,8 +3691,7 @@ MATCHING RULES (when multiple files are provided):
 
     const { getParsingModel } = require('../services/aiConfig');
     const requestBody = JSON.stringify({
-      model: getParsingModel(),
-      max_tokens: 8000,
+
       system: systemPrompt,
       messages: [{ role: 'user', content: contentItems }]
     });
@@ -3753,18 +3752,32 @@ MATCHING RULES (when multiple files are provided):
     console.log(`[AI-Parse] Response (first 300): ${text.substring(0, 300)}`);
 
     const clean = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+    const wasTruncated = data.stop_reason === 'max_tokens';
     let parsed;
     try {
       parsed = JSON.parse(clean);
-    } catch {
-      // The AI may have wrapped the JSON in prose — extract the object between the first { and last }
-      const s = clean.indexOf('{'); const e = clean.lastIndexOf('}');
-      if (s >= 0 && e > s) { try { parsed = JSON.parse(clean.slice(s, e + 1)); } catch {} }
+    } catch (e) {
+      const s2 = clean.indexOf('{'); const e2 = clean.lastIndexOf('}');
+      if (s2 >= 0 && e2 > s2) { try { parsed = JSON.parse(clean.slice(s2, e2 + 1)); } catch (e3) {} }
+    }
+    if ((!parsed || typeof parsed !== 'object') && (wasTruncated || !clean.trim().endsWith('}'))) {
+      try {
+        const arrStart = clean.indexOf('[', clean.indexOf('"parts"'));
+        const lastClose = clean.lastIndexOf('}');
+        if (arrStart >= 0 && lastClose > arrStart) {
+          const repaired = clean.slice(0, lastClose + 1).replace(/,\s*$/, '') + ']}';
+          parsed = JSON.parse('{' + repaired.slice(repaired.indexOf('"parts"')));
+          console.warn('[AI-Parse] Salvaged truncated response — recovered', (parsed.parts || []).length, 'part(s).');
+        }
+      } catch (e4) { /* fall through */ }
     }
     if (!parsed || typeof parsed !== 'object') {
-      console.error('[AI-Parse] Non-JSON AI response (first 800):', clean.substring(0, 800));
-      const snippet = clean.substring(0, 400).replace(/\s+/g, ' ');
-      throw new Error(`The AI read the document but didn't return usable data. It replied: "${snippet}${clean.length > 400 ? '…' : ''}"`);
+      console.error('[AI-Parse] Unparseable. stop_reason:', data.stop_reason, 'length:', clean.length, 'first800:', clean.substring(0, 800));
+      if (wasTruncated) {
+        throw new Error('The AI response was cut off before it finished (document too large). Try splitting it into fewer parts, or re-run.');
+      }
+      const snippet = clean.substring(0, 300).replace(/\s+/g, ' ');
+      throw new Error(`The AI read the document but the reply couldn't be parsed (stop_reason: ${data.stop_reason || 'unknown'}, length: ${clean.length}). It replied: "${snippet}${clean.length > 300 ? '\u2026' : ''}"`);
     }
 
     // Use buildFormData from email scanner to convert to our form format. Also resolve each part's

@@ -3210,6 +3210,63 @@ router.get('/:id/pdf', async (req, res, next) => {
       doc.fontSize(11).fillColor(grayColor).text(estimate.notes, 50, yPos, { width: 500 });
     }
 
+    // ========== ROLL ORIENTATION REFERENCE ==========
+    // For any rolled part with an easy-way / hard-way / on-edge choice, show the reference diagram so the
+    // customer can confirm the orientation is what they intended BEFORE production. Prevents wrong-way rework.
+    try {
+      const ORIENT_IMG = {
+        angle_roll:   { easy_way: 'AngleEW.png',   hard_way: 'AngleHW.png' },
+        channel_roll: { easy_way: 'ChannelEW.png', hard_way: 'ChannelHW.png', on_edge: 'ChannelOnEdge.png' },
+        tube_roll:    { easy_way: 'TubingEW.png',  hard_way: 'TubingHW.png' },
+        flat_bar:     { easy_way: 'FlatBarEW.png', hard_way: 'FlatBarHW.png' },
+        beam_roll:    { easy_way: 'IbeamEW.png',   hard_way: 'IbeamHW.png' }
+      };
+      const TYPE_LABEL = { angle_roll: 'Angle', channel_roll: 'Channel', tube_roll: 'Square/Rect Tube', flat_bar: 'Flat Bar', beam_roll: 'I-Beam' };
+      const ORIENT_LABEL = { easy_way: 'Easy Way (EW)', hard_way: 'Hard Way (HW)', on_edge: 'On Edge' };
+      // Collect the unique (type, orientation) pairs actually used in this estimate.
+      const seen = new Set();
+      const refs = [];
+      for (const part of sortedParts) {
+        const map = ORIENT_IMG[part.partType];
+        if (!map) continue;
+        const rt = part.rollType;
+        if (!rt || !map[rt]) continue;
+        const key = part.partType + '|' + rt;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        refs.push({ img: map[rt], typeLabel: TYPE_LABEL[part.partType], orientLabel: ORIENT_LABEL[rt] });
+      }
+      if (refs.length > 0) {
+        doc.addPage();
+        let ry = 50;
+        doc.fontSize(16).fillColor(primaryColor).font('Helvetica-Bold').text('Roll Orientation Reference', 50, ry, { lineBreak: false });
+        ry += 24;
+        doc.fontSize(10).fillColor(grayColor).font('Helvetica').text(
+          'Please confirm the roll orientation of each part below matches your requirement. Easy Way and Hard Way produce different diameters and cannot be swapped after production. If anything looks wrong, contact us before we begin.',
+          50, ry, { width: 512 });
+        ry += 42;
+        for (const r of refs) {
+          const imgPath = path.join(__dirname, '..', 'assets', 'orientation-ref', r.img);
+          const blockH = 190;
+          if (ry + blockH > 720) { doc.addPage(); ry = 50; }
+          // Heading for this orientation
+          doc.fontSize(12).fillColor(darkColor).font('Helvetica-Bold').text(`${r.typeLabel} — ${r.orientLabel}`, 50, ry, { lineBreak: false });
+          ry += 18;
+          try {
+            if (fs.existsSync(imgPath)) {
+              doc.image(imgPath, 70, ry, { fit: [420, 150], align: 'center' });
+            } else {
+              doc.fontSize(9).fillColor('#999').text('(diagram unavailable)', 70, ry);
+            }
+          } catch (imgErr) { /* skip a bad image */ }
+          ry += 168;
+          doc.strokeColor('#eee').lineWidth(0.5).moveTo(50, ry).lineTo(562, ry).stroke();
+          ry += 12;
+          doc.font('Helvetica');
+        }
+      }
+    } catch (refErr) { console.error('[PDF] orientation reference error:', refErr.message); }
+
     // ========== FOOTER ==========
     const pageCount = doc.bufferedPageRange().count;
     for (let i = 0; i < pageCount; i++) {

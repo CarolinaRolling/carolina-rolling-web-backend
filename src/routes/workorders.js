@@ -393,7 +393,7 @@ function refreshDerivedFields(part) {
         if (part.partType === 'tee_bar') {
           dir = part.rollType === 'easy_way' ? ' SO' : part.rollType === 'on_edge' ? ' SU' : ' SI';
         } else {
-          dir = part.rollType === 'easy_way' ? ' EW' : part.rollType === 'on_edge' ? ' OE' : ' HW';
+          dir = part.rollType === 'easy_way' ? ' EW' : part.rollType === 'on_edge' ? ' On Edge' : ' HW';
         }
       }
       let line = `Roll to ${inch(rollVal)} ${spec}${dir}`;

@@ -2590,7 +2590,7 @@ router.get('/:id/pdf', async (req, res, next) => {
       if (part.partType === 'tee_bar') {
         return part.rollType === 'easy_way' ? 'SO' : part.rollType === 'on_edge' ? 'SU' : 'SI';
       }
-      return part.rollType === 'easy_way' ? 'EW' : part.rollType === 'on_edge' ? 'OE' : 'HW';
+      return part.rollType === 'easy_way' ? 'EW' : part.rollType === 'on_edge' ? 'On Edge' : 'HW';
     };
 
     // Colors
@@ -2626,7 +2626,8 @@ router.get('/:id/pdf', async (req, res, next) => {
     }
     doc.font('Helvetica').fontSize(10.5).fillColor(grayColor);
     doc.text('9152 Sonrisa St., Bellflower, CA 90706', 130, 52, { lineBreak: false });
-    doc.text('Phone: (562) 633-1044  |  Email: keepitrolling@carolinarolling.com', 130, 63, { lineBreak: false });
+    doc.text('Phone: (562) 633-1044', 130, 63, { lineBreak: false });
+    doc.text('Email: keepitrolling@carolinarolling.com', 130, 74, { lineBreak: false });
     
     // ESTIMATE + number + date — top right corner
     doc.fontSize(16).fillColor(primaryColor).font('Helvetica-Bold');

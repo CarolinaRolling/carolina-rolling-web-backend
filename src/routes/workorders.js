@@ -1493,15 +1493,18 @@ router.get('/invoicing/queue', async (req, res, next) => {
 // GET /api/workorders/invoicing/history - Invoiced WOs (MUST be before /:id)
 router.get('/invoicing/history', async (req, res, next) => {
   try {
-    const { Op } = require('sequelize');
+    const { Op, fn, col, literal } = require('sequelize');
     const workOrders = await WorkOrder.findAll({
       where: {
         invoiceNumber: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] },
         [Op.or]: [{ isVoided: null }, { isVoided: false }]
       },
       include: [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'partTotal', 'quantity'] }],
-      order: [['invoiceDate', 'DESC']],
-      limit: 100
+      // Sort by the best available date so invoices with a null invoiceDate (e.g. number assigned but date
+      // not yet stamped) still sort by when they were actually invoiced/updated — otherwise they fall to the
+      // bottom and get cut off by the limit, which hid recently-invoiced work orders.
+      order: [[literal('COALESCE("WorkOrder"."invoiceDate", "WorkOrder"."updatedAt", "WorkOrder"."createdAt")'), 'DESC']],
+      limit: 500
     });
     res.json({ data: workOrders });
   } catch (error) { next(error); }

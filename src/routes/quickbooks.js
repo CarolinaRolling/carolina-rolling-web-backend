@@ -1049,8 +1049,8 @@ router.post('/assign-invoice-number/:id', async (req, res, next) => {
         clientName: wo.clientName
       }, { transaction });
       
-      // Update WO
-      await wo.update({ invoiceNumber: String(nextNum) }, { transaction });
+      // Update WO — set invoiceDate too so it sorts correctly in the Invoiced history (and QB export).
+      await wo.update({ invoiceNumber: String(nextNum), invoiceDate: wo.invoiceDate || new Date() }, { transaction });
       
       // Increment next number
       await AppSettings.upsert({ key: 'next_invoice_number', value: nextNum + 1 }, { transaction });

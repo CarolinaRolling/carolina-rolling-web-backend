@@ -1858,6 +1858,26 @@ router.put('/invoice-number/:id', async (req, res, next) => {
 });
 
 router.regenerateInvoicePDF = regenerateInvoicePDF;
+// GET /api/quickbooks/debug-entered-status?key=crtube — TEMP: shows the iifExportedAt state of invoiced WOs
+// so we can see why mark-entered marked 0. Remove after diagnosing.
+router.get('/debug-entered-status', async (req, res) => {
+  try {
+    if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });
+    const { Op } = require('sequelize');
+    const rows = await WorkOrder.findAll({
+      where: { invoiceNumber: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] } },
+      attributes: ['id', 'drNumber', 'invoiceNumber', 'iifExportedAt', 'iifBatchId'],
+      limit: 500
+    });
+    const total = rows.length;
+    const nullExported = rows.filter(r => !r.iifExportedAt).length;
+    const hasExported = rows.filter(r => r.iifExportedAt).length;
+    const manual = rows.filter(r => (r.iifBatchId || '').startsWith('manual')).length;
+    const sample = rows.slice(0, 5).map(r => ({ dr: r.drNumber, inv: r.invoiceNumber, iifExportedAt: r.iifExportedAt, iifBatchId: r.iifBatchId }));
+    res.json({ data: { total, nullExported, hasExported, manual, sample } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
 // POST /api/quickbooks/mark-entered — mark invoices as manually entered into QuickBooks (no IIF export).
 // Sets iifExportedAt with a 'manual' batch id so they show as done in the Invoiced tab.
 router.post('/mark-entered', async (req, res, next) => {
@@ -1869,11 +1889,21 @@ router.post('/mark-entered', async (req, res, next) => {
     const { Op } = require('sequelize');
     const now = new Date();
     const batchId = 'manual-' + now.toISOString().slice(0, 10);
+    // Mark whatever the user explicitly selected. Only skip ones already flagged as EXPORTED via a real IIF
+    // batch (so we don't relabel a true export as manual); manual re-marking and null are fine to (re)set.
     const [count] = await WorkOrder.update(
       { iifExportedAt: now, iifBatchId: batchId },
-      { where: { id: { [Op.in]: workOrderIds }, iifExportedAt: null } }
+      { where: {
+          id: { [Op.in]: workOrderIds },
+          [Op.or]: [
+            { iifExportedAt: null },
+            { iifBatchId: null },
+            { iifBatchId: { [Op.like]: 'manual-%' } }
+          ]
+      } }
     );
-    res.json({ data: { marked: count, batchId }, message: `Marked ${count} invoice(s) as entered in QuickBooks` });
+    console.log(`[quickbooks] mark-entered: requested ${workOrderIds.length}, updated ${count}`);
+    res.json({ data: { marked: count, batchId, requested: workOrderIds.length }, message: `Marked ${count} of ${workOrderIds.length} invoice(s) as entered in QuickBooks` });
   } catch (error) { console.error('[quickbooks] mark-entered error:', error.message); next(error); }
 });
 

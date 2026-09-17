@@ -328,6 +328,25 @@ const sendTestPush = async (req, res) => {
 app.get('/api/debug/push/test', sendTestPush);
 app.post('/api/debug/push/test', authenticate, sendTestPush);
 
+app.get('/api/debug/entered-status', async (req, res) => {
+  try {
+    if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });
+    const { WorkOrder } = require('./models');
+    const { Op } = require('sequelize');
+    const rows = await WorkOrder.findAll({
+      where: { invoiceNumber: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] } },
+      attributes: ['id', 'drNumber', 'invoiceNumber', 'iifExportedAt', 'iifBatchId'],
+      limit: 600
+    });
+    const total = rows.length;
+    const nullExported = rows.filter(r => !r.iifExportedAt).length;
+    const hasExported = rows.filter(r => r.iifExportedAt).length;
+    const manual = rows.filter(r => (r.iifBatchId || '').startsWith('manual')).length;
+    const sample = rows.slice(0, 6).map(r => ({ id: r.id, dr: r.drNumber, inv: r.invoiceNumber, iifExportedAt: r.iifExportedAt, iifBatchId: r.iifBatchId }));
+    res.json({ data: { total, nullExported, hasExported, manual, sample } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
 app.get('/api/debug/ai-usage', async (req, res) => {
   try {
     if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });

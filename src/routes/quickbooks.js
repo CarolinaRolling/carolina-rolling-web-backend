@@ -1858,26 +1858,6 @@ router.put('/invoice-number/:id', async (req, res, next) => {
 });
 
 router.regenerateInvoicePDF = regenerateInvoicePDF;
-// GET /api/quickbooks/debug-entered-status?key=crtube — TEMP: shows the iifExportedAt state of invoiced WOs
-// so we can see why mark-entered marked 0. Remove after diagnosing.
-router.get('/debug-entered-status', async (req, res) => {
-  try {
-    if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });
-    const { Op } = require('sequelize');
-    const rows = await WorkOrder.findAll({
-      where: { invoiceNumber: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] } },
-      attributes: ['id', 'drNumber', 'invoiceNumber', 'iifExportedAt', 'iifBatchId'],
-      limit: 500
-    });
-    const total = rows.length;
-    const nullExported = rows.filter(r => !r.iifExportedAt).length;
-    const hasExported = rows.filter(r => r.iifExportedAt).length;
-    const manual = rows.filter(r => (r.iifBatchId || '').startsWith('manual')).length;
-    const sample = rows.slice(0, 5).map(r => ({ dr: r.drNumber, inv: r.invoiceNumber, iifExportedAt: r.iifExportedAt, iifBatchId: r.iifBatchId }));
-    res.json({ data: { total, nullExported, hasExported, manual, sample } });
-  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
-});
-
 // POST /api/quickbooks/mark-entered — mark invoices as manually entered into QuickBooks (no IIF export).
 // Sets iifExportedAt with a 'manual' batch id so they show as done in the Invoiced tab.
 router.post('/mark-entered', async (req, res, next) => {

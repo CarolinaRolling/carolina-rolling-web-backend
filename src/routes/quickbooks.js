@@ -32,9 +32,14 @@ const TERMS_MAP = {
 };
 
 function formatQBDate(dateStr) {
-  if (!dateStr) return new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' });
-  const d = new Date(dateStr);
-  return `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getDate().toString().padStart(2, '0')}/${d.getFullYear()}`;
+  const d = dateStr ? new Date(dateStr) : new Date();
+  // Format in the shop's timezone (Pacific) so the QB invoice date matches what CR Admin shows, and a
+  // near-midnight UTC timestamp doesn't roll to the wrong calendar day.
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Los_Angeles', month: '2-digit', day: '2-digit', year: 'numeric'
+  }).formatToParts(d);
+  const get = (t) => (parts.find(p => p.type === t) || {}).value || '';
+  return `${get('month')}/${get('day')}/${get('year')}`;
 }
 
 function clean(s) {
@@ -106,7 +111,9 @@ async function buildInvoiceIIF(wo, parts, client, invoiceNum) {
   
   const drLabel = wo.drNumber ? `DR-${wo.drNumber}` : (wo.orderNumber || '');
   const clientName = clean(client?.quickbooksName || client?.name || wo.clientName || 'Unknown');
-  const invoiceDate = formatQBDate(wo.shippedAt || wo.completedAt || wo.createdAt);
+  // Use the date the invoice was created in CR Admin (wo.invoiceDate) as the QuickBooks invoice date.
+  // Fall back to shipped/completed/created only if it was never stamped.
+  const invoiceDate = formatQBDate(wo.invoiceDate || wo.shippedAt || wo.completedAt || wo.createdAt);
   const docNum = invoiceNum || wo.invoiceNumber || drLabel;
   const terms = mapTerms(client?.paymentTerms);
   const clientPO = clean(wo.clientPurchaseOrderNumber || '');

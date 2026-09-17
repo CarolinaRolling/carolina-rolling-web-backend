@@ -1869,22 +1869,30 @@ router.post('/mark-entered', async (req, res, next) => {
     const { Op } = require('sequelize');
     const now = new Date();
     const batchId = 'manual-' + now.toISOString().slice(0, 10);
-    // Mark whatever the user explicitly selected. Only skip ones already flagged as EXPORTED via a real IIF
-    // batch (so we don't relabel a true export as manual); manual re-marking and null are fine to (re)set.
-    const [count] = await WorkOrder.update(
-      { iifExportedAt: now, iifBatchId: batchId },
-      { where: {
-          id: { [Op.in]: workOrderIds },
-          [Op.or]: [
-            { iifExportedAt: null },
-            { iifBatchId: null },
-            { iifBatchId: { [Op.like]: 'manual-%' } }
-          ]
-      } }
-    );
+    // Mark whatever the user explicitly selected. Update in chunks to avoid any large-array query limits,
+    // and don't overwrite rows already tied to a real (non-manual) IIF export.
+    let count = 0;
+    const CHUNK = 100;
+    for (let i = 0; i < workOrderIds.length; i += CHUNK) {
+      const chunk = workOrderIds.slice(i, i + CHUNK);
+      const [n] = await WorkOrder.update(
+        { iifExportedAt: now, iifBatchId: batchId },
+        { where: {
+            id: { [Op.in]: chunk },
+            [Op.or]: [
+              { iifExportedAt: { [Op.is]: null } },
+              { iifBatchId: { [Op.like]: 'manual-%' } }
+            ]
+        } }
+      );
+      count += n;
+    }
     console.log(`[quickbooks] mark-entered: requested ${workOrderIds.length}, updated ${count}`);
     res.json({ data: { marked: count, batchId, requested: workOrderIds.length }, message: `Marked ${count} of ${workOrderIds.length} invoice(s) as entered in QuickBooks` });
-  } catch (error) { console.error('[quickbooks] mark-entered error:', error.message); next(error); }
+  } catch (error) {
+    console.error('[quickbooks] mark-entered error:', error.message, error.stack);
+    return res.status(500).json({ error: { message: 'Mark failed: ' + error.message } });
+  }
 });
 
 // POST /api/quickbooks/unmark-entered — undo the QB-entered flag (in case of a mistake).

@@ -1853,4 +1853,39 @@ router.put('/invoice-number/:id', async (req, res, next) => {
 });
 
 router.regenerateInvoicePDF = regenerateInvoicePDF;
+// POST /api/quickbooks/mark-entered — mark invoices as manually entered into QuickBooks (no IIF export).
+// Sets iifExportedAt with a 'manual' batch id so they show as done in the Invoiced tab.
+router.post('/mark-entered', async (req, res, next) => {
+  try {
+    const { workOrderIds } = req.body;
+    if (!Array.isArray(workOrderIds) || workOrderIds.length === 0) {
+      return res.status(400).json({ error: { message: 'No work order IDs provided' } });
+    }
+    const { Op } = require('sequelize');
+    const now = new Date();
+    const batchId = 'manual-' + now.toISOString().slice(0, 10);
+    const [count] = await WorkOrder.update(
+      { iifExportedAt: now, iifBatchId: batchId },
+      { where: { id: { [Op.in]: workOrderIds }, iifExportedAt: null } }
+    );
+    res.json({ data: { marked: count, batchId }, message: `Marked ${count} invoice(s) as entered in QuickBooks` });
+  } catch (error) { console.error('[quickbooks] mark-entered error:', error.message); next(error); }
+});
+
+// POST /api/quickbooks/unmark-entered — undo the QB-entered flag (in case of a mistake).
+router.post('/unmark-entered', async (req, res, next) => {
+  try {
+    const { workOrderIds } = req.body;
+    if (!Array.isArray(workOrderIds) || workOrderIds.length === 0) {
+      return res.status(400).json({ error: { message: 'No work order IDs provided' } });
+    }
+    const { Op } = require('sequelize');
+    const [count] = await WorkOrder.update(
+      { iifExportedAt: null, iifBatchId: null },
+      { where: { id: { [Op.in]: workOrderIds } } }
+    );
+    res.json({ data: { unmarked: count }, message: `Reset ${count} invoice(s)` });
+  } catch (error) { console.error('[quickbooks] unmark-entered error:', error.message); next(error); }
+});
+
 module.exports = router;

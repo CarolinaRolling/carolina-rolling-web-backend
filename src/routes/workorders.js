@@ -1500,10 +1500,13 @@ router.get('/invoicing/history', async (req, res, next) => {
         [Op.or]: [{ isVoided: null }, { isVoided: false }]
       },
       include: [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'partTotal', 'quantity'] }],
-      // Sort by the best available date so invoices with a null invoiceDate (e.g. number assigned but date
-      // not yet stamped) still sort by when they were actually invoiced/updated — otherwise they fall to the
-      // bottom and get cut off by the limit, which hid recently-invoiced work orders.
-      order: [[literal('COALESCE("WorkOrder"."invoiceDate", "WorkOrder"."updatedAt", "WorkOrder"."createdAt")'), 'DESC']],
+      // Sort so anything NOT yet in QuickBooks (iifExportedAt IS NULL) floats to the TOP — that's the work
+      // still to do. Within each group, newest invoice date first. (COALESCE handles null invoiceDate so a
+      // recently-numbered invoice still sorts by when it was touched, instead of dropping to the bottom.)
+      order: [
+        [literal('CASE WHEN "WorkOrder"."iifExportedAt" IS NULL THEN 0 ELSE 1 END'), 'ASC'],
+        [literal('COALESCE("WorkOrder"."invoiceDate", "WorkOrder"."updatedAt", "WorkOrder"."createdAt")'), 'DESC']
+      ],
       limit: 500
     });
     res.json({ data: workOrders });

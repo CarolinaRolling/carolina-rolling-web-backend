@@ -1544,10 +1544,15 @@ router.post('/export-batch-with-reconciliation', async (req, res, next) => {
 
     if (allLines.length === 0) return res.status(400).json({ error: { message: 'No billable items found' } });
 
-    // Mark all as exported
+    // Mark all as exported — on BOTH the InvoiceNumber record AND the WorkOrder (the Invoiced tab reads the
+    // WorkOrder.iifExportedAt to show status and prevent double-entry, so it MUST be set there too).
     await InvoiceNumber.update(
       { iifExportedAt: exportDate, iifBatchId: batchId },
       { where: { workOrderId: { [Op.in]: workOrderIds }, iifExportedAt: null } }
+    );
+    await WorkOrder.update(
+      { iifExportedAt: exportDate, iifBatchId: batchId },
+      { where: { id: { [Op.in]: workOrderIds }, iifExportedAt: null } }
     );
 
     // Generate reconciliation PDF

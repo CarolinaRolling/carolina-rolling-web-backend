@@ -347,6 +347,32 @@ app.get('/api/debug/fix-iif-columns', async (req, res) => {
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
+app.get('/api/debug/test-mark', async (req, res) => {
+  try {
+    if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });
+    const { WorkOrder } = require('./models');
+    const { Op } = require('sequelize');
+    // Grab 3 invoiced WO ids the same way the tab would
+    const rows = await WorkOrder.findAll({
+      where: { invoiceNumber: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] } },
+      attributes: ['id', 'drNumber', 'iifExportedAt', 'iifBatchId'],
+      limit: 3
+    });
+    const ids = rows.map(r => r.id);
+    // Read raw values BEFORE
+    const before = rows.map(r => ({ id: r.id, dr: r.drNumber, iifExportedAt: r.iifExportedAt, iifBatchId: r.iifBatchId }));
+    // Attempt the exact update
+    const [count] = await WorkOrder.update(
+      { iifExportedAt: new Date(), iifBatchId: 'manual-test' },
+      { where: { id: { [Op.in]: ids } } }
+    );
+    // Read AFTER
+    const afterRows = await WorkOrder.findAll({ where: { id: { [Op.in]: ids } }, attributes: ['id', 'drNumber', 'iifExportedAt', 'iifBatchId'] });
+    const after = afterRows.map(r => ({ id: r.id, dr: r.drNumber, iifExportedAt: r.iifExportedAt, iifBatchId: r.iifBatchId }));
+    res.json({ data: { idsAttempted: ids, updateCount: count, before, after } });
+  } catch (e) { res.status(500).json({ error: { message: e.message, stack: (e.stack||'').split('\n').slice(0,3) } }); }
+});
+
 app.get('/api/debug/db-identity', async (req, res) => {
   try {
     if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });

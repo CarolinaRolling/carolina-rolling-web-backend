@@ -715,6 +715,16 @@ const WorkOrder = sequelize.define('WorkOrder', {
     type: DataTypes.STRING,
     allowNull: true
   },
+  // QuickBooks IIF export tracking (DB columns added via migration; must be declared here or Sequelize
+  // ignores them in SELECT/UPDATE — which silently no-ops mark-entered/export).
+  iifExportedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  iifBatchId: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
   invoicePdfUrl: {
     type: DataTypes.STRING,
     allowNull: true

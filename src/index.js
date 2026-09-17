@@ -328,6 +328,25 @@ const sendTestPush = async (req, res) => {
 app.get('/api/debug/push/test', sendTestPush);
 app.post('/api/debug/push/test', authenticate, sendTestPush);
 
+app.get('/api/debug/fix-iif-columns', async (req, res) => {
+  try {
+    if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });
+    const results = [];
+    for (const sql of [
+      `ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "iifExportedAt" TIMESTAMP WITH TIME ZONE`,
+      `ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "iifBatchId" VARCHAR(255)`
+    ]) {
+      try { await sequelize.query(sql); results.push({ sql, ok: true }); }
+      catch (e) { results.push({ sql, ok: false, error: e.message }); }
+    }
+    // Verify the columns now exist
+    const [cols] = await sequelize.query(
+      `SELECT column_name FROM information_schema.columns WHERE table_name = 'work_orders' AND column_name IN ('iifExportedAt','iifBatchId')`
+    );
+    res.json({ data: { ran: results, columnsNow: cols.map(c => c.column_name) } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
 app.get('/api/debug/entered-status', async (req, res) => {
   try {
     if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });

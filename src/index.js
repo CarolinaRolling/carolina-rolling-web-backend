@@ -347,6 +347,24 @@ app.get('/api/debug/fix-iif-columns', async (req, res) => {
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
+app.get('/api/debug/db-identity', async (req, res) => {
+  try {
+    if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });
+    // Which database is the APP actually connected to?
+    const [dbInfo] = await sequelize.query(`SELECT current_database() AS db, inet_server_addr() AS host, current_setting('transaction_read_only') AS read_only`);
+    // Does the APP's connection see the iif columns on work_orders?
+    const [cols] = await sequelize.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'work_orders' AND column_name IN ('iifExportedAt','iifBatchId')`);
+    // Redacted DATABASE_URL host so we can compare which instance it points at
+    let dbUrlHost = null;
+    try { const u = new URL(process.env.DATABASE_URL); dbUrlHost = u.hostname + ':' + u.port + u.pathname; } catch {}
+    res.json({ data: {
+      appDatabase: dbInfo[0],
+      columnsAppSees: cols.map(c => c.column_name),
+      databaseUrlHost: dbUrlHost
+    }});
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
 app.get('/api/debug/entered-status', async (req, res) => {
   try {
     if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });

@@ -2096,12 +2096,17 @@ async function startServer() {
       console.log('Job assignment columns ready');
       // Internal notes on work orders (carried over from the estimate on conversion).
       await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "internalNotes" TEXT`);
-      // QuickBooks IIF export tracking — these are defined on the model but were missing from the DB,
-      // which crashed the Invoiced-tab history query. Add them so exported/entered status can be stored.
+      console.log('Job assignment columns ready');
+    } catch(e) { console.log('Job assignment columns error:', e.message); }
+
+    // QuickBooks IIF export tracking columns — in their OWN try block so they always run, independent of
+    // whether any earlier migration in the assignment block failed. (These were defined on the WorkOrder
+    // model but missing from the DB, which crashed the Invoiced-tab history query.)
+    try {
       await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "iifExportedAt" TIMESTAMP WITH TIME ZONE`);
       await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "iifBatchId" VARCHAR(255)`);
       console.log('QuickBooks IIF export columns ready');
-    } catch(e) { console.log('Job assignment columns error:', e.message); }
+    } catch(e) { console.log('QuickBooks IIF columns error:', e.message); }
 
     // Operator tasks table (free-text reminders)
     try {

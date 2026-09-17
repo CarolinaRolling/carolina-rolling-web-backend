@@ -1493,21 +1493,23 @@ router.get('/invoicing/queue', async (req, res, next) => {
 // GET /api/workorders/invoicing/history - Invoiced WOs (MUST be before /:id)
 router.get('/invoicing/history', async (req, res, next) => {
   try {
-    const { Op, fn, col, literal } = require('sequelize');
-    const workOrders = await WorkOrder.findAll({
+    const { Op } = require('sequelize');
+    const rows = await WorkOrder.findAll({
       where: {
         invoiceNumber: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] },
         [Op.or]: [{ isVoided: null }, { isVoided: false }]
       },
       include: [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'partTotal', 'quantity'] }],
-      // Sort so anything NOT yet in QuickBooks (iifExportedAt IS NULL) floats to the TOP — that's the work
-      // still to do. Within each group, newest invoice date first. (COALESCE handles null invoiceDate so a
-      // recently-numbered invoice still sorts by when it was touched, instead of dropping to the bottom.)
-      order: [
-        [literal('CASE WHEN "WorkOrder"."iifExportedAt" IS NULL THEN 0 ELSE 1 END'), 'ASC'],
-        [literal('COALESCE("WorkOrder"."invoiceDate", "WorkOrder"."updatedAt", "WorkOrder"."createdAt")'), 'DESC']
-      ],
       limit: 500
+    });
+    // Sort in JS (robust against schema/alias quirks): un-entered invoices (no iifExportedAt) float to the
+    // TOP — that's the work still to do — then newest invoice/updated/created date first within each group.
+    const bestDate = (w) => new Date(w.invoiceDate || w.updatedAt || w.createdAt || 0).getTime();
+    const workOrders = rows.sort((a, b) => {
+      const ae = a.iifExportedAt ? 1 : 0;
+      const be = b.iifExportedAt ? 1 : 0;
+      if (ae !== be) return ae - be;           // not-entered (0) before entered (1)
+      return bestDate(b) - bestDate(a);         // newest first
     });
     res.json({ data: workOrders });
   } catch (error) { next(error); }

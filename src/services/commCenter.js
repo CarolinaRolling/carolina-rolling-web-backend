@@ -417,7 +417,18 @@ async function runBillScan({ limit = 25 } = {}) {
   const since = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000);
   let extracted = 0;
   for (const account of accounts) {
-
+    // Bills for this account that haven't been scanned yet (billData IS NULL). Scanning each bill exactly
+    // once — a no-PDF result is stored and never re-sent — is what prevents the old token-cost loop.
+    const bills = await ScannedEmail.findAll({
+      where: {
+        gmailAccountId: account.id,
+        category: 'bill',
+        billData: { [Op.is]: null },
+        receivedAt: { [Op.gte]: since }
+      },
+      order: [['receivedAt', 'DESC']],
+      limit
+    });
     if (!bills.length) continue;
     let gmail;
     try { gmail = buildGmailClient(account); } catch { continue; }

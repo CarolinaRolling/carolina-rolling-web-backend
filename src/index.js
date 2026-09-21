@@ -391,6 +391,29 @@ app.get('/api/debug/db-identity', async (req, res) => {
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
+app.get('/api/debug/invoice-sequence', async (req, res) => {
+  try {
+    if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });
+    const { AppSettings, InvoiceNumber } = require('./models');
+    const setting = await AppSettings.findOne({ where: { key: 'next_invoice_number' } });
+    const counter = setting ? setting.value : null;
+    const highestAny = await InvoiceNumber.findOne({ order: [['invoiceNumber', 'DESC']] });
+    const highestActive = await InvoiceNumber.findOne({ where: { status: 'active' }, order: [['invoiceNumber', 'DESC']] });
+    // Recent 10 numbers with status, to spot gaps/voids/duplicates
+    const recent = await InvoiceNumber.findAll({ order: [['invoiceNumber', 'DESC']], limit: 12, attributes: ['invoiceNumber', 'status', 'clientName', 'workOrderId'] });
+    // Detect duplicates in the recent range
+    const nums = recent.map(r => r.invoiceNumber);
+    const dupes = nums.filter((n, i) => nums.indexOf(n) !== i);
+    res.json({ data: {
+      counter_next_invoice_number: counter,
+      highestAny: highestAny ? { num: highestAny.invoiceNumber, status: highestAny.status } : null,
+      highestActive: highestActive ? { num: highestActive.invoiceNumber, status: highestActive.status } : null,
+      recent: recent.map(r => ({ num: r.invoiceNumber, status: r.status, client: r.clientName, wo: r.workOrderId ? 'yes' : 'no' })),
+      duplicatesInRecent: dupes
+    }});
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
 app.get('/api/debug/entered-status', async (req, res) => {
   try {
     if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });

@@ -911,7 +911,7 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
 
 // ==================== RECONCILIATION PDF GENERATOR ====================
 
-async function generateReconciliationPDFBuffer(items, batchId, exportDate) {
+async function generateReconciliationPDFBuffer(items, batchId, exportDate, reusedItems = []) {
   const PDFDocument = require('pdfkit');
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ margin: 50, size: 'letter' });
@@ -988,6 +988,45 @@ async function generateReconciliationPDFBuffer(items, batchId, exportDate) {
     y += 10;
     doc.font('Helvetica').fontSize(8.5).fillColor('#888');
     doc.text('Instructions: After importing this batch into QuickBooks, check each invoice against the QB import log. Check the box next to each confirmed entry. Keep this document for your records.', 50, y, { width: 512 });
+    y += 34;
+
+    // ===== REUSED INVOICE NUMBERS — manual entry required (NOT in the IIF) =====
+    if (reusedItems && reusedItems.length > 0) {
+      if (y > 640) { doc.addPage(); y = 50; }
+      doc.rect(50, y, 512, 22).fill('#fdecea');
+      doc.font('Helvetica-Bold').fontSize(11).fillColor('#c62828').text('\u26A0  REUSED INVOICE NUMBERS \u2014 ENTER MANUALLY IN QUICKBOOKS', 58, y + 6);
+      y += 26;
+      doc.font('Helvetica').fontSize(8.5).fillColor('#a94442').text('These invoices reuse a previously-freed number and were NOT included in the IIF file above (to avoid a duplicate on import). Enter or correct each one MANUALLY in QuickBooks, then check it off.', 50, y, { width: 512 });
+      y += 26;
+      // header
+      doc.rect(50, y, 512, 18).fill('#c62828');
+      doc.font('Helvetica-Bold').fontSize(9).fillColor('white');
+      doc.text('\u2713', 56, y + 4, { width: 20 });
+      doc.text('REUSED #', 82, y + 4, { width: 80 });
+      doc.text('DR #', 167, y + 4, { width: 60 });
+      doc.text('CLIENT', 232, y + 4, { width: 180 });
+      doc.text('CLIENT PO', 417, y + 4, { width: 90 });
+      doc.text('AMOUNT', 500, y + 4, { width: 57, align: 'right' });
+      y += 22;
+      let reusedTotal = 0;
+      reusedItems.forEach((item, i) => {
+        if (y > 700) { doc.addPage(); y = 50; }
+        if (i % 2 === 1) doc.rect(50, y, 512, 18).fill('#fdf0ef');
+        doc.rect(56, y + 3, 12, 12).lineWidth(1).strokeColor('#c62828').stroke();
+        doc.font('Helvetica-Bold').fontSize(10).fillColor('#c62828').text(`#${item.invoiceNumber}`, 82, y + 4, { width: 80 });
+        doc.font('Helvetica').fontSize(10).fillColor('#1565c0').text(item.drLabel, 167, y + 4, { width: 60 });
+        doc.font('Helvetica').fontSize(10).fillColor('#333').text((item.clientName || '').substring(0, 28), 232, y + 4, { width: 180 });
+        doc.font('Helvetica').fontSize(9).fillColor('#555').text((item.clientPO || '\u2014').substring(0, 16), 417, y + 4, { width: 90 });
+        doc.font('Helvetica-Bold').fontSize(10).fillColor('#333').text(fmtCur(item.total), 500, y + 4, { width: 57, align: 'right' });
+        reusedTotal += parseFloat(item.total) || 0;
+        y += 18;
+        doc.moveTo(50, y).lineTo(562, y).lineWidth(0.2).strokeColor('#f2d6d3').stroke();
+      });
+      y += 6;
+      doc.font('Helvetica-Bold').fontSize(10).fillColor('#c62828');
+      doc.text(`Reused total \u2014 ${reusedItems.length} to enter manually`, 50, y, { width: 400 });
+      doc.text(fmtCur(reusedTotal), 500, y, { width: 57, align: 'right' });
+    }
 
     doc.end();
   });
@@ -1002,18 +1041,38 @@ const IIF_HEADER = [
 // ==================== INVOICE NUMBERS ====================
 
 // GET /api/quickbooks/next-invoice-number
+// Single source of truth for the next invoice number. Derived from the highest number that EXISTS in any
+// status (active or void) + 1, so a number is never reused (no QB duplicates) and a lost counter increment
+// self-heals (no permanent jump-ahead). The stored counter is only a floor for a brand-new system.
+// Returns { number, isReused }. Prefers the lowest FREED number (from a cleared/rejected invoice) so gaps
+// get filled; a reused number is flagged so it's excluded from IIF export and shown on the reconciliation
+// report for manual entry. Otherwise returns highest-existing + 1 (self-healing, never reuses live numbers).
+async function computeNextInvoiceNumber(transaction) {
+  const { AppSettings, InvoiceNumber } = require('../models');
+  const opts = transaction ? { transaction } : {};
+  // 1) Any freed numbers waiting to be reused?
+  const freedRow = await AppSettings.findOne({ where: { key: 'freed_invoice_numbers' }, ...opts });
+  const freed = (freedRow && Array.isArray(freedRow.value)) ? freedRow.value.slice() : [];
+  if (freed.length > 0) {
+    freed.sort((a, b) => a - b);
+    const reuse = freed.shift();
+    // Make sure it isn't somehow live again; if it is, drop it and fall through.
+    const clash = await InvoiceNumber.findOne({ where: { invoiceNumber: reuse }, ...opts });
+    await AppSettings.upsert({ key: 'freed_invoice_numbers', value: freed }, opts);
+    if (!clash) return { number: reuse, isReused: true };
+  }
+  // 2) Normal: highest existing (any status) + 1.
+  const highest = await InvoiceNumber.findOne({ order: [['invoiceNumber', 'DESC']], ...opts });
+  if (highest && highest.invoiceNumber) return { number: highest.invoiceNumber + 1, isReused: false };
+  // 3) Brand-new system.
+  const setting = await AppSettings.findOne({ where: { key: 'next_invoice_number' }, ...opts });
+  return { number: (setting && setting.value) ? setting.value : 1001, isReused: false };
+}
+
 router.get('/next-invoice-number', async (req, res, next) => {
   try {
-    const setting = await AppSettings.findOne({ where: { key: 'next_invoice_number' } });
-    let nextNum = setting?.value || 1001;
-    
-    // Also check highest used
-    const highest = await InvoiceNumber.findOne({ order: [['invoiceNumber', 'DESC']] });
-    if (highest && highest.invoiceNumber >= nextNum) {
-      nextNum = highest.invoiceNumber + 1;
-    }
-    
-    res.json({ data: { nextNumber: nextNum } });
+    const { number, isReused } = await computeNextInvoiceNumber();
+    res.json({ data: { nextNumber: number, isReused } });
   } catch (error) { next(error); }
 });
 
@@ -1042,11 +1101,7 @@ router.post('/assign-invoice-number/:id', async (req, res, next) => {
     
     const { sequelize } = require('../models');
     const result = await sequelize.transaction(async (transaction) => {
-      const setting = await AppSettings.findOne({ where: { key: 'next_invoice_number' }, transaction });
-      let nextNum = setting?.value || 1001;
-      
-      const highest = await InvoiceNumber.findOne({ order: [['invoiceNumber', 'DESC']], transaction });
-      if (highest && highest.invoiceNumber >= nextNum) nextNum = highest.invoiceNumber + 1;
+      const { number: nextNum, isReused } = await computeNextInvoiceNumber(transaction);
       
       // Create invoice number record
       await InvoiceNumber.create({
@@ -1057,10 +1112,13 @@ router.post('/assign-invoice-number/:id', async (req, res, next) => {
       }, { transaction });
       
       // Update WO — set invoiceDate too so it sorts correctly in the Invoiced history (and QB export).
-      await wo.update({ invoiceNumber: String(nextNum), invoiceDate: wo.invoiceDate || new Date() }, { transaction });
+      await wo.update({ invoiceNumber: String(nextNum), invoiceDate: wo.invoiceDate || new Date(), reusedInvoiceNumber: isReused }, { transaction });
       
-      // Increment next number
-      await AppSettings.upsert({ key: 'next_invoice_number', value: nextNum + 1 }, { transaction });
+      // Advance the stored counter only for brand-new (non-reused) numbers, and never move it backward.
+      if (!isReused) {
+        const cur = (await AppSettings.findOne({ where: { key: 'next_invoice_number' }, transaction }))?.value || 0;
+        await AppSettings.upsert({ key: 'next_invoice_number', value: Math.max(cur, nextNum + 1) }, { transaction });
+      }
       
       return nextNum;
     });
@@ -1081,6 +1139,7 @@ router.get('/export/:id', async (req, res, next) => {
       ]
     });
     if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
+    if (wo.reusedInvoiceNumber) return res.status(400).json({ error: { message: `Invoice #${wo.invoiceNumber} reuses a freed number and must be entered MANUALLY in QuickBooks (IIF export is blocked to prevent a duplicate).` } });
     
     const client = await resolveClient(wo);
     const result = await buildInvoiceIIF(wo, wo.parts || [], client, wo.invoiceNumber);
@@ -1121,7 +1180,7 @@ router.post('/export-batch', async (req, res, next) => {
       const result = await buildInvoiceIIF(wo, wo.parts || [], client, wo.invoiceNumber);
       if (result) { allLines.push(...result.lines); summaries.push(result.summary); }
     }
-    if (allLines.length === 0) return res.status(400).json({ error: { message: 'No billable items found' } });
+    if (allLines.length === 0 && reusedSummaries.length === 0) return res.status(400).json({ error: { message: 'No billable items found' } });
     
     const iifContent = [...IIF_HEADER, ...allLines].join('\r\n') + '\r\n';
     const filename = `quickbooks-invoices-${new Date().toISOString().split('T')[0]}.iif`;
@@ -1424,13 +1483,10 @@ router.get('/invoice-pdf/:id', async (req, res, next) => {
     if (!wo.invoiceNumber) {
       // Auto-assign if not yet assigned
       const result = await sequelize.transaction(async (t) => {
-        const setting = await AppSettings.findOne({ where: { key: 'next_invoice_number' }, transaction: t });
-        let nextNum = setting?.value || 1001;
-        const highest = await InvoiceNumber.findOne({ order: [['invoiceNumber', 'DESC']], transaction: t });
-        if (highest && highest.invoiceNumber >= nextNum) nextNum = highest.invoiceNumber + 1;
+        const { number: nextNum, isReused } = await computeNextInvoiceNumber(t);
         await InvoiceNumber.create({ invoiceNumber: nextNum, workOrderId: wo.id, clientId: wo.clientId, clientName: wo.clientName }, { transaction: t });
-        await wo.update({ invoiceNumber: String(nextNum), invoiceDate: new Date() }, { transaction: t });
-        await AppSettings.upsert({ key: 'next_invoice_number', value: nextNum + 1 }, { transaction: t });
+        await wo.update({ invoiceNumber: String(nextNum), invoiceDate: new Date(), reusedInvoiceNumber: isReused }, { transaction: t });
+        await AppSettings.upsert({ key: 'next_invoice_number', value: Math.max((await AppSettings.findOne({ where: { key: 'next_invoice_number' }, transaction: t }))?.value || 0, nextNum + 1) }, { transaction: t });
         return nextNum;
       });
       wo.invoiceNumber = String(result);
@@ -1515,13 +1571,10 @@ router.post('/export-batch-with-reconciliation', async (req, res, next) => {
     for (const wo of workOrders) {
       if (!wo.invoiceNumber) {
         const result = await sequelize.transaction(async (t) => {
-          const setting = await AppSettings.findOne({ where: { key: 'next_invoice_number' }, transaction: t });
-          let nextNum = setting?.value || 1001;
-          const highest = await InvoiceNumber.findOne({ order: [['invoiceNumber', 'DESC']], transaction: t });
-          if (highest && highest.invoiceNumber >= nextNum) nextNum = highest.invoiceNumber + 1;
+          const { number: nextNum, isReused } = await computeNextInvoiceNumber(t);
           await InvoiceNumber.create({ invoiceNumber: nextNum, workOrderId: wo.id, clientId: wo.clientId, clientName: wo.clientName }, { transaction: t });
-          await wo.update({ invoiceNumber: String(nextNum) }, { transaction: t });
-          await AppSettings.upsert({ key: 'next_invoice_number', value: nextNum + 1 }, { transaction: t });
+          await wo.update({ invoiceNumber: String(nextNum), reusedInvoiceNumber: isReused }, { transaction: t });
+          await AppSettings.upsert({ key: 'next_invoice_number', value: Math.max((await AppSettings.findOne({ where: { key: 'next_invoice_number' }, transaction: t }))?.value || 0, nextNum + 1) }, { transaction: t });
           return nextNum;
         });
         wo.invoiceNumber = String(result);
@@ -1534,18 +1587,27 @@ router.post('/export-batch-with-reconciliation', async (req, res, next) => {
     const batchId = `BATCH-${new Date().toISOString().slice(0, 10)}-${Date.now().toString(36).toUpperCase()}`;
     const exportDate = new Date();
 
+    const reusedSummaries = [];
     for (const wo of workOrders) {
       const client = await resolveClient(wo);
       const result = await buildInvoiceIIF(wo, wo.parts || [], client, wo.invoiceNumber);
       if (result) {
-        allLines.push(...result.lines);
-        summaries.push({
+        const summ = {
           invoiceNumber: result.summary.invoiceNumber,
           drLabel: result.summary.drNumber,
           clientName: result.summary.clientName,
           clientPO: result.summary.clientPO,
-          total: result.summary.total
-        });
+          total: result.summary.total,
+          reused: !!wo.reusedInvoiceNumber
+        };
+        if (wo.reusedInvoiceNumber) {
+          // Reused number: do NOT put it in the IIF (would risk a QuickBooks duplicate). List it separately
+          // on the reconciliation report so it can be entered/corrected manually in QuickBooks.
+          reusedSummaries.push(summ);
+        } else {
+          allLines.push(...result.lines);
+          summaries.push(summ);
+        }
       }
     }
 
@@ -1553,17 +1615,20 @@ router.post('/export-batch-with-reconciliation', async (req, res, next) => {
 
     // Mark all as exported — on BOTH the InvoiceNumber record AND the WorkOrder (the Invoiced tab reads the
     // WorkOrder.iifExportedAt to show status and prevent double-entry, so it MUST be set there too).
-    await InvoiceNumber.update(
-      { iifExportedAt: exportDate, iifBatchId: batchId },
-      { where: { workOrderId: { [Op.in]: workOrderIds }, iifExportedAt: null } }
-    );
-    await WorkOrder.update(
-      { iifExportedAt: exportDate, iifBatchId: batchId },
-      { where: { id: { [Op.in]: workOrderIds }, iifExportedAt: null } }
-    );
+    const exportedIds = workOrders.filter(w => !w.reusedInvoiceNumber).map(w => w.id);
+    if (exportedIds.length) {
+      await InvoiceNumber.update(
+        { iifExportedAt: exportDate, iifBatchId: batchId },
+        { where: { workOrderId: { [Op.in]: exportedIds }, iifExportedAt: null } }
+      );
+      await WorkOrder.update(
+        { iifExportedAt: exportDate, iifBatchId: batchId },
+        { where: { id: { [Op.in]: exportedIds }, iifExportedAt: null } }
+      );
+    }
 
     // Generate reconciliation PDF
-    const reconcPdf = await generateReconciliationPDFBuffer(summaries, batchId, exportDate);
+    const reconcPdf = await generateReconciliationPDFBuffer(summaries, batchId, exportDate, reusedSummaries);
     const iifContent = [...IIF_HEADER, ...allLines].join('\r\n') + '\r\n';
 
     // Return both as JSON with base64 encoded content

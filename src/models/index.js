@@ -725,6 +725,13 @@ const WorkOrder = sequelize.define('WorkOrder', {
     type: DataTypes.STRING,
     allowNull: true
   },
+  // Set when this invoice reused a freed/rejected invoice number. Reused invoices are excluded from
+  // IIF export (avoid a QuickBooks duplicate) and flagged on the reconciliation report for manual entry.
+  reusedInvoiceNumber: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: false
+  },
   invoicePdfUrl: {
     type: DataTypes.STRING,
     allowNull: true

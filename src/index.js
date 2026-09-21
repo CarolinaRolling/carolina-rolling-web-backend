@@ -2210,6 +2210,7 @@ async function startServer() {
     try {
       await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "iifExportedAt" TIMESTAMP WITH TIME ZONE`);
       await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "iifBatchId" VARCHAR(255)`);
+      await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "reusedInvoiceNumber" BOOLEAN NOT NULL DEFAULT false`);
       console.log('QuickBooks IIF export columns ready');
     } catch(e) { console.log('QuickBooks IIF columns error:', e.message); }
 

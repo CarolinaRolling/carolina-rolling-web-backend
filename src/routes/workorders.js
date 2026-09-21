@@ -2099,11 +2099,25 @@ router.delete('/:id/invoice', async (req, res, next) => {
       } catch (e) { console.warn('Could not delete invoice PDF:', e.message); }
     }
 
+    // Free the invoice number so it can be reused on the next invoice (fills the gap instead of wasting it).
+    // Remove the InvoiceNumber record and add the number to the freed pool. A reused number is later flagged
+    // (reusedInvoiceNumber) so it's excluded from IIF export and shown on the reconciliation report.
+    const freedNum = workOrder.invoiceNumber ? parseInt(workOrder.invoiceNumber, 10) : null;
+    if (freedNum && !isNaN(freedNum)) {
+      const { InvoiceNumber, AppSettings } = require('../models');
+      try { await InvoiceNumber.destroy({ where: { invoiceNumber: freedNum } }); } catch (e) { console.warn('[clear-invoice] could not remove InvoiceNumber:', e.message); }
+      try {
+        const row = await AppSettings.findOne({ where: { key: 'freed_invoice_numbers' } });
+        const list = (row && Array.isArray(row.value)) ? row.value : [];
+        if (!list.includes(freedNum)) list.push(freedNum);
+        await AppSettings.upsert({ key: 'freed_invoice_numbers', value: list });
+      } catch (e) { console.warn('[clear-invoice] could not update freed pool:', e.message); }
+    }
     await workOrder.update({
       invoiceNumber: null, invoiceDate: null, invoicedBy: null,
-      invoicePdfUrl: null, invoicePdfCloudinaryId: null
+      invoicePdfUrl: null, invoicePdfCloudinaryId: null, reusedInvoiceNumber: false
     });
-    res.json({ data: workOrder, message: 'Invoice cleared' });
+    res.json({ data: workOrder, message: freedNum ? `Invoice cleared \u2014 #${freedNum} freed for reuse` : 'Invoice cleared' });
   } catch (error) { next(error); }
 });
 

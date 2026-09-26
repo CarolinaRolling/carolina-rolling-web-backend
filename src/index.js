@@ -2214,6 +2214,14 @@ async function startServer() {
       console.log('QuickBooks IIF export columns ready');
     } catch(e) { console.log('QuickBooks IIF columns error:', e.message); }
 
+    // Widen tax-rate columns so precise custom rates (e.g. 3.9375%) don't get rounded to 2 decimals.
+    try {
+      await sequelize.query(`ALTER TABLE clients ALTER COLUMN "customTaxRate" TYPE DECIMAL(12,6)`);
+      await sequelize.query(`ALTER TABLE work_orders ALTER COLUMN "taxRate" TYPE DECIMAL(7,4)`);
+      await sequelize.query(`ALTER TABLE estimates ALTER COLUMN "taxRate" TYPE DECIMAL(7,4)`);
+      console.log('Tax-rate precision columns widened');
+    } catch(e) { console.log('Tax-rate precision migration error:', e.message); }
+
     // Operator tasks table (free-text reminders)
     try {
       await sequelize.query(`CREATE TABLE IF NOT EXISTS operator_tasks (

@@ -2375,10 +2375,15 @@ async function fetchAttachmentsByMessageId(gmailMessageId, gmailAccountId) {
         // referenced by Content-ID in the HTML body, not "attached"). As long as there's an attachmentId
         // and it's a pdf/image, pull it.
         if ((isPdf || isImg) && part.body?.attachmentId) {
-          // Skip tiny inline images (signature logos/icons) — only meaningful when filename is empty
-          // (a real named attachment we always keep). ~8KB floor drops most logos, keeps real photos.
+          // Skip likely logos/signature images so they aren't sent to the AI as "prints".
+          // - Unnamed inline images under ~8KB (Content-ID logos in the HTML body).
+          // - Named images that are small (<15KB) AND whose name looks like a logo/signature/icon.
           const sz = part.body.size || 0;
-          if (!filename && isImg && sz > 0 && sz < 8000) { for (const sub of (part.parts || [])) await walk(sub); return; }
+          const looksLikeLogo = /logo|signature|sig|icon|banner|header|footer|letterhead|badge|seal|stamp/i.test(filename || '');
+          if (isImg && sz > 0 && ((!filename && sz < 8000) || (looksLikeLogo && sz < 15000))) {
+            for (const sub of (part.parts || [])) await walk(sub);
+            return;
+          }
           const att = await gmail.users.messages.attachments.get({ userId: 'me', messageId: gmailMessageId, id: part.body.attachmentId });
           const ext = mimeType.split('/')[1] ? '.' + mimeType.split('/')[1].replace('jpeg', 'jpg') : (isPdf ? '.pdf' : '.png');
           const name = filename || `inline-image-${attachments.length + 1}${ext}`;

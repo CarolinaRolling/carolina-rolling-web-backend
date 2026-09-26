@@ -625,7 +625,7 @@ const WorkOrder = sequelize.define('WorkOrder', {
     defaultValue: []
   },
   taxRate: {
-    type: DataTypes.DECIMAL(5, 2),
+    type: DataTypes.DECIMAL(7, 4),
     allowNull: true
   },
   taxAmount: {
@@ -1404,7 +1404,7 @@ const Estimate = sequelize.define('Estimate', {
     defaultValue: 0
   },
   taxRate: {
-    type: DataTypes.DECIMAL(5, 2),
+    type: DataTypes.DECIMAL(7, 4),
     defaultValue: 7.0
   },
   taxAmount: {
@@ -2390,8 +2390,8 @@ const Client = sequelize.define('Client', {
     allowNull: true
   },
   customTaxRate: {
-    type: DataTypes.DECIMAL(10, 4),
-    allowNull: true // null means use default rate
+    type: DataTypes.DECIMAL(12, 6),
+    allowNull: true // null means use default rate. 6 decimals holds fractional rates like 0.039375 (3.9375%).
   },
   notes: {
     type: DataTypes.TEXT,

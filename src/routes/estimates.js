@@ -3644,7 +3644,11 @@ async function runAiParse(estimate, uploaded, quoteIndex, extraNotes, jobId, quo
       text: `These files are from client: ${clientName}. Parse them as a request for quote (RFQ) for metal rolling, forming, or fabrication.\n`
         + `Extract all parts, dimensions, materials, and quantities from the QUOTE/part list${hasQuoteText ? ' (the pasted text above)' : ''}.\n`
         + (anyPrints
-            ? `Then MATCH each individual print/drawing file to the part it belongs to, using the client part number (the print number the client uses to reference the part). For each print, read its part/drawing number from the DRAWING'S TITLE BLOCK first, then fall back to the filename. Only match a print to a part when you are confident (the part number clearly matches). If you cannot confidently match a print, leave it unmatched.\n`
+            ? `Then MATCH each individual print/drawing file to the part it belongs to.\n`
+              + `- IGNORE company logos, letterhead, email signatures, and decorative images. These are NOT prints and must never be matched to a part, added to a part, or listed as unmatched. A logo is usually a small image, appears at the top/corner, and has no dimensions or title block.\n`
+              + `- A real PRINT/DRAWING has a title block, dimensions, and a part/drawing number. Read that part/drawing number from the TITLE BLOCK first, then fall back to the filename.\n`
+              + `- Match a print to a part when its drawing/part number matches that part's client part number. Set matchedFileIndex + matchConfidence "high".\n`
+              + `- A wrong drawing on a part is worse than no drawing. If you cannot confidently match, leave it unmatched.\n`
             : '')
         + `${extraNotes || ''}`
     });
@@ -3745,7 +3749,8 @@ MATCHING RULES (when multiple files are provided):
 - "matchedFileIndex" = the FILE INDEX of the print/drawing that belongs to this part (from the "--- FILE INDEX N ---" labels). null if no print confidently matches this part.
 - "matchConfidence" = "high" only when the part number on the drawing (title block, preferred) or filename clearly matches this part's clientPartNumber; otherwise "low" or null and leave matchedFileIndex null.
 - Do NOT guess a match. A wrong drawing on a part is worse than no drawing. When unsure, leave it unmatched.
-- "unmatchedFileIndexes" = indexes of any print files you could not confidently match to a part (exclude the quote's index).`;
+- "unmatchedFileIndexes" = indexes of any print files you could not confidently match to a part (exclude the quote's index).
+- LOGOS/LETTERHEAD/SIGNATURE IMAGES: never treat as a print. Do not match them to any part, do not add them to a part's fields, and do NOT put their index in unmatchedFileIndexes. Simply skip them.`;
 
     const { getParsingModel } = require('../services/aiConfig');
     const requestBody = JSON.stringify({

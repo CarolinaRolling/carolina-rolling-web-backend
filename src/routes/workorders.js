@@ -541,9 +541,6 @@ async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
         ['PO DATE', new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' })],
         ['WORK ORDER', workOrder.drNumber ? `DR-${workOrder.drNumber}` : (workOrder.orderNumber || '-')]
       ];
-      if (vendorEstNums.length > 0) {
-        detFields.push(['VENDOR QUOTE #', vendorEstNums.join(', ')]);
-      }
       const colW = W / detFields.length;
       
       detFields.forEach(([label, value], i) => {
@@ -553,9 +550,18 @@ async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
         doc.fontSize(7).font('Helvetica-Bold').fillColor('#888').text(label, x + 6, detY + 3);
         doc.fontSize(9).font('Helvetica-Bold').fillColor('#000').text(value, x + 6, detY + 17, { width: colW - 12 });
       });
+
+      // "Please refer to estimate:" line — helps the vendor look up the quote(s) they sent us.
+      // Pulls every vendor quote/estimate number from the parts on this PO, comma-separated. Omitted if none.
+      let tableY = detY + 46;
+      if (vendorEstNums.length > 0) {
+        doc.fontSize(9).font('Helvetica-Bold').fillColor('#000')
+          .text('Please refer to estimate: ', L, tableY, { continued: true });
+        doc.font('Helvetica').text(vendorEstNums.join(', '));
+        tableY += 20;
+      }
       
       // ─── ITEMS TABLE ───
-      const tableY = detY + 46;
       const cols = { item: L, qty: L + 40, desc: L + 80, cutFile: L + 360 };
       const colWidths = { item: 40, qty: 40, desc: 280, cutFile: W - 360 };
       

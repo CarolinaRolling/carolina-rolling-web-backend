@@ -414,6 +414,28 @@ app.get('/api/debug/invoice-sequence', async (req, res) => {
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
+app.get('/api/debug/vendor-est-check', async (req, res) => {
+  try {
+    if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });
+    const { WorkOrder, WorkOrderPart, Estimate, EstimatePart } = require('./models');
+    const drNum = req.query.dr;
+    // Find the work order by DR number (or most recent)
+    const { Op } = require('sequelize');
+    const wo = drNum
+      ? await WorkOrder.findOne({ where: { drNumber: drNum }, include: [{ model: WorkOrderPart, as: 'parts' }] })
+      : await WorkOrder.findOne({ order: [['createdAt', 'DESC']], include: [{ model: WorkOrderPart, as: 'parts' }] });
+    if (!wo) return res.json({ data: { error: 'no work order found' } });
+    const woParts = (wo.parts || []).map(p => ({ pn: p.partNumber, type: p.partType, vendorEstimateNumber: p.vendorEstimateNumber, fdVendor: (p.formData || {}).vendorEstimateNumber }));
+    // The source estimate
+    let estParts = [];
+    if (wo.estimateId) {
+      const est = await Estimate.findByPk(wo.estimateId, { include: [{ model: EstimatePart, as: 'parts' }] });
+      estParts = (est?.parts || []).map(p => ({ pn: p.partNumber, type: p.partType, vendorEstimateNumber: p.vendorEstimateNumber, fdVendor: (p.formData || {}).vendorEstimateNumber }));
+    }
+    res.json({ data: { dr: wo.drNumber, estimateId: wo.estimateId, workOrderParts: woParts, estimateParts: estParts } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
 app.get('/api/debug/entered-status', async (req, res) => {
   try {
     if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });

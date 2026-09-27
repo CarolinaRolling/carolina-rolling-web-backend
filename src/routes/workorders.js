@@ -2094,8 +2094,19 @@ router.post('/:id/invoice-pdf', upload.single('invoicePdf'), async (req, res, ne
 // DELETE /api/workorders/:id/invoice - Clear invoice from a work order
 router.delete('/:id/invoice', async (req, res, next) => {
   try {
+    // PROTECTED ACTION: deleting an invoice + reclaiming its number requires admin rights AND the override code.
+    if (!req.user || req.user.role !== 'admin') {
+      return res.status(403).json({ error: { message: 'Admin rights required to delete an invoice.' } });
+    }
+    const OVERRIDE_CODE = process.env.DELETE_OVERRIDE_CODE || 'CRC-FORCE-DELETE';
+    const suppliedCode = req.body?.overrideCode || req.query?.overrideCode;
+    if (suppliedCode !== OVERRIDE_CODE) {
+      return res.status(403).json({ error: { message: 'Override code required to delete an invoice and reclaim its number.' } });
+    }
+
     const workOrder = await WorkOrder.findByPk(req.params.id);
     if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+    console.log(`[clear-invoice] #${workOrder.invoiceNumber} on DR-${workOrder.drNumber} deleted+reclaimed by admin ${req.user.username}`);
     
     // Delete PDF if exists
     if (workOrder.invoicePdfCloudinaryId) {

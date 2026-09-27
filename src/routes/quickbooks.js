@@ -1254,6 +1254,41 @@ router.get('/invoice-numbers', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// GET /api/quickbooks/invoice-numbers/health - scan the invoice-number sequence and report any gaps
+// (numbers missing between the lowest and highest used). Voided numbers and numbers currently freed for
+// reuse are NOT reported as missing — those are intentional/expected.
+router.get('/invoice-numbers/health', async (req, res, next) => {
+  try {
+    const { AppSettings } = require('../models');
+    const all = await InvoiceNumber.findAll({ attributes: ['invoiceNumber', 'status'], order: [['invoiceNumber', 'ASC']] });
+    if (all.length === 0) {
+      return res.json({ data: { total: 0, min: null, max: null, missing: [], voided: [], freed: [], healthy: true } });
+    }
+    const usedNums = new Set(all.map(r => r.invoiceNumber));
+    const voided = all.filter(r => r.status === 'void').map(r => r.invoiceNumber);
+    const voidedSet = new Set(voided);
+    // Numbers currently sitting in the freed-for-reuse pool are expected gaps, not "missing".
+    const freedRow = await AppSettings.findOne({ where: { key: 'freed_invoice_numbers' } });
+    const freed = (freedRow && Array.isArray(freedRow.value)) ? freedRow.value : [];
+    const freedSet = new Set(freed);
+    const min = all[0].invoiceNumber;
+    const max = all[all.length - 1].invoiceNumber;
+    // Walk the full range; a number is "missing" if it's not used, not voided, and not freed.
+    const missing = [];
+    for (let n = min; n <= max; n++) {
+      if (!usedNums.has(n) && !voidedSet.has(n) && !freedSet.has(n)) missing.push(n);
+    }
+    res.json({ data: {
+      total: all.length,
+      min, max,
+      missing,
+      voided: voided.sort((a, b) => a - b),
+      freed: freed.slice().sort((a, b) => a - b),
+      healthy: missing.length === 0
+    }});
+  } catch (error) { next(error); }
+});
+
 // POST /api/quickbooks/invoice-numbers/backfill - one-time recovery: find work orders that have an
 // invoiceNumber but no matching InvoiceNumber tracking row, and create the missing rows so they show
 // on the tracking page. Safe to run repeatedly (skips numbers already tracked).

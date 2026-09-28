@@ -1271,9 +1271,12 @@ router.get('/invoice-numbers/health', async (req, res, next) => {
     const freedRow = await AppSettings.findOne({ where: { key: 'freed_invoice_numbers' } });
     const freed = (freedRow && Array.isArray(freedRow.value)) ? freedRow.value : [];
     const freedSet = new Set(freed);
-    const min = all[0].invoiceNumber;
+    // Only scan from the system's starting number up (default 209000, overridable via ?from=). Numbers below
+    // that predate the system and would show as false "gaps".
+    const floor = parseInt(req.query.from, 10) || 209000;
+    const min = Math.max(all[0].invoiceNumber, floor);
     const max = all[all.length - 1].invoiceNumber;
-    // Walk the full range; a number is "missing" if it's not used, not voided, and not freed.
+    // Walk the range from the floor; a number is "missing" if it's not used, not voided, and not freed.
     const missing = [];
     for (let n = min; n <= max; n++) {
       if (!usedNums.has(n) && !voidedSet.has(n) && !freedSet.has(n)) missing.push(n);
@@ -1282,8 +1285,8 @@ router.get('/invoice-numbers/health', async (req, res, next) => {
       total: all.length,
       min, max,
       missing,
-      voided: voided.sort((a, b) => a - b),
-      freed: freed.slice().sort((a, b) => a - b),
+      voided: voided.filter(n => n >= floor).sort((a, b) => a - b),
+      freed: freed.filter(n => n >= floor).slice().sort((a, b) => a - b),
       healthy: missing.length === 0
     }});
   } catch (error) { next(error); }

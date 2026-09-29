@@ -619,16 +619,16 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
             const lblbl = part.partType === 'flat_stock' ? 'Handling' : 'Rolling';
             detailLines.push(`${lblbl}: ${fmtCur(bd.labEach)} ea`);
           }
-          // One breakdown line per linked service, labeled with its description + its price.
+          // One breakdown line per linked service, labeled with its description + its price. A linked service
+          // cost is a FLAT total for that service (e.g. "print full-size template = $30"), so show the flat
+          // amount — NOT divided by the part quantity, which would misleadingly read "$15 ea" for 2 parts.
           for (const svc of linked) {
-            const sq = parseInt(svc.quantity) || 1;
             const svcTot = calculatePartTotal(svc);
             if (svcTot <= 0) continue;
-            const svcEach = (part.quantity && parseInt(part.quantity) > 0) ? (svcTot / parseInt(part.quantity)) : (sq > 0 ? svcTot / sq : svcTot);
             const svcFd = (svc.formData && typeof svc.formData === 'object') ? svc.formData : {};
             let svcName = clean(svcFd._serviceNotes || svc.specialInstructions || svcFd._serviceType || svcFd._fabServiceType || '');
             if (!svcName || svcName.toLowerCase() === 'other') svcName = 'Service';
-            detailLines.push(`${svcName}: ${fmtCur(svcEach)} ea`);
+            detailLines.push(`${svcName}: ${fmtCur(svcTot)}`);
           }
         } catch (e) { /* breakdown is best-effort; never block the invoice */ }
 

@@ -182,10 +182,12 @@ async function buildInvoiceIIF(wo, parts, client, invoiceNum) {
       const cost = getPartAmount(svc);
       svcTotal += cost;
       const fd = svc.formData && typeof svc.formData === 'object' ? svc.formData : {};
-      let label = fd._fabServiceType || fd._serviceType || fd.serviceType || svc.partType;
+      // Prefer the operator's typed service note/description; fall back to a type label.
+      let label = clean(fd._serviceNotes || svc.specialInstructions || fd._fabServiceType || fd._serviceType || fd.serviceType || svc.partType || '');
       if (label === 'fab_service') label = 'Fabrication';
       if (label === 'shop_rate') label = 'Shop Rate';
       if (label === 'rush_service') label = 'Rush';
+      if (!label || label.toLowerCase() === 'other') label = 'Service';
       svcDetails.push({ label, cost });
     }
     
@@ -610,16 +612,23 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
         // with the line total. Include the linked services' per-unit price in the labor line.
         try {
           const bd = partBreakdown(part);
-          let labEach = bd.labEach;
+          // Keep Rolling as the part's OWN cost — do NOT fold linked service costs into it. Each linked
+          // service is shown as its own "Service: $X" breakdown line below so the client sees the split.
+          if (bd.matEach > 0) detailLines.push(`Material: ${fmtCur(bd.matEach)} ea`);
+          if (bd.labEach > 0) {
+            const lblbl = part.partType === 'flat_stock' ? 'Handling' : 'Rolling';
+            detailLines.push(`${lblbl}: ${fmtCur(bd.labEach)} ea`);
+          }
+          // One breakdown line per linked service, labeled with its description + its price.
           for (const svc of linked) {
             const sq = parseInt(svc.quantity) || 1;
             const svcTot = calculatePartTotal(svc);
-            labEach += (part.quantity && parseInt(part.quantity) > 0) ? (svcTot / (parseInt(part.quantity))) : (sq > 0 ? svcTot / sq : svcTot);
-          }
-          if (bd.matEach > 0) detailLines.push(`Material: ${fmtCur(bd.matEach)} ea`);
-          if (labEach > 0) {
-            const lblbl = part.partType === 'flat_stock' ? 'Handling' : 'Rolling';
-            detailLines.push(`${lblbl}: ${fmtCur(labEach)} ea`);
+            if (svcTot <= 0) continue;
+            const svcEach = (part.quantity && parseInt(part.quantity) > 0) ? (svcTot / parseInt(part.quantity)) : (sq > 0 ? svcTot / sq : svcTot);
+            const svcFd = (svc.formData && typeof svc.formData === 'object') ? svc.formData : {};
+            let svcName = clean(svcFd._serviceNotes || svc.specialInstructions || svcFd._serviceType || svcFd._fabServiceType || '');
+            if (!svcName || svcName.toLowerCase() === 'other') svcName = 'Service';
+            detailLines.push(`${svcName}: ${fmtCur(svcEach)} ea`);
           }
         } catch (e) { /* breakdown is best-effort; never block the invoice */ }
 
@@ -630,18 +639,6 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
           const dlH = doc.heightOfString(dlText, { width: 470 });
           doc.text(dlText, 85, yPos, { width: 470 });
           yPos += Math.max(11, dlH + 1);
-        }
-
-        // Service note under part
-        for (const svc of linked) {
-          if (yPos > 700) { doc.addPage(); yPos = 50; }
-          const svcFd = (svc.formData && typeof svc.formData === 'object') ? svc.formData : {};
-          const svcLabel = clean(svcFd._serviceNotes || svcFd._serviceType || 'Fabrication Service');
-          doc.font('Helvetica').fontSize(9).fillColor(grayColor);
-          const svcText = '  + ' + svcLabel;
-          const svcH = doc.heightOfString(svcText, { width: 470 });
-          doc.text(svcText, 85, yPos, { width: 470 });
-          yPos += Math.max(13, svcH + 2);
         }
 
         doc.strokeColor(lightGray).lineWidth(0.3).moveTo(50, yPos).lineTo(562, yPos).stroke();

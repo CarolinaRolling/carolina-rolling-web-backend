@@ -25,7 +25,10 @@ function basePartLaborEach(part) {
   const fd = part.formData && typeof part.formData === 'object' ? part.formData : {};
   const stored = parseFloat(fd._baseLaborTotal);
   if (!isNaN(stored) && stored > 0) return stored;
-  return parseFloat(part.laborTotal) || parseFloat(fd.laborTotal) || 0;
+  // For "other" service parts the cost is entered in the "Service Cost" field, which is stored as
+  // rollingCost (not laborTotal) — include it so the service still prices onto the invoice.
+  return parseFloat(part.laborTotal) || parseFloat(fd.laborTotal)
+      || parseFloat(part.rollingCost) || parseFloat(fd.rollingCost) || 0;
 }
 
 // Calculate a single part's total cost

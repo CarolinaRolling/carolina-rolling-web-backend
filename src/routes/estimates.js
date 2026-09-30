@@ -970,11 +970,16 @@ router.post('/', async (req, res, next) => {
       return res.status(400).json({ error: { message: 'Client name is required' } });
     }
 
-    // Get default tax rate from settings if not provided
+    // Determine the tax rate. Use the explicitly-sent rate ONLY when the caller opted into a custom rate
+    // (useCustomTax) — otherwise always apply the configured default from settings, so a stale value the
+    // form initialized with (or the model's default) can never override the real default tax rate.
     let effectiveTaxRate = taxRate;
-    if (effectiveTaxRate === undefined) {
+    const wantsCustomTax = req.body.useCustomTax === true;
+    if (!wantsCustomTax || effectiveTaxRate === undefined || effectiveTaxRate === null || effectiveTaxRate === '') {
       const taxSetting = await AppSettings.findOne({ where: { key: 'tax_settings' } });
-      effectiveTaxRate = taxSetting?.value?.defaultTaxRate || 7.0;
+      const configured = taxSetting?.value?.defaultTaxRate;
+      if (configured !== undefined && configured !== null) effectiveTaxRate = parseFloat(configured);
+      else if (effectiveTaxRate === undefined || effectiveTaxRate === null || effectiveTaxRate === '') effectiveTaxRate = 7.0;
     }
 
     // Use custom estimate number if provided, otherwise auto-generate

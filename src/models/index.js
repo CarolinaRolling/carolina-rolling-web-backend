@@ -1405,7 +1405,7 @@ const Estimate = sequelize.define('Estimate', {
   },
   taxRate: {
     type: DataTypes.DECIMAL(7, 4),
-    defaultValue: 7.0
+    allowNull: true
   },
   taxAmount: {
     type: DataTypes.DECIMAL(10, 2),

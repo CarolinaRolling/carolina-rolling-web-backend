@@ -440,18 +440,18 @@ app.get('/api/debug/estimate-tax', async (req, res) => {
   try {
     if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });
     const { Estimate } = require('./models');
-    const estNum = req.query.est;
-    const est = estNum
-      ? await Estimate.findOne({ where: { estimateNumber: estNum } })
-      : await Estimate.findOne({ order: [['updatedAt', 'DESC']] });
-    if (!est) return res.json({ data: { error: 'not found' } });
+    const { Op } = require('sequelize');
+    // List the 8 most recently updated estimates with their tax fields, so we can find the right one.
+    const recent = await Estimate.findAll({
+      order: [['updatedAt', 'DESC']], limit: 8,
+      attributes: ['estimateNumber', 'taxRate', 'useCustomTax', 'taxExempt', 'updatedAt']
+    });
+    // Also check the DB column type for taxRate (did the DECIMAL(7,4) migration run?)
+    const { sequelize } = require('./models');
+    const [cols] = await sequelize.query("SELECT column_name, data_type, numeric_precision, numeric_scale FROM information_schema.columns WHERE table_name = 'estimates' AND column_name = 'taxRate'");
     res.json({ data: {
-      estimateNumber: est.estimateNumber,
-      taxRate: est.taxRate,
-      taxRate_type: typeof est.taxRate,
-      useCustomTax: est.useCustomTax,
-      taxExempt: est.taxExempt,
-      updatedAt: est.updatedAt
+      columnType: cols[0] || null,
+      recentEstimates: recent.map(e => ({ est: e.estimateNumber, taxRate: e.taxRate, taxRate_type: typeof e.taxRate, useCustomTax: e.useCustomTax, taxExempt: e.taxExempt, updatedAt: e.updatedAt }))
     }});
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });

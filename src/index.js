@@ -436,6 +436,26 @@ app.get('/api/debug/vendor-est-check', async (req, res) => {
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
+app.get('/api/debug/estimate-tax', async (req, res) => {
+  try {
+    if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });
+    const { Estimate } = require('./models');
+    const estNum = req.query.est;
+    const est = estNum
+      ? await Estimate.findOne({ where: { estimateNumber: estNum } })
+      : await Estimate.findOne({ order: [['updatedAt', 'DESC']] });
+    if (!est) return res.json({ data: { error: 'not found' } });
+    res.json({ data: {
+      estimateNumber: est.estimateNumber,
+      taxRate: est.taxRate,
+      taxRate_type: typeof est.taxRate,
+      useCustomTax: est.useCustomTax,
+      taxExempt: est.taxExempt,
+      updatedAt: est.updatedAt
+    }});
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
 app.get('/api/debug/tax-settings', async (req, res) => {
   try {
     if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });

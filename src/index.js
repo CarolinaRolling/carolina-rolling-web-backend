@@ -436,6 +436,22 @@ app.get('/api/debug/vendor-est-check', async (req, res) => {
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
+app.get('/api/debug/force-tax', async (req, res) => {
+  try {
+    if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });
+    const estNum = req.query.est;
+    const rate = parseFloat(req.query.rate || '10.5');
+    if (!estNum) return res.json({ error: 'Add &est=EST-NUMBER&rate=10.5' });
+    const { Estimate } = require('./models');
+    const est = await Estimate.findOne({ where: { estimateNumber: estNum } });
+    if (!est) return res.json({ error: 'estimate not found: ' + estNum });
+    const before = est.taxRate;
+    await est.update({ taxRate: rate });
+    const after = await Estimate.findOne({ where: { estimateNumber: estNum } });
+    res.json({ data: { est: estNum, before, attempted: rate, afterUpdate: after.taxRate, stuck: parseFloat(after.taxRate) === rate } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
 app.get('/api/debug/estimate-tax', async (req, res) => {
   try {
     if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });

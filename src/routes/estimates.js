@@ -1091,6 +1091,19 @@ router.put('/:id', async (req, res, next) => {
 
     await estimate.update(updates);
 
+    // If anything affecting tax/totals changed, recompute and persist taxAmount + grandTotal so the stored
+    // values never go stale (the PDF and lists read these). A taxRate edit that didn't refresh taxAmount was
+    // what made an updated rate appear to "revert" on the invoice/PDF.
+    if (['taxRate', 'taxExempt', 'discountPercent', 'discountAmount', 'truckingCost', 'useCustomTax'].some(f => req.body[f] !== undefined)) {
+      try {
+        const fresh = await Estimate.findByPk(estimate.id, { include: [{ model: EstimatePart, as: 'parts' }] });
+        if (fresh) {
+          const t = await calculateEstimateTotalsWithMinimums(fresh.parts || [], fresh);
+          await fresh.update({ partsSubtotal: t.partsSubtotal, taxAmount: t.taxAmount, grandTotal: t.grandTotal });
+        }
+      } catch (e) { console.warn('[estimate update] totals recalc failed:', e.message); }
+    }
+
     // When an estimate reaches a state where a pricing review is no longer pending (sent to the
     // client, accepted, or declined), auto-complete any open "Review pricing" todos for it so the
     // task doesn't linger on the board after the work is done.

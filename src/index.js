@@ -436,6 +436,15 @@ app.get('/api/debug/vendor-est-check', async (req, res) => {
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
+app.get('/api/debug/tax-settings', async (req, res) => {
+  try {
+    if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });
+    const { AppSettings } = require('./models');
+    const row = await AppSettings.findOne({ where: { key: 'tax_settings' } });
+    res.json({ data: { tax_settings: row ? row.value : null } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
 app.get('/api/debug/entered-status', async (req, res) => {
   try {
     if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });

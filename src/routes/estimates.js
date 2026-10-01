@@ -1069,6 +1069,18 @@ router.put('/:id', async (req, res, next) => {
       }
     });
 
+    // Sanitize numeric/decimal fields: an empty string into a DECIMAL column throws and fails the WHOLE save
+    // (which made the estimate silently refuse to save anything, including notes). Convert '' -> null/skip.
+    const numericFields = ['taxRate', 'truckingCost', 'discountPercent', 'discountAmount'];
+    for (const nf of numericFields) {
+      if (updates[nf] === '' || updates[nf] === undefined) {
+        delete updates[nf]; // don't overwrite with an invalid/blank value
+      } else if (updates[nf] !== null) {
+        const n = parseFloat(updates[nf]);
+        if (isNaN(n)) delete updates[nf]; else updates[nf] = n;
+      }
+    }
+
     // Handle custom estimate number with uniqueness check
     if (req.body.estimateNumber !== undefined && req.body.estimateNumber !== estimate.estimateNumber) {
       const newNum = req.body.estimateNumber.trim();

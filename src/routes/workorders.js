@@ -33,6 +33,16 @@ const { Op } = require('sequelize');
 const { PDFDocument: PDFLibDocument } = require('pdf-lib');
 const { WorkOrder, WorkOrderPart, WorkOrderPartFile, WorkOrderDocument, DailyActivity, DRNumber, InboundOrder, PONumber, AppSettings, Estimate, EstimatePart, Vendor, Client, Shipment, ShipmentPhoto, ShipmentCharge, WorkOrderPresence, sequelize } = require('../models');
 
+// Only source of a default tax rate: Admin -> Tax Settings. No numeric fallback (a wrong default is risky).
+async function getAdminDefaultTaxRate() {
+  const taxSetting = await AppSettings.findOne({ where: { key: 'tax_settings' } });
+  const configured = taxSetting?.value?.defaultTaxRate;
+  if (configured === undefined || configured === null || configured === '') {
+    throw new Error('No default tax rate configured. Set it in Admin → Tax Settings.');
+  }
+  return parseFloat(configured);
+}
+
 // Spec label matching the other roll forms: ID/ISR, OD/OSR, CLD/CLR.
 function coneSpecLabel(measurePoint, measureType) {
   const isRad = measureType === 'radius';
@@ -1759,15 +1769,13 @@ router.post('/', async (req, res, next) => {
     }
 
     // Determine tax rate: client-specific > admin default
+    // Client-specific rate if set, otherwise the admin default (no numeric fallback).
     let effectiveTaxRate = null;
     if (resolvedClient?.customTaxRate) {
       effectiveTaxRate = parseFloat(resolvedClient.customTaxRate) * 100; // stored as decimal, convert to %
     }
     if (!effectiveTaxRate) {
-      try {
-        const taxSetting = await AppSettings.findOne({ where: { key: 'tax_settings' } });
-        effectiveTaxRate = taxSetting?.value?.defaultTaxRate || 9.75;
-      } catch (e) { effectiveTaxRate = 9.75; }
+      effectiveTaxRate = await getAdminDefaultTaxRate();
     }
 
     const orderNumber = generateOrderNumber();

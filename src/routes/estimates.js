@@ -12,6 +12,17 @@ const fileStorage = require('../utils/storage');
 const { Op } = require('sequelize');
 const { Estimate, EstimatePart, EstimatePartFile, EstimateFile, WorkOrder, WorkOrderPart, WorkOrderPartFile, InboundOrder, AppSettings, DRNumber, PONumber, DailyActivity, Client, Vendor, ShipmentCharge, ScannedEmail, sequelize } = require('../models');
 
+// The ONLY source of a default tax rate is Admin -> Tax Settings (tax_settings.defaultTaxRate). There is NO
+// numeric fallback by design: a wrong hardcoded default is riskier than a clear error. Throws if unset.
+async function getAdminDefaultTaxRate() {
+  const taxSetting = await AppSettings.findOne({ where: { key: 'tax_settings' } });
+  const configured = taxSetting?.value?.defaultTaxRate;
+  if (configured === undefined || configured === null || configured === '') {
+    throw new Error('No default tax rate configured. Set it in Admin → Tax Settings.');
+  }
+  return parseFloat(configured);
+}
+
 // Spec label matching the other roll forms: ID/ISR, OD/OSR, CLD/CLR.
 function coneSpecLabel(measurePoint, measureType) {
   const isRad = measureType === 'radius';
@@ -973,13 +984,11 @@ router.post('/', async (req, res, next) => {
     // Determine the tax rate. Use the explicitly-sent rate ONLY when the caller opted into a custom rate
     // (useCustomTax) — otherwise always apply the configured default from settings, so a stale value the
     // form initialized with (or the model's default) can never override the real default tax rate.
+    // Tax rate: a custom rate only when explicitly chosen; otherwise ALWAYS the admin default (no fallback).
     let effectiveTaxRate = taxRate;
     const wantsCustomTax = req.body.useCustomTax === true;
     if (!wantsCustomTax || effectiveTaxRate === undefined || effectiveTaxRate === null || effectiveTaxRate === '') {
-      const taxSetting = await AppSettings.findOne({ where: { key: 'tax_settings' } });
-      const configured = taxSetting?.value?.defaultTaxRate;
-      if (configured !== undefined && configured !== null) effectiveTaxRate = parseFloat(configured);
-      else if (effectiveTaxRate === undefined || effectiveTaxRate === null || effectiveTaxRate === '') effectiveTaxRate = 7.0;
+      effectiveTaxRate = await getAdminDefaultTaxRate();
     }
 
     // Use custom estimate number if provided, otherwise auto-generate

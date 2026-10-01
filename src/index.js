@@ -484,6 +484,23 @@ app.get('/api/debug/bill-scan-status', async (req, res) => {
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
+app.post('/api/debug/test-estimate-save', async (req, res) => {
+  try {
+    if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });
+    const { Estimate } = require('./models');
+    const estNum = req.query.est;
+    const est = estNum ? await Estimate.findOne({ where: { estimateNumber: estNum } }) : await Estimate.findOne({ order: [['updatedAt','DESC']] });
+    if (!est) return res.json({ error: 'not found' });
+    // Attempt the same kind of update the form sends, and return the REAL error if it throws.
+    try {
+      await est.update({ notes: (est.notes || '') + '', taxRate: est.taxRate });
+      res.json({ data: { ok: true, est: est.estimateNumber, taxRate: est.taxRate } });
+    } catch (updateErr) {
+      res.json({ data: { ok: false, realError: updateErr.message, name: updateErr.name, errors: (updateErr.errors || []).map(e => ({ path: e.path, message: e.message, value: e.value })) } });
+    }
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
 app.get('/api/debug/estimate-tax', async (req, res) => {
   try {
     if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });

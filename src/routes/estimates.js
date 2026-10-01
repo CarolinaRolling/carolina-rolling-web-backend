@@ -1081,6 +1081,18 @@ router.put('/:id', async (req, res, next) => {
       }
     }
 
+    // Sanitize DATE fields: an empty string or "Invalid date" into a date column throws and fails the whole
+    // save (this was the "Save failed / not saved" cause). Empty -> null; invalid -> skip.
+    const dateFields = ['validUntil'];
+    for (const df of dateFields) {
+      if (!(df in updates)) continue;
+      const v = updates[df];
+      if (v === '' || v === null || v === undefined) { updates[df] = null; continue; }
+      const d = new Date(v);
+      if (isNaN(d.getTime())) { delete updates[df]; } // "Invalid date" etc. -> don't write it
+      else { updates[df] = d; }
+    }
+
     // Handle custom estimate number with uniqueness check
     if (req.body.estimateNumber !== undefined && req.body.estimateNumber !== estimate.estimateNumber) {
       const newNum = req.body.estimateNumber.trim();

@@ -2697,6 +2697,13 @@ const ScannedEmail = sequelize.define('ScannedEmail', {
   billStatus: {
     type: DataTypes.STRING,
     allowNull: true   // null = not extracted yet; 'pending' | 'approved' | 'rejected'
+  },
+  // How many times the bill-extraction (PDF read) has been attempted. The queue stops after a few tries so a
+  // bill that can't be read can never loop forever (that retry loop was the old token leak).
+  billAttempts: {
+    type: DataTypes.INTEGER,
+    allowNull: false,
+    defaultValue: 0
   }
 }, {
   tableName: 'scanned_emails',

@@ -73,13 +73,14 @@ Decide who the sender is RELATIVE TO US:
   - isQuoteRequest=true when they ask us to quote/price work or send specs/drawings for a quote.
 - vendor = a supplier or subcontractor WE BUY FROM: steel/material suppliers, outside processing (galvanizing, machining, heat treat), or freight/trucking. Usually order confirmations, shipping notices, material quotes WE requested, or their invoices. Only use vendor when they are clearly selling material/services we purchase to fulfill jobs.
   - isSupplierQuote=true ONLY when this vendor email is GIVING US PRICING for material or services — i.e. an actual quote/estimate with prices, per-unit costs, or a formal price offer for steel/material/processing we asked about. isSupplierQuote=FALSE for vendor INVOICES, bills, statements, order confirmations, shipping/tracking notices, delivery ETAs, "your order shipped", acknowledgements, or anything that is not the vendor quoting us a price to buy. When in doubt, set isSupplierQuote=false.
-- bill = an invoice, statement, or payment request addressed to us.
+- bill = an invoice, statement, account statement, or payment request addressed to us — including automated ones ("your invoice is ready", "statement available", "payment due", "amount due", "past due", "remittance", a PDF invoice attached, or a link to view/pay an invoice). A real invoice/statement/payment request is ALWAYS "bill", never marketing or spam, even when it is automated, has a payment-portal link, or reads like a notification. When an email shows an invoice number, an amount due, a due date, or an attached invoice/statement PDF, classify it as bill.
 - business = taxes, government/regulatory notices, certifications, annual reports, insurance, licensing.
-- marketing = UNSOLICITED sales pitches, promotions, newsletters, cold outreach, ads — INCLUDING equipment-financing offers, "lines of credit", business loans, leasing, SEO/website services, insurance sales. needsResponse=false.
-- spam = junk, phishing, scams. needsResponse=false.
+- marketing = UNSOLICITED sales pitches, promotions, newsletters, cold outreach, ads — INCLUDING equipment-financing offers, "lines of credit", business loans, leasing, SEO/website services, insurance sales. needsResponse=false. NOTE: an actual invoice/statement/payment request from a company we do business with is a BILL, not marketing — do not classify a real bill as marketing just because it is automated or contains a pay-online link.
+- spam = junk, phishing, scams. needsResponse=false. A legitimate invoice or statement is NEVER spam.
 - general = anything else.
 
 CRITICAL RULES:
+- BILLS FIRST: if the email contains an invoice, statement, amount due, due date, invoice number, or an attached/linked invoice or statement, classify it as "bill" — this takes priority over marketing/spam even if it is automated or has promotional styling.
 - An unsolicited offer of financing, credit, a "line of credit", loans, leasing, or equipment sales is marketing or spam — NEVER vendor.
 - Do NOT default to vendor just because an email sounds business-like. Vendor means a supplier we actually buy material or services from.
 - A request to quote or perform rolling/forming/fab work is client_inquiry, not vendor.
@@ -410,38 +411,74 @@ async function extractBill(gmail, messageId) {
   }
 }
 
-// Extract any bill-category emails that don't have data yet
-async function runBillScan({ limit = 25 } = {}) {
+// Bill extraction QUEUE — attempt-limited so a bill that can't be read can never loop forever.
+// A bill is eligible only while billData IS NULL AND billAttempts < MAX_BILL_ATTEMPTS. Each try increments
+// the counter; once it hits the cap the bill is marked exhausted and never retried. A hard per-run cap and the
+// shared AI budget check bound the cost of any single run. (This retry loop was the original token leak.)
+const MAX_BILL_ATTEMPTS = parseInt(process.env.MAX_BILL_ATTEMPTS, 10) || 3;
+const MAX_BILLS_PER_RUN = parseInt(process.env.MAX_BILLS_PER_RUN, 10) || 25;
+
+async function runBillScan({ limit = MAX_BILLS_PER_RUN } = {}) {
+  const runCap = Math.min(limit, MAX_BILLS_PER_RUN);
   const accounts = await GmailAccount.findAll({ where: { isActive: true } });
-  if (!accounts.length) return { extracted: 0 };
+  if (!accounts.length) return { extracted: 0, attempted: 0, exhausted: 0 };
   const since = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000);
-  let extracted = 0;
+  let extracted = 0, attempted = 0, exhausted = 0;
+  const aiUsage = require('./aiUsage');
   for (const account of accounts) {
-    // Bills for this account that haven't been scanned yet (billData IS NULL). Scanning each bill exactly
-    // once — a no-PDF result is stored and never re-sent — is what prevents the old token-cost loop.
+    if (attempted >= runCap) break;
+    // Queue: unread bills that still have attempts left.
     const bills = await ScannedEmail.findAll({
       where: {
         gmailAccountId: account.id,
         category: 'bill',
         billData: { [Op.is]: null },
+        billAttempts: { [Op.lt]: MAX_BILL_ATTEMPTS },
         receivedAt: { [Op.gte]: since }
       },
       order: [['receivedAt', 'DESC']],
-      limit
+      limit: runCap
     });
     if (!bills.length) continue;
     let gmail;
     try { gmail = buildGmailClient(account); } catch { continue; }
     for (const b of bills) {
+      if (attempted >= runCap) break;
+      // Stop the whole run if we are over the AI budget — never keep spending.
+      try { await aiUsage.assertWithinBudget('commCenter.extractBill'); }
+      catch (budgetErr) { console.warn('[Bills] budget reached, stopping run:', budgetErr.message); return { extracted, attempted, exhausted, stoppedForBudget: true }; }
+
+      const nextAttempt = (b.billAttempts || 0) + 1;
+      attempted++;
       try {
         const data = await extractBill(gmail, b.gmailMessageId);
-        await b.update({ billData: data || { error: 'unknown' }, billStatus: b.billStatus || 'pending' });
-        if (data && !data.error) extracted++;
-      } catch (e) { console.warn('[Bills] row failed:', e.message); }
+        if (data && !data.error) {
+          // Success — store the data, done forever.
+          await b.update({ billData: data, billStatus: b.billStatus || 'pending', billAttempts: nextAttempt });
+          extracted++;
+        } else {
+          // Failed attempt. If we've hit the cap, store the error so billData is set (removes it from the
+          // queue permanently). Otherwise just bump the attempt counter and leave billData null to retry later.
+          if (nextAttempt >= MAX_BILL_ATTEMPTS) {
+            await b.update({ billData: data || { error: 'exhausted' }, billAttempts: nextAttempt });
+            exhausted++;
+          } else {
+            await b.update({ billAttempts: nextAttempt });
+          }
+        }
+      } catch (e) {
+        console.warn('[Bills] row failed:', e.message);
+        if (nextAttempt >= MAX_BILL_ATTEMPTS) {
+          await b.update({ billData: { error: 'exhausted', detail: e.message }, billAttempts: nextAttempt });
+          exhausted++;
+        } else {
+          await b.update({ billAttempts: nextAttempt });
+        }
+      }
     }
   }
-  console.log(`[Bills] Bill scan: ${extracted} extracted`);
-  return { extracted };
+  console.log(`[Bills] Bill scan: ${extracted} extracted, ${attempted} attempted, ${exhausted} exhausted (max ${MAX_BILL_ATTEMPTS} tries each)`);
+  return { extracted, attempted, exhausted };
 }
 
 module.exports = { classifyEmail, isAck, computeCoverageForThread, runCoverageScan, reclassifyExisting, extractEmailBody, stripQuoted, extractBill, runBillScan, VALID_CATEGORIES };

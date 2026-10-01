@@ -452,6 +452,38 @@ app.get('/api/debug/force-tax', async (req, res) => {
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
+app.get('/api/debug/reclassify-and-scan-bills', async (req, res) => {
+  try {
+    if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });
+    const { reclassifyExisting, runBillScan } = require('./services/commCenter');
+    const reclass = await reclassifyExisting({ limit: parseInt(req.query.limit, 10) || 400 });
+    const scan = await runBillScan({ limit: 50 });
+    res.json({ data: { reclassified: reclass, billScan: scan } });
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
+app.get('/api/debug/bill-scan-status', async (req, res) => {
+  try {
+    if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });
+    const { ScannedEmail } = require('./models');
+    const { Op } = require('sequelize');
+    const since = new Date(Date.now() - 45 * 24 * 60 * 60 * 1000);
+    const totalBills = await ScannedEmail.count({ where: { category: 'bill' } });
+    const recentBills = await ScannedEmail.count({ where: { category: 'bill', receivedAt: { [Op.gte]: since } } });
+    const unscanned = await ScannedEmail.count({ where: { category: 'bill', billData: { [Op.is]: null }, receivedAt: { [Op.gte]: since } } });
+    const scanned = await ScannedEmail.count({ where: { category: 'bill', billData: { [Op.ne]: null } } });
+    // sample of recent bills with their data status
+    const sample = await ScannedEmail.findAll({
+      where: { category: 'bill' }, order: [['receivedAt', 'DESC']], limit: 8,
+      attributes: ['subject', 'fromEmail', 'receivedAt', 'billData', 'billStatus', 'gmailMessageId']
+    });
+    res.json({ data: {
+      totalBills, recentBills_45d: recentBills, unscanned_45d: unscanned, scanned_total: scanned,
+      sample: sample.map(b => ({ subject: (b.subject||'').slice(0,50), from: b.fromEmail, received: b.receivedAt, hasData: !!b.billData, dataError: b.billData && b.billData.error ? b.billData.error : null, hasMsgId: !!b.gmailMessageId }))
+    }});
+  } catch (e) { res.status(500).json({ error: { message: e.message } }); }
+});
+
 app.get('/api/debug/estimate-tax', async (req, res) => {
   try {
     if (req.query.key !== 'crtube') return res.status(401).json({ error: { message: 'Add ?key=crtube' } });
@@ -2288,6 +2320,12 @@ async function startServer() {
       await sequelize.query(`ALTER TABLE estimates ALTER COLUMN "taxRate" TYPE DECIMAL(7,4)`);
       console.log('Tax-rate precision columns widened');
     } catch(e) { console.log('Tax-rate precision migration error:', e.message); }
+
+    // Bill-extraction attempt counter (queue safety — limits retries so bills can't loop forever).
+    try {
+      await sequelize.query(`ALTER TABLE scanned_emails ADD COLUMN IF NOT EXISTS "billAttempts" INTEGER NOT NULL DEFAULT 0`);
+      console.log('Bill attempts column ready');
+    } catch(e) { console.log('Bill attempts migration error:', e.message); }
 
     // Operator tasks table (free-text reminders)
     try {

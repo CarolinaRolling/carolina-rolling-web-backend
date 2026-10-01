@@ -1250,6 +1250,10 @@ async function scanDraftsForPricing() {
           const ts = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' });
           const gmLink = `https://mail.google.com/mail/?authuser=${encodeURIComponent(account.email)}#sent/${sm.id}`;
           const noteBlock = `\n\n***Pricing you quoted the client (${ts})***\n\u{1F4E7} ${gmLink}\n${quoted}\n(Verify and enter these into the estimate, then generate the PDF.)\n***Quoted pricing: end***`;
+          // DEDUP: only append if this exact sent message isn't already referenced in the notes. Without this,
+          // every scan re-appended the same block, so a note the user deleted kept coming back.
+          const already = (est.internalNotes || '').includes(gmLink) || (est.internalNotes || '').includes(`#sent/${sm.id}`);
+          if (already) { continue; }
           await est.update({
             internalNotes: (est.internalNotes || '') + noteBlock,
             pricingQuotedNeedsEntry: true,
@@ -1520,6 +1524,11 @@ async function _runScanInternal() {
             
             const noteBlock = `\n\n***Supplier quote: ${vendorName} (${timestamp})***\n📧 ${gmailLink}\n${pricingSummary}\n***Supplier quote: end***`;
             const currentNotes = rfqEstimate.internalNotes || '';
+            // DEDUP: skip if this supplier email is already referenced, so a deleted note doesn't get re-added.
+            if (currentNotes.includes(gmailLink)) {
+              console.log(`[EmailScanner] Vendor quote already in notes for ${rfqEstimate.estimateNumber}, skipping`);
+              continue;
+            }
             const estUpdate = { internalNotes: currentNotes + noteBlock };
             // Auto-advance the progression board to 'pricing_received' — a supplier quote just came
             // in and got linked. Never move BACKWARD (e.g. if it's already in_review/ready_to_send).

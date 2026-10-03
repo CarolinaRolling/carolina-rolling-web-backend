@@ -703,7 +703,9 @@ router.get('/price-suggestion', async (req, res, next) => {
       newClientUpliftPct: cfg.newClientUpliftPct,
       minLaborCharge: partTypeCfg.minCharge || cfg.minLaborCharge,
       override: partTypeCfg,
-      materialFactors: cfg.materialFactors || {}
+      materialFactors: cfg.materialFactors || {},
+      qtyDiscountStrength: cfg.qtyDiscountStrength,   // global quantity-discount strength (per-part-type can override)
+      perUnitFloor: cfg.perUnitFloor                   // global per-unit price floor
     });
     result.guidance = partTypeCfg.notes || null;
     res.json({ data: result });

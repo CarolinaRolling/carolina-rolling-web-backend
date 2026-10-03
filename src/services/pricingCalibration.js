@@ -166,7 +166,7 @@ async function buildWorksheetFromHistory(partType, models) {
       counts[s] = counts[s] || { n: 0, sample: p };
       counts[s].n++;
     }
-    const top = Object.entries(counts).sort((a, b) => b[1].n - a[1].n).slice(0, 5);
+    const top = Object.entries(counts).sort((a, b) => b[1].n - a[1].n).slice(0, 10); // top 10 real sizes for more thickness/size coverage
     if (top.length < 2) return buildWorksheet(partType); // not enough distinct real sizes — use defaults
 
     // Build rows from the real top sizes. Row 1 (most common) is the baseline anchor.

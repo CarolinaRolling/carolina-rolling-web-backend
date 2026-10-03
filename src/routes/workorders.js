@@ -31,7 +31,7 @@ const cloudinary = require('cloudinary').v2;
 const fileStorage = require('../utils/storage');
 const { Op } = require('sequelize');
 const { PDFDocument: PDFLibDocument } = require('pdf-lib');
-const { WorkOrder, WorkOrderPart, WorkOrderPartFile, WorkOrderDocument, DailyActivity, DRNumber, InboundOrder, PONumber, AppSettings, Estimate, EstimatePart, Vendor, Client, Shipment, ShipmentPhoto, ShipmentCharge, WorkOrderPresence, sequelize } = require('../models');
+const { WorkOrder, WorkOrderPart, WorkOrderPartFile, WorkOrderDocument, DailyActivity, DRNumber, InboundOrder, PONumber, AppSettings, Estimate, EstimatePart, Vendor, Client, Shipment, ShipmentPhoto, ShipmentCharge, WorkOrderPresence, ActivityLog, sequelize } = require('../models');
 
 // Only source of a default tax rate: Admin -> Tax Settings. No numeric fallback (a wrong default is risky).
 async function getAdminDefaultTaxRate() {
@@ -988,6 +988,30 @@ async function generateOutsideProcessingPO(poNumber, vendor, parts, workOrder, s
 }
 
 // Helper to log activity for daily email
+// Audit a work-order lifecycle event to the ActivityLog (the one shown in Users & Logs). Captures the action,
+// DR number, client name, and who did it — so creation/voiding/deletion are traceable (accountability).
+async function auditWorkOrder(req, action, wo, extraDetails = {}) {
+  try {
+    const drLabel = wo?.drNumber ? `DR-${wo.drNumber}` : (wo?.orderNumber || '(no number)');
+    await ActivityLog.create({
+      userId: req?.user?.id || null,
+      username: req?.user?.username || 'system',
+      action, // 'workorder_created' | 'workorder_voided' | 'workorder_deleted'
+      resourceType: 'workorder',
+      resourceId: wo?.id || null,
+      details: {
+        drNumber: wo?.drNumber || null,
+        drLabel,
+        clientName: wo?.clientName || null,
+        orderNumber: wo?.orderNumber || null,
+        invoiceNumber: wo?.invoiceNumber || null,
+        ...extraDetails
+      },
+      ipAddress: req?.ip || null
+    });
+  } catch (e) { console.error('auditWorkOrder failed:', e.message); }
+}
+
 async function logActivity(type, resourceType, resourceId, resourceNumber, clientName, description, details = {}) {
   try {
     await DailyActivity.create({
@@ -1889,6 +1913,7 @@ router.post('/', async (req, res, next) => {
           ? `Work order created with DR-${drNumber}`
           : 'Work order created successfully'
       });
+      auditWorkOrder(req, 'workorder_created', createdOrder);
     } catch (err) {
       await transaction.rollback();
       throw err;
@@ -2978,7 +3003,12 @@ router.put('/:id', async (req, res, next) => {
       }
     }
 
+    const wasVoided = workOrder.isVoided;
     await workOrder.update(updates);
+    // Audit a void (isVoided flipped to true in this update).
+    if (updates.isVoided === true && !wasVoided) {
+      auditWorkOrder(req, 'workorder_voided', workOrder, { voidReason: updates.voidReason || null });
+    }
 
     // Job finished → refresh Ginger's list (free, no-AI)
     if (status && ['completed', 'stored', 'shipped', 'archived'].includes(status)) {
@@ -3129,9 +3159,12 @@ router.delete('/:id', async (req, res, next) => {
       await InboundOrder.destroy({ where: { id: inboundOrderIds }, transaction });
     }
 
+    // Capture audit details before the row is gone.
+    const auditSnapshot = { id: workOrder.id, drNumber: workOrder.drNumber, orderNumber: workOrder.orderNumber, clientName: workOrder.clientName, invoiceNumber: workOrder.invoiceNumber };
     await workOrder.destroy({ transaction });
     await transaction.commit();
 
+    auditWorkOrder(req, 'workorder_deleted', auditSnapshot, { usedOverride: !!(req.body?.overrideCode || req.query?.overrideCode) });
     res.json({ message: 'Work order deleted successfully' });
   } catch (error) {
     await transaction.rollback();

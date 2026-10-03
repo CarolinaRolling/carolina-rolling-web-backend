@@ -369,12 +369,15 @@ async function suggestPrice(target, opts = {}) {
 
   const tQty = Math.max(1, parseInt(target.quantity, 10) || 1);
   const tBillableAdj = tBillable * tFactor;    // A36-equivalent pounds for THIS job
-  const jobTotal = setup + rate * (tQty * tBillableAdj);
-  const predicted = jobTotal / tQty;           // price EACH, with setup spread over the run
+  // NOTE: setup cost is intentionally NOT added here and the per-each minimum-charge floor is removed below.
+  // The estimate/work-order page applies the real minimum at the JOB level (accounting for quantity), so
+  // adding a per-each setup+min here double-charged it and made small multi-piece jobs always show $125 ea.
+  const jobTotal = rate * (tQty * tBillableAdj);
+  const predicted = jobTotal / tQty;           // price EACH (pure rate x weight; job min handled elsewhere)
 
   // How much ABOVE the fitted line has he actually WON? Lean toward the upper end of that,
   // rather than inventing a price from an unrelated small job's $/lb.
-  const ratios = top.map(c => c.labor / Math.max(1, (setup + rate * (c.qty * c.weightAdj)) / c.qty)).sort((a, b) => a - b);
+  const ratios = top.map(c => c.labor / Math.max(1, (rate * (c.qty * c.weightAdj)) / c.qty)).sort((a, b) => a - b);
   const leanRaw = percentile(ratios, 75) || 1;
   const lean = Math.min(Math.max(leanRaw, 1), 1.25);   // never lean more than +25%
   const bestEver = Math.min(ratios[ratios.length - 1] || 1, 1.6);
@@ -383,10 +386,11 @@ async function suggestPrice(target, opts = {}) {
   const provenHigh = predicted * bestEver;
   const recentComps = top.filter(c => c.ageDays <= 365);
   const recentTypical = recentComps.length
-    ? median(recentComps.map(c => c.labor / Math.max(1, (setup + rate * (c.qty * c.weightAdj)) / c.qty))) * predicted
+    ? median(recentComps.map(c => c.labor / Math.max(1, (rate * (c.qty * c.weightAdj)) / c.qty))) * predicted
     : null;
 
-  let suggested = Math.max(predicted * lean, minCharge);
+  // No per-each minimum-charge floor here — the estimate/WO page applies the minimum at the job level.
+  let suggested = predicted * lean;
 
   let isNewClient = false;
   if (target.clientName && upliftPct > 0) {
@@ -408,12 +412,12 @@ async function suggestPrice(target, opts = {}) {
     low: Math.round(Math.min.apply(null, rates) * tBillable * 100) / 100,
     recentMedian: recentTypical ? Math.round(recentTypical * 100) / 100 : null,
     ratePerLb: Math.round(rate * 10000) / 10000,
-    setupCost: Math.round(setup * 100) / 100,
+    setupCost: 0,  // setup cost intentionally not applied in the suggestion (job-level minimum handles small jobs)
     fitted,
     quantity: tQty,
     materialFactor: Math.round(tFactor * 100) / 100,
-    priceEachAtQty1: Math.round((setup + rate * tBillableAdj) * 100) / 100,
-    jobTotal: Math.round((setup + rate * (tQty * tBillableAdj)) * 100) / 100,
+    priceEachAtQty1: Math.round((rate * tBillableAdj) * 100) / 100,
+    jobTotal: Math.round((rate * (tQty * tBillableAdj)) * 100) / 100,
     overrideUsed: !!ov.enabled,
     billableWeightLbs: Math.round(tBillable),
     billableWidth: billableWidth(tDims.w),

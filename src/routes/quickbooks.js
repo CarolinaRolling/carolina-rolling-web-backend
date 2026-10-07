@@ -817,8 +817,9 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
 
       // ── Credit Card Fee Totals ──
       if (!hasPayments) {
-        const ccInPersonTotal = Math.round((grandTotal * 1.026 + 0.15) * 100) / 100;
-        const ccManualTotal = Math.round((grandTotal * 1.035 + 0.15) * 100) / 100;
+        // Gross-up so the shop NETS the grandTotal after Square's cut: charge = (target + fixed) / (1 - pct).
+        const ccInPersonTotal = Math.round(((grandTotal + 0.15) / (1 - 0.026)) * 100) / 100;
+        const ccManualTotal = Math.round(((grandTotal + 0.15) / (1 - 0.035)) * 100) / 100;
         doc.font('Helvetica-Bold').fontSize(9).fillColor(grayColor)
           .text('Total with Credit Card Fees', 350, yPos, { width: 212, align: 'right', lineBreak: false });
         yPos += 12;
@@ -864,6 +865,15 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
           doc.font('Helvetica').fontSize(9).fillColor(grayColor);
           doc.text('Bal: ' + fmtCur(Math.max(0, runningBalance)), 452, yPos, { width: 110, align: 'right', lineBreak: false });
           yPos += 18;
+          // Credit card fee as its own line under the payment.
+          if (pmt.ccFeeAmount && parseFloat(pmt.ccFeeAmount) > 0) {
+            const pctLbl = pmt.ccProcessingType === 'manual' ? '3.5%' : '2.6%';
+            const typeLbl = pmt.ccProcessingType === 'manual' ? 'manual/keyed' : 'in-person';
+            doc.font('Helvetica').fontSize(9).fillColor('#e65100');
+            doc.text(`   \u21B3 Credit card fee (${pctLbl} + $0.15 \u00B7 ${typeLbl})`, 135, yPos, { width: 260, lineBreak: false });
+            doc.text(fmtCur(parseFloat(pmt.ccFeeAmount)), 358, yPos, { width: 90, align: 'right', lineBreak: false });
+            yPos += 16;
+          }
           doc.strokeColor('#f0f0f0').lineWidth(0.3).moveTo(50, yPos - 2).lineTo(562, yPos - 2).stroke();
         }
 

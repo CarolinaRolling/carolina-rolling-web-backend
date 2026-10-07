@@ -228,8 +228,18 @@ router.post('/ledger/:woId/payments', async (req, res, next) => {
     });
     if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
 
-    const { paymentType, amount, paymentDate, paymentMethod, paymentReference, notes } = req.body;
+    const { paymentType, amount, paymentDate, paymentMethod, paymentReference, notes, ccProcessingType } = req.body;
     if (!amount || parseFloat(amount) <= 0) return res.status(400).json({ error: { message: 'Amount required' } });
+
+    // If paid by credit card, auto-calculate the Square fee for THIS payment amount based on the processing
+    // type (in_person = 2.6% + $0.15, manual = 3.5% + $0.15). Stored so it can show as its own line.
+    let ccFeeAmount = null;
+    let ccType = null;
+    if (paymentMethod === 'credit_card') {
+      ccType = (ccProcessingType === 'manual') ? 'manual' : 'in_person';
+      const pct = ccType === 'manual' ? 0.035 : 0.026;
+      ccFeeAmount = (parseFloat(amount) * pct + 0.15).toFixed(2);
+    }
 
     const payment = await WOP.create({
       workOrderId: wo.id,
@@ -238,6 +248,8 @@ router.post('/ledger/:woId/payments', async (req, res, next) => {
       paymentDate: paymentDate || new Date().toISOString().split('T')[0],
       paymentMethod: paymentMethod || null,
       paymentReference: paymentReference || null,
+      ccProcessingType: ccType,
+      ccFeeAmount: ccFeeAmount,
       notes: notes || null,
       recordedBy: req.user?.username || 'admin'
     });

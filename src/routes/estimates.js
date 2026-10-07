@@ -3189,10 +3189,11 @@ router.get('/:id/pdf', async (req, res, next) => {
     yPos += 15;
 
     const grandTotal = parseFloat(estimate.grandTotal) || 0;
-    const ccInPersonFee = (grandTotal * 2.6 / 100) + 0.15;
-    const ccInPersonTotal = grandTotal + ccInPersonFee;
-    const ccManualFee = (grandTotal * 3.5 / 100) + 0.15;
-    const ccManualTotal = grandTotal + ccManualFee;
+    // Gross-up so we NET the grandTotal after Square's cut (charge = (target + fixed) / (1 - percent)).
+    const ccInPersonTotal = (grandTotal + 0.15) / (1 - 0.026);
+    const ccInPersonFee = ccInPersonTotal - grandTotal;
+    const ccManualTotal = (grandTotal + 0.15) / (1 - 0.035);
+    const ccManualFee = ccManualTotal - grandTotal;
 
     doc.fontSize(11).font('Helvetica-Bold').fillColor(darkColor);
     doc.text('Total with Credit Card Fees', 50, yPos, { align: 'right', width: 512, lineBreak: false });

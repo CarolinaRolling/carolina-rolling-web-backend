@@ -2327,6 +2327,13 @@ async function startServer() {
       console.log('Bill attempts column ready');
     } catch(e) { console.log('Bill attempts migration error:', e.message); }
 
+    // Credit-card fee tracking on payments.
+    try {
+      await sequelize.query(`ALTER TABLE work_order_payments ADD COLUMN IF NOT EXISTS "ccProcessingType" VARCHAR(255)`);
+      await sequelize.query(`ALTER TABLE work_order_payments ADD COLUMN IF NOT EXISTS "ccFeeAmount" DECIMAL(10,2)`);
+      console.log('Payment CC fee columns ready');
+    } catch(e) { console.log('Payment CC fee migration error:', e.message); }
+
     // Operator tasks table (free-text reminders)
     try {
       await sequelize.query(`CREATE TABLE IF NOT EXISTS operator_tasks (

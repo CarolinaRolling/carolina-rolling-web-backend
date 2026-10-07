@@ -3749,6 +3749,9 @@ const WorkOrderPayment = sequelize.define('WorkOrderPayment', {
   paymentDate: { type: DataTypes.DATEONLY, allowNull: false },
   paymentMethod: { type: DataTypes.STRING, allowNull: true }, // check, ach, wire, credit_card, cash, other
   paymentReference: { type: DataTypes.STRING, allowNull: true },
+  // Credit card processing details (only when paymentMethod = credit_card).
+  ccProcessingType: { type: DataTypes.STRING, allowNull: true }, // 'in_person' (2.6%+$0.15) | 'manual' (3.5%+$0.15)
+  ccFeeAmount: { type: DataTypes.DECIMAL(10, 2), allowNull: true }, // the Square fee for this payment, auto-calculated
   notes: { type: DataTypes.TEXT, allowNull: true },
   recordedBy: { type: DataTypes.STRING, allowNull: true },
   voidedAt: { type: DataTypes.DATE, allowNull: true }

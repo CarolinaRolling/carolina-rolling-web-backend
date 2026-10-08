@@ -620,7 +620,7 @@ async function generatePurchaseOrderPDF(poNumber, supplier, parts, workOrder) {
           const grade = partObj.material || '';
           const origin = partObj._materialOrigin || '';
           desc = (thk ? thk + ' ' : '') + 'Cone - ';
-          if (ld && sd && vh) desc += ld.toFixed(1) + '" ' + ldType + ' x ' + sd.toFixed(1) + '" ' + sdType + ' x ' + vh.toFixed(1) + '" VH';
+          if (ld && sd && vh) desc += ld.toFixed(3) + '" ' + ldType + ' x ' + sd.toFixed(3) + '" ' + sdType + ' x ' + vh.toFixed(3) + '" VH';
           if (grade) desc += ' ' + grade;
           if (origin) desc += ' ' + origin;
         }

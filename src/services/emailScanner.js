@@ -979,6 +979,10 @@ async function createEstimateFromParsed(parsed, clientInfo, scannedEmail, attach
     for (let i = 0; i < (parsed.parts || []).length; i++) {
       const p = parsed.parts[i];
       const formData = buildFormData(p);
+      // For cones the real dimensions live in formData._cone* (set by buildFormData). The raw
+      // outerDiameter/diameter/width/sectionSize/radius columns are NOT cone form fields and, if
+      // persisted, show up as a stray "N\" OD" spec line on CR Admin and the app — so skip them.
+      const isCone = (p.partType === 'cone_roll');
       const part = await EstimatePart.create({
         estimateId: estimate.id,
         partNumber: i + 1,
@@ -986,13 +990,13 @@ async function createEstimateFromParsed(parsed, clientInfo, scannedEmail, attach
         quantity: parseInt(p.quantity) || 1,
         material: p.material || null,
         thickness: p.thickness || null,
-        width: p.width || null,
+        width: isCone ? null : (p.width || null),
         length: p.length || null,
-        outerDiameter: p.outerDiameter || p.diameter || null,
-        diameter: p.diameter || p.outerDiameter || null,
+        outerDiameter: isCone ? null : (p.outerDiameter || p.diameter || null),
+        diameter: isCone ? null : (p.diameter || p.outerDiameter || null),
         wallThickness: p.wallThickness || null,
-        sectionSize: p.sectionSize || p.legSize || null,
-        radius: p.radius || null,
+        sectionSize: isCone ? null : (p.sectionSize || p.legSize || null),
+        radius: isCone ? null : (p.radius || null),
         arcDegrees: p.arcDegrees || null,
         rollType: p.rollType || null,
         flangeOut: p.flangeOut || false,

@@ -2891,7 +2891,7 @@ router.get('/:id/pdf', async (req, res, next) => {
         const origin = fd._materialOrigin || '';
         let coneLine = thk ? thk + ' ' : '';
         coneLine += 'Cone - ';
-        if (ld && sd && vh) coneLine += ld.toFixed(1) + '" ' + ldType + ' x ' + sd.toFixed(1) + '" ' + sdType + ' x ' + vh.toFixed(1) + '" VH';
+        if (ld && sd && vh) coneLine += ld.toFixed(3) + '" ' + ldType + ' x ' + sd.toFixed(3) + '" ' + sdType + ' x ' + vh.toFixed(3) + '" VH';
         if (grade) coneLine += ' ' + grade;
         if (origin) coneLine += ' ' + origin;
         descLines.push(coneLine);
@@ -3924,12 +3924,24 @@ MATCHING RULES (when multiple files are provided):
         fileIndex: mfi,
         fileName: heldFiles[mfi].originalName
       } : null;
-      return {
+      const base = {
         ...p,
         partNumber: (estimate.parts?.length || 0) + i + 1,
         formData,
         matchedPrint: matched
       };
+      // For cones, the real dimensions live in formData._cone* (set by buildFormData). The raw
+      // outerDiameter / diameter / width / sectionSize / radius columns the AI fills are NOT cone
+      // form fields, and if persisted they surface as a stray "N\" OD" spec line on CR Admin and
+      // the Android app. Blank them so only the _cone* fields drive the cone.
+      if (base.partType === 'cone_roll') {
+        base.outerDiameter = '';
+        base.diameter = '';
+        base.width = '';
+        base.sectionSize = '';
+        base.radius = '';
+      }
+      return base;
     });
 
     // Unmatched prints: any held print not confidently attached to a part.

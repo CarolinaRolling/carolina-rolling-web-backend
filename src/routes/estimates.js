@@ -478,6 +478,28 @@ function calculateEstimateTotals(parts, truckingCost, taxRate, taxExempt = false
   });
   partsSubtotal += opTransportBilled;
 
+  // Expedite applies to LABOR ONLY (not material). Build the labor base the same way partsSubtotal
+  // is built (honoring the minimum-labor bump) so the percentage lands on charged labor only.
+  let expediteLaborBase = 0;
+  if (minInfo && minInfo.minimumApplies) {
+    parts.forEach(part => {
+      if (EA_PRICED_TYPES.includes(part.partType) || part.partType === 'rush_service') return;
+      const q = parseInt(part.quantity) || 1;
+      expediteLaborBase += (parseFloat(part.laborTotal) || parseFloat((part.formData || {}).laborTotal) || 0) * q;
+    });
+    expediteLaborBase += parseFloat(minInfo.adjustedLabor) || 0;
+  } else {
+    parts.forEach(part => {
+      if (part.partType === 'rush_service') return;
+      if (['fab_service', 'shop_rate'].includes(part.partType)) {
+        expediteLaborBase += parseFloat(part.partTotal) || 0;
+      } else {
+        const q = parseInt(part.quantity) || 1;
+        expediteLaborBase += (parseFloat(part.laborTotal) || parseFloat((part.formData || {}).laborTotal) || 0) * q;
+      }
+    });
+  }
+
   // Rush service amounts
   let expediteAmount = 0, emergencyAmount = 0;
   const rushPart = parts.find(p => p.partType === 'rush_service');
@@ -489,7 +511,7 @@ function calculateEstimateTotals(parts, truckingCost, taxRate, taxExempt = false
       } else {
         let pct = parseFloat(fd._expediteType) || 0;
         if (fd._expediteType === 'custom_pct') pct = parseFloat(fd._expediteCustomPct) || 0;
-        expediteAmount = partsSubtotal * (pct / 100);
+        expediteAmount = expediteLaborBase * (pct / 100);
       }
     }
     if (fd._emergencyEnabled) {
@@ -2788,16 +2810,19 @@ router.get('/:id/pdf', async (req, res, next) => {
           } else {
             let pct = parseFloat(rfd._expediteType) || 0;
             if (rfd._expediteType === 'custom_pct') pct = parseFloat(rfd._expediteCustomPct) || 0;
-            // Calculate base (pre-rush) subtotal from non-rush parts to avoid circular inflation
-            let baseSubtotal = 0;
+            // Expedite applies to LABOR ONLY (not material). Sum charged labor across non-rush parts
+            // (mirrors calculateEstimateTotals) so this printed line reconciles with the grand total.
+            let baseLabor = 0;
             for (const bp of sortedParts) {
               if (bp.partType === 'rush_service') continue;
-              const bqty = parseInt(bp.quantity) || 1;
-              const bmat = (parseFloat(bp.materialTotal) || 0) * (1 + (parseFloat(bp.materialMarkupPercent) || 0) / 100);
-              const blab = parseFloat(bp._baseLaborTotal ?? bp.formData?._baseLaborTotal ?? bp.laborTotal) || 0;
-              baseSubtotal += (bmat + blab) * bqty;
+              if (['fab_service', 'shop_rate'].includes(bp.partType)) {
+                baseLabor += parseFloat(bp.partTotal) || 0;
+              } else {
+                const bqty = parseInt(bp.quantity) || 1;
+                baseLabor += (parseFloat(bp.laborTotal) || parseFloat(bp.formData?.laborTotal) || 0) * bqty;
+              }
             }
-            rushExpediteAmt = baseSubtotal * (pct / 100);
+            rushExpediteAmt = baseLabor * (pct / 100);
           }
         }
         if (rfd._emergencyEnabled) rushEmergencyAmt = emergOpts[rfd._emergencyDay] || 0;
@@ -3081,8 +3106,41 @@ router.get('/:id/pdf', async (req, res, next) => {
       yPos += 6;
     }
 
-    // ========== TRUCKING ==========
-    if (parseFloat(estimate.truckingCost) > 0 || estimate.truckingDescription) {
+    // ========== SHIPPING & HANDLING (multi-shipment; replaces single Trucking field) ==========
+    const estShipCharges = await ShipmentCharge.findAll({
+      where: { estimateId: estimate.id },
+      order: [['sortOrder', 'ASC'], ['createdAt', 'ASC']]
+    });
+    const chargeBilled = (c) =>
+      (parseFloat(c.shippingCost) || 0) * (1 + (parseFloat(c.shippingMarkup) || 0) / 100) +
+      (parseFloat(c.materialsCost) || 0) * (1 + (parseFloat(c.materialsMarkup) || 0) / 100);
+    const shipChargesTotal = estShipCharges.reduce((sum, c) => sum + chargeBilled(c), 0);
+    const hasShipCharges = estShipCharges.length > 0 && shipChargesTotal > 0;
+    // Shipping & Handling is a non-taxed add-on (same treatment trucking had).
+    const grandTotalWithShipping = (parseFloat(estimate.grandTotal) || 0) + shipChargesTotal;
+
+    if (hasShipCharges) {
+      if (yPos > 660) { doc.addPage(); yPos = 50; }
+      doc.fontSize(11).fillColor(darkColor).font('Helvetica-Bold').text('Shipping & Handling', 85, yPos, { lineBreak: false });
+      doc.font('Helvetica');
+      yPos += 16;
+      estShipCharges.forEach(c => {
+        const billed = chargeBilled(c);
+        if (billed <= 0) return;
+        const dest = c.dropoffIsShop ? 'to Shop'
+          : (c.dropoffLocation ? ('to ' + c.dropoffLocation)
+          : (c.vendorName ? c.vendorName : 'Delivery'));
+        if (yPos > 710) { doc.addPage(); yPos = 50; }
+        doc.fontSize(10).fillColor(grayColor).text('Shipping & Handling \u2014 ' + dest, 85, yPos, { width: 380, lineBreak: false });
+        doc.fillColor(darkColor).font('Helvetica-Bold').text(formatCurrency(billed), 500, yPos, { width: 62, align: 'right', lineBreak: false });
+        doc.font('Helvetica');
+        yPos += 15;
+      });
+      yPos += 12;
+    }
+
+    // ========== TRUCKING (legacy — only shown when there are no shipment charges) ==========
+    if (!hasShipCharges && (parseFloat(estimate.truckingCost) > 0 || estimate.truckingDescription)) {
       if (yPos > 680) { doc.addPage(); yPos = 50; }
       
       doc.fontSize(11).fillColor(darkColor).font('Helvetica-Bold').text('Trucking / Delivery', 85, yPos, { lineBreak: false });
@@ -3156,10 +3214,16 @@ router.get('/:id/pdf', async (req, res, next) => {
       yPos += 18;
     }
 
-    // Trucking
-    if (parseFloat(estimate.truckingCost) > 0) {
+    // Trucking (legacy — only when no shipment charges)
+    if (!hasShipCharges && parseFloat(estimate.truckingCost) > 0) {
       doc.fillColor(grayColor).text('Trucking:', 350, yPos, { lineBreak: false });
       doc.fillColor(darkColor).text(formatCurrency(estimate.truckingCost), 480, yPos, { align: 'right', width: 82, lineBreak: false });
+      yPos += 18;
+    }
+    // Shipping & Handling (non-taxed add-on)
+    if (hasShipCharges) {
+      doc.fillColor(grayColor).text('Shipping & Handling:', 350, yPos, { lineBreak: false });
+      doc.fillColor(darkColor).text(formatCurrency(shipChargesTotal), 480, yPos, { align: 'right', width: 82, lineBreak: false });
       yPos += 18;
     }
 
@@ -3178,7 +3242,7 @@ router.get('/:id/pdf', async (req, res, next) => {
     doc.strokeColor(lightGray).lineWidth(1).moveTo(350, yPos).lineTo(562, yPos).stroke();
     yPos += 10;
     doc.fontSize(14).fillColor(primaryColor).font('Helvetica-Bold').text('TOTAL:', 350, yPos, { lineBreak: false });
-    doc.text(formatCurrency(estimate.grandTotal), 480, yPos, { align: 'right', width: 82, lineBreak: false });
+    doc.text(formatCurrency(grandTotalWithShipping), 480, yPos, { align: 'right', width: 82, lineBreak: false });
     doc.font('Helvetica');
     yPos += 30;
 
@@ -3188,7 +3252,7 @@ router.get('/:id/pdf', async (req, res, next) => {
     doc.strokeColor(lightGray).lineWidth(0.5).moveTo(50, yPos).lineTo(562, yPos).stroke();
     yPos += 15;
 
-    const grandTotal = parseFloat(estimate.grandTotal) || 0;
+    const grandTotal = grandTotalWithShipping;
     // Gross-up so we NET the grandTotal after Square's cut (charge = (target + fixed) / (1 - percent)).
     const ccInPersonTotal = (grandTotal + 0.15) / (1 - 0.026);
     const ccInPersonFee = ccInPersonTotal - grandTotal;
@@ -3232,7 +3296,7 @@ router.get('/:id/pdf', async (req, res, next) => {
       const laborDiscount = discPct > 0 ? laborOnlySubtotal * (discPct / 100) : discAmt;
       const laborAfterDiscount = laborOnlySubtotal - laborDiscount;
       const laborTax = estimate.taxExempt ? 0 : laborAfterDiscount * (parseFloat(estimate.taxRate) / 100);
-      const laborOnlyTotal = laborAfterDiscount + laborTax + (parseFloat(estimate.truckingCost) || 0);
+      const laborOnlyTotal = laborAfterDiscount + laborTax + (hasShipCharges ? shipChargesTotal : (parseFloat(estimate.truckingCost) || 0));
 
       doc.strokeColor('#1565c0').lineWidth(1.5).moveTo(50, yPos).lineTo(562, yPos).stroke();
       yPos += 12;

@@ -261,19 +261,90 @@ async function buildInvoiceIIF(wo, parts, client, invoiceNum) {
     lineItems.push({ description: clean(desc).substring(0, 200), amount: cost, qty: 1, invItem: itemType, isPriced: true });
     subtotal += cost;
   }
-  
-  // Trucking
-  const trucking = parseFloat(wo.truckingCost) || 0;
-  if (trucking > 0) {
-    lineItems.push({
-      description: clean(wo.truckingDescription || 'Trucking / Delivery'),
-      amount: trucking,
-      qty: 1,
-      isFreight: true,
-      isPriced: true,
-      invItem: ''
-    });
-    subtotal += trucking;
+
+  // Rush / Expedite — a percentage expedite is computed from the order's LABOR (not stored on the
+  // rush part), so getPartAmount() returns 0 and the loop above skips it. Add it here so the IIF
+  // export matches the invoice PDF. Expedite applies to labor only; it is a taxable service line.
+  const rushSvc = sorted.find(p => p.partType === 'rush_service' && getPartAmount(p) <= 0);
+  if (rushSvc) {
+    const rfd = rushSvc.formData && typeof rushSvc.formData === 'object' ? rushSvc.formData : {};
+    let rushAmt = 0;
+    const rushLabels = [];
+    if (rfd._expediteEnabled) {
+      if (rfd._expediteType === 'custom_amt') {
+        rushAmt += parseFloat(rfd._expediteCustomAmt) || 0;
+        rushLabels.push('Expedite Fee');
+      } else {
+        let pct = parseFloat(rfd._expediteType) || 0;
+        if (rfd._expediteType === 'custom_pct') pct = parseFloat(rfd._expediteCustomPct) || 0;
+        let rushLaborBase = 0;
+        for (const bp of parts) {
+          if (bp.partType === 'rush_service') continue;
+          if (['fab_service', 'shop_rate'].includes(bp.partType)) {
+            rushLaborBase += getPartAmount(bp);
+          } else {
+            try {
+              const bd = partBreakdown(bp);
+              const bq = parseInt(bp.quantity) || 1;
+              rushLaborBase += (parseFloat(bd.labEach) || 0) * bq;
+            } catch (e) { /* skip */ }
+          }
+        }
+        rushAmt += Math.round(rushLaborBase * (pct / 100) * 100) / 100;
+        rushLabels.push(`Expedite Service (${pct}% of labor)`);
+      }
+    }
+    if (rfd._emergencyEnabled) {
+      const emergOpts = { 'Saturday': 600, 'Saturday Night': 800, 'Sunday': 600, 'Sunday Night': 800 };
+      const em = emergOpts[rfd._emergencyDay] || 0;
+      if (em > 0) { rushAmt += em; rushLabels.push(`Emergency Off-Hours (${rfd._emergencyDay})`); }
+    }
+    rushAmt = Math.round(rushAmt * 100) / 100;
+    if (rushAmt > 0) {
+      lineItems.push({
+        description: clean(rushLabels.join(' + ') || 'Rush / Emergency Service').substring(0, 200),
+        amount: rushAmt, qty: 1, invItem: itemType, isPriced: true
+      });
+      subtotal += rushAmt;
+    }
+  }
+
+  // Shipping & Handling — multi-shipment freight. Each shipment is a non-taxed line on the
+  // FREIGHT account (isFreight routes it there with TAXABLE=N). Falls back to the legacy single
+  // truckingCost field only when there are no shipment charges, so historical invoices still export.
+  const woShipCharges = await ShipmentCharge.findAll({
+    where: { workOrderId: wo.id },
+    order: [['sortOrder', 'ASC'], ['createdAt', 'ASC']]
+  });
+  const billedOf = (c) =>
+    (parseFloat(c.shippingCost) || 0) * (1 + (parseFloat(c.shippingMarkup) || 0) / 100) +
+    (parseFloat(c.materialsCost) || 0) * (1 + (parseFloat(c.materialsMarkup) || 0) / 100);
+  const activeShip = woShipCharges.filter(c => billedOf(c) > 0);
+  if (activeShip.length > 0) {
+    for (const c of activeShip) {
+      const billed = Math.round(billedOf(c) * 100) / 100;
+      const dest = c.dropoffIsShop ? 'to Shop'
+        : (c.dropoffLocation ? ('to ' + c.dropoffLocation)
+        : (c.vendorName ? c.vendorName : 'Delivery'));
+      lineItems.push({
+        description: clean('Shipping & Handling - ' + dest).substring(0, 200),
+        amount: billed, qty: 1, isFreight: true, isPriced: true, invItem: ''
+      });
+      subtotal += billed;
+    }
+  } else {
+    const trucking = parseFloat(wo.truckingCost) || 0;
+    if (trucking > 0) {
+      lineItems.push({
+        description: clean(wo.truckingDescription || 'Trucking / Delivery'),
+        amount: trucking,
+        qty: 1,
+        isFreight: true,
+        isPriced: true,
+        invItem: ''
+      });
+      subtotal += trucking;
+    }
   }
   
   // Add blank lines then material supplier info
@@ -659,7 +730,21 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
             } else {
               let pct = parseFloat(fd._expediteType) || 0;
               if (fd._expediteType === 'custom_pct') pct = parseFloat(fd._expediteCustomPct) || 0;
-              amt += subtotal * (pct / 100);
+              // Expedite applies to LABOR ONLY (not material). Sum charged labor across non-rush parts.
+              let rushLaborBase = 0;
+              for (const bp of parts) {
+                if (bp.partType === 'rush_service') continue;
+                if (['fab_service', 'shop_rate'].includes(bp.partType)) {
+                  rushLaborBase += calculatePartTotal(bp);
+                } else {
+                  try {
+                    const bd = partBreakdown(bp);
+                    const bq = parseInt(bp.quantity) || 1;
+                    rushLaborBase += (parseFloat(bd.labEach) || 0) * bq;
+                  } catch (e) { /* skip */ }
+                }
+              }
+              amt += rushLaborBase * (pct / 100);
             }
           }
           if (fd._emergencyEnabled) {
@@ -677,7 +762,7 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
           const parts = [];
           if (fd._expediteEnabled) {
             const pct = fd._expediteType === 'custom_pct' ? fd._expediteCustomPct : fd._expediteType;
-            parts.push(fd._expediteType === 'custom_amt' ? `Expedite Fee` : `Expedite Service (${pct}%)`);
+            parts.push(fd._expediteType === 'custom_amt' ? `Expedite Fee` : `Expedite Service (${pct}% of labor)`);
           }
           if (fd._emergencyEnabled) parts.push(`Emergency Off-Hours (${fd._emergencyDay})`);
           label = parts.join(' + ') || 'Rush / Emergency Service';

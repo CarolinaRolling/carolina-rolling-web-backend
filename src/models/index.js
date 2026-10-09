@@ -3852,6 +3852,9 @@ const ShipmentCharge = sequelize.define('ShipmentCharge', {
   materialsCost: { type: DataTypes.DECIMAL(10, 2), defaultValue: 0 },
   materialsMarkup: { type: DataTypes.DECIMAL(5, 2), defaultValue: 0 },
   notes: { type: DataTypes.TEXT, allowNull: true },
+  // Display-only driving distance/time (Google Distance Matrix), shown on the shipment card.
+  distanceMiles: { type: DataTypes.DECIMAL(8, 2), allowNull: true },
+  durationMinutes: { type: DataTypes.INTEGER, allowNull: true },
 }, { tableName: 'shipment_charges', timestamps: true });
 
 Estimate.hasMany(ShipmentCharge, { foreignKey: 'estimateId', as: 'shipmentCharges' });

@@ -1732,6 +1732,9 @@ async function startServer() {
         `ALTER TABLE estimate_parts ADD COLUMN IF NOT EXISTS "rev" VARCHAR(255)`,
         `ALTER TABLE estimate_parts ADD COLUMN IF NOT EXISTS "poLineNumber" VARCHAR(255)`,
         `ALTER TABLE estimate_parts ADD COLUMN IF NOT EXISTS "lotNumber" VARCHAR(255)`,
+        // Shipping & Handling driving distance/time (display-only, shown on the shipment card).
+        `ALTER TABLE shipment_charges ADD COLUMN IF NOT EXISTS "distanceMiles" DECIMAL(8,2)`,
+        `ALTER TABLE shipment_charges ADD COLUMN IF NOT EXISTS "durationMinutes" INTEGER`,
     ];
     // Create work_order_payments table
     try {

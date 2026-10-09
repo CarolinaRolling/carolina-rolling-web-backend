@@ -3598,6 +3598,8 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
         materialsCost: sc.materialsCost,
         materialsMarkup: sc.materialsMarkup,
         notes: sc.notes,
+        distanceMiles: sc.distanceMiles,
+        durationMinutes: sc.durationMinutes,
       }, { transaction });
     }
 
@@ -4417,6 +4419,8 @@ router.post('/:id/shipment-charges', async (req, res, next) => {
       materialsCost: parseFloat(req.body.materialsCost) || 0,
       materialsMarkup: parseFloat(req.body.materialsMarkup) || 0,
       notes: req.body.notes || null,
+      distanceMiles: (req.body.distanceMiles != null && req.body.distanceMiles !== '') ? parseFloat(req.body.distanceMiles) : null,
+      durationMinutes: (req.body.durationMinutes != null && req.body.durationMinutes !== '') ? parseInt(req.body.durationMinutes) : null,
     });
     const result = await ShipmentCharge.findByPk(charge.id, { include: [{ model: Vendor, as: 'vendor', attributes: ['id', 'name'] }] });
     res.json({ data: result });
@@ -4440,6 +4444,8 @@ router.put('/:id/shipment-charges/:chargeId', async (req, res, next) => {
       materialsCost: req.body.materialsCost !== undefined ? parseFloat(req.body.materialsCost) : charge.materialsCost,
       materialsMarkup: req.body.materialsMarkup !== undefined ? parseFloat(req.body.materialsMarkup) : charge.materialsMarkup,
       notes: req.body.notes !== undefined ? (req.body.notes || null) : charge.notes,
+      distanceMiles: req.body.distanceMiles !== undefined ? ((req.body.distanceMiles === '' || req.body.distanceMiles == null) ? null : parseFloat(req.body.distanceMiles)) : charge.distanceMiles,
+      durationMinutes: req.body.durationMinutes !== undefined ? ((req.body.durationMinutes === '' || req.body.durationMinutes == null) ? null : parseInt(req.body.durationMinutes)) : charge.durationMinutes,
     });
     const result = await ShipmentCharge.findByPk(charge.id, { include: [{ model: Vendor, as: 'vendor', attributes: ['id', 'name'] }] });
     res.json({ data: result });

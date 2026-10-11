@@ -721,6 +721,12 @@ const WorkOrder = sequelize.define('WorkOrder', {
     type: DataTypes.DATE,
     allowNull: true
   },
+  // When grandTotal/taxAmount were last written by services/invoiceTotals (full invoice total,
+  // shipping included). Null = legacy value copied from the estimate. Frozen once exported to QB.
+  totalsComputedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
   iifBatchId: {
     type: DataTypes.STRING,
     allowNull: true
@@ -3754,7 +3760,10 @@ const WorkOrderPayment = sequelize.define('WorkOrderPayment', {
   ccFeeAmount: { type: DataTypes.DECIMAL(10, 2), allowNull: true }, // the Square fee for this payment, auto-calculated
   notes: { type: DataTypes.TEXT, allowNull: true },
   recordedBy: { type: DataTypes.STRING, allowNull: true },
-  voidedAt: { type: DataTypes.DATE, allowNull: true }
+  voidedAt: { type: DataTypes.DATE, allowNull: true },
+  // Set when this row is the per-invoice record of a ClientPayment application, so balances
+  // count that money once (see services/paymentLedger.js).
+  paymentApplicationId: { type: DataTypes.UUID, allowNull: true }
 }, { tableName: 'work_order_payments', timestamps: true });
 
 WorkOrder.hasMany(WorkOrderPayment, { foreignKey: 'workOrderId', as: 'payments' });

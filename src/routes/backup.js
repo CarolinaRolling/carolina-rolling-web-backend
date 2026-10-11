@@ -343,6 +343,15 @@ async function buildBackup(includeFiles = false) {
 }
 
 // ============= HELPER: Upload backup to Cloudinary =============
+// Backups hold the whole database (password hashes, API keys, Gmail tokens), so they are stored as
+// Cloudinary "authenticated" assets: they can only be downloaded through a URL signed with the API
+// secret. Previously they were public files with a guessable, timestamp-based name (audit C3).
+const BACKUP_DELIVERY_TYPE = 'authenticated';
+function backupDownloadUrl(publicId, type) {
+  if (!publicId) return null;
+  return cloudinary.url(publicId, { resource_type: 'raw', type: type || 'upload', sign_url: true, secure: true });
+}
+
 async function uploadBackupToCloudinary(backup) {
   const jsonStr = JSON.stringify(backup);
   const compressed = await gzip(Buffer.from(jsonStr, 'utf-8'));
@@ -353,12 +362,13 @@ async function uploadBackupToCloudinary(backup) {
 
   const result = await cloudinary.uploader.upload(
     `data:application/gzip;base64,${base64}`,
-    { public_id: publicId, resource_type: 'raw', overwrite: true, tags: ['auto-backup', 'database-backup'] }
+    { public_id: publicId, resource_type: 'raw', type: BACKUP_DELIVERY_TYPE, overwrite: true, tags: ['auto-backup', 'database-backup'] }
   );
 
   return {
-    url: result.secure_url,
+    url: backupDownloadUrl(result.public_id, BACKUP_DELIVERY_TYPE),
     publicId: result.public_id,
+    type: BACKUP_DELIVERY_TYPE,
     size: compressed.length,
     uncompressedSize: jsonStr.length,
     createdAt: new Date().toISOString()
@@ -418,7 +428,7 @@ async function runAutoBackup(includeFiles = false) {
       if (searchResult.resources && searchResult.resources.length > 8) {
         const toDelete = searchResult.resources.slice(8);
         for (const old of toDelete) {
-          await cloudinary.uploader.destroy(old.public_id, { resource_type: 'raw' });
+          await cloudinary.uploader.destroy(old.public_id, { resource_type: 'raw', type: old.type || 'upload' });
           console.log(`[auto-backup] Deleted old backup: ${old.public_id}`);
         }
       }
@@ -446,7 +456,14 @@ async function runAutoBackup(includeFiles = false) {
 // ============= ROUTES =============
 
 // GET /api/backup - Download full backup as JSON
-router.get('/', async (req, res, next) => {
+// Admin only: the dump contains password hashes, API keys and Gmail tokens (audit C3).
+// Credentials must come in a header, never ?token= / ?apikey= (those land in logs/history).
+router.get('/', (req, res, next) => {
+  if (req.query.token || req.query.apikey) {
+    return res.status(400).json({ error: { message: 'Send credentials in the Authorization or X-API-Key header to download a backup.' } });
+  }
+  next();
+}, requireAdmin, async (req, res, next) => {
   try {
     const includeFiles = req.query.includeFiles === 'true';
     const backup = await buildBackup(includeFiles);
@@ -460,7 +477,9 @@ router.get('/', async (req, res, next) => {
 });
 
 // GET /api/backup/info - Get backup stats and last auto-backup info
-router.get('/info', async (req, res, next) => {
+// Admin only: the response includes the cloud URLs of past backups, which download the full
+// database (password hashes, API keys, Gmail tokens) — audit C3.
+router.get('/info', requireAdmin, async (req, res, next) => {
   try {
     const [clientCount, vendorCount, drCount, poCount, shipmentCount, inboundCount, workOrderCount, estimateCount, settingsCount, userCount] = await Promise.all([
       Client.count(), Vendor.count(), DRNumber.count(), PONumber.count(),
@@ -502,11 +521,18 @@ router.get('/info', async (req, res, next) => {
         .execute();
       cloudBackups = (searchResult.resources || []).map(r => ({
         publicId: r.public_id,
-        url: r.secure_url,
+        type: r.type,
+        url: backupDownloadUrl(r.public_id, r.type),
         size: r.bytes,
         createdAt: r.created_at
       }));
     } catch (e) { /* cloudinary may not be configured */ }
+
+    // Re-sign history links with each backup's real delivery type (old public backups may have
+    // been converted to private by scripts/secure-cloud-backups.js since they were recorded)
+    const typeById = new Map(cloudBackups.map(b => [b.publicId, b.type]));
+    backupHistory = backupHistory.map(h => (h && h.publicId)
+      ? { ...h, url: backupDownloadUrl(h.publicId, typeById.get(h.publicId) || h.type || 'upload') } : h);
 
     const { getProvider } = require('../utils/storage');
     
@@ -654,14 +680,15 @@ router.post('/test', requireAdmin, async (req, res, next) => {
     const testPublicId = `shipment-tracker-backups/test-${Date.now()}`;
     const uploadResult = await cloudinary.uploader.upload(
       `data:application/gzip;base64,${base64}`,
-      { public_id: testPublicId, resource_type: 'raw', tags: ['test-backup'] }
+      { public_id: testPublicId, resource_type: 'raw', type: BACKUP_DELIVERY_TYPE, tags: ['test-backup'] }
     );
-    results.steps.push({ step: 'Upload to Cloudinary', status: 'ok', detail: uploadResult.secure_url });
+    const testUrl = backupDownloadUrl(uploadResult.public_id, BACKUP_DELIVERY_TYPE);
+    results.steps.push({ step: 'Upload to Cloudinary', status: 'ok', detail: `${uploadResult.public_id} (private)` });
 
     // Step 4: Download and verify
     const https = require('https');
     const downloadedData = await new Promise((resolve, reject) => {
-      https.get(uploadResult.secure_url, (response) => {
+      https.get(testUrl, (response) => {
         const chunks = [];
         response.on('data', chunk => chunks.push(chunk));
         response.on('end', () => resolve(Buffer.concat(chunks)));
@@ -677,7 +704,7 @@ router.post('/test', requireAdmin, async (req, res, next) => {
     });
 
     // Step 5: Clean up test file
-    await cloudinary.uploader.destroy(testPublicId, { resource_type: 'raw' });
+    await cloudinary.uploader.destroy(testPublicId, { resource_type: 'raw', type: BACKUP_DELIVERY_TYPE });
     results.steps.push({ step: 'Clean up test file', status: 'ok' });
 
     results.success = countsMatch;
@@ -694,6 +721,10 @@ router.post('/test', requireAdmin, async (req, res, next) => {
 
 // POST /api/backup/restore - Restore from backup JSON
 router.post('/restore', requireAdmin, async (req, res, next) => {
+  // Pause the invoice-total hooks while tables are wiped and re-inserted (they would otherwise
+  // recompute totals from half-restored data and overwrite the restored values).
+  const invoiceTotals = require('../services/invoiceTotals');
+  invoiceTotals.suspendTotalsHooks();
   try {
     const { backup, options = {} } = req.body;
     if (!backup || !backup.data) {
@@ -1045,6 +1076,14 @@ router.post('/restore', requireAdmin, async (req, res, next) => {
       }
     }
 
+    // An older backup may hold client payments recorded before payment linking existed —
+    // link them now so they are not double counted (same as the boot step).
+    try {
+      const { linkLegacyTwinPayments } = require('../services/paymentLedger');
+      const linkRes = await linkLegacyTwinPayments(sequelize);
+      if (linkRes.linked) console.log(`[restore] linked ${linkRes.linked} client-payment application(s)`);
+    } catch (e) { console.warn('[restore] payment link step failed:', e.message); }
+
     res.json({ message: 'Backup restored successfully', results, fileResults });
     } catch (innerErr) {
       throw innerErr;
@@ -1052,6 +1091,8 @@ router.post('/restore', requireAdmin, async (req, res, next) => {
   } catch (error) {
     console.error('[restore] Error:', error.message);
     next(error);
+  } finally {
+    invoiceTotals.resumeTotalsHooks();
   }
 });
 

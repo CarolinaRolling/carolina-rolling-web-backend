@@ -2251,12 +2251,10 @@ router.post('/:id/email-invoice', async (req, res, next) => {
     const shopName = 'Carolina Rolling Co. Inc.';
     const invoiceDate = workOrder.invoiceDate ? new Date(workOrder.invoiceDate).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : 'N/A';
     
-    // Calculate total
-    const partsTotal = (workOrder.parts || []).reduce((sum, p) => sum + (parseFloat(p.partTotal) || 0), 0);
-    const trucking = parseFloat(workOrder.truckingCost) || 0;
-    const subtotal = partsTotal + trucking;
-    const taxAmt = parseFloat(workOrder.taxAmount) || 0;
-    const total = subtotal + taxAmt;
+    // Invoice total — same calculation as the invoice PDF and QuickBooks (services/invoiceTotals).
+    // The old email added parts + trucking + the stored tax and could disagree with the attached PDF.
+    const { loadInvoiceTotals } = require('../services/invoiceTotals');
+    const total = (await loadInvoiceTotals([workOrder.id])).get(workOrder.id)?.amount || 0;
 
     const html = `
       <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">

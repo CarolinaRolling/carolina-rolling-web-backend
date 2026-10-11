@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const { Client, Vendor, WorkOrder, WorkOrderPart, Estimate, ClientPayment, PaymentApplication, CreditMemo, Refund, ShipmentCharge, sequelize } = require('../models');
+// Shared invoice totals + payment math (audit C2/C4)
+const { loadBalances } = require('../services/paymentLedger');
 const { Op } = require('sequelize');
 
 // ============= CLIENTS =============
@@ -624,36 +626,16 @@ router.get('/clients/:id/history', async (req, res, next) => {
       order: [['drNumber','DESC NULLS LAST'],['createdAt','DESC']]
     });
 
-    // Calculate balance per WO
+    // Balance per WO — shared invoice total minus payments counted once (services/paymentLedger)
+    const balances = await loadBalances(wos.filter(w => !w.isVoided).map(w => w.id));
     const woData = [];
     for (const wo of wos) {
       if (wo.isVoided) continue;
       const j = wo.toJSON();
-      const partsTotal = (j.parts||[]).reduce((s,p) => s + (parseFloat(p.partTotal)||0), 0);
-      const base = parseFloat(j.grandTotal) > 0 ? parseFloat(j.grandTotal) : partsTotal + (parseFloat(wo.truckingCost)||0);
-      let shipping = 0;
-      try {
-        const charges = await ShipmentCharge.findAll({ where: { workOrderId: j.id } });
-        charges.forEach(c => {
-          shipping += (parseFloat(c.shippingCost)||0)*(1+(parseFloat(c.shippingMarkup)||0)/100)
-                    + (parseFloat(c.materialsCost)||0)*(1+(parseFloat(c.materialsMarkup)||0)/100);
-        });
-      } catch(e) {}
-      const total = base + shipping;
-
-      // Payments applied
-      let paid = 0;
-      try {
-        const apps = await PaymentApplication.findAll({ where: { workOrderId: j.id } });
-        for (const app of apps) {
-          const cp = await ClientPayment.findByPk(app.clientPaymentId, { attributes: ['voidedAt'] });
-          if (cp && !cp.voidedAt) paid += parseFloat(app.amount)||0;
-        }
-        const legacyPmts = await (require('../models').WorkOrderPayment || sequelize.models.WorkOrderPayment).findAll({ where: { workOrderId: j.id, voidedAt: null } });
-        paid += legacyPmts.reduce((s,p) => s + (parseFloat(p.amount)||0), 0);
-      } catch(e) {}
-
-      const balance = Math.max(0, total - paid);
+      const bal = balances.get(j.id) || { total: 0, paid: 0, balance: 0 };
+      const total = bal.total;
+      const paid = bal.paid;
+      const balance = bal.balance;
 
       // Due date
       let dueDate = null;
@@ -707,14 +689,6 @@ router.get('/clients/:id/statement-pdf', async (req, res, next) => {
     const client = await Client.findByPk(req.params.id);
     if (!client) return res.status(404).json({ error: { message: 'Client not found' } });
 
-    // Reuse history endpoint logic inline
-    const histRes = await new Promise((resolve, reject) => {
-      const fakeReq = { params: { id: req.params.id } };
-      const fakeRes = { json: (data) => resolve(data), status: () => ({ json: reject }) };
-      router.handle ? router.handle(fakeReq, fakeRes, reject) : reject(new Error('not supported'));
-    }).catch(() => null);
-
-    // Fallback: just get WOs directly
     const { Op } = require('sequelize');
     const wos = await WorkOrder.findAll({
       where: { clientId: req.params.id, invoiceNumber: { [Op.ne]: null }, isVoided: { [Op.ne]: true } },
@@ -726,10 +700,16 @@ router.get('/clients/:id/statement-pdf', async (req, res, next) => {
     const termDays = termsToDays(client.paymentTerms);
     const now = new Date();
 
+    // Paid/balance from the shared payment math — the old statement counted an invoice as either
+    // fully paid (paymentDate set) or not paid at all, ignoring partial payments.
+    const balances = await loadBalances(wos.map(w => w.id));
+
     const doc = new PDFDocument({ margin: 50, size: 'letter' });
     const chunks = [];
     doc.on('data', chunk => chunks.push(chunk));
-    await new Promise(resolve => doc.on('end', resolve));
+    // Resolves once doc.end() below has flushed. (Awaiting this BEFORE drawing, as the old code
+    // did, never resolved and the request hung.)
+    const finished = new Promise(resolve => doc.on('end', resolve));
 
     // Header
     doc.font('Helvetica-Bold').fontSize(22).fillColor('#1565c0').text('ACCOUNT STATEMENT', 350, 50, { width: 200, align: 'right' });
@@ -768,10 +748,10 @@ router.get('/clients/:id/statement-pdf', async (req, res, next) => {
     let grandBalance = 0;
     for (const wo of wos) {
       const j = wo.toJSON();
-      const partsTotal = (j.parts||[]).reduce((s,p) => s+(parseFloat(p.partTotal)||0),0);
-      const total = parseFloat(j.grandTotal)>0 ? parseFloat(j.grandTotal) : partsTotal + (parseFloat(wo.truckingCost)||0);
-      const paid = j.paymentDate ? total : 0;
-      const balance = Math.max(0, total - paid);
+      const bal = balances.get(j.id) || { total: 0, paid: 0, balance: 0 };
+      const total = bal.total;
+      const paid = bal.paid;
+      const balance = bal.balance;
       grandBalance += balance;
 
       let dueDate = '';
@@ -812,6 +792,7 @@ router.get('/clients/:id/statement-pdf', async (req, res, next) => {
     doc.text('$' + grandBalance.toFixed(2), cols.balance, y, { width: 62, align: 'right' });
 
     doc.end();
+    await finished;
     const buffer = Buffer.concat(chunks);
 
     res.setHeader('Content-Type', 'application/pdf');

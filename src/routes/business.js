@@ -5,6 +5,9 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { Liability, Employee, PayrollWeek, PayrollEntry, WorkOrder, WorkOrderPart, WorkOrderPayment, Vendor, PONumber, InboundOrder, Client, ShipmentCharge, ClientPayment, PaymentApplication, CreditMemo, CreditMemoApplication, Refund, sequelize } = require('../models');
+// Shared invoice totals + payment math (audit C2/C4) — every balance on every screen comes from these.
+const { loadInvoiceTotals } = require('../services/invoiceTotals');
+const { loadBalances, loadBalance, syncPaidFlag } = require('../services/paymentLedger');
 const fileStorage = require('../utils/storage');
 
 // Multer config for bill attachments
@@ -32,15 +35,17 @@ router.get('/payments/outstanding', async (req, res, next) => {
       order: [['invoiceDate', 'ASC']]
     });
     
-    // Calculate aging
+    // Calculate aging — totals and balances from the shared invoice/payment math
     const now = new Date();
+    const balances = await loadBalances(wos.map(w => w.id));
     const data = wos.map(wo => {
       const inv = wo.invoiceDate ? new Date(wo.invoiceDate) : new Date(wo.createdAt);
       const daysOut = Math.floor((now - inv) / 86400000);
-      return { ...wo.toJSON(), daysOutstanding: daysOut };
-    });
+      const b = balances.get(wo.id);
+      return { ...wo.toJSON(), grandTotal: (b ? b.total : 0).toFixed(2), balance: (b ? b.balance : 0).toFixed(2), daysOutstanding: daysOut };
+    }).filter(w => parseFloat(w.balance) > 0.01);   // fully paid through client payments isn't outstanding
     
-    const totalOutstanding = data.reduce((s, w) => s + (parseFloat(w.grandTotal) || 0), 0);
+    const totalOutstanding = data.reduce((s, w) => s + (parseFloat(w.balance) || 0), 0);
     const over30 = data.filter(w => w.daysOutstanding > 30);
     const over60 = data.filter(w => w.daysOutstanding > 60);
     const over90 = data.filter(w => w.daysOutstanding > 90);
@@ -62,8 +67,10 @@ router.get('/payments/history', async (req, res, next) => {
       order: [['paymentDate', 'DESC']],
       limit: parseInt(limit)
     });
-    const totalReceived = wos.reduce((s, w) => s + (parseFloat(w.grandTotal) || 0), 0);
-    res.json({ data: { payments: wos, totalReceived, count: wos.length } });
+    const totalsMap = await loadInvoiceTotals(wos.map(w => w.id));
+    const payments = wos.map(w => ({ ...w.toJSON(), grandTotal: (totalsMap.get(w.id)?.amount ?? (parseFloat(w.grandTotal) || 0)).toFixed(2) }));
+    const totalReceived = payments.reduce((s, w) => s + (parseFloat(w.grandTotal) || 0), 0);
+    res.json({ data: { payments, totalReceived, count: payments.length } });
   } catch (error) { next(error); }
 });
 
@@ -108,86 +115,30 @@ router.get('/ledger', async (req, res, next) => {
       sequelize.where(sequelize.cast(sequelize.col('drNumber'), 'TEXT'), { [Op.iLike]: `%${search}%` })
     ];
 
-    const WOPart = sequelize.models.WorkOrderPart || require('../models').WorkOrderPart;
-    const WOPayment = sequelize.models.WorkOrderPayment || require('../models').WorkOrderPayment;
-
-    // Load WOs with parts first
+    // Load WOs, then totals + payments from the shared helpers (one rule for every screen)
     const wos = await WorkOrder.findAll({
       where,
       attributes: ['id','drNumber','orderNumber','clientName','clientPurchaseOrderNumber','invoiceNumber','invoiceDate','grandTotal','truckingCost','status','completedAt','shippedAt','createdAt','paymentDate','paymentMethod','paymentReference'],
-      include: [
-        { model: WOPart, as: 'parts', attributes: ['id','partType','partTotal','quantity'], required: false }
-      ],
       order: [['invoiceDate','DESC NULLS LAST'],['createdAt','DESC']]
     });
-
-    // Load payments separately (table may not exist yet)
-    let paymentsMap = {};
-    try {
-      if (WOPayment) {
-        const allPayments = await WOPayment.findAll({
-          where: { workOrderId: wos.map(w => w.id), voidedAt: null },
-          order: [['paymentDate','ASC']]
-        });
-        allPayments.forEach(p => {
-          const pid = p.workOrderId;
-          if (!paymentsMap[pid]) paymentsMap[pid] = [];
-          paymentsMap[pid].push(p.toJSON());
-        });
-      }
-    } catch (payErr) { console.warn('[ledger] payments load skip:', payErr.message); }
-
-    // Load shipping charges in one query
-    let shippingMap = {};
-    try {
-      const { ShipmentCharge } = require('../models');
-      const allCharges = await ShipmentCharge.findAll({ where: { workOrderId: wos.map(w => w.id) } });
-      allCharges.forEach(c => {
-        const wid = c.workOrderId;
-        if (!shippingMap[wid]) shippingMap[wid] = 0;
-        shippingMap[wid] += (parseFloat(c.shippingCost)||0) * (1 + (parseFloat(c.shippingMarkup)||0)/100)
-                          + (parseFloat(c.materialsCost)||0) * (1 + (parseFloat(c.materialsMarkup)||0)/100);
-      });
-    } catch(e) { /* shipment_charges may not exist yet */ }
+    const balances = await loadBalances(wos.map(w => w.id));
 
     const now = new Date();
     const data = wos.map(wo => {
       const j = wo.toJSON();
-
-      // Calculate total — sum partTotals + trucking + shipping charges
-      const partsTotal = (j.parts||[]).reduce((s, p) => s + (parseFloat(p.partTotal)||0), 0);
-      const trucking = parseFloat(j.truckingCost) || 0;
-      const calculatedTotal = partsTotal + trucking;
-      const shippingTotal = shippingMap[j.id] || 0;
-      // Use grandTotal from WO if set and > 0, then add shipping charges on top
-      const baseTotal = (parseFloat(j.grandTotal) > 0 ? parseFloat(j.grandTotal) : calculatedTotal);
-      const total = baseTotal + shippingTotal;
-
-      const payments = paymentsMap[j.id] || [];
-      const totalPaid = payments.reduce((s,p) => s + parseFloat(p.amount||0), 0);
-      // Legacy single payment (old system)
-      const legacyPaid = (!payments.length && j.paymentDate && total > 0) ? total : 0;
-      const effectivePaid = totalPaid + legacyPaid;
-
-      const balance = Math.max(0, total - effectivePaid);
+      const b = balances.get(j.id) || { total: 0, paid: 0, balance: 0, isPaid: false, legacyPaid: 0, payments: [] };
       const invDate = j.invoiceDate ? new Date(j.invoiceDate) : new Date(j.createdAt);
       const daysOut = Math.floor((now - invDate) / 86400000);
-      // Only mark as paid if total > 0 AND balance is 0
-      const isPaid = total > 0 && balance <= 0.01;
-      // needsPricing = total is 0, needs attention
-      const needsPricing = total === 0;
-
-      const { parts: _p, ...safeJ } = j;
       return {
-        ...safeJ,
-        grandTotal: total.toFixed(2),
-        totalPaid: effectivePaid.toFixed(2),
-        balance: balance.toFixed(2),
-        isPaid,
-        needsPricing,
+        ...j,
+        grandTotal: b.total.toFixed(2),
+        totalPaid: b.paid.toFixed(2),
+        balance: b.balance.toFixed(2),
+        isPaid: b.isPaid,
+        needsPricing: b.total === 0,
         daysOutstanding: daysOut,
-        payments,
-        legacyPayment: legacyPaid > 0 ? { date: j.paymentDate, method: j.paymentMethod, reference: j.paymentReference } : null
+        payments: b.payments,
+        legacyPayment: b.legacyPaid > 0 ? { date: j.paymentDate, method: j.paymentMethod, reference: j.paymentReference } : null
       };
     });
 
@@ -254,14 +205,8 @@ router.post('/ledger/:woId/payments', async (req, res, next) => {
       recordedBy: req.user?.username || 'admin'
     });
 
-    // Check if fully paid — update WO paymentDate for backward compat
-    const allPayments = await WOP.findAll({ where: { workOrderId: wo.id, voidedAt: null } });
-    const totalPaid = allPayments.reduce((s,p) => s + parseFloat(p.amount||0), 0);
-    const partsTotal = (wo.parts||[]).reduce((s,p) => s + (parseFloat(p.partTotal)||0), 0);
-    const grandTotal = parseFloat(wo.grandTotal) || partsTotal;
-    if (grandTotal > 0 && totalPaid >= grandTotal - 0.01) {
-      await wo.update({ paymentDate: payment.paymentDate, paymentMethod, paymentReference, paymentRecordedBy: req.user?.username || 'admin' });
-    }
+    // Fully paid? Keep the WO paymentDate flag in step (shared invoice total + payment math)
+    await syncPaidFlag(wo.id, { paymentDate: payment.paymentDate, paymentMethod, paymentReference, recordedBy: req.user?.username || 'admin' });
 
     // Auto-regenerate invoice PDF
     try {
@@ -282,15 +227,11 @@ router.delete('/ledger/payments/:paymentId', async (req, res, next) => {
     if (!payment) return res.status(404).json({ error: { message: 'Payment not found' } });
     await payment.update({ voidedAt: new Date() });
 
-    // Clear WO paymentDate if no longer fully paid
-    const allPayments = await WOP.findAll({ where: { workOrderId: payment.workOrderId, voidedAt: null } });
-    const wo = await WorkOrder.findByPk(payment.workOrderId, { include: [{ model: WorkOrderPart, as: 'parts' }] });
+    // Clear WO paymentDate if no longer fully paid. If this row was a client-payment application's
+    // invoice record, voiding it also removes that application from the balance (paymentLedger).
+    const wo = await WorkOrder.findByPk(payment.workOrderId);
     if (wo) {
-      const totalPaid = allPayments.reduce((s,p) => s + parseFloat(p.amount||0), 0);
-      const grandTotal = parseFloat(wo.grandTotal) || 0;
-      if (totalPaid < grandTotal - 0.01) {
-        await wo.update({ paymentDate: null, paymentMethod: null, paymentReference: null, paymentRecordedBy: null });
-      }
+      await syncPaidFlag(wo.id);
       // Re-regen invoice PDF
       try {
         const qbRoutes = require('./quickbooks');
@@ -1254,45 +1195,6 @@ Carolina Rolling Co., Inc.`;
 // NEW PAYMENT SYSTEM
 // ══════════════════════════════════════════════════════════
 
-// Helper: calculate WO balance including shipping charges
-async function getWOBalance(woId) {
-  const wo = await WorkOrder.findByPk(woId, {
-    attributes: ['id','drNumber','orderNumber','clientId','clientName','grandTotal','truckingCost','invoiceNumber'],
-    include: [{ model: WorkOrderPart, as: 'parts', attributes: ['partTotal'] }]
-  });
-  if (!wo) return null;
-  const partsTotal = (wo.parts||[]).reduce((s,p) => s + (parseFloat(p.partTotal)||0), 0);
-  const trucking = parseFloat(wo.truckingCost) || 0;
-  const base = parseFloat(wo.grandTotal) > 0 ? parseFloat(wo.grandTotal) : partsTotal + trucking;
-  let shipping = 0;
-  try {
-    const charges = await ShipmentCharge.findAll({ where: { workOrderId: woId } });
-    charges.forEach(c => {
-      shipping += (parseFloat(c.shippingCost)||0)*(1+(parseFloat(c.shippingMarkup)||0)/100)
-                + (parseFloat(c.materialsCost)||0)*(1+(parseFloat(c.materialsMarkup)||0)/100);
-    });
-  } catch(e) {}
-  const total = base + shipping;
-  // Sum all non-voided payments applied to this WO
-  let paid = 0;
-  try {
-    const apps = await PaymentApplication.findAll({
-      where: { workOrderId: woId },
-      include: [{ model: ClientPayment, as: undefined, attributes: ['voidedAt'] }]
-    });
-    // Also legacy WOPayments
-    const legacyPmts = await WorkOrderPayment.findAll({ where: { workOrderId: woId, voidedAt: null } });
-    paid += legacyPmts.reduce((s,p) => s + (parseFloat(p.amount)||0), 0);
-    // PaymentApplications — need to check if parent payment is voided
-    for (const app of apps) {
-      const cp = await ClientPayment.findByPk(app.clientPaymentId, { attributes: ['voidedAt'] });
-      if (!cp || cp.voidedAt) continue;
-      paid += parseFloat(app.amount) || 0;
-    }
-  } catch(e) {}
-  return { wo: wo.toJSON(), total, paid, balance: Math.max(0, total - paid) };
-}
-
 // GET /api/business/client-payments — list all client payments
 router.get('/client-payments', async (req, res, next) => {
   try {
@@ -1318,10 +1220,11 @@ router.get('/client-open-invoices/:clientId', async (req, res, next) => {
       include: [{ model: WorkOrderPart, as: 'parts', attributes: ['partTotal'] }],
       order: [['invoiceDate','ASC NULLS LAST']]
     });
+    const balances = await loadBalances(wos.map(w => w.id));
     const results = [];
     for (const wo of wos) {
-      const info = await getWOBalance(wo.id);
-      if (info && info.balance > 0.01) results.push(info);
+      const b = balances.get(wo.id);
+      if (b && b.balance > 0.01) results.push({ wo: wo.toJSON(), total: b.total, paid: b.paid, balance: b.balance });
     }
     res.json({ data: results });
   } catch(error) { next(error); }
@@ -1347,16 +1250,26 @@ router.post('/client-payments', async (req, res, next) => {
     for (const app of (applications || [])) {
       const appAmt = parseFloat(app.amount);
       if (!appAmt || appAmt <= 0) continue;
-      await PaymentApplication.create({
+      const application = await PaymentApplication.create({
         clientPaymentId: payment.id, workOrderId: app.workOrderId, amount: appAmt
       }, { transaction: t });
-      // Also create legacy WOPayment for backwards compatibility
+      // The per-invoice payment record (ledger, invoice PDF and QuickBooks read this table).
+      // paymentApplicationId marks it as the same money as the application, so it counts once.
       await WorkOrderPayment.create({
         workOrderId: app.workOrderId, amount: appAmt,
         paymentDate: paymentDate || new Date(), paymentMethod: method || 'check',
-        paymentReference: reference || null, paymentType: 'partial', recordedBy: recordedBy || 'admin'
+        paymentReference: reference || null, paymentType: 'partial', recordedBy: recordedBy || 'admin',
+        paymentApplicationId: application.id
       }, { transaction: t });
       totalApplied += appAmt;
+    }
+    // Mark invoices that are now paid in full
+    const touchedWOs = [...new Set((applications || []).filter(a => parseFloat(a.amount) > 0).map(a => a.workOrderId))];
+    for (const woId of touchedWOs) {
+      // Savepoint: a problem updating the paid flag must never roll back the payment itself
+      try {
+        await sequelize.transaction({ transaction: t }, (sp) => syncPaidFlag(woId, { transaction: sp, paymentDate: paymentDate || new Date(), paymentMethod: method || 'check', paymentReference: reference || null, recordedBy: recordedBy || 'admin' }));
+      } catch (e) { console.warn('[client-payment] paid-flag update skipped for', woId, e.message); }
     }
 
     // If remainder and creditMemoRemainder flag, create credit memo
@@ -1373,6 +1286,13 @@ router.post('/client-payments', async (req, res, next) => {
     }
 
     await t.commit();
+    // Refresh the invoice PDFs so their payment history shows this payment (best effort, background)
+    try {
+      const qbRoutes = require('./quickbooks');
+      if (qbRoutes.regenerateInvoicePDF) {
+        (async () => { for (const woId of touchedWOs) { try { await qbRoutes.regenerateInvoicePDF(woId); } catch (e) { /* non-fatal */ } } })();
+      }
+    } catch (e) { /* non-fatal */ }
     res.json({ data: { payment, creditMemo }, message: 'Payment recorded' });
   } catch(err) { await t.rollback(); next(err); }
 });
@@ -1487,20 +1407,14 @@ router.get('/general-ledger', async (req, res, next) => {
       });
     } catch(e) {}
 
-    // ── Revenue: Legacy WO Payments (not already in ClientPayments) ──
+    // ── Revenue: per-invoice payments that are NOT part of a ClientPayment ──
+    // (rows with paymentApplicationId are the invoice-side copy of a client payment already listed above)
     try {
       const legacyPmts = await WorkOrderPayment.findAll({
-        where: { voidedAt: null, ...(startDate && { paymentDate: { [Op.gte]: startDate } }), ...(endDate && { paymentDate: { [Op.lte]: endDate } }) },
+        where: { voidedAt: null, paymentApplicationId: null, ...(startDate && { paymentDate: { [Op.gte]: startDate } }), ...(endDate && { paymentDate: { [Op.lte]: endDate } }) },
         order: [['paymentDate', 'DESC']]
       });
-      // Only include if no ClientPayment application covers this WO
-      const coveredWOIds = new Set();
-      try {
-        const apps = await PaymentApplication.findAll({ attributes: ['workOrderId'] });
-        apps.forEach(a => coveredWOIds.add(a.workOrderId));
-      } catch {}
       legacyPmts.forEach(p => {
-        if (coveredWOIds.has(p.workOrderId)) return;
         entries.push({
           id: p.id, date: p.paymentDate, type: 'payment',
           category: 'Revenue', description: `Payment received`,

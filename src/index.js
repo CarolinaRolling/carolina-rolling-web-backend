@@ -6,6 +6,8 @@ const path = require('path');
 const cloudinary = require('cloudinary').v2;
 const cron = require('node-cron');
 const { sequelize, Shipment, ShipmentPhoto, ShipmentDocument, User, AppSettings, WorkOrder, Client, DailyActivity, Estimate, TodoItem } = require('./models');
+// Keep each work order's stored grandTotal/taxAmount in step with its parts and charges (audit C4).
+require('./services/invoiceTotals').registerTotalsHooks(require('./models'));
 const shipmentRoutes = require('./routes/shipments');
 const settingsRoutes = require('./routes/settings');
 const { sendScheduleEmail } = require('./routes/settings');
@@ -427,7 +429,7 @@ const blockPortalKeys = (req, res, next) => {
 
 app.use('/api/workorders', authenticate, blockPortalKeys, workordersRoutes);
 app.use('/api/estimates', authenticate, blockPortalKeys, estimatesRoutes);
-app.use('/api/backup', authenticate, backupRoutes);
+app.use('/api/backup', authenticate, blockPortalKeys, backupRoutes);
 app.use('/api/deletion-archive', authenticate, deletionArchiveRoutes);
 const businessRoutes = require('./routes/business');
 app.use('/api/business', authenticate, blockPortalKeys, businessRoutes);
@@ -1776,12 +1778,40 @@ async function startServer() {
         "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
         "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT NOW()
       )`);
-      // Fix vendorId column type if created with wrong INTEGER type
+      // Fix vendorId column type ONLY if it was created with the wrong (non-UUID) type.
+      // The old version dropped and re-added the column unconditionally on every boot, which
+      // erased every shipping charge's vendor link on each restart (audit C1).
       try {
-        await sequelize.query(`ALTER TABLE shipment_charges DROP COLUMN IF EXISTS "vendorId"`);
-        await sequelize.query(`ALTER TABLE shipment_charges ADD COLUMN IF NOT EXISTS "vendorId" UUID`);
-        console.log('shipment_charges vendorId fixed to UUID');
-      } catch (e2) { console.log('vendorId already correct type'); }
+        const [vcol] = await sequelize.query(
+          `SELECT data_type FROM information_schema.columns
+            WHERE table_schema = current_schema() AND table_name = 'shipment_charges' AND column_name = 'vendorId'`
+        );
+        const vtype = vcol[0]?.data_type;
+        if (!vtype) {
+          await sequelize.query(`ALTER TABLE shipment_charges ADD COLUMN IF NOT EXISTS "vendorId" UUID`);
+          console.log('shipment_charges vendorId added (UUID)');
+        } else if (vtype !== 'uuid') {
+          // Wrong type: values can't be valid vendor UUIDs, so converting to NULL loses nothing.
+          await sequelize.query(`ALTER TABLE shipment_charges ALTER COLUMN "vendorId" TYPE UUID USING NULL`);
+          console.log(`shipment_charges vendorId converted ${vtype} -> UUID`);
+        }
+        // One-time repair: re-link charges whose vendor link was wiped by the old boot step, using
+        // the stored vendorName (exact, case-insensitive match to a single vendor only). Runs once,
+        // so later deliberate "no vendor" choices are left alone.
+        const relinkDone = await AppSettings.findOne({ where: { key: 'fix_c1_vendor_relink_done' } });
+        const [, relinked] = relinkDone ? [null, 0] : await sequelize.query(`
+          UPDATE shipment_charges sc SET "vendorId" = v.id
+            FROM vendors v
+           WHERE sc."vendorId" IS NULL
+             AND sc."vendorName" IS NOT NULL AND btrim(sc."vendorName") <> ''
+             AND lower(btrim(v.name)) = lower(btrim(sc."vendorName"))
+             AND (SELECT count(*) FROM vendors v2 WHERE lower(btrim(v2.name)) = lower(btrim(sc."vendorName"))) = 1`);
+        const n = relinked?.rowCount ?? relinked;
+        if (!relinkDone) {
+          await AppSettings.upsert({ key: 'fix_c1_vendor_relink_done', value: { at: new Date().toISOString(), relinked: n || 0 } });
+          console.log(`shipment_charges: re-linked ${n || 0} charge(s) to vendors by name (one-time repair)`);
+        }
+      } catch (e2) { console.log('shipment_charges vendorId check skipped:', e2.message); }
       console.log('shipment_charges table ready');
     } catch (e) { console.log('shipment_charges table error:', e.message); }
 
@@ -1939,6 +1969,7 @@ async function startServer() {
     // model but missing from the DB, which crashed the Invoiced-tab history query.)
     try {
       await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "iifExportedAt" TIMESTAMP WITH TIME ZONE`);
+      await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "totalsComputedAt" TIMESTAMP WITH TIME ZONE`);
       await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "iifBatchId" VARCHAR(255)`);
       await sequelize.query(`ALTER TABLE work_orders ADD COLUMN IF NOT EXISTS "reusedInvoiceNumber" BOOLEAN NOT NULL DEFAULT false`);
       console.log('QuickBooks IIF export columns ready');
@@ -1964,6 +1995,16 @@ async function startServer() {
       await sequelize.query(`ALTER TABLE work_order_payments ADD COLUMN IF NOT EXISTS "ccFeeAmount" DECIMAL(10,2)`);
       console.log('Payment CC fee columns ready');
     } catch(e) { console.log('Payment CC fee migration error:', e.message); }
+
+    // Link each client-payment application to its per-invoice WorkOrderPayment row so the same
+    // money is counted once in balances (audit C2). Idempotent: only unlinked rows are touched.
+    try {
+      await sequelize.query(`ALTER TABLE work_order_payments ADD COLUMN IF NOT EXISTS "paymentApplicationId" UUID`);
+      await sequelize.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_wop_payment_application ON work_order_payments ("paymentApplicationId") WHERE "paymentApplicationId" IS NOT NULL`);
+      const { linkLegacyTwinPayments } = require('./services/paymentLedger');
+      const r = await linkLegacyTwinPayments(sequelize);
+      if (r.linked || r.unmatched) console.log(`[payments] linked ${r.linked} client-payment application(s) to their invoice payment rows; ${r.unmatched} application(s) have no twin and count on their own`);
+    } catch(e) { console.log('Payment application link migration error:', e.message); }
 
     // Operator tasks table (free-text reminders)
     try {

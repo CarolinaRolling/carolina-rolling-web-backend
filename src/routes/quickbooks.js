@@ -82,6 +82,8 @@ function getFinalShipDate(wo) {
 
 // Pricing utilities from shared module
 const { calculatePartTotal, partBreakdown, roundUpMaterial, loadLaborMinimums, calculateMinimumAdjustment } = require('../services/pricing');
+// The single invoice-total calculation shared by the PDF, ledger, balances and email (audit C4)
+const { computeInvoiceTotals, snapshotTotalsForExport } = require('../services/invoiceTotals');
 
 function getPartAmount(part) {
   return calculatePartTotal(part);
@@ -417,6 +419,15 @@ async function buildInvoiceIIF(wo, parts, client, invoiceNum) {
   const taxAmount = Math.round(taxableAmount * taxRate / 100 * 100) / 100;
   // TRNS amount = subtotal only. QB adds tax automatically for taxable lines.
   const grandTotal = Math.round(subtotal * 100) / 100;
+
+  // Self-check: the shared calculation (used by the PDF, ledger and balances) must match what we
+  // send to QuickBooks. A mismatch means the two drifted — log it loudly rather than diverge silently.
+  try {
+    const T = computeInvoiceTotals({ wo, parts, client, shipmentCharges: woShipCharges, laborMinimums: await loadLaborMinimums() });
+    if (Math.abs(T.preTaxTotal - grandTotal) > 0.005 || Math.abs(T.taxAmount - taxAmount) > 0.005) {
+      console.warn(`[IIF] totals mismatch for ${drLabel}: IIF pre-tax ${grandTotal} tax ${taxAmount} vs shared ${T.preTaxTotal} tax ${T.taxAmount}`);
+    }
+  } catch (e) { console.warn('[IIF] totals self-check failed:', e.message); }
   
   // DR number for Delivery Receipt field — just the number, no prefix
   const drNum = wo.drNumber ? String(wo.drNumber) : '';
@@ -595,7 +606,10 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
       const servicesByParent = new Map();
       for (const svc of serviceParts) {
         const fd = (svc.formData && typeof svc.formData === 'object') ? svc.formData : {};
-        const parentId = fd._linkedPartId;
+        // Rush is always its own line; a link to a part that no longer exists is ignored (the line
+        // would otherwise vanish from the PDF while still counting in the total)
+        const parentId = (svc.partType !== 'rush_service' && regularParts.some(p => String(p.id) === String(fd._linkedPartId)))
+          ? fd._linkedPartId : null;
         if (parentId) {
           if (!servicesByParent.has(parentId)) servicesByParent.set(parentId, []);
           servicesByParent.get(parentId).push(svc);
@@ -603,7 +617,10 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
       }
 
       let subtotal = 0;
-      const isResale = (client?.taxStatus || '').toLowerCase() === 'resale' || (client?.taxStatus || '').toLowerCase() === 'exempt';
+      // Totals come from the shared calculation so this PDF, the ledger and QuickBooks agree.
+      // (Tax exemption now also honors the work order's own Tax Exempt flag, like the IIF export.)
+      const T = computeInvoiceTotals({ wo, parts, client, shipmentCharges, laborMinimums: await loadLaborMinimums() });
+      const isResale = T.isTaxExempt;
 
       const PART_LABELS = {
         plate_roll: 'Plate Roll', angle_roll: 'Angle Roll', pipe_roll: 'Pipes / Tubes / Round',
@@ -721,36 +738,9 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
       for (const svc of serviceParts.filter(s => !Array.from(servicesByParent.values()).flat().includes(s))) {
         let amt = calculatePartTotal(svc);
 
-        // Rush service — fee stored in formData, not partTotal
+        // Rush service — fee stored in formData, not partTotal (shared calculation)
         if (svc.partType === 'rush_service' && amt <= 0) {
-          const fd = (svc.formData && typeof svc.formData === 'object') ? svc.formData : {};
-          if (fd._expediteEnabled) {
-            if (fd._expediteType === 'custom_amt') {
-              amt += parseFloat(fd._expediteCustomAmt) || 0;
-            } else {
-              let pct = parseFloat(fd._expediteType) || 0;
-              if (fd._expediteType === 'custom_pct') pct = parseFloat(fd._expediteCustomPct) || 0;
-              // Expedite applies to LABOR ONLY (not material). Sum charged labor across non-rush parts.
-              let rushLaborBase = 0;
-              for (const bp of parts) {
-                if (bp.partType === 'rush_service') continue;
-                if (['fab_service', 'shop_rate'].includes(bp.partType)) {
-                  rushLaborBase += calculatePartTotal(bp);
-                } else {
-                  try {
-                    const bd = partBreakdown(bp);
-                    const bq = parseInt(bp.quantity) || 1;
-                    rushLaborBase += (parseFloat(bd.labEach) || 0) * bq;
-                  } catch (e) { /* skip */ }
-                }
-              }
-              amt += rushLaborBase * (pct / 100);
-            }
-          }
-          if (fd._emergencyEnabled) {
-            const emergOpts = { 'Saturday': 600, 'Saturday Night': 800, 'Sunday': 600, 'Sunday Night': 800 };
-            amt += emergOpts[fd._emergencyDay] || 0;
-          }
+          amt = (svc.id === T.rushPartId) ? T.rushAmount : 0;
         }
 
         if (amt <= 0) continue;
@@ -774,6 +764,20 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
         doc.text('1', 400, yPos, { width: 30, align: 'center', lineBreak: false });
         doc.text(fmtCur(amt), 438, yPos, { width: 52, align: 'right', lineBreak: false });
         doc.font('Helvetica-Bold').text(fmtCur(amt), 498, yPos, { width: 64, align: 'right', lineBreak: false });
+        yPos += 20;
+        doc.strokeColor(lightGray).lineWidth(0.3).moveTo(50, yPos).lineTo(562, yPos).stroke();
+        yPos += 6;
+        itemNum++;
+      }
+
+      // ── Minimum labor charge (billed in QuickBooks; previously missing from the PDF) ──
+      if (T.minimumAdjustment > 0) {
+        if (yPos > 700) { doc.addPage(); yPos = 50; }
+        doc.font('Helvetica').fontSize(10).fillColor(grayColor).text(String(itemNum), 50, yPos, { width: 30, lineBreak: false });
+        doc.font('Helvetica').fontSize(10).fillColor(darkColor).text('Minimum labor charge adjustment', 85, yPos, { width: 310, lineBreak: false });
+        doc.text('1', 400, yPos, { width: 30, align: 'center', lineBreak: false });
+        doc.text(fmtCur(T.minimumAdjustment), 438, yPos, { width: 52, align: 'right', lineBreak: false });
+        doc.font('Helvetica-Bold').text(fmtCur(T.minimumAdjustment), 498, yPos, { width: 64, align: 'right', lineBreak: false });
         yPos += 20;
         doc.strokeColor(lightGray).lineWidth(0.3).moveTo(50, yPos).lineTo(562, yPos).stroke();
         yPos += 6;
@@ -860,21 +864,19 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
         yPos += 16;
       };
 
-      // Discount
-      const discountPct = parseFloat(wo.discountPercent) || 0;
-      const discountAmt = parseFloat(wo.discountAmount) || 0;
-      let discountTotal = discountPct > 0 ? Math.round(subtotal * discountPct / 100 * 100) / 100 : discountAmt;
+      // Discount (shared calculation)
+      const discountPct = T.discountPercent;
+      const discountTotal = T.discountTotal;
       if (discountTotal > 0) {
         const label = discountPct > 0 ? `Discount (${discountPct}%)` : 'Discount';
         doc.font('Helvetica').fontSize(10).fillColor(grayColor).text(label, 350, yPos, { width: 140, align: 'right', lineBreak: false });
         doc.font('Helvetica').fontSize(10).fillColor('#c62828').text('-' + fmtCur(discountTotal), 498, yPos, { width: 64, align: 'right', lineBreak: false });
         yPos += 16;
-        subtotal -= discountTotal;
       }
 
-      totRow('Parts Subtotal', subtotal);
-      const taxRate = isResale ? 0 : (parseFloat(wo.taxRate) || 0);
-      const taxAmt = Math.round(subtotal * taxRate / 100 * 100) / 100;
+      totRow('Parts Subtotal', T.partsAfterDiscount);
+      const taxRate = T.taxRate;
+      const taxAmt = T.taxAmount;
       if (isResale) {
         doc.font('Helvetica').fontSize(9).fillColor(grayColor).text('Tax Exempt / Resale Certificate', 350, yPos, { width: 212, align: 'right', lineBreak: false });
         yPos += 14;
@@ -882,14 +884,14 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
         totRow(`Tax (${taxRate}%)`, taxAmt);
       }
       // Shipping is always tax exempt — added after tax
-      if (shippingTotal > 0) {
+      if (T.shippingTotal > 0) {
         doc.font('Helvetica').fontSize(10).fillColor(grayColor).text('Shipping & Handling', 350, yPos, { width: 140, align: 'right', lineBreak: false });
-        doc.font('Helvetica').fontSize(10).fillColor(darkColor).text(fmtCur(shippingTotal), 498, yPos, { width: 64, align: 'right', lineBreak: false });
+        doc.font('Helvetica').fontSize(10).fillColor(darkColor).text(fmtCur(T.shippingTotal), 498, yPos, { width: 64, align: 'right', lineBreak: false });
         yPos += 14;
         doc.font('Helvetica').fontSize(8).fillColor(grayColor).text('(tax exempt)', 350, yPos, { width: 212, align: 'right', lineBreak: false });
         yPos += 10;
       }
-      const grandTotal = Math.round((subtotal + taxAmt + shippingTotal) * 100) / 100;
+      const grandTotal = T.grandTotal;
 
       // Grand total box
       yPos += 4;
@@ -1747,6 +1749,9 @@ router.post('/export-batch-with-reconciliation', async (req, res, next) => {
     // WorkOrder.iifExportedAt to show status and prevent double-entry, so it MUST be set there too).
     const exportedIds = workOrders.filter(w => !w.reusedInvoiceNumber).map(w => w.id);
     if (exportedIds.length) {
+      // Freeze each invoice's total as sent to QuickBooks, so later edits don't move the AR ledger
+      const notYetExported = workOrders.filter(w => !w.reusedInvoiceNumber && !w.iifExportedAt).map(w => w.id);
+      await snapshotTotalsForExport(notYetExported);
       await InvoiceNumber.update(
         { iifExportedAt: exportDate, iifBatchId: batchId },
         { where: { workOrderId: { [Op.in]: exportedIds }, iifExportedAt: null } }
@@ -1822,7 +1827,7 @@ router.post('/invoice-email/:id', async (req, res, next) => {
     const wo = await WorkOrder.findByPk(req.params.id, {
       include: [
         { model: WorkOrderPart, as: 'parts' },
-        { model: Client, as: 'client', attributes: ['id','name','apEmail','contactEmail','quickbooksName'] }
+        { model: Client, as: 'client', attributes: ['id','name','apEmail','contactEmail','quickbooksName','taxStatus','paymentTerms'] }
       ]
     });
     if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
@@ -2060,6 +2065,9 @@ router.put('/invoice-number/:id', async (req, res, next) => {
 });
 
 router.regenerateInvoicePDF = regenerateInvoicePDF;
+// Exposed for tests (totals consistency between the IIF export, the PDF and the shared calculation)
+router._buildInvoiceIIF = buildInvoiceIIF;
+router._generateInvoicePDFBuffer = generateInvoicePDFBuffer;
 // POST /api/quickbooks/mark-entered — mark invoices as manually entered into QuickBooks (no IIF export).
 // Sets iifExportedAt with a 'manual' batch id so they show as done in the Invoiced tab.
 router.post('/mark-entered', async (req, res, next) => {
@@ -2077,6 +2085,10 @@ router.post('/mark-entered', async (req, res, next) => {
     const CHUNK = 100;
     for (let i = 0; i < workOrderIds.length; i += CHUNK) {
       const chunk = workOrderIds.slice(i, i + CHUNK);
+      // Freeze totals for the ones being marked now (not ones already tied to a real IIF export)
+      const toMark = await WorkOrder.findAll({ attributes: ['id'], where: { id: { [Op.in]: chunk },
+        [Op.or]: [{ iifExportedAt: { [Op.is]: null } }, { iifBatchId: { [Op.like]: 'manual-%' } }] } });
+      await snapshotTotalsForExport(toMark.map(w => w.id));
       const [n] = await WorkOrder.update(
         { iifExportedAt: now, iifBatchId: batchId },
         { where: {

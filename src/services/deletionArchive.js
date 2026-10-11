@@ -24,14 +24,23 @@ async function archiveRecord(instance, options = {}) {
       if (snapshot[child] === undefined) continue;
     }
 
-    await DeletionArchive.create({
+    const row = {
       modelName: modelName || instance.constructor?.name || 'unknown',
       recordId: String(instance.id ?? snapshot.id ?? ''),
       label: label || null,
       snapshot,
       deletedBy: deletedBy || null,
       reason: reason || null,
-    }, transaction ? { transaction } : {});
+    };
+    if (transaction) {
+      // Inside the caller's transaction a failed INSERT would abort that whole transaction, so the
+      // delete the user asked for would then fail at commit — the opposite of "never block the delete"
+      // (audit L5). A savepoint confines a failure to the archive row.
+      const { sequelize } = require('../models');
+      await sequelize.transaction({ transaction }, (sp) => DeletionArchive.create(row, { transaction: sp }));
+    } else {
+      await DeletionArchive.create(row);
+    }
 
     return true;
   } catch (err) {

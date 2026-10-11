@@ -1569,7 +1569,18 @@ const Estimate = sequelize.define('Estimate', {
     // Catch-all: ping the estimator's phone whenever a NEW estimate arrives from email,
     // no matter which code path created it (background scanner, review center, AI parse...).
     // Only fires for email-sourced estimates — not ones the owner types up himself.
-    afterCreate: async (estimate) => {
+    afterCreate: (estimate, options) => notifyNewEstimate(estimate, options)
+  }
+});
+
+// Created inside a transaction (e.g. the email scanner's all-or-nothing create): ping only once it has
+// committed, so the estimator is never told about an estimate that was then rolled back (round 7).
+async function notifyNewEstimate(estimate, options) {
+  if (options && options.transaction && typeof options.transaction.afterCommit === 'function') {
+    options.transaction.afterCommit(() => { notifyNewEstimate(estimate, {}).catch(() => {}); });
+    return;
+  }
+  {
       try {
         if (!estimate.scannedEmailId) return; // not an incoming request
         const { notifyEstimatorDevices } = require('../services/push');
@@ -1588,9 +1599,8 @@ const Estimate = sequelize.define('Estimate', {
       } catch (e) {
         console.error('[new-estimate] push hook failed (non-fatal):', e.message);
       }
-    }
   }
-});
+}
 
 // EstimatePart Model - parts within an estimate (replaces EstimateLineItem)
 const EstimatePart = sequelize.define('EstimatePart', {

@@ -951,7 +951,40 @@ async function createEstimateFromParsed(parsed, clientInfo, scannedEmail, attach
       console.log(`[EmailScanner] No contact matched sender ${senderEmail} — using primary contact "${primaryContact.name}" for ${clientInfo.clientName}`);
     }
 
-    const estimate = await Estimate.create({
+    // The estimate, its parts, their print links and the review to-do are written in ONE transaction:
+    // a failure part-way used to leave a half-built estimate (some parts missing) that looked complete
+    // (audit L6). Files uploaded before a failure are removed again.
+    const { sequelize } = require('../models');
+    const uploadedIds = [];
+    let estimate;
+    // Upload each part's print BEFORE opening the transaction, so a slow upload doesn't hold a database
+    // connection and row locks open (round 7 review). The estimate id is chosen up front for the folder.
+    const newEstimateId = require('crypto').randomUUID();
+    const uploads = [];
+    for (let i = 0; i < (parsed.parts || []).length; i++) {
+      const p = parsed.parts[i];
+      const sourceFilename = p._sourceFile;
+      const sourceFile = sourceFilename
+        ? attachmentFiles.find(f => f.filename === sourceFilename)
+        : (attachmentFiles.length === 1 ? attachmentFiles[0] : attachmentFiles[i]);
+      uploads[i] = null;
+      if (!sourceFile || !sourceFile.buffer) continue;
+      try {
+        const uploadResult = await fileStorage.uploadBuffer(sourceFile.buffer, {
+          folder: `estimates/${newEstimateId}/parts`,
+          filename: sourceFile.filename,
+          mimeType: sourceFile.mimeType || 'application/pdf'
+        });
+        if (uploadResult.storageId) uploadedIds.push(uploadResult.storageId);
+        uploads[i] = { sourceFile, uploadResult };
+      } catch (fileErr) {
+        console.error(`[EmailScanner] Failed to upload attachment for part #${i + 1}: ${fileErr.message}`);
+      }
+    }
+    try {
+    await sequelize.transaction(async (t) => {
+    estimate = await Estimate.create({
+      id: newEstimateId,
       estimateNumber: estNumber,
       clientName: clientInfo.clientName,
       clientId: clientInfo.clientId,
@@ -964,7 +997,7 @@ async function createEstimateFromParsed(parsed, clientInfo, scannedEmail, attach
       internalNotes: internalNotes,
       emailLink: scannedEmail.gmailLink,
       scannedEmailId: scannedEmail.id
-    });
+    }, { transaction: t });
 
     // Create parts with proper formData — track IDs for fab service linking
     const createdPartIds = []; // index → part ID
@@ -997,22 +1030,15 @@ async function createEstimateFromParsed(parsed, clientInfo, scannedEmail, attach
         materialDescription: p.description || null,
         materialSource: p.materialSource || 'customer_supplied',
         formData: formData
-      });
+      }, { transaction: t });
       createdPartIds.push(part.id);
 
-      // Save the source drawing/PDF to this part if available
-      const sourceFilename = p._sourceFile;
-      const sourceFile = sourceFilename
-        ? attachmentFiles.find(f => f.filename === sourceFilename)
-        : (attachmentFiles.length === 1 ? attachmentFiles[0] : attachmentFiles[i]);
-      if (sourceFile && sourceFile.buffer) {
+      // Link this part's print (uploaded above) if there is one
+      if (uploads[i]) {
+        const { sourceFile, uploadResult } = uploads[i];
         try {
-          const uploadResult = await fileStorage.uploadBuffer(sourceFile.buffer, {
-            folder: `estimates/${estimate.id}/parts`,
-            filename: sourceFile.filename,
-            mimeType: sourceFile.mimeType || 'application/pdf'
-          });
-          await EstimatePartFile.create({
+          // savepoint: a failed file row must not abort the estimate's transaction
+          await sequelize.transaction({ transaction: t }, (sp) => EstimatePartFile.create({
             partId: part.id,
             filename: sourceFile.filename,
             originalName: sourceFile.filename,
@@ -1022,10 +1048,11 @@ async function createEstimateFromParsed(parsed, clientInfo, scannedEmail, attach
             cloudinaryId: uploadResult.storageId,
             fileType: sourceFile.mimeType === 'application/pdf' ? 'pdf_print' : 'drawing',
             portalVisible: false
-          });
+          }, { transaction: sp }));
           console.log(`[EmailScanner] Saved attachment "${sourceFile.filename}" to part #${i + 1}`);
         } catch (fileErr) {
           console.error(`[EmailScanner] Failed to save attachment to part #${i + 1}: ${fileErr.message}`);
+          if (uploadResult.storageId) { try { await fileStorage.deleteFile(uploadResult.storageId); } catch (_) { /* best effort */ } }
         }
       }
     }
@@ -1039,7 +1066,7 @@ async function createEstimateFromParsed(parsed, clientInfo, scannedEmail, attach
           const fabPartId = createdPartIds[i];
           await EstimatePart.update(
             { formData: { ...buildFormData(p), _linkedPartId: parentId } },
-            { where: { id: fabPartId } }
+            { where: { id: fabPartId }, transaction: t }
           );
           console.log(`[EmailScanner] Linked fab_service part #${i + 1} to parent part #${p.parentPartIndex + 1}`);
         }
@@ -1047,7 +1074,7 @@ async function createEstimateFromParsed(parsed, clientInfo, scannedEmail, attach
     }
 
     // Auto-send for review
-    const headEstimator = await User.findOne({ where: { isHeadEstimator: true, isActive: true } });
+    const headEstimator = await User.findOne({ where: { isHeadEstimator: true, isActive: true }, transaction: t });
     await TodoItem.create({
       title: `Review pricing: ${estNumber} — ${clientInfo.clientName}`,
       description: `Auto-created from email. ${(parsed.parts || []).length} part(s). Confidence: ${parsed.confidence || 'unknown'}.${attachmentFiles && attachmentFiles.length > 0 ? ` ${attachmentFiles.length} drawing(s) parsed and attached.` : ''}`,
@@ -1057,7 +1084,13 @@ async function createEstimateFromParsed(parsed, clientInfo, scannedEmail, attach
       estimateId: estimate.id,
       estimateNumber: estNumber,
       createdBy: 'Email Scanner'
+    }, { transaction: t });
     });
+    } catch (txErr) {
+      // nothing was saved — remove the files uploaded for it
+      for (const id of uploadedIds) { try { await fileStorage.deleteFile(id); } catch (_) { /* best effort */ } }
+      throw txErr;
+    }
 
     console.log(`[EmailScanner] Created estimate ${estNumber} for ${clientInfo.clientName} with ${(parsed.parts || []).length} parts`);
     return { estimateId: estimate.id, estimateNumber: estNumber };
@@ -2325,6 +2358,7 @@ const fileStorage = require('../utils/storage');
 }
 
 module.exports = {
+  createEstimateFromParsed,   // exported for the round-7 integration test (all-or-nothing estimate creation)
   getOAuth2Client,
   getGmailClient,
   runScan,

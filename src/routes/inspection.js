@@ -232,7 +232,11 @@ router.patch('/unit/:id', async (req, res, next) => {
     const updates = {};
 
     if (req.body.preRoll !== undefined) {
-      const pr = req.body.preRoll;
+      // The whole measurement set replaces the stored one. Both the web panel and the tablets always send
+      // every field, and the tablet clears a measurement by leaving it out — merging would bring an
+      // erased value back (round 7 review). A missing / non-object payload is ignored, not saved.
+      if (!req.body.preRoll || typeof req.body.preRoll !== 'object') return res.status(400).json({ error: { message: 'preRoll must be an object' } });
+      const pr = { ...req.body.preRoll };
       // Auto-calculate out-of-square
       const oos = calcOutOfSquare(pr.diagA, pr.diagB);
       pr.outOfSquare = oos > 0.1875;
@@ -247,7 +251,8 @@ router.patch('/unit/:id', async (req, res, next) => {
     }
 
     if (req.body.postRoll !== undefined) {
-      const po = req.body.postRoll;
+      if (!req.body.postRoll || typeof req.body.postRoll !== 'object') return res.status(400).json({ error: { message: 'postRoll must be an object' } });
+      const po = { ...req.body.postRoll };
       // ASME UG-80 out-of-roundness: (Dmax−Dmin) ≤ 1% of nominal diameter
       let nominalD = null;
       const jobForSpec = await InspectionJob.findByPk(unit.inspectionJobId, { attributes: ['workOrderPartId'] });

@@ -1108,6 +1108,37 @@ router.get('/:shipmentId/documents/:documentId/signed-url', async (req, res, nex
   }
 });
 
+// GET /api/shipments/:shipmentId/documents/:documentId/download — the file itself (audit M11).
+// The web document viewer has always called this route, but it didn't exist, so viewing a shipment
+// document fell back to a broken link. S3 files are streamed; Cloudinary files redirect to a 5-minute
+// signed URL; NAS files redirect to their stored URL.
+router.get('/:shipmentId/documents/:documentId/download', async (req, res, next) => {
+  try {
+    const { shipmentId, documentId } = req.params;
+    const doc = await ShipmentDocument.findOne({ where: { id: documentId, shipmentId } });
+    if (!doc) return res.status(404).json({ error: { message: 'Document not found' } });
+    const filename = doc.originalName || doc.filename || 'document.pdf';
+    const contentType = doc.mimeType || 'application/pdf';
+    if (doc.cloudinaryId && doc.cloudinaryId.startsWith('s3:') && fileStorage.useS3()) {
+      if (await fileStorage.streamToResponse(doc.cloudinaryId, res, { filename, contentType })) return;
+    }
+    let url = doc.url;
+    if (doc.cloudinaryId && !doc.cloudinaryId.startsWith('s3:')) {
+      url = cloudinary.utils.private_download_url(doc.cloudinaryId, 'raw', {
+        resource_type: 'raw', expires_at: Math.floor(Date.now() / 1000) + 300, attachment: false
+      });
+    }
+    if (!url) return res.status(404).json({ error: { message: 'This document has no stored file.' } });
+    // Send the browser to the (short-lived, signed) file URL rather than fetching it through the server:
+    // no server-side request to an arbitrary stored URL, and NAS (http, shop LAN) links still open
+    // from a browser in the shop.
+    res.redirect(302, url);
+  } catch (error) {
+    console.error('Error downloading shipment document:', error.message);
+    next(error);
+  }
+});
+
 // GET /api/shipments/documents/nas-urls - Get all NAS document URLs for cleanup
 router.get('/documents/nas-urls', async (req, res, next) => {
   try {

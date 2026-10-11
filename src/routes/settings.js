@@ -89,13 +89,15 @@ router.put('/locations', async (req, res, next) => {
 // POST /api/settings/locations - Add a new location
 router.post('/locations', async (req, res, next) => {
   try {
-    const { id, name, xPercent, yPercent, description } = req.body;
-
-    if (!id || !name || xPercent === undefined || yPercent === undefined) {
-      return res.status(400).json({ 
-        error: { message: 'id, name, xPercent, and yPercent are required' } 
-      });
-    }
+    // The web "Add location" form sends only a name, which this route always rejected (audit M11).
+    // A missing id is made from the name and a missing position starts in the middle of the map
+    // (drag it into place afterwards). Tablets that send everything are unaffected.
+    const name = String(req.body.name || '').trim();
+    if (!name) return res.status(400).json({ error: { message: 'Location name is required' } });
+    const id = req.body.id || name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || `loc-${Date.now()}`;
+    const xPercent = req.body.xPercent !== undefined ? req.body.xPercent : 0.5;
+    const yPercent = req.body.yPercent !== undefined ? req.body.yPercent : 0.5;
+    const { description } = req.body;
 
     // Get current locations
     let setting = await AppSettings.findOne({
@@ -1180,6 +1182,18 @@ const ADMIN_KEYS = new Set([
   'weld_rates', 'certifier_signature_url', 'cod_override_password', 'ai_models', 'email_settings',
 ]);
 const isAdmin = (req) => (req.user && req.user.role === 'admin') || (req.apiKey && req.apiKey.permissions === 'admin');
+// Secrets: only an admin can read them through the generic route. The COD override password used to be
+// sent to every browser that opened a work order and compared there (round 7) — it is now checked on
+// the server (POST /api/workorders/:id/cod-override) and screens only ask whether one is configured.
+const SECRET_KEYS = new Set(['cod_override_password', 'email_settings']);
+
+// GET /api/settings/cod-override-status — is a COD override password set? (never returns the password)
+router.get('/cod-override-status', async (req, res, next) => {
+  try {
+    const row = await AppSettings.findOne({ where: { key: 'cod_override_password' } });
+    res.json({ data: { configured: !!(row && row.value != null && String(row.value).trim()) } });
+  } catch (error) { next(error); }
+});
 
 
 // GET /api/settings/:key - Get a general setting by key
@@ -1187,6 +1201,9 @@ const isAdmin = (req) => (req.user && req.user.role === 'admin') || (req.apiKey 
 // This matches the key-value-store semantics: "no value" is a valid state, not an error.
 router.get('/:key', async (req, res, next) => {
   try {
+    if (SECRET_KEYS.has(req.params.key) && !isAdmin(req)) {
+      return res.status(403).json({ error: { message: 'Only an admin can read this setting.' } });
+    }
     const setting = await AppSettings.findOne({
       where: { key: req.params.key }
     });

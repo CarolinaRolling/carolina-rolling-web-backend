@@ -713,16 +713,23 @@ app.get('/api/operations/production', authenticate, async (req, res) => {
   try {
     const { WorkOrderPart, WorkOrder } = require('./models');
     const { Op } = require('sequelize');
-    let start;
+    // The week runs midnight-to-midnight on the shop's calendar (Pacific), Monday first. It used to be
+    // midnight UTC (5 pm Sunday Pacific), so late-Sunday work landed in the next week (audit M12).
+    const shopTime = require('./utils/shopTime');
+    let startYmd;
     if (req.query.start) {
-      start = new Date(req.query.start + 'T00:00:00');
+      const sv = String(req.query.start);
+      // a real calendar date (2026-02-30 is refused instead of silently rolling over)
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(sv) || new Date(sv + 'T12:00:00Z').toISOString().slice(0, 10) !== sv) {
+        return res.status(400).json({ error: { message: 'Invalid start date' } });
+      }
+      startYmd = sv;
     } else {
-      start = new Date(); start.setHours(0, 0, 0, 0);
-      const dow = start.getDay();
-      start.setDate(start.getDate() + (dow === 0 ? -6 : 1 - dow)); // Monday
+      startYmd = shopTime.mondayOf(shopTime.shopDate());
     }
+    const start = shopTime.shopMidnight(startYmd);
     if (isNaN(start.getTime())) return res.status(400).json({ error: { message: 'Invalid start date' } });
-    const end = new Date(start); end.setDate(end.getDate() + 7);
+    const end = shopTime.shopMidnight(shopTime.addDays(startYmd, 7));
 
     // Collapse "Ray (Ray Tablet)" and "Ray" to the same person for grouping
     const normalizeOperator = (s) => {
@@ -833,22 +840,16 @@ app.get('/api/operations/schedule', authenticate, async (req, res) => {
     const now = new Date();
     const DONE = ['stored', 'shipped', 'archived', 'completed'];
     // Mirror CR Admin getDateStatus: overdue / today / urgent(<=3) / soon(<=7) / normal / none.
-    const dateStatus = (dateStr) => {
-      if (!dateStr) return 'none';
-      const d = new Date(dateStr);
-      if (isNaN(d)) return 'none';
-      const days = Math.floor((d - now) / 86400000);
-      if (days < 0) return 'overdue';
-      if (days === 0) return 'today';
-      if (days <= 3) return 'urgent';
-      if (days <= 7) return 'soon';
-      return 'normal';
-    };
+    // Due dates are calendar dates: compared with the shop's today (Pacific), not as midnight-UTC
+    // instants, which flagged jobs overdue from 5 pm the day before (audit M12)
+    const shopTime = require('./utils/shopTime');
+    const today = shopTime.shopDate(now);
+    const dateStatus = (dateStr) => shopTime.dueStatus(dateStr, today);
     res.json({ data: rows.map(w => {
       const parts = w.parts || [];
       const isRush = parts.some(pt => pt.partType === 'rush_service') || w.priority === 'rush' || w.priority === 'emergency';
       const due = w.promisedDate || w.requestedDueDate;
-      const isOverdue = !!due && new Date(due) < now && !DONE.includes(w.status);
+      const isOverdue = !!due && shopTime.dueStatus(due, today) === 'overdue' && !DONE.includes(w.status);
       return {
         id: w.id,
         dr: w.drNumber || w.orderNumber,
@@ -1343,7 +1344,17 @@ app.use((req, res) => {
 // Cleanup job: Two-phase cleanup for shipped items
 // Phase 1: Delete photos/images from Cloudinary after 3 months (keeps shipment record for reference)
 // Phase 2: Delete entire shipment record after 6 months
+// Only one dyno runs scheduled jobs (same rule as the cron guard below). CRON_LEADER=true/false overrides.
+const isCronLeader = () => process.env.CRON_LEADER ? process.env.CRON_LEADER === 'true' : (!process.env.DYNO || process.env.DYNO === 'web.1');
+
+// Round 7 (audit M6): runs on the cron leader only (it used to run on every dyno at every boot, so two
+// dynos deleted the same rows at once); stored files go through fileRefs, which works for S3 as well as
+// Cloudinary (it used to call Cloudinary even when files live on S3, so S3 files were never removed)
+// and keeps a file another record still uses; each shipment is snapshotted in the deletion archive
+// before it is removed.
 async function cleanupOldShippedItems() {
+  if (!isCronLeader()) return;
+  const { deleteStoredFileIfUnused } = require('./services/fileRefs');
   try {
     // === Phase 1: Strip photos from shipments shipped 3+ months ago ===
     const threeMonthsAgo = new Date();
@@ -1367,15 +1378,9 @@ async function cleanupOldShippedItems() {
       
       for (const shipment of shipmentsWithPhotos) {
         for (const photo of shipment.photos) {
-          if (photo.cloudinaryId) {
-            try {
-              await cloudinary.uploader.destroy(photo.cloudinaryId);
-              deletedCount++;
-            } catch (e) {
-              console.error(`[Cleanup] Failed to delete Cloudinary image ${photo.cloudinaryId}:`, e.message);
-            }
-          }
+          const storageId = photo.cloudinaryId;
           await photo.destroy();
+          if (storageId && await deleteStoredFileIfUnused(storageId, { resourceType: 'image' })) deletedCount++;
         }
       }
       console.log(`[Cleanup] Phase 1 complete: Deleted ${deletedCount} photos from ${shipmentsWithPhotos.length} shipments`);
@@ -1402,22 +1407,14 @@ async function cleanupOldShippedItems() {
     if (shipmentsToDelete.length > 0) {
       console.log(`[Cleanup] Deleting ${shipmentsToDelete.length} shipment records older than 6 months...`);
       
+      const { archiveRecord, labelFor } = require('./services/deletionArchive');
       for (const shipment of shipmentsToDelete) {
-        // Delete any remaining photos from Cloudinary
-        for (const photo of shipment.photos) {
-          if (photo.cloudinaryId) {
-            try { await cloudinary.uploader.destroy(photo.cloudinaryId); } catch (e) {}
-          }
-        }
-        
-        // Delete documents from Cloudinary
-        for (const doc of shipment.documents) {
-          if (doc.cloudinaryId) {
-            try { await cloudinary.uploader.destroy(doc.cloudinaryId, { resource_type: 'raw' }); } catch (e) {}
-          }
-        }
-        
+        const photoIds = (shipment.photos || []).map(p => p.cloudinaryId).filter(Boolean);
+        const docIds = (shipment.documents || []).map(d => d.cloudinaryId).filter(Boolean);
+        await archiveRecord(shipment, { modelName: 'Shipment', label: labelFor(shipment), deletedBy: 'system', reason: 'automatic cleanup: shipped 6+ months ago' });
         await shipment.destroy();
+        for (const id of photoIds) await deleteStoredFileIfUnused(id, { resourceType: 'image' });
+        for (const id of docIds) await deleteStoredFileIfUnused(id, { resourceType: 'raw' });
       }
       console.log(`[Cleanup] Phase 2 complete: Deleted ${shipmentsToDelete.length} shipment records`);
     }
@@ -2488,57 +2485,10 @@ async function startServer() {
         await sequelize.query(`ALTER TABLE work_order_parts ADD COLUMN "vendorEstimateNumber" VARCHAR(255) DEFAULT NULL`);
         console.log('Added vendorEstimateNumber to work_order_parts');
       }
-      // Backfill vendorEstimateNumber from linked estimate parts where missing
-      try {
-        const [bfResult] = await sequelize.query(`
-          UPDATE work_order_parts wop
-          SET "vendorEstimateNumber" = ep."vendorEstimateNumber"
-          FROM work_orders wo
-          JOIN estimates e ON e.id = wo."estimateId"
-          JOIN estimate_parts ep ON ep."estimateId" = e.id AND ep."partNumber" = wop."partNumber"
-          WHERE wop."workOrderId" = wo.id
-          AND ep."vendorEstimateNumber" IS NOT NULL AND ep."vendorEstimateNumber" != ''
-          AND (wop."vendorEstimateNumber" IS NULL OR wop."vendorEstimateNumber" = '')
-        `);
-        const bfCount = bfResult?.rowCount || 0;
-        if (bfCount > 0) console.log(`Backfilled vendorEstimateNumber for ${bfCount} work order parts from estimates`);
-      } catch (bfErr) {
-        console.log('vendorEstimateNumber backfill:', bfErr.message);
-      }
-      // Backfill clientPartNumber from linked estimate parts where missing
-      try {
-        const [cpResult] = await sequelize.query(`
-          UPDATE work_order_parts wop
-          SET "clientPartNumber" = ep."clientPartNumber"
-          FROM work_orders wo
-          JOIN estimates e ON e.id = wo."estimateId"
-          JOIN estimate_parts ep ON ep."estimateId" = e.id AND ep."partNumber" = wop."partNumber"
-          WHERE wop."workOrderId" = wo.id
-          AND ep."clientPartNumber" IS NOT NULL AND ep."clientPartNumber" != ''
-          AND (wop."clientPartNumber" IS NULL OR wop."clientPartNumber" = '')
-        `);
-        const cpCount = cpResult?.rowCount || 0;
-        if (cpCount > 0) console.log(`Backfilled clientPartNumber for ${cpCount} work order parts from estimates`);
-      } catch (bfErr) {
-        console.log('clientPartNumber backfill:', bfErr.message);
-      }
-      // Backfill heatNumber from linked estimate parts where missing
-      try {
-        const [hnResult] = await sequelize.query(`
-          UPDATE work_order_parts wop
-          SET "heatNumber" = ep."heatNumber"
-          FROM work_orders wo
-          JOIN estimates e ON e.id = wo."estimateId"
-          JOIN estimate_parts ep ON ep."estimateId" = e.id AND ep."partNumber" = wop."partNumber"
-          WHERE wop."workOrderId" = wo.id
-          AND ep."heatNumber" IS NOT NULL AND ep."heatNumber" != ''
-          AND (wop."heatNumber" IS NULL OR wop."heatNumber" = '')
-        `);
-        const hnCount = hnResult?.rowCount || 0;
-        if (hnCount > 0) console.log(`Backfilled heatNumber for ${hnCount} work order parts from estimates`);
-      } catch (bfErr) {
-        console.log('heatNumber backfill:', bfErr.message);
-      }
+      // (Round 7: three boot "backfills" of vendorEstimateNumber / clientPartNumber / heatNumber from the
+      // estimate were removed. Their SQL was invalid, so they failed on every boot and never changed
+      // anything — and they matched parts by line number, which reordering changes, so fixing them could
+      // have copied a heat number onto the wrong part.)
       // Ensure heatBreakdown column exists
       if (!wopColNames.includes('heatBreakdown')) {
         await sequelize.query(`ALTER TABLE work_order_parts ADD COLUMN "heatBreakdown" JSONB DEFAULT NULL`);
@@ -2618,7 +2568,7 @@ async function startServer() {
       oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
       const [archiveCount] = await Estimate.update(
         { status: 'archived', archivedAt: new Date() },
-        { where: { status: { [Op.notIn]: ['archived', 'accepted'] }, createdAt: { [Op.lt]: oneMonthAgo } } }
+        { where: { status: { [Op.notIn]: ['archived', 'accepted', 'converted'] }, createdAt: { [Op.lt]: oneMonthAgo } } }   // never 'converted' (round 7)
       );
       if (archiveCount > 0) console.log(`Archived ${archiveCount} estimates older than 1 month`);
     } catch (e) { console.log('Estimate archive:', e.message); }
@@ -2807,7 +2757,7 @@ async function startServer() {
     //
     // process.env.DYNO is set by Heroku ("web.1", "web.2", ...). Outside Heroku it is
     // undefined and everything runs as before.
-    const CRON_LEADER = !process.env.DYNO || process.env.DYNO === 'web.1';
+    const CRON_LEADER = isCronLeader();   // same rule as the shipment cleanup (CRON_LEADER=true/false overrides)
     if (!CRON_LEADER) {
       console.log(`[cron] ${process.env.DYNO} is not the leader — scheduled jobs disabled on this dyno.`);
     }
@@ -3252,7 +3202,7 @@ Please confirm with the operator and mark the order complete if ready.`,
         oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
         const [count] = await Estimate.update(
           { status: 'archived', archivedAt: new Date() },
-          { where: { status: { [Op.notIn]: ['archived', 'accepted'] }, createdAt: { [Op.lt]: oneMonthAgo } } }
+          { where: { status: { [Op.notIn]: ['archived', 'accepted', 'converted'] }, createdAt: { [Op.lt]: oneMonthAgo } } }   // never 'converted' (round 7)
         );
         if (count > 0) console.log(`[auto-archive] Archived ${count} estimates older than 1 month`);
       } catch (err) {

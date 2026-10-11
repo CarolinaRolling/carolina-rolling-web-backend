@@ -272,9 +272,16 @@ router.get('/liabilities', async (req, res, next) => {
 });
 
 // POST /api/business/liabilities
+// Fields a bill form may set (audit L7). Before, the whole request body was saved, so a request could
+// set paidAt / paidAmount / status (marking a bill paid without a payment), its id or its file links.
+// Paying goes through /:id/pay; files through /:id/upload.
+const LIABILITY_FIELDS = ['name', 'category', 'amount', 'dueDate', 'recurring', 'recurringInterval', 'vendor', 'vendorId',
+  'notes', 'referenceNumber', 'vendorInvoiceNumber', 'poNumber', 'linkedPOId', 'lineItems'];
+const pickLiabilityFields = (body = {}) => Object.fromEntries(Object.entries(body).filter(([k]) => LIABILITY_FIELDS.includes(k)));
+
 router.post('/liabilities', async (req, res, next) => {
   try {
-    const liability = await Liability.create(req.body);
+    const liability = await Liability.create({ ...pickLiabilityFields(req.body), createdBy: req.user?.username || null });
     res.json({ data: liability, message: 'Bill added' });
   } catch (error) { next(error); }
 });
@@ -284,7 +291,7 @@ router.put('/liabilities/:id', async (req, res, next) => {
   try {
     const liability = await Liability.findByPk(req.params.id);
     if (!liability) return res.status(404).json({ error: { message: 'Not found' } });
-    await liability.update(req.body);
+    await liability.update(pickLiabilityFields(req.body));
     res.json({ data: liability, message: 'Updated' });
   } catch (error) { next(error); }
 });

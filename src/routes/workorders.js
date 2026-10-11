@@ -994,6 +994,40 @@ async function generateOutsideProcessingPO(poNumber, vendor, parts, workOrder, s
 // Helper to log activity for daily email
 // Audit a work-order lifecycle event to the ActivityLog (the one shown in Users & Logs). Captures the action,
 // DR number, client name, and who did it — so creation/voiding/deletion are traceable (accountability).
+// Delete-override code (audit L4): only from the DELETE_OVERRIDE_CODE setting on the server — there is
+// no built-in fallback any more (it was in the source code, so anyone who saw the code knew it) — and
+// only in the request body (a query string ends up in server and proxy logs).
+// Wrong-password limiter shared by the COD override and the delete override code: 5 tries per user per
+// 10 minutes, counted synchronously. Per server process (each dyno keeps its own count).
+const passwordAttempts = (() => {
+  const m = new Map();   // key → { n, until }
+  return {
+    take(key) {
+      const now = Date.now();
+      let e = m.get(key);
+      if (!e || e.until <= now) { e = { n: 0, until: now + 10 * 60 * 1000 }; m.set(key, e); }
+      if (e.n >= 5) return false;
+      e.n++;
+      if (m.size > 5000) for (const [k, v] of m) if (v.until <= now) m.delete(k);   // keep the map small
+      return true;
+    },
+    clear(key) { m.delete(key); },
+  };
+})();
+
+function overrideCodeProblem(req) {
+  const who = req.user?.username || req.apiKey?.name || req.ip;
+  if (!passwordAttempts.take('delete:' + who)) return 'Too many wrong override codes. Try again in a few minutes.';
+  const expected = process.env.DELETE_OVERRIDE_CODE;
+  if (!expected) return 'The delete override is turned off: set DELETE_OVERRIDE_CODE on the server to enable it.';
+  const supplied = String(req.body?.overrideCode || '');
+  const crypto = require('crypto');
+  const h = (v) => crypto.createHash('sha256').update(v).digest();
+  const ok = supplied && crypto.timingSafeEqual(h(supplied), h(expected));
+  if (ok) passwordAttempts.clear('delete:' + who);
+  return ok ? null : 'Incorrect override code.';
+}
+
 async function auditWorkOrder(req, action, wo, extraDetails = {}) {
   try {
     const drLabel = wo?.drNumber ? `DR-${wo.drNumber}` : (wo?.orderNumber || '(no number)');
@@ -1567,7 +1601,12 @@ router.get('/invoicing/skipped', async (req, res, next) => {
 });
 
 // GET /api/workorders/:id - Get work order by ID
+// Fixed paths registered further down this file would otherwise be caught here as an "id" and answered
+// with "Work order not found" — the Archived work orders page and the blank shipper form never loaded
+// (audit M11). Hand them on to their own routes.
+const FIXED_GET_PATHS = new Set(['archived', 'blank-shipper']);
 router.get('/:id', async (req, res, next) => {
+  if (FIXED_GET_PATHS.has(req.params.id)) return next('route');
   try {
     // Support both UUID and orderNumber
     const idParam = req.params.id;
@@ -2116,10 +2155,9 @@ router.delete('/:id/invoice', async (req, res, next) => {
     if (!req.user || req.user.role !== 'admin') {
       return res.status(403).json({ error: { message: 'Admin rights required to delete an invoice.' } });
     }
-    const OVERRIDE_CODE = process.env.DELETE_OVERRIDE_CODE || 'CRC-FORCE-DELETE';
-    const suppliedCode = req.body?.overrideCode || req.query?.overrideCode;
-    if (suppliedCode !== OVERRIDE_CODE) {
-      return res.status(403).json({ error: { message: 'Override code required to delete an invoice and reclaim its number.' } });
+    const codeProblem = overrideCodeProblem(req);
+    if (codeProblem) {
+      return res.status(403).json({ error: { message: `Override code required to delete an invoice and reclaim its number. ${codeProblem}` } });
     }
 
     const workOrder = await WorkOrder.findByPk(req.params.id);
@@ -2303,6 +2341,45 @@ router.post('/:id/email-invoice', async (req, res, next) => {
     console.error('[email-invoice] Failed:', error.message);
     next(error);
   }
+});
+
+// GET /api/workorders/:id/invoice-totals — the invoice total exactly as the PDF, ledger and QuickBooks
+// export compute it (services/invoiceTotals). The work-order screen shows this next to its own live
+// preview, which can differ until saved (audit M16).
+router.get('/:id/invoice-totals', async (req, res, next) => {
+  try {
+    const { loadInvoiceTotals } = require('../services/invoiceTotals');
+    const entry = (await loadInvoiceTotals([req.params.id])).get(req.params.id);
+    if (!entry) return res.status(404).json({ error: { message: 'Work order not found' } });
+    res.json({ data: { ...entry.totals, amount: entry.amount, frozen: !!entry.wo.iifExportedAt } });
+  } catch (error) { next(error); }
+});
+
+// POST /api/workorders/:id/cod-override — check the COD override password on the server (round 7).
+// Before: every browser that opened a work order downloaded the password and compared it locally, so
+// anyone could read it in the browser's network tab. Wrong attempts are limited per user, and every
+// attempt is written to the activity log.
+router.post('/:id/cod-override', async (req, res, next) => {
+  try {
+    const who = req.user?.username || req.apiKey?.name || req.ip;
+    // Counted before anything is awaited, so a burst of parallel guesses can't all slip through
+    if (!passwordAttempts.take('cod:' + who)) {
+      return res.status(429).json({ error: { message: 'Too many wrong attempts. Try again in a few minutes.' } });
+    }
+    const workOrder = await WorkOrder.findByPk(req.params.id, { attributes: ['id', 'drNumber', 'orderNumber', 'clientName', 'invoiceNumber'] });
+    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+    const row = await AppSettings.findOne({ where: { key: 'cod_override_password' } });
+    const expected = row && row.value != null ? String(row.value).trim() : '';
+    if (!expected) return res.status(409).json({ error: { message: 'No override password is configured. Set one in Admin → Users & Logs → System.' } });
+    const entered = String(req.body?.password || '').trim();
+    const crypto = require('crypto');
+    const h = (v) => crypto.createHash('sha256').update(v).digest();
+    const ok = entered.length > 0 && crypto.timingSafeEqual(h(entered), h(expected));
+    if (ok) passwordAttempts.clear('cod:' + who);
+    await auditWorkOrder(req, ok ? 'cod_override_used' : 'cod_override_failed', workOrder, { action: req.body?.action || null });
+    if (!ok) return res.status(403).json({ error: { message: 'Incorrect override password.' } });
+    res.json({ data: { ok: true } });
+  } catch (error) { next(error); }
 });
 
 // POST /api/workorders/:id/mark-complete - Shop floor marks order complete
@@ -3064,11 +3141,14 @@ router.delete('/:id', async (req, res, next) => {
 
     // Suggest void instead of delete for DR-numbered orders, unless override passcode supplied
     if (workOrder.drNumber) {
-      const OVERRIDE_CODE = process.env.DELETE_OVERRIDE_CODE || 'CRC-FORCE-DELETE';
-      const suppliedCode = req.body?.overrideCode || req.query?.overrideCode;
-      if (suppliedCode !== OVERRIDE_CODE) {
+      if (!req.body?.overrideCode) {
         await transaction.rollback();
         return res.status(400).json({ error: { message: `DR-${workOrder.drNumber} should be voided instead of deleted. Use DR Numbers → Void to preserve the record for accounting.` } });
+      }
+      const codeProblem = overrideCodeProblem(req);
+      if (codeProblem) {
+        await transaction.rollback();
+        return res.status(403).json({ error: { message: codeProblem } });
       }
       console.log(`[delete WO] Force-delete override used for DR-${workOrder.drNumber} by ${req.body?.deletedBy || 'unknown'}`);
     }
@@ -3177,7 +3257,7 @@ router.delete('/:id', async (req, res, next) => {
     await transaction.commit();
     require('../services/fileRefs').deleteStoredFilesIfUnused(storedFiles).catch(() => {});
 
-    auditWorkOrder(req, 'workorder_deleted', auditSnapshot, { usedOverride: !!(req.body?.overrideCode || req.query?.overrideCode) });
+    auditWorkOrder(req, 'workorder_deleted', auditSnapshot, { usedOverride: !!req.body?.overrideCode });
     res.json({ message: 'Work order deleted successfully' });
   } catch (error) {
     await transaction.rollback();

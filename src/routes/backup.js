@@ -149,6 +149,19 @@ async function buildBackup(includeFiles = false) {
   backup.data.activityLogs = (await ActivityLog.findAll({ where: { createdAt: { [require('sequelize').Op.gte]: thirtyDaysAgo } }, order: [['createdAt', 'DESC']] })).map(a => a.toJSON());
   backup.data.dailyActivity = (await DailyActivity.findAll({ order: [['createdAt', 'DESC']], limit: 365 })).map(d => d.toJSON());
 
+  // Tables the backup used to leave out (audit M8). WorkOrderPresence ("in machine" heartbeats) is
+  // live state, not data, and is still skipped.
+  {
+    const M = require('../models');
+    backup.data.deletionArchive = (await M.DeletionArchive.findAll()).map(r => r.toJSON());
+    backup.data.inboundPaperwork = (await M.InboundPaperwork.findAll()).map(r => r.toJSON());
+    backup.data.convertQueueItems = (await M.ConvertQueueItem.findAll()).map(r => r.toJSON());
+    backup.data.deviceTokens = (await M.DeviceToken.findAll()).map(r => r.toJSON());
+  }
+  // Tables exported only in part (most recent rows). A restore must not clear these, or the older
+  // rows that were never in the file are lost (M8).
+  backup.partialTables = ['emailLogs', 'scannedEmails', 'shopSupplyLogs', 'activityLogs', 'dailyActivity'];
+
   // Counts
   backup.counts = {};
   for (const [key, val] of Object.entries(backup.data)) {
@@ -824,10 +837,16 @@ router.post('/restore', requireAdmin, async (req, res, next) => {
     };
 
     // Upsert helper for simple models
+    // Tables the file holds only partly (newest rows) are never cleared — older rows weren't exported (M8).
+    // Older backup files don't say which, so the known partial ones are listed here too.
+    // The deletion archive and device registrations are also never cleared: the archive may hold
+    // snapshots of records deleted after this backup was taken, and clearing device tokens would cut
+    // push notifications to devices registered since.
+    const partial = new Set([...(backup.partialTables || []), 'emailLogs', 'scannedEmails', 'shopSupplyLogs', 'activityLogs', 'dailyActivity', 'deletionArchive', 'deviceTokens']);
     const restoreSimple = async (model, data, label) => {
       if (!data || !data.length) return;
       results[label] = { restored: 0, skipped: 0, errors: [] };
-      if (clearExisting) {
+      if (clearExisting && !partial.has(label)) {
         try { await model.destroy({ where: {}, force: true }); } catch (e) {
           console.warn(`[restore] Clear ${label} failed: ${e.message}`);
         }
@@ -1013,6 +1032,11 @@ router.post('/restore', requireAdmin, async (req, res, next) => {
       await restoreSimple(M.EmailLog, backup.data.emailLogs, 'emailLogs');
       await restoreSimple(M.ActivityLog, backup.data.activityLogs, 'activityLogs');
       await restoreSimple(M.DailyActivity, backup.data.dailyActivity, 'dailyActivity');
+      // added in round 7 (absent from older backup files — then simply skipped)
+      await restoreSimple(M.DeletionArchive, backup.data.deletionArchive, 'deletionArchive');
+      await restoreSimple(M.InboundPaperwork, backup.data.inboundPaperwork, 'inboundPaperwork');
+      await restoreSimple(M.ConvertQueueItem, backup.data.convertQueueItems, 'convertQueueItems');
+      await restoreSimple(M.DeviceToken, backup.data.deviceTokens, 'deviceTokens');
     }
 
     // ===== SECOND PASS: Apply deferred FK updates =====

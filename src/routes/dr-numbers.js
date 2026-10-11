@@ -309,6 +309,16 @@ router.post('/:drNumber/unvoid', async (req, res, next) => {
     if (drEntry.workOrderId) {
       const workOrder = await WorkOrder.findByPk(drEntry.workOrderId, { transaction });
       if (workOrder) {
+        // While voided, its invoice number counted as free and may have gone to another order.
+        if (workOrder.invoiceNumber) {
+          const { Op } = require('sequelize');
+          const holder = await WorkOrder.findOne({ where: { invoiceNumber: workOrder.invoiceNumber, id: { [Op.ne]: workOrder.id },
+            [Op.or]: [{ isVoided: null }, { isVoided: false }] }, transaction });
+          if (holder) {
+            await transaction.rollback();
+            return res.status(409).json({ error: { message: `Can't restore DR-${drNumber}: its invoice #${workOrder.invoiceNumber} is now used by ${holder.drNumber ? 'DR-' + holder.drNumber : holder.orderNumber}. Clear or change one of the invoice numbers first.` } });
+          }
+        }
         await workOrder.update({
           isVoided: false,
           voidedAt: null,

@@ -2045,11 +2045,18 @@ router.post('/:id/invoice', upload.single('invoicePdf'), async (req, res, next) 
     const { invoiceNumber, invoiceDate } = req.body;
     if (!invoiceNumber) return res.status(400).json({ error: { message: 'Invoice number is required' } });
     
-    const updates = {
-      invoiceNumber,
-      invoiceDate: invoiceDate || new Date(),
-      invoicedBy: req.user?.username || 'Unknown'
-    };
+    // Claim the typed number through the locked service (audit H4). It refuses a number another
+    // live work order holds — the old code moved the tracking row and left two orders sharing it —
+    // and records the tracking row in the same transaction.
+    const invoiceNumbers = require('../services/invoiceNumbers');
+    try {
+      await invoiceNumbers.claimInvoiceNumber(workOrder.id, invoiceNumber, {
+        extraUpdates: { invoiceDate: invoiceDate || new Date(), invoicedBy: req.user?.username || 'Unknown' } });
+    } catch (claimErr) {
+      try { if (req.file) require('fs').unlinkSync(req.file.path); } catch (e) {}
+      if (claimErr.status === 409) return res.status(409).json({ error: { message: claimErr.message } });
+      throw claimErr;
+    }
 
     // Upload PDF if provided
     if (req.file) {
@@ -2059,35 +2066,9 @@ router.post('/:id/invoice', upload.single('invoicePdf'), async (req, res, next) 
         folder: 'invoices',
         contentType: 'application/pdf'
       });
-      updates.invoicePdfUrl = result.url;
-      updates.invoicePdfCloudinaryId = result.publicId;
       try { require('fs').unlinkSync(req.file.path); } catch(e) {}
+      await WorkOrder.update({ invoicePdfUrl: result.url, invoicePdfCloudinaryId: result.publicId }, { where: { id: workOrder.id } });
     }
-
-    await workOrder.update(updates);
-
-    // Also record this invoice number in the InvoiceNumber tracking table so it appears on the
-    // Invoice Numbers tracking page. (Previously only the auto-assign path did this, so invoices
-    // recorded here with a typed number never showed up on the tracker.) Skip if that number is
-    // already tracked, to avoid duplicates.
-    try {
-      const { InvoiceNumber } = require('../models');
-      const numInt = parseInt(invoiceNumber);
-      if (!isNaN(numInt) && numInt > 0) {
-        const existing = await InvoiceNumber.findOne({ where: { invoiceNumber: numInt } });
-        if (!existing) {
-          await InvoiceNumber.create({
-            invoiceNumber: numInt,
-            workOrderId: workOrder.id,
-            clientId: workOrder.clientId || null,
-            clientName: workOrder.clientName || null,
-          });
-        } else if (!existing.workOrderId && workOrder.id) {
-          // Backfill the link if the number was pre-created (e.g. imported) but unlinked.
-          await existing.update({ workOrderId: workOrder.id, clientId: workOrder.clientId || existing.clientId, clientName: workOrder.clientName || existing.clientName });
-        }
-      }
-    } catch (e) { console.warn('[invoice] could not record InvoiceNumber tracking row:', e.message); }
     
     const updated = await WorkOrder.findByPk(req.params.id, {
       include: [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'partTotal', 'quantity'] }]
@@ -2141,32 +2122,22 @@ router.delete('/:id/invoice', async (req, res, next) => {
     if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
     console.log(`[clear-invoice] #${workOrder.invoiceNumber} on DR-${workOrder.drNumber} deleted+reclaimed by admin ${req.user.username}`);
     
-    // Delete PDF if exists
-    if (workOrder.invoicePdfCloudinaryId) {
+    // Free the invoice number so it can be reused on the next invoice (fills the gap instead of wasting it).
+    // Removing the tracking row, adding the number to the freed pool and clearing the work order now
+    // happen in ONE locked transaction (audit H4) — before, each step could fail or race on its own.
+    // A reused number is later flagged (reusedInvoiceNumber) so it's excluded from IIF export.
+    const oldPdfId = workOrder.invoicePdfCloudinaryId;
+    const { freed: freedNum } = await require('../services/invoiceNumbers').releaseInvoiceNumber(workOrder.id, {
+      extraUpdates: { invoicePdfUrl: null, invoicePdfCloudinaryId: null } });
+    await workOrder.reload();
+
+    // Delete the PDF only after the database change is committed
+    if (oldPdfId) {
       try {
         const fileStorage = require('../utils/storage');
-        await fileStorage.destroy(workOrder.invoicePdfCloudinaryId);
+        await fileStorage.destroy(oldPdfId);
       } catch (e) { console.warn('Could not delete invoice PDF:', e.message); }
     }
-
-    // Free the invoice number so it can be reused on the next invoice (fills the gap instead of wasting it).
-    // Remove the InvoiceNumber record and add the number to the freed pool. A reused number is later flagged
-    // (reusedInvoiceNumber) so it's excluded from IIF export and shown on the reconciliation report.
-    const freedNum = workOrder.invoiceNumber ? parseInt(workOrder.invoiceNumber, 10) : null;
-    if (freedNum && !isNaN(freedNum)) {
-      const { InvoiceNumber, AppSettings } = require('../models');
-      try { await InvoiceNumber.destroy({ where: { invoiceNumber: freedNum } }); } catch (e) { console.warn('[clear-invoice] could not remove InvoiceNumber:', e.message); }
-      try {
-        const row = await AppSettings.findOne({ where: { key: 'freed_invoice_numbers' } });
-        const list = (row && Array.isArray(row.value)) ? row.value : [];
-        if (!list.includes(freedNum)) list.push(freedNum);
-        await AppSettings.upsert({ key: 'freed_invoice_numbers', value: list });
-      } catch (e) { console.warn('[clear-invoice] could not update freed pool:', e.message); }
-    }
-    await workOrder.update({
-      invoiceNumber: null, invoiceDate: null, invoicedBy: null,
-      invoicePdfUrl: null, invoicePdfCloudinaryId: null, reusedInvoiceNumber: false
-    });
     res.json({ data: workOrder, message: freedNum ? `Invoice cleared \u2014 #${freedNum} freed for reuse` : 'Invoice cleared' });
   } catch (error) { next(error); }
 });

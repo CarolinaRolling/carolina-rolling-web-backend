@@ -84,6 +84,8 @@ function getFinalShipDate(wo) {
 const { calculatePartTotal, partBreakdown, roundUpMaterial, loadLaborMinimums, calculateMinimumAdjustment } = require('../services/pricing');
 // The single invoice-total calculation shared by the PDF, ledger, balances and email (audit C4)
 const { computeInvoiceTotals, snapshotTotalsForExport } = require('../services/invoiceTotals');
+// All invoice-number assignment goes through one locked, idempotent service (audit H4)
+const invoiceNumbers = require('../services/invoiceNumbers');
 
 function getPartAmount(part) {
   return calculatePartTotal(part);
@@ -1141,31 +1143,12 @@ const IIF_HEADER = [
 // Returns { number, isReused }. Prefers the lowest FREED number (from a cleared/rejected invoice) so gaps
 // get filled; a reused number is flagged so it's excluded from IIF export and shown on the reconciliation
 // report for manual entry. Otherwise returns highest-existing + 1 (self-healing, never reuses live numbers).
-async function computeNextInvoiceNumber(transaction) {
-  const { AppSettings, InvoiceNumber } = require('../models');
-  const opts = transaction ? { transaction } : {};
-  // 1) Any freed numbers waiting to be reused?
-  const freedRow = await AppSettings.findOne({ where: { key: 'freed_invoice_numbers' }, ...opts });
-  const freed = (freedRow && Array.isArray(freedRow.value)) ? freedRow.value.slice() : [];
-  if (freed.length > 0) {
-    freed.sort((a, b) => a - b);
-    const reuse = freed.shift();
-    // Make sure it isn't somehow live again; if it is, drop it and fall through.
-    const clash = await InvoiceNumber.findOne({ where: { invoiceNumber: reuse }, ...opts });
-    await AppSettings.upsert({ key: 'freed_invoice_numbers', value: freed }, opts);
-    if (!clash) return { number: reuse, isReused: true };
-  }
-  // 2) Normal: highest existing (any status) + 1.
-  const highest = await InvoiceNumber.findOne({ order: [['invoiceNumber', 'DESC']], ...opts });
-  if (highest && highest.invoiceNumber) return { number: highest.invoiceNumber + 1, isReused: false };
-  // 3) Brand-new system.
-  const setting = await AppSettings.findOne({ where: { key: 'next_invoice_number' }, ...opts });
-  return { number: (setting && setting.value) ? setting.value : 1001, isReused: false };
-}
+// computeNextInvoiceNumber() was removed: it read-max-plus-one without a lock, and the preview
+// endpoint that called it consumed a freed number. See services/invoiceNumbers.js.
 
 router.get('/next-invoice-number', async (req, res, next) => {
   try {
-    const { number, isReused } = await computeNextInvoiceNumber();
+    const { number, isReused } = await invoiceNumbers.previewNextInvoiceNumber();
     res.json({ data: { nextNumber: number, isReused } });
   } catch (error) { next(error); }
 });
@@ -1185,40 +1168,13 @@ router.put('/next-invoice-number', async (req, res, next) => {
 // POST /api/quickbooks/assign-invoice-number/:id — Assign invoice number to WO
 router.post('/assign-invoice-number/:id', async (req, res, next) => {
   try {
-    const wo = await WorkOrder.findByPk(req.params.id);
-    if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
-    
-    // Check if already has invoice number
-    if (wo.invoiceNumber) {
-      return res.json({ data: { invoiceNumber: wo.invoiceNumber }, message: 'Invoice number already assigned' });
-    }
-    
-    const { sequelize } = require('../models');
-    const result = await sequelize.transaction(async (transaction) => {
-      const { number: nextNum, isReused } = await computeNextInvoiceNumber(transaction);
-      
-      // Create invoice number record
-      await InvoiceNumber.create({
-        invoiceNumber: nextNum,
-        workOrderId: wo.id,
-        clientId: wo.clientId,
-        clientName: wo.clientName
-      }, { transaction });
-      
-      // Update WO — set invoiceDate too so it sorts correctly in the Invoiced history (and QB export).
-      await wo.update({ invoiceNumber: String(nextNum), invoiceDate: wo.invoiceDate || new Date(), reusedInvoiceNumber: isReused }, { transaction });
-      
-      // Advance the stored counter only for brand-new (non-reused) numbers, and never move it backward.
-      if (!isReused) {
-        const cur = (await AppSettings.findOne({ where: { key: 'next_invoice_number' }, transaction }))?.value || 0;
-        await AppSettings.upsert({ key: 'next_invoice_number', value: Math.max(cur, nextNum + 1) }, { transaction });
-      }
-      
-      return nextNum;
-    });
-    
-    res.json({ data: { invoiceNumber: String(result) }, message: `Invoice #${result} assigned` });
-  } catch (error) { next(error); }
+    const r = await invoiceNumbers.assignNextInvoiceNumber(req.params.id, { setDate: 'ifMissing' });
+    if (r.alreadyAssigned) return res.json({ data: { invoiceNumber: r.number }, message: 'Invoice number already assigned' });
+    res.json({ data: { invoiceNumber: r.number }, message: `Invoice #${r.number} assigned` });
+  } catch (error) {
+    if (error.status === 404) return res.status(404).json({ error: { message: error.message } });
+    next(error);
+  }
 });
 
 // ==================== IIF EXPORT ====================
@@ -1274,7 +1230,7 @@ router.post('/export-batch', async (req, res, next) => {
       const result = await buildInvoiceIIF(wo, wo.parts || [], client, wo.invoiceNumber);
       if (result) { allLines.push(...result.lines); summaries.push(result.summary); }
     }
-    if (allLines.length === 0 && reusedSummaries.length === 0) return res.status(400).json({ error: { message: 'No billable items found' } });
+    if (allLines.length === 0) return res.status(400).json({ error: { message: 'No billable items found' } });
     
     const iifContent = [...IIF_HEADER, ...allLines].join('\r\n') + '\r\n';
     const filename = `quickbooks-invoices-${new Date().toISOString().split('T')[0]}.iif`;
@@ -1442,20 +1398,13 @@ router.post('/invoice-numbers/manual', async (req, res, next) => {
     const existing = await InvoiceNumber.findOne({ where: { invoiceNumber: num } });
     if (existing) return res.status(400).json({ error: { message: `Invoice #${num} already exists` } });
     
-    const entry = { invoiceNumber: num, clientName: clientName || null };
-    
-    // If linking to a work order
-    if (workOrderId) {
-      const wo = await WorkOrder.findByPk(workOrderId);
-      if (wo) {
-        entry.workOrderId = wo.id;
-        entry.clientId = wo.clientId;
-        entry.clientName = wo.clientName;
-        await wo.update({ invoiceNumber: String(num) });
-      }
+    // Linking to a work order goes through the locked service (refuses a number a live order holds)
+    if (workOrderId && await WorkOrder.findByPk(workOrderId)) {
+      await invoiceNumbers.claimInvoiceNumber(workOrderId, num);
+      const inv = await InvoiceNumber.findOne({ where: { invoiceNumber: num } });
+      return res.json({ data: inv, message: `Invoice #${num} created` });
     }
-    
-    const inv = await InvoiceNumber.create(entry);
+    const inv = await InvoiceNumber.create({ invoiceNumber: num, clientName: clientName || null });
     
     // Update next number if this one is >= current next
     const setting = await AppSettings.findOne({ where: { key: 'next_invoice_number' } });
@@ -1465,7 +1414,10 @@ router.post('/invoice-numbers/manual', async (req, res, next) => {
     }
     
     res.json({ data: inv, message: `Invoice #${num} created` });
-  } catch (error) { next(error); }
+  } catch (error) {
+    if (error.status === 409) return res.status(409).json({ error: { message: error.message } });
+    next(error);
+  }
 });
 
 // POST /api/quickbooks/invoice-numbers/:id/void - Void an invoice number
@@ -1515,36 +1467,32 @@ router.post('/import-invoice-numbers', async (req, res, next) => {
       if (!drNum || !invNum) continue;
 
       try {
+       // Each row in its own savepoint: a database error on one row (e.g. a constraint) rolls back
+       // only that row instead of silently aborting — and losing — the whole import.
+       await sequelize.transaction({ transaction }, async (rowT) => {
+        const transaction = rowT;
         const wo = await WorkOrder.findOne({ where: { drNumber: drNum }, transaction });
         if (!wo) {
           results.notFound.push({ drNumber: drNum, invoiceNumber: invNum });
-          continue;
+          return;
         }
 
         // Skip if already has the same invoice number
         if (wo.invoiceNumber && wo.invoiceNumber === String(invNum)) {
           results.alreadySet.push({ drNumber: drNum, invoiceNumber: invNum, clientName: wo.clientName });
-          continue;
+          return;
         }
 
-        // Create or update InvoiceNumber record
-        const existing = await InvoiceNumber.findOne({ where: { invoiceNumber: invNum }, transaction });
-        if (!existing) {
-          await InvoiceNumber.create({
-            invoiceNumber: invNum,
-            workOrderId: wo.id,
-            clientName: wo.clientName,
-            status: 'active'
-          }, { transaction });
-        } else if (!existing.workOrderId) {
-          await existing.update({ workOrderId: wo.id, clientName: wo.clientName }, { transaction });
+        // Stamp the number through the locked service. It refuses a number that another live work
+        // order already holds (the old import stamped it anyway, giving two orders one number).
+        try {
+          await invoiceNumbers.claimInvoiceNumber(wo.id, invNum, {
+            transaction, moveCounter: false, extraUpdates: { invoiceDate: wo.invoiceDate || new Date() } });
+        } catch (claimErr) {
+          if (claimErr.status !== 409) throw claimErr;
+          results.errors.push({ drNumber: drNum, invoiceNumber: invNum, error: claimErr.message });
+          return;
         }
-
-        // Stamp invoice number on the work order
-        await wo.update({
-          invoiceNumber: String(invNum),
-          invoiceDate: wo.invoiceDate || new Date()
-        }, { transaction });
 
         // If QB name or terms were found and the client is missing them, set them now
         let qbNameSet = null;
@@ -1571,6 +1519,7 @@ router.post('/import-invoice-numbers', async (req, res, next) => {
         }
 
         results.matched.push({ drNumber: drNum, invoiceNumber: invNum, clientName: wo.clientName, workOrderId: wo.id, qbNameSet, termsSet });
+       });
       } catch (rowErr) {
         results.errors.push({ drNumber: drNum, invoiceNumber: invNum, error: rowErr.message });
       }
@@ -1613,16 +1562,11 @@ router.get('/invoice-pdf/:id', async (req, res, next) => {
       } catch (e) { console.warn('[invoice-pdf] payments fallback failed:', e.message); }
     }
     if (!wo.invoiceNumber) {
-      // Auto-assign if not yet assigned
-      const result = await sequelize.transaction(async (t) => {
-        const { number: nextNum, isReused } = await computeNextInvoiceNumber(t);
-        await InvoiceNumber.create({ invoiceNumber: nextNum, workOrderId: wo.id, clientId: wo.clientId, clientName: wo.clientName }, { transaction: t });
-        await wo.update({ invoiceNumber: String(nextNum), invoiceDate: new Date(), reusedInvoiceNumber: isReused }, { transaction: t });
-        await AppSettings.upsert({ key: 'next_invoice_number', value: Math.max((await AppSettings.findOne({ where: { key: 'next_invoice_number' }, transaction: t }))?.value || 0, nextNum + 1) }, { transaction: t });
-        return nextNum;
-      });
-      wo.invoiceNumber = String(result);
-      wo.invoiceDate = new Date();
+      // "Generate Invoice" assigns the number on first use. Locked + idempotent: a double-click or a
+      // second tab gets the SAME number instead of burning a second one.
+      const r = await invoiceNumbers.assignNextInvoiceNumber(wo.id, { setDate: 'ifMissing' });
+      await wo.reload({ attributes: ['invoiceNumber', 'invoiceDate', 'reusedInvoiceNumber'] });
+      wo.invoiceNumber = wo.invoiceNumber || r.number;
     } else if (!wo.invoiceDate) {
       // Has invoice number but no date — set now
       await wo.update({ invoiceDate: new Date() });
@@ -1702,14 +1646,9 @@ router.post('/export-batch-with-reconciliation', async (req, res, next) => {
     // Assign invoice numbers to any without one
     for (const wo of workOrders) {
       if (!wo.invoiceNumber) {
-        const result = await sequelize.transaction(async (t) => {
-          const { number: nextNum, isReused } = await computeNextInvoiceNumber(t);
-          await InvoiceNumber.create({ invoiceNumber: nextNum, workOrderId: wo.id, clientId: wo.clientId, clientName: wo.clientName }, { transaction: t });
-          await wo.update({ invoiceNumber: String(nextNum), reusedInvoiceNumber: isReused }, { transaction: t });
-          await AppSettings.upsert({ key: 'next_invoice_number', value: Math.max((await AppSettings.findOne({ where: { key: 'next_invoice_number' }, transaction: t }))?.value || 0, nextNum + 1) }, { transaction: t });
-          return nextNum;
-        });
-        wo.invoiceNumber = String(result);
+        const r = await invoiceNumbers.assignNextInvoiceNumber(wo.id, { setDate: false });
+        wo.invoiceNumber = r.number;
+        wo.reusedInvoiceNumber = r.isReused;
       }
     }
 
@@ -2035,30 +1974,16 @@ router.put('/invoice-number/:id', async (req, res, next) => {
       }
     }
 
-    // Update WO invoice number
+    // Update WO invoice number + tracking row through the locked service (re-checks under the lock,
+    // so two people can't both take the same number between the checks above and the write)
     const oldNum = wo.invoiceNumber;
-    await wo.update({ invoiceNumber: newNum });
-
-    // Update the InvoiceNumber tracking record if it exists; create it if it doesn't, so the number
-    // always appears on the tracking page regardless of how it was first recorded.
-    const [affected] = await InvoiceNumber.update(
-      { invoiceNumber: numInt || newNum },
-      { where: { workOrderId: wo.id } }
-    );
-    if (!affected && numInt > 0) {
-      const dup = await InvoiceNumber.findOne({ where: { invoiceNumber: numInt } });
-      if (!dup) {
-        await InvoiceNumber.create({ invoiceNumber: numInt, workOrderId: wo.id, clientId: wo.clientId || null, clientName: wo.clientName || null });
-      } else if (dup.voidedAt || dup.status === 'void' || dup.status === 'voided') {
-        // RECLAIM: the existing tracking row for this number was voided — reassign it to this WO and clear
-        // its voided state so the number is properly owned again (and the tracking page stays accurate).
-        await dup.update({
-          workOrderId: wo.id, clientId: wo.clientId || null, clientName: wo.clientName || null,
-          status: 'active', voidedAt: null, voidedBy: null, voidReason: null
-        });
-      }
-      // If dup is active (belongs to a live WO) we never get here — the uniqueness check above already 409'd.
+    try {
+      await invoiceNumbers.claimInvoiceNumber(wo.id, newNum, { moveCounter: false });
+    } catch (claimErr) {
+      if (claimErr.status === 409) return res.status(409).json({ error: { message: claimErr.message } });
+      throw claimErr;
     }
+    await wo.reload();
 
     res.json({ data: wo.toJSON(), message: `Invoice number changed from #${oldNum || '?'} to #${newNum}` });
   } catch (error) { next(error); }

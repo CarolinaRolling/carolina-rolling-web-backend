@@ -50,6 +50,22 @@ class EstimateLinkService {
     const transaction = await sequelize.transaction();
 
     try {
+      // Lock both rows first (audit H7) so a double-click or two people linking at once can't link
+      // twice, and refuse to link a second estimate onto a work order that already has one.
+      const woLock = await WorkOrder.findByPk(workOrderId, { transaction, lock: transaction.LOCK.UPDATE });
+      const estLock = await Estimate.findByPk(estimateId, { transaction, lock: transaction.LOCK.UPDATE });
+      if (woLock && woLock.estimateId && woLock.estimateId !== estimateId) {
+        const linked = await Estimate.findByPk(woLock.estimateId, { attributes: ['id', 'estimateNumber', 'workOrderId'], transaction });
+        if (linked && linked.workOrderId === woLock.id) {
+          await transaction.rollback();
+          throw new Error(`This work order is already linked to estimate ${linked.estimateNumber}. Unlink it first.`);
+        }
+      }
+      if (estLock && estLock.workOrderId) {
+        await transaction.rollback();
+        throw new Error('Estimate is already linked to a work order');
+      }
+
       // Load both records
       const workOrder = await WorkOrder.findByPk(workOrderId, {
         include: [{ model: WorkOrderPart, as: 'parts' }],
@@ -187,7 +203,8 @@ class EstimateLinkService {
         partsCopied: createdParts.length
       };
     } catch (error) {
-      await transaction.rollback();
+      // Earlier checks may already have rolled back; a second rollback would throw and hide the real error
+      if (!transaction.finished) await transaction.rollback();
       throw error;
     }
   }
@@ -228,7 +245,8 @@ class EstimateLinkService {
         message: 'Estimate unlinked (parts remain on work order)'
       };
     } catch (error) {
-      await transaction.rollback();
+      // Earlier checks may already have rolled back; a second rollback would throw and hide the real error
+      if (!transaction.finished) await transaction.rollback();
       throw error;
     }
   }

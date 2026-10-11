@@ -2236,6 +2236,12 @@ async function getNextDRNumber(transaction) {
 //   - pendingInboundCount         -> NOT migrated, decide whether it is still wanted
 // It does NOT copy part files, remap _linkedPartId, or copy shipment charges, so it should
 // never be wired back up as-is. Delete once pendingInboundCount is settled.
+// Retired (audit H7): it skipped the duplicate-conversion lock and the DR-number checks, so any
+// stray call could still create a second work order. This handler answers first; the old code
+// below is never reached.
+router.post('/:id/convert', (req, res) => {
+  res.status(410).json({ error: { message: 'This endpoint was retired. Use POST /api/estimates/:id/convert-to-workorder.' } });
+});
 router.post('/:id/convert', async (req, res, next) => {
   const transaction = await sequelize.transaction();
   
@@ -3430,22 +3436,29 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
   let committed = false;
   
   try {
+    // Lock the estimate row FIRST, inside the transaction (audit H7). A second click / second tab /
+    // retry waits here until this conversion commits, then sees workOrderId set and stops — instead
+    // of both passing the check and creating two work orders with two DR numbers.
+    const lockedEstimate = await Estimate.findByPk(req.params.id, { transaction, lock: transaction.LOCK.UPDATE });
+    if (!lockedEstimate) {
+      await transaction.rollback();
+      return res.status(404).json({ error: { message: 'Estimate not found' } });
+    }
+    if (lockedEstimate.status === 'converted' || lockedEstimate.workOrderId) {
+      await transaction.rollback();
+      return res.status(400).json({
+        error: { message: 'Estimate has already been converted to a work order' },
+        data: { workOrderId: lockedEstimate.workOrderId || null }
+      });
+    }
+
     const estimate = await Estimate.findByPk(req.params.id, {
       include: [
         { model: EstimatePart, as: 'parts', include: [{ model: EstimatePartFile, as: 'files' }] },
         { model: EstimateFile, as: 'files' }
-      ]
+      ],
+      transaction
     });
-
-    if (!estimate) {
-      await transaction.rollback();
-      return res.status(404).json({ error: { message: 'Estimate not found' } });
-    }
-
-    if (estimate.status === 'converted' || estimate.workOrderId) {
-      await transaction.rollback();
-      return res.status(400).json({ error: { message: 'Estimate has already been converted to a work order' } });
-    }
 
     const { clientPurchaseOrderNumber, requestedDueDate, promisedDate, notes, materialReceived, customDRNumber } = req.body;
 

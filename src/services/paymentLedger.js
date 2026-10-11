@@ -16,7 +16,7 @@
  * Legacy rule (kept from the original ledger): a work order with paymentDate set and no payment
  * records at all was marked paid with the old one-click "record payment" — treat it as paid in full.
  */
-const { round2, loadInvoiceTotals } = require('./invoiceTotals');
+const { round2, loadInvoiceTotals, hasPricedLines } = require('./invoiceTotals');
 
 async function loadPaymentsFor(woIds, { transaction } = {}) {
   const ids = [...new Set((woIds || []).filter(Boolean))];
@@ -141,4 +141,68 @@ async function linkLegacyTwinPayments(sequelize) {
   return { linked, unmatched: apps.length - linked };
 }
 
-module.exports = { loadPaymentsFor, loadBalances, loadBalance, syncPaidFlag, linkLegacyTwinPayments };
+// ─────────────────────── payment validation (audit H5) ───────────────────────
+
+class PaymentValidationError extends Error {
+  constructor(message) { super(message); this.status = 400; this.code = 'PAYMENT_INVALID'; }
+}
+const norm = (s) => String(s || '').trim().toLowerCase();
+const fmt = (n) => '$' + (Math.round(n * 100) / 100).toFixed(2);
+const label = (wo) => wo.invoiceNumber ? `invoice #${wo.invoiceNumber}` : (wo.drNumber ? `DR-${wo.drNumber}` : wo.orderNumber);
+
+/**
+ * Lock the invoices a payment touches (row locks, consistent order so two payments can't deadlock)
+ * and check every amount BEFORE anything is written. Must run inside the payment's transaction;
+ * a concurrent payment on the same invoice waits for this one, then sees its effect.
+ *
+ * Rules:
+ *   • the applications can't add up to more than the payment;
+ *   • each invoice must exist, not be voided, and belong to the paying client;
+ *   • an invoice can't be paid past what is still owed. Not checked (allowed) when the balance can't
+ *     be known: the order isn't priced yet (a deposit), or it was marked paid with the old one-click
+ *     button that kept no payment record (the real check is being entered now).
+ * @returns {Map<workOrderId, amount>} the per-invoice amounts (duplicates combined)
+ */
+async function validatePaymentApplications({ applications, paymentAmount, clientId, clientName, transaction }) {
+  if (!transaction) throw new Error('validatePaymentApplications requires a transaction');
+  const { WorkOrder } = require('../models');
+  const perWo = new Map();
+  for (const a of applications || []) {
+    const amt = round2(parseFloat(a.amount));
+    if (!(amt > 0)) continue;
+    if (!a.workOrderId) throw new PaymentValidationError('Each application needs an invoice.');
+    perWo.set(a.workOrderId, round2((perWo.get(a.workOrderId) || 0) + amt));
+  }
+  if (!perWo.size) return perWo;
+
+  const applied = round2([...perWo.values()].reduce((s, v) => s + v, 0));
+  if (paymentAmount !== undefined && applied > round2(paymentAmount) + 0.005) {
+    throw new PaymentValidationError(`The amounts applied to invoices add up to ${fmt(applied)}, but the payment is only ${fmt(paymentAmount)}.`);
+  }
+
+  const ids = [...perWo.keys()].sort();
+  const wos = await WorkOrder.findAll({ where: { id: ids }, order: [['id', 'ASC']], transaction, lock: transaction.LOCK.UPDATE });
+  if (wos.length !== ids.length) throw new PaymentValidationError('One of the invoices no longer exists. Refresh and try again.');
+
+  for (const wo of wos) {
+    if (wo.isVoided || wo.status === 'void') throw new PaymentValidationError(`${label(wo)} is voided and can't take a payment.`);
+    if (clientId || clientName) {
+      const sameClient = (clientId && wo.clientId) ? wo.clientId === clientId : norm(wo.clientName) === norm(clientName);
+      if (!sameClient) throw new PaymentValidationError(`${label(wo)} belongs to ${wo.clientName}, not to the client making this payment.`);
+    }
+  }
+
+  const balances = await loadBalances(ids, { transaction });
+  for (const id of ids) {
+    const b = balances.get(id);
+    const amt = perWo.get(id);
+    const balanceUnknown = !b || b.legacyPaid > 0 || (!hasPricedLines(b.totals) && !b.wo.iifExportedAt);
+    if (!balanceUnknown && b.total > 0 && amt > b.balance + 0.005) {
+      const extra = b.balance <= 0.005 ? `${label(b.wo)} is already paid in full` : `only ${fmt(b.balance)} is still owed on ${label(b.wo)}`;
+      throw new PaymentValidationError(`${fmt(amt)} is more than the invoice balance: ${extra}. To keep the extra as credit, use Take Payment and tick "Create credit memo".`);
+    }
+  }
+  return perWo;
+}
+
+module.exports = { loadPaymentsFor, loadBalances, loadBalance, syncPaidFlag, linkLegacyTwinPayments, validatePaymentApplications, PaymentValidationError };

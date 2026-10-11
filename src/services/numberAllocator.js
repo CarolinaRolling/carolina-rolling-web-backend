@@ -23,6 +23,7 @@
 const LOCK_KEYS = {
   dr: 8410001,
   po: 8410002,
+  invoice: 8410003,
 };
 
 async function acquire(sequelize, key, transaction) {
@@ -120,6 +121,7 @@ async function allocatePONumber(models, transaction, { startingNumber = 0 } = {}
 
 module.exports = {
   LOCK_KEYS,
+  acquire,
   allocateDRNumber,
   reserveCustomDRNumber,
   allocatePONumber,

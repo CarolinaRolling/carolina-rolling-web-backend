@@ -2006,6 +2006,17 @@ async function startServer() {
       if (r.linked || r.unmatched) console.log(`[payments] linked ${r.linked} client-payment application(s) to their invoice payment rows; ${r.unmatched} application(s) have no twin and count on their own`);
     } catch(e) { console.log('Payment application link migration error:', e.message); }
 
+    // Database guards for invoice numbers (audit H4): one live work order per number, one active
+    // number per work order. Only added when existing data allows; otherwise the duplicates are
+    // logged so they can be fixed by hand — nothing is changed automatically.
+    try {
+      const { ensureInvoiceConstraints } = require('./services/invoiceNumbers');
+      const problems = await ensureInvoiceConstraints(sequelize);
+      for (const p of problems) {
+        console.warn(`[invoices] could not add ${p.name}: ${p.duplicates.length} duplicate(s) to fix first:`, JSON.stringify(p.duplicates));
+      }
+    } catch(e) { console.log('Invoice constraint migration error:', e.message); }
+
     // Operator tasks table (free-text reminders)
     try {
       await sequelize.query(`CREATE TABLE IF NOT EXISTS operator_tasks (

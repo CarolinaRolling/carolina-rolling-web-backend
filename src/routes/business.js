@@ -7,7 +7,7 @@ const fs = require('fs');
 const { Liability, Employee, PayrollWeek, PayrollEntry, WorkOrder, WorkOrderPart, WorkOrderPayment, Vendor, PONumber, InboundOrder, Client, ShipmentCharge, ClientPayment, PaymentApplication, CreditMemo, CreditMemoApplication, Refund, sequelize } = require('../models');
 // Shared invoice totals + payment math (audit C2/C4) — every balance on every screen comes from these.
 const { loadInvoiceTotals } = require('../services/invoiceTotals');
-const { loadBalances, loadBalance, syncPaidFlag } = require('../services/paymentLedger');
+const { loadBalances, loadBalance, syncPaidFlag, validatePaymentApplications } = require('../services/paymentLedger');
 const fileStorage = require('../utils/storage');
 
 // Multer config for bill attachments
@@ -192,21 +192,32 @@ router.post('/ledger/:woId/payments', async (req, res, next) => {
       ccFeeAmount = (parseFloat(amount) * pct + 0.15).toFixed(2);
     }
 
-    const payment = await WOP.create({
-      workOrderId: wo.id,
-      paymentType: paymentType || 'partial',
-      amount: parseFloat(amount).toFixed(2),
-      paymentDate: paymentDate || new Date().toISOString().split('T')[0],
-      paymentMethod: paymentMethod || null,
-      paymentReference: paymentReference || null,
-      ccProcessingType: ccType,
-      ccFeeAmount: ccFeeAmount,
-      notes: notes || null,
-      recordedBy: req.user?.username || 'admin'
-    });
-
-    // Fully paid? Keep the WO paymentDate flag in step (shared invoice total + payment math)
-    await syncPaidFlag(wo.id, { paymentDate: payment.paymentDate, paymentMethod, paymentReference, recordedBy: req.user?.username || 'admin' });
+    // Lock the invoice, check the amount against what is still owed, record, and update the paid
+    // flag — all in one transaction, so two payments entered at once can't both pass the check (H5).
+    let payment;
+    try {
+      payment = await sequelize.transaction(async (t) => {
+        await validatePaymentApplications({ applications: [{ workOrderId: wo.id, amount }], transaction: t });
+        const p = await WOP.create({
+          workOrderId: wo.id,
+          paymentType: paymentType || 'partial',
+          amount: parseFloat(amount).toFixed(2),
+          paymentDate: paymentDate || new Date().toISOString().split('T')[0],
+          paymentMethod: paymentMethod || null,
+          paymentReference: paymentReference || null,
+          ccProcessingType: ccType,
+          ccFeeAmount: ccFeeAmount,
+          notes: notes || null,
+          recordedBy: req.user?.username || 'admin'
+        }, { transaction: t });
+        // Fully paid? Keep the WO paymentDate flag in step (shared invoice total + payment math)
+        await syncPaidFlag(wo.id, { transaction: t, paymentDate: p.paymentDate, paymentMethod, paymentReference, recordedBy: req.user?.username || 'admin' });
+        return p;
+      });
+    } catch (valErr) {
+      if (valErr.status === 400) return res.status(400).json({ error: { message: valErr.message } });
+      throw valErr;
+    }
 
     // Auto-regenerate invoice PDF
     try {
@@ -1236,7 +1247,19 @@ router.post('/client-payments', async (req, res, next) => {
   try {
     const { clientId, clientName, paymentDate, amount, method, reference, notes, recordedBy, applications, creditMemoRemainder } = req.body;
     const totalAmount = parseFloat(amount);
-    if (!totalAmount || totalAmount <= 0) throw new Error('Invalid payment amount');
+    if (!totalAmount || totalAmount <= 0) {
+      await t.rollback();
+      return res.status(400).json({ error: { message: 'Enter a payment amount greater than zero.' } });
+    }
+    // Validate every application before writing anything (audit H5): not more than the payment,
+    // same client, invoice not voided, not past what is still owed. Locks those invoices.
+    try {
+      await validatePaymentApplications({ applications, paymentAmount: totalAmount, clientId: clientId || null, clientName, transaction: t });
+    } catch (valErr) {
+      await t.rollback();
+      if (valErr.status === 400) return res.status(400).json({ error: { message: valErr.message } });
+      return next(valErr);
+    }
 
     // Create the parent payment
     const payment = await ClientPayment.create({

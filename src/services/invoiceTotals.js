@@ -218,7 +218,7 @@ async function loadInvoiceTotals(woIds, { transaction } = {}) {
     WorkOrder.findAll({ where: { id: ids }, transaction }),
     WorkOrderPart.findAll({ where: { workOrderId: ids }, transaction }),
     ShipmentCharge.findAll({ where: { workOrderId: ids }, transaction }).catch(() => []),
-    loadLaborMinimums(),
+    loadLaborMinimums({ transaction }),   // same connection: never needs a second one while holding locks
   ]);
   const clientIds = [...new Set(wos.map(w => w.clientId).filter(Boolean))];
   const clients = clientIds.length

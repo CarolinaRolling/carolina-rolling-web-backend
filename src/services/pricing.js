@@ -95,9 +95,9 @@ function partBreakdown(part) {
 }
 
 // Load labor minimums from settings
-async function loadLaborMinimums() {
+async function loadLaborMinimums({ transaction } = {}) {
   try {
-    const setting = await getAppSettings().findOne({ where: { key: 'labor_minimums' } });
+    const setting = await getAppSettings().findOne({ where: { key: 'labor_minimums' }, transaction });
     if (setting?.value) return JSON.parse(setting.value);
   } catch (e) {}
   return [];

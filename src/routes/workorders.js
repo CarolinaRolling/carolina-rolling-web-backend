@@ -1214,15 +1214,7 @@ function cleanupTempFile(filePath) {
   }
 }
 
-// Generate unique work order number
-function generateOrderNumber() {
-  const date = new Date();
-  const year = date.getFullYear().toString().slice(-2);
-  const month = (date.getMonth() + 1).toString().padStart(2, '0');
-  const day = date.getDate().toString().padStart(2, '0');
-  const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
-  return `WO-${year}${month}${day}-${random}`;
-}
+// generateOrderNumber() removed — numbers now come from services/docNumbers (audit M5)
 
 // Auto-archive any shipments linked to a work order when it's shipped
 async function archiveLinkedShipments(workOrderId) {
@@ -1806,7 +1798,7 @@ router.post('/', async (req, res, next) => {
       effectiveTaxRate = await getAdminDefaultTaxRate();
     }
 
-    const orderNumber = generateOrderNumber();
+    const orderNumber = await require('../services/docNumbers').nextDocNumber('WO');
 
     // Start transaction
     const transaction = await sequelize.transaction();
@@ -1939,7 +1931,15 @@ router.put('/:id/status', async (req, res, next) => {
     if (!status) {
       return res.status(400).json({ error: { message: 'Status is required' } });
     }
-    await workOrder.update({ status });
+    // Same rules and side effects as the office edit (audit M4): known statuses only, not on a voided
+    // order, completedAt set when a tablet marks it Stored, "In Machine" cleared when done.
+    const { planStatusChange, applyDoneSideEffects } = require('../services/workOrderStatus');
+    const statusUpdates = planStatusChange(workOrder, status);
+    if (Object.keys(statusUpdates).length) {
+      await workOrder.update(statusUpdates);
+      await applyDoneSideEffects(workOrder, status);
+      if (status === 'shipped') await archiveLinkedShipments(workOrder.id);
+    }
     // Job finished → refresh Ginger's list (free, no-AI) so it drops off and capacity recalcs
     if (['completed', 'stored', 'shipped', 'archived'].includes(status)) {
       require('../services/gingerScan').runGingerScan({ useAI: false }).catch(() => {});
@@ -2326,6 +2326,7 @@ router.post('/:id/mark-complete', async (req, res, next) => {
     // Mark complete. Completion time is recorded on the order (completedAt) and per part —
     // no longer appended to notes (keeps the notes field for real notes).
     const now = new Date();
+    require('../services/workOrderStatus').planStatusChange(workOrder, 'stored');   // refuses a voided order (M4)
 
     await workOrder.update({ 
       status: 'stored',
@@ -2980,41 +2981,29 @@ router.put('/:id', async (req, res, next) => {
     if (voidedBy !== undefined) updates.voidedBy = voidedBy || null;
     if (voidReason !== undefined) updates.voidReason = voidReason || null;
 
-    if (status) {
-      updates.status = status;
-      
-      // Set timestamps based on status
-      if (status === 'received' && !workOrder.receivedAt) {
-        updates.receivedAt = new Date();
-      }
-      if (status === 'completed' && !workOrder.completedAt) {
-        updates.completedAt = new Date();
-      }
-      if (status === 'shipped') {
-        updates.pickedUpAt = new Date();
-        if (pickedUpBy) updates.pickedUpBy = pickedUpBy;
-        if (signatureData) updates.signatureData = signatureData;
-      }
-      // Job reached a done state — clear its "in machine" marker(s).
-      if (['completed', 'stored', 'shipped', 'archived'].includes(status)) {
-        try { await WorkOrderPresence.destroy({ where: { workOrderId: workOrder.id } }); } catch {}
-      }
-    }
+    // Status: shared rules + timestamps (audit M4). A request that un-voids AND changes status is judged
+    // as un-voided; one that voids is judged before the void.
+    const { planStatusChange, applyDoneSideEffects } = require('../services/workOrderStatus');
+    const statusChange = planStatusChange(
+      { ...workOrder.get({ plain: true }), isVoided: updates.isVoided === false ? false : workOrder.isVoided },
+      status, { pickedUpBy, signatureData });
+    Object.assign(updates, statusChange);
 
     const wasVoided = workOrder.isVoided;
     await workOrder.update(updates);
+    if (statusChange.status) await applyDoneSideEffects(workOrder, statusChange.status);
     // Audit a void (isVoided flipped to true in this update).
     if (updates.isVoided === true && !wasVoided) {
       auditWorkOrder(req, 'workorder_voided', workOrder, { voidReason: updates.voidReason || null });
     }
 
     // Job finished → refresh Ginger's list (free, no-AI)
-    if (status && ['completed', 'stored', 'shipped', 'archived'].includes(status)) {
+    if (statusChange.status && ['completed', 'stored', 'shipped', 'archived'].includes(statusChange.status)) {
       require('../services/gingerScan').runGingerScan({ useAI: false }).catch(() => {});
     }
 
     // Auto-archive linked shipments when shipped
-    if (status === 'shipped') {
+    if (statusChange.status === 'shipped') {
       await archiveLinkedShipments(workOrder.id);
     }
 
@@ -3210,9 +3199,8 @@ router.post('/:id/parts', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Work order not found' } });
     }
 
-    // Get the next part number
-    const existingParts = await WorkOrderPart.count({ where: { workOrderId: workOrder.id } });
-    const partNumber = existingParts + 1;
+    // Next line number = highest + 1 (was count + 1, which repeated numbers after a delete) — M14
+    const partNumber = (await require('../services/partNumbers').maxPartNumber(WorkOrderPart, 'workOrderId', workOrder.id)) + 1;
 
     // Clean numeric fields - convert empty strings to null
     const numericFields = ['laborRate', 'laborHours', 'laborTotal', 'materialUnitCost', 
@@ -3281,9 +3269,9 @@ router.post('/:id/parts', async (req, res, next) => {
       ? req.body.lotNumber
       : (workOrder.drNumber ? `${workOrder.drNumber}-${cleanLotNum}` : (req.body.lotNumber || null));
 
-    const part = await WorkOrderPart.create({
+    // (retried with the next number if another add took this one a moment ago)
+    const part = await require('../services/partNumbers').createWithNextPartNumber(WorkOrderPart, 'workOrderId', {
       workOrderId: workOrder.id,
-      partNumber,
       partType,
       clientPartNumber,
       heatNumber,
@@ -3357,9 +3345,8 @@ router.put('/:id/parts/reorder', async (req, res, next) => {
   try {
     const { partIds } = req.body;
     if (!partIds || !Array.isArray(partIds)) return res.status(400).json({ error: { message: 'partIds array required' } });
-    for (let i = 0; i < partIds.length; i++) {
-      await WorkOrderPart.update({ partNumber: i + 1 }, { where: { id: partIds[i], workOrderId: req.params.id } });
-    }
+    // one transaction, so a half-applied reorder can't leave two parts with the same number (M14)
+    await require('../services/partNumbers').reorderParts(WorkOrderPart, 'workOrderId', req.params.id, partIds);
     const workOrder = await WorkOrder.findByPk(req.params.id, { include: [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }, { model: WorkOrderDocument, as: 'documents' }] });
     res.json({ data: workOrder.toJSON() });
   } catch (error) { next(error); }
@@ -3794,17 +3781,8 @@ router.delete('/:id/parts/:partId', async (req, res, next) => {
       console.error('[part delete] inspection cleanup failed (non-fatal):', e.message);
     }
 
-    // Renumber remaining parts
-    const remainingParts = await WorkOrderPart.findAll({
-      where: { workOrderId: req.params.id },
-      order: [['partNumber', 'ASC']]
-    });
-
-    for (let i = 0; i < remainingParts.length; i++) {
-      if (remainingParts[i].partNumber !== i + 1) {
-        await remainingParts[i].update({ partNumber: i + 1 });
-      }
-    }
+    // Renumber remaining parts (one transaction — M14)
+    await require('../services/partNumbers').renumberParts(WorkOrderPart, 'workOrderId', req.params.id);
 
     res.json({ message: 'Part deleted successfully' });
   } catch (error) {
@@ -4288,8 +4266,7 @@ router.post('/:id/duplicate-to-estimate', async (req, res, next) => {
     const year = now.getFullYear().toString().slice(-2);
     const month = (now.getMonth() + 1).toString().padStart(2, '0');
     const day = now.getDate().toString().padStart(2, '0');
-    const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
-    const estimateNumber = `EST-${year}${month}${day}-${random}`;
+    const estimateNumber = await require('../services/docNumbers').nextDocNumber('EST');
     const drLabel = workOrder.drNumber ? `DR-${workOrder.drNumber}` : workOrder.orderNumber;
 
     // Pull the original estimate too (if any) — used for header fields and to enrich each part with any

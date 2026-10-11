@@ -1271,9 +1271,17 @@ router.post('/client-payments', async (req, res, next) => {
       notes: notes || null, recordedBy: recordedBy || 'admin'
     }, { transaction: t });
 
-    // Create applications
+    // Create applications — the same invoice listed twice is combined into one application (one row per
+    // payment per invoice is now a database rule, audit M3)
     let totalApplied = 0;
-    for (const app of (applications || [])) {
+    const merged = new Map();
+    for (const a of (applications || [])) {
+      const amt = parseFloat(a.amount);
+      if (!a.workOrderId || !amt || amt <= 0) continue;
+      const prev = merged.get(a.workOrderId);
+      merged.set(a.workOrderId, prev ? { ...prev, amount: Math.round((parseFloat(prev.amount) + amt) * 100) / 100 } : { ...a, amount: amt });
+    }
+    for (const app of merged.values()) {
       const appAmt = parseFloat(app.amount);
       if (!appAmt || appAmt <= 0) continue;
       const application = await PaymentApplication.create({

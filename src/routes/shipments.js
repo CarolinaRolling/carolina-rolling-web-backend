@@ -420,8 +420,7 @@ router.post('/', async (req, res, next) => {
         const year = date.getFullYear().toString().slice(-2);
         const month = (date.getMonth() + 1).toString().padStart(2, '0');
         const day = date.getDate().toString().padStart(2, '0');
-        const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
-        const orderNumber = `WO-${year}${month}${day}-${random}`;
+        const orderNumber = await require('../services/docNumbers').nextDocNumber('WO');
 
         workOrder = await WorkOrder.create({
           orderNumber,
@@ -690,8 +689,7 @@ router.post('/:id/link-workorder', async (req, res, next) => {
         const year = date.getFullYear().toString().slice(-2);
         const month = (date.getMonth() + 1).toString().padStart(2, '0');
         const day = date.getDate().toString().padStart(2, '0');
-        const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
-        const orderNumber = `WO-${year}${month}${day}-${random}`;
+        const orderNumber = await require('../services/docNumbers').nextDocNumber('WO');
 
         workOrder = await WorkOrder.create({
           orderNumber,

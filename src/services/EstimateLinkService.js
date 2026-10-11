@@ -124,7 +124,8 @@ class EstimateLinkService {
       await workOrder.update(workOrderUpdates, { transaction });
 
       // === STEP 2: Copy estimate parts to work order ===
-      const existingPartCount = workOrder.parts?.length || 0;
+      // after the highest existing line number, not the count (gaps would collide) — M14
+      const existingPartCount = (workOrder.parts || []).reduce((m, p) => Math.max(m, p.partNumber || 0), 0);
       const createdParts = [];
 
       for (let i = 0; i < (estimate.parts || []).length; i++) {

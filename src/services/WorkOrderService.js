@@ -3,7 +3,7 @@
 
 const { Op } = require('sequelize');
 const cloudinary = require('cloudinary').v2;
-const { WORK_ORDER_STATUSES, DEFAULTS, cleanNumericFields, generateWorkOrderNumber } = require('../constants');
+const { WORK_ORDER_STATUSES, DEFAULTS, cleanNumericFields } = require('../constants');
 const { allocateDRNumber } = require('./numberAllocator');
 
 class WorkOrderService {
@@ -85,7 +85,7 @@ class WorkOrderService {
       }, { transaction });
 
       // Create work order
-      const orderNumber = generateWorkOrderNumber();
+      const orderNumber = await require('./docNumbers').nextDocNumber('WO');
       // Caller data is spread FIRST so it can never clobber the identifiers we just
       // allocated. drNumber is not in NUMERIC_FIELDS, so a drNumber of null or a stray
       // string in the request body used to overwrite nextDRNumber and produce a work order

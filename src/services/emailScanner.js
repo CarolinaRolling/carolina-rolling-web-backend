@@ -524,15 +524,7 @@ Add a "summary" field in your response: a 1-2 sentence plain-English summary of 
   }
 }
 
-// Generate estimate number (match existing format)
-function generateEstimateNumber() {
-  const now = new Date();
-  const y = now.getFullYear().toString().slice(-2);
-  const m = String(now.getMonth() + 1).padStart(2, '0');
-  const d = String(now.getDate()).padStart(2, '0');
-  const rand = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
-  return `EST-${y}${m}${d}-${rand}`;
-}
+// generateEstimateNumber() removed — numbers now come from services/docNumbers (audit M5)
 
 // Build formData object that matches what the frontend form components expect
 // Convert a dimension value that may be written as a fraction/mixed number ("8 1/4", "8-1/4",
@@ -929,7 +921,7 @@ function mergeAttachmentParts(emailParsed, attachmentResults) {
 async function createEstimateFromParsed(parsed, clientInfo, scannedEmail, attachmentFiles = []) {
   try {
     // Use reference number as estimate number for clients like GNB
-    const estNumber = parsed.referenceNumber || generateEstimateNumber();
+    const estNumber = parsed.referenceNumber || await require('./docNumbers').nextDocNumber('EST');
     
     // Check for duplicate
     const existing = await Estimate.findOne({ where: { estimateNumber: estNumber } });

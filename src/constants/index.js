@@ -125,25 +125,7 @@ function cleanNumericFields(data, fields = NUMERIC_FIELDS) {
   return cleaned;
 }
 
-// Helper to generate estimate number
-function generateEstimateNumber() {
-  const now = new Date();
-  const year = now.getFullYear().toString().slice(-2);
-  const month = (now.getMonth() + 1).toString().padStart(2, '0');
-  const day = now.getDate().toString().padStart(2, '0');
-  const random = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
-  return `EST-${year}${month}${day}-${random}`;
-}
 
-// Helper to generate work order number
-function generateWorkOrderNumber() {
-  const now = new Date();
-  const year = now.getFullYear().toString().slice(-2);
-  const month = (now.getMonth() + 1).toString().padStart(2, '0');
-  const day = now.getDate().toString().padStart(2, '0');
-  const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
-  return `WO-${year}${month}${day}-${random}`;
-}
 
 module.exports = {
   WORK_ORDER_STATUSES,
@@ -158,7 +140,5 @@ module.exports = {
   ROLL_TYPES,
   NUMERIC_FIELDS,
   DEFAULTS,
-  cleanNumericFields,
-  generateEstimateNumber,
-  generateWorkOrderNumber
+  cleanNumericFields
 };

@@ -165,7 +165,7 @@ function cleanNumericFields(data, fields = NUMERIC_FIELDS) {
 // into the update, so a request could move a part to another estimate (estimateId), change its id,
 // or back-date it. A request can also no longer save a price that isn't a number ("abc" used to be
 // stored silently as blank) or a negative labor rate, labor hours or material cost.
-const PROTECTED_PART_FIELDS = ['id', 'estimateId', 'createdAt', 'updatedAt'];
+const PROTECTED_PART_FIELDS = ['id', 'estimateId', 'createdAt', 'updatedAt', 'partNumber'];   // partNumber: only Reorder changes it (M14)
 const NON_NEGATIVE_FIELDS = ['laborRate', 'laborHours', 'materialUnitCost'];
 function sanitizePartInput(body) {
   const data = { ...(body || {}) };
@@ -276,15 +276,7 @@ function cleanupTempFile(filePath) {
   }
 }
 
-// Generate estimate number
-function generateEstimateNumber() {
-  const date = new Date();
-  const year = date.getFullYear().toString().slice(-2);
-  const month = (date.getMonth() + 1).toString().padStart(2, '0');
-  const day = date.getDate().toString().padStart(2, '0');
-  const random = Math.floor(Math.random() * 1000).toString().padStart(3, '0');
-  return `EST-${year}${month}${day}-${random}`;
-}
+// generateEstimateNumber() removed — numbers now come from services/docNumbers (audit M5)
 
 // Calculate part totals
 function calculatePartTotals(part) {
@@ -1054,7 +1046,7 @@ router.post('/', async (req, res, next) => {
         return res.status(409).json({ error: { message: `Estimate number "${estimateNumber}" is already in use` } });
       }
     } else {
-      estimateNumber = generateEstimateNumber();
+      estimateNumber = await require('../services/docNumbers').nextDocNumber('EST');
     }
 
     // Create estimate
@@ -1164,6 +1156,18 @@ router.put('/:id', async (req, res, next) => {
       }
     }
 
+    // Estimate status: known values only (a typo used to be a database error), and "converted" only
+    // through Convert, so an estimate can't look converted without a work order (audit M4)
+    if (updates.status !== undefined) {
+      const { ESTIMATE_STATUSES } = require('../constants');
+      const allowed = Object.values(ESTIMATE_STATUSES);
+      if (!updates.status) delete updates.status;
+      else if (!allowed.includes(updates.status)) {
+        return res.status(400).json({ error: { message: `"${updates.status}" isn't an estimate status. Use one of: ${allowed.join(', ')}.` } });
+      } else if (updates.status === 'converted' && estimate.status !== 'converted' && !estimate.workOrderId) {
+        return res.status(400).json({ error: { message: 'Use Convert to Work Order to convert an estimate.' } });
+      }
+    }
     if (updates.status) {
       if (updates.status === 'sent' && !estimate.sentAt) {
         updates.sentAt = new Date();
@@ -1312,10 +1316,7 @@ router.post('/:id/parts', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Estimate not found' } });
     }
 
-    const existingParts = await EstimatePart.count({ where: { estimateId: estimate.id } });
-    
     let partData = cleanNumericFields({
-      partNumber: existingParts + 1,
       ...sanitizePartInput(req.body),
       estimateId: estimate.id,
     });
@@ -1332,7 +1333,8 @@ router.post('/:id/parts', async (req, res, next) => {
       Object.assign(partData, totals);
     }
     
-    const part = await EstimatePart.create(partData);
+    // next line number = highest + 1, retried if another add took it (M14)
+    const part = await require('../services/partNumbers').createWithNextPartNumber(EstimatePart, 'estimateId', partData);
 
     // Recalculate estimate totals
     const allParts = await EstimatePart.findAll({ where: { estimateId: estimate.id } });
@@ -1353,9 +1355,7 @@ router.put('/:id/parts/reorder', async (req, res, next) => {
   try {
     const { partIds } = req.body;
     if (!partIds || !Array.isArray(partIds)) return res.status(400).json({ error: { message: 'partIds array required' } });
-    for (let i = 0; i < partIds.length; i++) {
-      await EstimatePart.update({ partNumber: i + 1 }, { where: { id: partIds[i], estimateId: req.params.id } });
-    }
+    await require('../services/partNumbers').reorderParts(EstimatePart, 'estimateId', req.params.id, partIds);   // atomic (M14)
     const estimate = await Estimate.findByPk(req.params.id, { include: [{ model: EstimatePart, as: 'parts', include: [{ model: EstimatePartFile, as: 'files' }] }, { model: EstimateFile, as: 'files' }] });
     res.json({ data: estimate.toJSON() });
   } catch (error) { next(error); }
@@ -1437,18 +1437,10 @@ router.delete('/:id/parts/:partId', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Part not found' } });
     }
 
-    const deletedPartNumber = part.partNumber;
     await part.destroy();
 
-    // Renumber remaining parts
-    const remainingParts = await EstimatePart.findAll({
-      where: { estimateId: req.params.id, partNumber: { [Op.gt]: deletedPartNumber } },
-      order: [['partNumber', 'ASC']]
-    });
-    
-    for (const p of remainingParts) {
-      await p.update({ partNumber: p.partNumber - 1 });
-    }
+    // Renumber remaining parts (one transaction — M14)
+    await require('../services/partNumbers').renumberParts(EstimatePart, 'estimateId', req.params.id);
 
     // Recalculate estimate totals
     const estimate = await Estimate.findByPk(req.params.id);
@@ -2416,7 +2408,7 @@ router.post('/:id/duplicate', async (req, res, next) => {
     const { notes } = req.body;
 
     // Generate new estimate number
-    const estimateNumber = generateEstimateNumber();
+    const estimateNumber = await require('../services/docNumbers').nextDocNumber('EST');
 
     // Create new estimate
     const newEstimate = await Estimate.create({
@@ -3496,8 +3488,7 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
     const year = date.getFullYear().toString().slice(-2);
     const month = (date.getMonth() + 1).toString().padStart(2, '0');
     const day = date.getDate().toString().padStart(2, '0');
-    const random = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
-    const orderNumber = `WO-${year}${month}${day}-${random}`;
+    const orderNumber = await require('../services/docNumbers').nextDocNumber('WO');
 
     // Create work order from estimate using shared utility
     const { buildWorkOrderFromEstimate, buildWorkOrderPartFromEstimate } = require('../services/pricing');
@@ -4003,6 +3994,7 @@ MATCHING RULES (when multiple files are provided):
       try { fs.copyFileSync(f.path, dest); heldFiles[idx] = { path: dest, originalName: f.originalname }; } catch {}
     });
 
+    const maxExisting = (estimate.parts || []).reduce((m, p) => Math.max(m, p.partNumber || 0), 0);
     const partsWithFormData = (parsed.parts || []).map((p, i) => {
       const formData = buildFormData(p);
       const mfi = (p.matchedFileIndex !== undefined && p.matchedFileIndex !== null) ? parseInt(p.matchedFileIndex) : null;
@@ -4014,7 +4006,7 @@ MATCHING RULES (when multiple files are provided):
       } : null;
       const base = {
         ...p,
-        partNumber: (estimate.parts?.length || 0) + i + 1,
+        partNumber: maxExisting + i + 1,   // after the highest existing number, not the count (M14)
         formData,
         matchedPrint: matched
       };
@@ -4099,7 +4091,7 @@ MATCHING RULES (when multiple files are provided):
           });
           if (partData.rollType === '') partData.rollType = null;
           partData = extractFormData(partData);
-          const createdPart = await EstimatePart.create(partData);
+          const createdPart = await require('../services/partNumbers').createWithNextPartNumber(EstimatePart, 'estimateId', partData);   // next free number, even if a part was added by hand during the parse (M14)
           autoCreated++;
           // Attach a confidently-matched print, if any.
           if (createdPart?.id && p.matchedPrint && heldFiles[p.matchedPrint.fileIndex]) {
@@ -4479,7 +4471,7 @@ router.delete('/:id/shipment-charges/:chargeId', async (req, res, next) => {
 // Create a draft estimate for a client and start an AI parse of in-memory attachments (used by Comm
 // Center "Convert to Estimate"). Returns { estimate, jobId }.
 router.createEstimateAndParseAttachments = async function(client, scanned, attachments, notes, quoteText) {
-  const estimateNumber = generateEstimateNumber();
+  const estimateNumber = await require('../services/docNumbers').nextDocNumber('EST');
   // Pick the specific contact who sent the email, if they're in the client's contacts — not just the
   // client's default contact. Match by email first, then by name.
   let contactName = client.contactName || scanned.fromName || '';

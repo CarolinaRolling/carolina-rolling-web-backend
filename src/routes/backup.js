@@ -733,6 +733,11 @@ router.post('/restore', requireAdmin, async (req, res, next) => {
   // unique guards during the restore so those rows aren't silently skipped, and put them back after
   // — any duplicates are then reported instead of losing work orders.
   try { await invoiceNumbersSvc.dropInvoiceConstraints(sequelize); } catch (e) { console.warn('[restore] could not lift invoice guards:', e.message); }
+  // Same for the round-6 integrity rules (foreign keys, part numbers, unique names): tables are
+  // re-inserted in an order they would reject. They're put back (and reported) at the end.
+  const integrity = require('../services/integrityConstraints');
+  let integrityRestored = false;
+  try { await integrity.dropRestorableConstraints(sequelize); } catch (e) { console.warn('[restore] could not lift integrity rules:', e.message); }
   try {
     const { backup, options = {} } = req.body;
     if (!backup || !backup.data) {
@@ -1104,6 +1109,9 @@ router.post('/restore', requireAdmin, async (req, res, next) => {
       for (const p of invoiceGuardReport) console.warn(`[restore] invoice guard ${p.name} not re-added — duplicates to fix:`, JSON.stringify(p.duplicates));
     } catch (e) { console.warn('[restore] could not re-add invoice guards:', e.message); }
 
+    try { integrity.logReport(await integrity.ensureIntegrityConstraints(sequelize)); integrityRestored = true; }
+    catch (e) { console.warn('[restore] could not re-add integrity rules:', e.message); }
+
     res.json({ message: 'Backup restored successfully', results, fileResults,
       invoiceNumberDuplicates: (invoiceGuardReport || []).flatMap(p => p.duplicates) });
     } catch (innerErr) {
@@ -1117,6 +1125,7 @@ router.post('/restore', requireAdmin, async (req, res, next) => {
     invoiceLock.resumeInvoiceLock();
     // If the restore failed part-way, still try to put the guards back
     if (!invoiceGuardReport) { try { await invoiceNumbersSvc.ensureInvoiceConstraints(sequelize); } catch (e) { /* logged at next boot */ } }
+    if (!integrityRestored) { try { await integrity.ensureIntegrityConstraints(sequelize); } catch (e) { /* re-added at next boot */ } }
   }
 });
 

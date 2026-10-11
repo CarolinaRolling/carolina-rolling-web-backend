@@ -518,7 +518,7 @@ router.post('/retry/:id', async (req, res, next) => {
       res.json({ data: email, message: 'Retry successful — pending order created' });
     } else {
       // RFQ — create estimate
-      const estNumber = parsed.referenceNumber || `EST-${new Date().toISOString().slice(2, 10).replace(/-/g, '')}-${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`;
+      const estNumber = parsed.referenceNumber || await require('../services/docNumbers').nextDocNumber('EST');
       const existingEst = await Estimate.findOne({ where: { estimateNumber: estNumber } });
       if (existingEst) {
         await email.update({ status: 'ignored', errorMessage: 'Duplicate estimate number' });

@@ -2157,7 +2157,38 @@ async function startServer() {
           console.warn('[schema] SCHEMA_SYNC_MODE=alter — this can DROP columns. Never use against production data.');
           await sequelize.sync({ alter: true });
         } else {
-          await sequelize.sync(); // create-only, cannot drop or alter existing columns
+          // Create-only, one model at a time. NOT sequelize.sync(): in Sequelize 6.37, when models
+          // reference each other in a cycle (WorkOrder ↔ Estimate here) sequelize.sync() silently runs a
+          // second pass with { alter: true } on EVERY model — the very behaviour that dropped and
+          // re-created columns until work_order_parts hit the 1600-column limit, and that added another
+          // copy of every UNIQUE constraint on each boot (audit M17). Model.sync() without alter only
+          // creates a missing table (and missing ENUM values / declared indexes); existing tables are
+          // never altered. A new table whose foreign key points at a table not created yet is created
+          // without that key.
+          const qi = sequelize.getQueryInterface();
+          const created = [], keyless = [];
+          // Pass 1: create missing tables. A table whose foreign key points at a table that doesn't
+          // exist yet (the cycle) is created without its keys and finished in pass 2.
+          for (const model of Object.values(sequelize.models)) {
+            if (await qi.tableExists(model.getTableName())) { await model.sync({}); continue; }
+            try { await model.sync({}); }
+            catch (e) { await model.sync({ withoutForeignKeyConstraints: true }); keyless.push(model); }
+            created.push(model.getTableName());
+          }
+          // Pass 2: add the declared foreign keys to the tables created without them (new tables only).
+          for (const model of keyless) {
+            const table = model.getTableName();
+            for (const [name, attr] of Object.entries(model.rawAttributes)) {
+              const ref = attr.references; if (!ref || !ref.model) continue;
+              const refTable = typeof ref.model === 'string' ? ref.model : ref.model.tableName || ref.model.getTableName();
+              const col = attr.field || name;
+              try {
+                await sequelize.query(`ALTER TABLE "${table}" ADD CONSTRAINT "${table}_${col}_fkey" FOREIGN KEY ("${col}") REFERENCES "${refTable}" ("${ref.key || 'id'}")` +
+                  ` ON DELETE ${attr.onDelete || 'SET NULL'} ON UPDATE ${attr.onUpdate || 'CASCADE'}`);
+              } catch (e) { console.warn(`[schema] could not add ${table}.${col} → ${refTable}: ${e.message}`); }
+            }
+          }
+          if (created.length) console.log(`[schema] created missing table(s): ${created.join(', ')}`);
         }
         console.log(`Database synchronized (SCHEMA_SYNC_MODE=${syncMode})`);
       } catch (syncErr) {
@@ -2167,6 +2198,14 @@ async function startServer() {
     } else {
       console.log('Schema sync off (default). Columns are managed by the migration block. Set SCHEMA_SYNC_MODE=safe to enable create-only sync.');
     }
+
+    // Integrity rules (audits M2, M3, M14, M17): remove duplicate constraints left by schema sync, one
+    // line number per part, unique names / payment applications / active DR per order, and foreign
+    // keys for id columns that had none. Runs after sync so this boot's duplicates are cleaned too.
+    try {
+      const integrity = require('./services/integrityConstraints');
+      integrity.logReport(await integrity.ensureIntegrityConstraints(sequelize));
+    } catch (e) { console.log('Integrity constraint migration error:', e.message); }
 
     // Migrate picked_up status to shipped (consolidated statuses)
     try {

@@ -1,5 +1,10 @@
 const express = require('express');
 const router = express.Router();
+
+// Same name ignoring case and outer spaces — exactly what the database's unique rule compares (audit M3).
+// (iLike treated "_" and "%" in a name as wildcards, and didn't ignore spaces.)
+const { fn: sqlFn, col: sqlCol, where: sqlWhere } = require('sequelize');
+const sameName = (name) => sqlWhere(sqlFn('lower', sqlFn('btrim', sqlCol('name'))), String(name || '').trim().toLowerCase());
 const { Client, Vendor, WorkOrder, WorkOrderPart, Estimate, ClientPayment, PaymentApplication, CreditMemo, Refund, ShipmentCharge, sequelize } = require('../models');
 // Shared invoice totals + payment math (audit C2/C4)
 const { loadBalances } = require('../services/paymentLedger');
@@ -60,7 +65,7 @@ router.get('/clients/check-notag', async (req, res, next) => {
     if (!name) return res.json({ data: { noTag: false } });
 
     const client = await Client.findOne({
-      where: { name: { [Op.iLike]: name.trim() }, isActive: true }
+      where: { [Op.and]: [sameName(name)], isActive: true }
     });
 
     res.json({ data: { noTag: client?.noTag === true, requiresPartLabels: client?.requiresPartLabels === true } });
@@ -106,7 +111,7 @@ router.post('/clients', async (req, res, next) => {
     }
     
     // Check for duplicate (active)
-    const existing = await Client.findOne({ where: { name: { [Op.iLike]: name.trim() } } });
+    const existing = await Client.findOne({ where: sameName(name) });
     if (existing) {
       if (!existing.isActive) {
         // Reactivate the inactive client instead of blocking
@@ -183,7 +188,7 @@ router.put('/clients/:id', async (req, res, next) => {
     if (name && name !== client.name) {
       const existing = await Client.findOne({ 
         where: { 
-          name: { [Op.iLike]: name },
+          [Op.and]: [sameName(name)],
           id: { [Op.ne]: client.id }
         } 
       });
@@ -194,6 +199,10 @@ router.put('/clients/:id', async (req, res, next) => {
     
     const oldName = client.name;
     
+    // The rename and every copy of the name change together, or not at all (audit M1)
+    const { sequelize } = require('../models');
+    const tx = await sequelize.transaction();
+    try {
     await client.update({
       name: name !== undefined ? name : client.name,
       contactName: contactName !== undefined ? contactName : client.contactName,
@@ -224,37 +233,18 @@ router.put('/clients/:id', async (req, res, next) => {
       usmcaImporterName: req.body.usmcaImporterName !== undefined ? (req.body.usmcaImporterName || null) : client.usmcaImporterName,
       usmcaImporterAddress: req.body.usmcaImporterAddress !== undefined ? (req.body.usmcaImporterAddress || null) : client.usmcaImporterAddress,
       usmcaOriginCriteria: req.body.usmcaOriginCriteria !== undefined ? (req.body.usmcaOriginCriteria || 'A') : client.usmcaOriginCriteria
-    });
+    }, { transaction: tx });
     
-    // Propagate name change to all work orders and estimates
+    // Propagate a name change to every record that carries the client's name — payments, credits,
+    // refunds, numbers, deliveries, shipments and the portal key included (audit M1)
     if (name && name !== oldName) {
-      try {
-        const [woCount] = await WorkOrder.update(
-          { clientName: name },
-          { where: { clientId: client.id } }
-        );
-        // Also update WOs matched by old name (in case clientId wasn't set)
-        const [woNameCount] = await WorkOrder.update(
-          { clientName: name },
-          { where: { clientName: oldName, clientId: null } }
-        );
-        const [estCount] = await Estimate.update(
-          { clientName: name },
-          { where: { clientId: client.id } }
-        );
-        const [estNameCount] = await Estimate.update(
-          { clientName: name },
-          { where: { clientName: oldName, clientId: null } }
-        );
-        const total = woCount + woNameCount + estCount + estNameCount;
-        console.log(`[Client] Name changed: "${oldName}" → "${name}" — updated ${woCount + woNameCount} WOs, ${estCount + estNameCount} estimates`);
-      } catch (propErr) {
-        console.error('[Client] Name propagation error:', propErr.message);
-        // Don't fail the request — client was already updated
-      }
+      const n = await require('../services/partyRefs').renameClient(client.id, oldName, name, { transaction: tx });
+      console.log(`[Client] Name changed: "${oldName}" → "${name}" — updated ${n} record(s)`);
     }
+    await tx.commit();
+    } catch (e) { await tx.rollback(); throw e; }
     
-    res.json({ data: client, message: name && name !== oldName ? `Client updated — name changed across all work orders and estimates` : 'Client updated successfully' });
+    res.json({ data: client, message: name && name !== oldName ? `Client updated — name changed on every record` : 'Client updated successfully' });
   } catch (error) {
     console.error('Client update error:', error.message, error.errors?.map(e => e.message));
     next(error);
@@ -273,49 +263,16 @@ router.post('/clients/:id/merge', async (req, res, next) => {
   const t = await sequelize.transaction();
   try {
     const [target, source] = await Promise.all([
-      Client.findByPk(targetId),
-      Client.findByPk(sourceId)
+      Client.findByPk(targetId, { transaction: t, lock: t.LOCK.UPDATE }),
+      Client.findByPk(sourceId, { transaction: t, lock: t.LOCK.UPDATE })
     ]);
-    if (!target) return res.status(404).json({ error: { message: 'Target client not found' } });
-    if (!source) return res.status(404).json({ error: { message: 'Source client not found' } });
-
+    if (!target) { await t.rollback(); return res.status(404).json({ error: { message: 'Target client not found' } }); }
+    if (!source) { await t.rollback(); return res.status(404).json({ error: { message: 'Source client not found' } }); }
     const targetName = target.name;
 
-    // Reassign all linked records
-    const tables = [
-      { table: 'work_orders', idCol: '"clientId"', nameCol: '"clientName"' },
-      { table: 'estimates', idCol: '"clientId"', nameCol: '"clientName"' },
-      { table: 'inbound_orders', idCol: '"clientId"', nameCol: '"clientName"' },
-      { table: 'dr_numbers', idCol: '"clientId"', nameCol: null },
-      { table: 'po_numbers', idCol: '"clientId"', nameCol: null },
-      { table: 'invoice_numbers', idCol: '"clientId"', nameCol: null },
-      { table: 'scanned_emails', idCol: '"clientId"', nameCol: null },
-      { table: 'pending_orders', idCol: '"clientId"', nameCol: null },
-    ];
-
-    // Shipments only store clientName (no clientId FK) — update by matching source name
-    try {
-      await sequelize.query(
-        `UPDATE shipments SET "clientName" = :targetName WHERE "clientName" = :sourceName`,
-        { replacements: { targetName, sourceName: source.name }, transaction: t }
-      );
-    } catch (e) { /* skip */ }
-
-    for (const { table, idCol, nameCol } of tables) {
-      try {
-        if (nameCol) {
-          await sequelize.query(
-            `UPDATE ${table} SET ${idCol} = :targetId, ${nameCol} = :targetName WHERE ${idCol} = :sourceId`,
-            { replacements: { targetId, targetName, sourceId }, transaction: t }
-          );
-        } else {
-          await sequelize.query(
-            `UPDATE ${table} SET ${idCol} = :targetId WHERE ${idCol} = :sourceId`,
-            { replacements: { targetId, sourceId }, transaction: t }
-          );
-        }
-      } catch (e) { /* table may not exist — skip */ }
-    }
+    // Every table that points at the client — payments, credit memos, refunds, paperwork and the
+    // portal key included (before, those were left pointing at the deleted client) — audit M1
+    await require('../services/partyRefs').mergeClients(target, source, { transaction: t });
 
     // Delete source client
     await source.destroy({ transaction: t });
@@ -426,13 +383,13 @@ router.post('/vendors', async (req, res, next) => {
     }
     
     // Check for duplicate
-    const existing = await Vendor.findOne({ where: { name: { [Op.iLike]: name } } });
+    const existing = await Vendor.findOne({ where: sameName(name) });
     if (existing) {
       return res.status(400).json({ error: { message: 'A vendor with this name already exists' } });
     }
     
     const vendor = await Vendor.create({
-      name,
+      name: String(name).trim(),
       contactName,
       contactPhone,
       contactEmail,
@@ -467,11 +424,12 @@ router.put('/vendors/:id', async (req, res, next) => {
       isActive
     } = req.body;
     
+    const oldVendorName = vendor.name;
     // Check for duplicate name (excluding current)
     if (name && name !== vendor.name) {
       const existing = await Vendor.findOne({ 
         where: { 
-          name: { [Op.iLike]: name },
+          [Op.and]: [sameName(name)],
           id: { [Op.ne]: vendor.id }
         } 
       });
@@ -480,6 +438,9 @@ router.put('/vendors/:id', async (req, res, next) => {
       }
     }
     
+    const { sequelize } = require('../models');
+    const tx = await sequelize.transaction();
+    try {
     await vendor.update({
       name: name !== undefined ? name : vendor.name,
       contactName: contactName !== undefined ? contactName : vendor.contactName,
@@ -495,8 +456,16 @@ router.put('/vendors/:id', async (req, res, next) => {
       accountingContactPhone: req.body.accountingContactPhone !== undefined ? (req.body.accountingContactPhone || null) : vendor.accountingContactPhone,
       emailScanEnabled: req.body.emailScanEnabled !== undefined ? req.body.emailScanEnabled : vendor.emailScanEnabled,
       emailScanAddresses: req.body.emailScanAddresses !== undefined ? req.body.emailScanAddresses : vendor.emailScanAddresses
-    });
-    
+    }, { transaction: tx });
+
+    // A rename used to change only the vendor record; parts, deliveries, POs, bills and the vendor
+    // portal key kept the old name (audit M1)
+    if (name && name !== oldVendorName) {
+      const n = await require('../services/partyRefs').renameVendor(vendor.id, oldVendorName, name, { transaction: tx });
+      console.log(`[Vendor] Name changed: "${oldVendorName}" → "${name}" — updated ${n} record(s)`);
+    }
+    await tx.commit();
+    } catch (e) { await tx.rollback(); throw e; }
     res.json({ data: vendor, message: 'Vendor updated successfully' });
   } catch (error) {
     next(error);
@@ -534,8 +503,8 @@ router.post('/vendors/:id/merge', async (req, res, next) => {
   const t = await sequelize.transaction();
   try {
     const [target, source] = await Promise.all([
-      Vendor.findByPk(targetId),
-      Vendor.findByPk(sourceId)
+      Vendor.findByPk(targetId, { transaction: t, lock: t.LOCK.UPDATE }),
+      Vendor.findByPk(sourceId, { transaction: t, lock: t.LOCK.UPDATE })
     ]);
     if (!target) { await t.rollback(); return res.status(404).json({ error: { message: 'Target vendor not found' } }); }
     if (!source) { await t.rollback(); return res.status(404).json({ error: { message: 'Source vendor not found' } }); }
@@ -543,49 +512,8 @@ router.post('/vendors/:id/merge', async (req, res, next) => {
     const targetName = target.name;
     const sourceName = source.name;
 
-    // Tables with a plain vendorId FK
-    const idTables = [
-      { table: 'inbound_orders', idCol: '"vendorId"' },
-      { table: 'work_order_parts', idCol: '"vendorId"' },
-      { table: 'estimate_parts', idCol: '"vendorId"' },
-      { table: 'po_numbers', idCol: '"vendorId"' },
-      { table: 'vendor_issues', idCol: '"vendorId"' },
-      { table: 'liabilities', idCol: '"vendorId"' },
-      { table: 'shipment_charges', idCol: '"vendorId"' },
-      // RFQ + outside-processing vendor references
-      { table: 'estimates', idCol: '"rfqVendorId"' },
-      { table: 'work_order_parts', idCol: '"outsideProcessingVendorId"' },
-      { table: 'estimate_parts', idCol: '"outsideProcessingVendorId"' },
-    ];
-    for (const { table, idCol } of idTables) {
-      try {
-        await sequelize.query(
-          `UPDATE ${table} SET ${idCol} = :targetId WHERE ${idCol} = :sourceId`,
-          { replacements: { targetId, sourceId }, transaction: t }
-        );
-      } catch (e) { /* column/table may not exist — skip */ }
-    }
-
-    // Parts also store the vendor NAME in supplierName (denormalized). Reassign by matching the
-    // source name so the display stays consistent with the merged vendor.
-    for (const table of ['work_order_parts', 'estimate_parts']) {
-      try {
-        await sequelize.query(
-          `UPDATE ${table} SET "supplierName" = :targetName WHERE "supplierName" = :sourceName`,
-          { replacements: { targetName, sourceName }, transaction: t }
-        );
-      } catch (e) { /* skip */ }
-    }
-
-    // vendorName-only fields (no FK) on vendor_issues and shipment_charges
-    for (const table of ['vendor_issues', 'shipment_charges']) {
-      try {
-        await sequelize.query(
-          `UPDATE ${table} SET "vendorName" = :targetName WHERE "vendorName" = :sourceName`,
-          { replacements: { targetName, sourceName }, transaction: t }
-        );
-      } catch (e) { /* skip */ }
-    }
+    // Every vendor id and vendor-name copy, in one transaction that fails loudly (audit M1)
+    await require('../services/partyRefs').mergeVendors(target, source, { transaction: t });
 
     // Delete source vendor
     await source.destroy({ transaction: t });

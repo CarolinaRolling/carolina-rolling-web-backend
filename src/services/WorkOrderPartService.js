@@ -29,15 +29,13 @@ class WorkOrderPartService {
     }
 
     // Get next part number
-    const existingParts = await WorkOrderPart.count({ where: { workOrderId } });
-    const partNumber = existingParts + 1;
+    // (number assigned at create: highest + 1, retried on a clash — audit M14)
 
     // Clean and prepare data
     const cleanedData = cleanNumericFields(data);
     
-    const part = await WorkOrderPart.create({
+    const part = await require('./partNumbers').createWithNextPartNumber(WorkOrderPart, 'workOrderId', {
       workOrderId,
-      partNumber,
       partType: data.partType,
       clientPartNumber: data.clientPartNumber,
       rev: data.rev,

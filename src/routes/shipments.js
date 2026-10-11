@@ -149,13 +149,25 @@ router.get('/unlinked', async (req, res, next) => {
 // GET /api/shipments - Get all shipments
 router.get('/', async (req, res, next) => {
   try {
-    const { status, clientName, search, archived, limit = 100, offset = 0 } = req.query;
+    const { status, clientName, search, archived, offset = 0 } = req.query;
     const { Op } = require('sequelize');
-    
+    // Before: a fixed 100 newest, archived included — once there were more, older shipments still on
+    // the floor vanished from the tablets (audit M10). Now:
+    //  - status=active  → every shipment not shipped/archived (no cap)
+    //  - no limit sent (the tablets) → every open shipment + the 100 most recent closed ones
+    //  - an explicit limit still pages as before
+    const CLOSED = ['shipped', 'archived'];
+    const explicitLimit = req.query.limit !== undefined && req.query.limit !== '';
+    const limit = explicitLimit ? Math.min(parseInt(req.query.limit) || 100, 5000) : 100;
+    const openPlusRecent = !explicitLimit && !status && !search && !clientName;
+
     const where = {};
-    if (status) where.status = status;
+    // (a NULL status — possible from the old PUT — counts as open, as the tablets show it as Received)
+    const OPEN = { [Op.or]: [{ status: null }, { status: { [Op.notIn]: CLOSED } }] };
+    if (status === 'active') where[Op.and] = [OPEN];
+    else if (status) where.status = status;
     if (clientName) where.clientName = { [Op.iLike]: `%${clientName}%` };
-    if (archived === 'false') {
+    if (archived === 'false' && !status) {
       where.status = { [Op.ne]: 'archived' };
     }
     if (search) {
@@ -169,16 +181,28 @@ router.get('/', async (req, res, next) => {
       ];
     }
 
-    const shipments = await Shipment.findAndCountAll({
-      where,
-      include: [
-        { model: ShipmentPhoto, as: 'photos' },
-        { model: ShipmentDocument, as: 'documents' }
-      ],
-      order: [['receivedAt', 'DESC']],
-      limit: parseInt(limit),
-      offset: parseInt(offset)
-    });
+    const include = [
+      { model: ShipmentPhoto, as: 'photos' },
+      { model: ShipmentDocument, as: 'documents' }
+    ];
+    const order = [['receivedAt', 'DESC']];
+    let shipments;
+    if (status === 'active' && !explicitLimit) {
+      const rows = await Shipment.findAll({ where, include, order });
+      shipments = { rows, count: rows.length };
+    } else if (openPlusRecent) {
+      const { status: statusCond, ...rest } = where;   // archived=false may already exclude archived
+      const openWhere = { ...rest, [Op.and]: [OPEN] };
+      const closedWhere = { ...rest, status: statusCond ? { [Op.and]: [statusCond, { [Op.in]: CLOSED }] } : { [Op.in]: CLOSED } };
+      const [open, closed] = await Promise.all([
+        Shipment.findAll({ where: openWhere, include, order }),
+        Shipment.findAll({ where: closedWhere, include, order, limit: 100 }),
+      ]);
+      const rows = [...open, ...closed].sort((a, b) => new Date(b.receivedAt || 0) - new Date(a.receivedAt || 0));
+      shipments = { rows, count: rows.length };
+    } else {
+      shipments = await Shipment.findAndCountAll({ where, include, order, limit, offset: parseInt(offset) || 0, distinct: true });
+    }
 
     // Sync shipment status with linked work order status (fire-and-forget)
     // If a WO is shipped/archived, the shipment should be archived too
@@ -760,8 +784,16 @@ router.put('/:id', async (req, res, next) => {
       }
     });
     
-    // verbose logging removed
-    
+    // A status the database doesn't have (e.g. waiting_for_materials, which is a work-order status)
+    // used to fail as a server error; say why instead (audit H2). A blank status is ignored.
+    if ('status' in updates) {
+      const allowed = (Shipment.rawAttributes.status && Shipment.rawAttributes.status.values) || [];
+      if (updates.status === null) delete updates.status;
+      else if (allowed.length && !allowed.includes(updates.status)) {
+        return res.status(400).json({ error: { message: `"${updates.status}" isn't a shipment status. Choose one of: ${allowed.join(', ')}.` } });
+      }
+    }
+
     // Handle shippedAt timestamp
     if (updates.status === 'shipped' && shipment.status !== 'shipped') {
       // Setting to shipped - record the timestamp

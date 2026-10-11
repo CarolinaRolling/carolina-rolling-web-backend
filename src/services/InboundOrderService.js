@@ -22,20 +22,33 @@ class InboundOrderService {
   // Get all inbound orders
   async getAll(options = {}) {
     const { InboundOrder, Vendor, WorkOrder } = this.models;
-    const { status, limit = 100, offset = 0 } = options;
+    const { status, offset = 0 } = options;
+    const { Op } = require('sequelize');
+    const include = [
+      { model: Vendor, as: 'vendor', attributes: ['id', 'name', 'contactName', 'contactPhone', 'contactEmail'] },
+      { model: WorkOrder, as: 'workOrder', attributes: ['id', 'orderNumber', 'drNumber', 'clientName', 'clientPurchaseOrderNumber', 'status'] }
+    ];
+    const order = [['createdAt', 'DESC']];
+    const DONE = ['received', 'cancelled'];
+    const explicitLimit = options.limit !== undefined && options.limit !== '';
 
+    // Before: a fixed 100 newest — once there were more, older deliveries still expected dropped off
+    // the tablets and the Inbound page (audit M10). With no limit sent: every open delivery plus the
+    // 100 most recent received/cancelled ones. status=open → open ones only. A limit pages as before.
+    if (!explicitLimit && (!status || status === 'open')) {
+      const OPEN = { [Op.or]: [{ status: null }, { status: { [Op.notIn]: DONE } }] };
+      const open = await InboundOrder.findAll({ where: OPEN, include, order });
+      if (status === 'open') return open;
+      const done = await InboundOrder.findAll({ where: { status: { [Op.in]: DONE } }, include, order, limit: 100 });
+      return [...open, ...done].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    }
     const where = {};
-    if (status) where.status = status;
-
+    if (status === 'open') where[Op.or] = [{ status: null }, { status: { [Op.notIn]: DONE } }];
+    else if (status) where.status = status;
     return InboundOrder.findAll({
-      where,
-      include: [
-        { model: Vendor, as: 'vendor', attributes: ['id', 'name', 'contactName', 'contactPhone', 'contactEmail'] },
-        { model: WorkOrder, as: 'workOrder', attributes: ['id', 'orderNumber', 'drNumber', 'clientName', 'clientPurchaseOrderNumber', 'status'] }
-      ],
-      order: [['createdAt', 'DESC']],
-      limit: parseInt(limit),
-      offset: parseInt(offset)
+      where, include, order,
+      limit: Math.min(parseInt(options.limit) || 100, 5000),
+      offset: parseInt(offset) || 0
     });
   }
 

@@ -3440,7 +3440,16 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     if (partType !== undefined) updates.partType = partType;
     if (clientPartNumber !== undefined) updates.clientPartNumber = clientPartNumber;
     if (heatNumber !== undefined) updates.heatNumber = heatNumber;
-    if (heatBreakdown !== undefined) updates.heatBreakdown = heatBreakdown;
+    if (heatBreakdown !== undefined) {
+      // Older tablets and the old web save sent rows as {heat, qty} only, erasing each heat's country
+      // of origin (used for the USMCA certificate). A row that doesn't mention country keeps the one
+      // stored for the same heat number (audit H1). Sending country: '' still clears it.
+      const key = (h) => String(h || '').trim().toUpperCase();
+      const stored = new Map((Array.isArray(part.heatBreakdown) ? part.heatBreakdown : []).filter(r => r && r.country).map(r => [key(r.heat), r.country]));
+      updates.heatBreakdown = Array.isArray(heatBreakdown)
+        ? heatBreakdown.map(r => (r && typeof r === 'object' && !('country' in r) && stored.has(key(r.heat)) ? { ...r, country: stored.get(key(r.heat)) } : r))
+        : heatBreakdown;
+    }
     if (req.body.heatCountry !== undefined) updates.heatCountry = req.body.heatCountry;
     if (req.body.clientJobNumber !== undefined) updates.clientJobNumber = req.body.clientJobNumber;
     // Press brake fields (real columns, Step 1 + Step 4)

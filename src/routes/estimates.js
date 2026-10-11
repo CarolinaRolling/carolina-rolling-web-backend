@@ -688,7 +688,10 @@ async function getUnsentDrafts() {
       id: e.id,
       estimateNumber: e.estimateNumber,
       clientName: e.clientName,
-      total: e.total,
+      // Estimate has no `total` column — the quotes screen never showed an amount (audit L10)
+      total: e.grandTotal != null ? parseFloat(e.grandTotal) : null,
+      sentAt: e.sentAt || null,
+      snoozedUntil: e.reminderSnoozeUntil || null,
       createdAt: e.createdAt,
       ageDays,
       isTopClient: topNames.has(e.clientName), // monitored client — the ones you can't afford to miss

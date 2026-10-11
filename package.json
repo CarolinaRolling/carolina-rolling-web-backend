@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/index.js",
     "test": "node test/conversion.test.js && node test/allocator.test.js && node test/origin.test.js && node test/deletionArchive.test.js && node test/invoiceTotals.test.js",
-    "test:integration": "node test/integration/critical-fixes.int.js verify && node test/integration/races.int.js && node test/integration/round3.int.js && node test/integration/round4.int.js && node test/integration/round5.int.js && node test/integration/totals-fuzz.int.js",
+    "test:integration": "node test/integration/critical-fixes.int.js verify && node test/integration/races.int.js && node test/integration/round3.int.js && node test/integration/round4.int.js && node test/integration/round5.int.js && node test/integration/round6.int.js && node test/integration/totals-fuzz.int.js",
     "check-schema": "node scripts/schema-drift-check.js",
     "dev": "nodemon src/index.js",
     "migrate": "node src/migrations/run.js",

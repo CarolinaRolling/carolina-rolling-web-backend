@@ -55,9 +55,11 @@ const REG = ['plate_roll', 'angle_roll', 'pipe_roll', 'cone_roll', 'flat_stock',
       regIds.push(p.id);
     }
     const nSvc = Math.floor(rnd() * 3);
+    let usedZero = false;   // a line numbered 0 is still exercised, but at most once (one number per line — M14)
     for (let i = 0; i < nSvc; i++) {
+      const zero = !usedZero && rnd() < 0.2; if (zero) usedZero = true;
       await WorkOrderPart.create({
-        workOrderId: wo.id, partNumber: rnd() < 0.2 ? 0 : pn++, partType: pick(['fab_service', 'shop_rate']), quantity: 1,
+        workOrderId: wo.id, partNumber: zero ? 0 : pn++, partType: pick(['fab_service', 'shop_rate']), quantity: 1,
         partTotal: money(400), formData: rnd() < 0.5 ? { _linkedPartId: pick(regIds) } : {},
       }, { hooks: false });
     }

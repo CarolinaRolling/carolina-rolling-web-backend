@@ -175,13 +175,15 @@ async function verify(pg, token) {
   const mk = await api(token, 'POST', '/quickbooks/mark-entered', { workOrderIds: [woId] });
   check('mark-entered OK', mk.status === 200, JSON.stringify(mk.body).slice(0, 150));
   const p1 = (await pg.query(`SELECT id FROM work_order_parts WHERE "workOrderId" = $1 AND "partType" = 'plate_roll'`, [woId])).rows[0].id;
-  await api(token, 'PUT', `/workorders/${woId}/parts/${p1}`, { partTotal: 500, laborTotal: 50, quantity: 2 });
+  const lockedEdit = await api(token, 'PUT', `/workorders/${woId}/parts/${p1}`, { partTotal: 500, laborTotal: 50, quantity: 2 });
   await sleep(1200);
   led = await api(token, 'GET', '/business/ledger'); row = led.body.data.invoices.find(i => i.id === woId);
   const fr = (await pg.query(`SELECT "grandTotal", "totalsComputedAt" FROM work_orders WHERE id = $1`, [woId])).rows[0];
-  check('exported invoice stays at $770 after a part edit (frozen)', near(row.grandTotal, 770) && near(fr.grandTotal, 770), `${row.grandTotal} / ${fr.grandTotal}`);
+  check('exported invoice: the price edit is refused (H10) and the total stays $770', lockedEdit.status === 409 && near(row.grandTotal, 770) && near(fr.grandTotal, 770), `${lockedEdit.status} ${row.grandTotal} / ${fr.grandTotal}`);
   check('frozen total is marked as computed', !!fr.totalsComputedAt);
   await api(token, 'POST', '/quickbooks/unmark-entered', { workOrderIds: [woId] });
+  await api(token, 'PUT', `/workorders/${woId}/parts/${p1}`, { partTotal: 500, laborTotal: 50, quantity: 2 });
+  await sleep(1200);
   led = await api(token, 'GET', '/business/ledger'); row = led.body.data.invoices.find(i => i.id === woId);
   check('after un-marking, the total is live again ($880)', near(row.grandTotal, 880), row.grandTotal);
   await api(token, 'PUT', `/workorders/${woId}/parts/${p1}`, { partTotal: 400, laborTotal: 50, quantity: 2 });

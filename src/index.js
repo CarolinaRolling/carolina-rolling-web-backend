@@ -8,6 +8,8 @@ const cron = require('node-cron');
 const { sequelize, Shipment, ShipmentPhoto, ShipmentDocument, User, AppSettings, WorkOrder, Client, DailyActivity, Estimate, TodoItem } = require('./models');
 // Keep each work order's stored grandTotal/taxAmount in step with its parts and charges (audit C4).
 require('./services/invoiceTotals').registerTotalsHooks(require('./models'));
+// Pricing on orders already in QuickBooks can't change without an admin reopening them (audit H10).
+require('./services/invoiceLock').registerInvoiceLockHooks(require('./models'));
 const shipmentRoutes = require('./routes/shipments');
 const settingsRoutes = require('./routes/settings');
 const { sendScheduleEmail } = require('./routes/settings');
@@ -2001,6 +2003,10 @@ async function startServer() {
     try {
       await sequelize.query(`ALTER TABLE work_order_payments ADD COLUMN IF NOT EXISTS "paymentApplicationId" UUID`);
       await sequelize.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_wop_payment_application ON work_order_payments ("paymentApplicationId") WHERE "paymentApplicationId" IS NOT NULL`);
+      // Credit memos applied to invoices (audit H6)
+      await sequelize.query(`ALTER TABLE work_order_payments ADD COLUMN IF NOT EXISTS "creditMemoApplicationId" UUID`);
+      await sequelize.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_wop_credit_memo_application ON work_order_payments ("creditMemoApplicationId") WHERE "creditMemoApplicationId" IS NOT NULL`);
+      await sequelize.query(`ALTER TABLE credit_memo_applications ADD COLUMN IF NOT EXISTS "voidedAt" TIMESTAMP WITH TIME ZONE`);
       const { linkLegacyTwinPayments } = require('./services/paymentLedger');
       const r = await linkLegacyTwinPayments(sequelize);
       if (r.linked || r.unmatched) console.log(`[payments] linked ${r.linked} client-payment application(s) to their invoice payment rows; ${r.unmatched} application(s) have no twin and count on their own`);

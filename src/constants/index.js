@@ -111,6 +111,10 @@ const DEFAULTS = {
 function cleanNumericFields(data, fields = NUMERIC_FIELDS) {
   const cleaned = { ...data };
   fields.forEach(field => {
+    // A field the request didn't send is left alone. (Turning absent fields into null made every
+    // partial update — a tablet status tap, a progress count, an operator note — blank the part's
+    // labor, material, setup and total prices.) An explicitly emptied field is still cleared.
+    if (!(field in cleaned)) return;
     if (cleaned[field] === '' || cleaned[field] === undefined) {
       cleaned[field] = null;
     } else if (cleaned[field] !== null && cleaned[field] !== undefined) {

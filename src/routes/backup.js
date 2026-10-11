@@ -725,7 +725,9 @@ router.post('/restore', requireAdmin, async (req, res, next) => {
   // recompute totals from half-restored data and overwrite the restored values).
   const invoiceTotals = require('../services/invoiceTotals');
   const invoiceNumbersSvc = require('../services/invoiceNumbers');
+  const invoiceLock = require('../services/invoiceLock');
   invoiceTotals.suspendTotalsHooks();
+  invoiceLock.suspendInvoiceLock();   // a restore rewrites exported orders wholesale
   let invoiceGuardReport = null;
   // An older backup may contain duplicate invoice numbers (from before the H4 fix). Lift the two
   // unique guards during the restore so those rows aren't silently skipped, and put them back after
@@ -1105,6 +1107,7 @@ router.post('/restore', requireAdmin, async (req, res, next) => {
     next(error);
   } finally {
     invoiceTotals.resumeTotalsHooks();
+    invoiceLock.resumeInvoiceLock();
     // If the restore failed part-way, still try to put the guards back
     if (!invoiceGuardReport) { try { await invoiceNumbersSvc.ensureInvoiceConstraints(sequelize); } catch (e) { /* logged at next boot */ } }
   }

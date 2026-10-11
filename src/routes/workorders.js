@@ -272,6 +272,10 @@ function fetchWithRedirects(url, maxRedirects = 5, timeoutMs = 15000) {
 function cleanNumericFields(data, fields) {
   const cleaned = { ...data };
   fields.forEach(field => {
+    // A field the request didn't send is left alone. (Turning absent fields into null made every
+    // partial update — a tablet status tap, a progress count, an operator note — blank the part's
+    // labor, material, setup and total prices.) An explicitly emptied field is still cleared.
+    if (!(field in cleaned)) return;
     if (cleaned[field] === '' || cleaned[field] === undefined) {
       cleaned[field] = null;
     } else if (cleaned[field] !== null) {
@@ -3293,7 +3297,7 @@ router.post('/:id/parts', async (req, res, next) => {
     });
   } catch (error) {
     console.error('Add work order part error:', error);
-    res.status(500).json({ error: { message: error.message || 'Failed to add part' } });
+    res.status(error && error.status >= 400 && error.status < 500 ? error.status : 500).json({ error: { message: error.message || 'Failed to add part' } });
   }
 });
 
@@ -3680,6 +3684,10 @@ router.delete('/:id/parts/:partId', async (req, res, next) => {
     if (!part) {
       return res.status(404).json({ error: { message: 'Part not found' } });
     }
+
+    // On an order already in QuickBooks, refuse BEFORE deleting any files (otherwise the part would
+    // stay but its prints/DXFs would be gone) — audit H10
+    await require('../services/invoiceLock').assertPartRemovable(part);
 
     // Delete files from Cloudinary
     for (const file of part.files) {
@@ -5047,15 +5055,11 @@ router.post('/:id/transport-po', async (req, res, next) => {
     const vendor = await Vendor.findByPk(trip.truckingVendorId);
     if (!vendor) return res.status(404).json({ error: { message: 'Trucking vendor not found' } });
 
-    // Generate PO number
-    const poSetting = await AppSettings.findOne({ where: { key: 'next_op_po_number' } });
-    let poNum = poSetting?.value?.nextNumber || 1001;
-    const poNumber = `TR${poNum}`;
-    if (poSetting) {
-      await poSetting.update({ value: { nextNumber: poNum + 1 } });
-    } else {
-      await AppSettings.create({ key: 'next_op_po_number', value: { nextNumber: poNum + 1 } });
-    }
+    // Reserve the PO number from the shared, locked PO sequence (audit H11). OP/TR keep their
+    // prefix but no longer have their own unlocked counter that could repeat material PO numbers.
+    const poNumber = await require('../services/poNumbers').reserveStandalone('TR', {
+      workOrderId: req.params.id, supplier: (typeof vendor !== 'undefined' && vendor) ? vendor.name : null,
+      vendorId: (typeof vendor !== 'undefined' && vendor) ? vendor.id : null });
 
     // Determine which parts this trip applies to
     let targetParts = [];
@@ -5159,15 +5163,11 @@ router.post('/:id/outside-processing/auto-bulk', async (req, res, next) => {
           continue;
         }
 
-        // Generate PO number
-        const poSetting = await AppSettings.findOne({ where: { key: 'next_op_po_number' } });
-        let poNum = poSetting?.value?.nextNumber || 1001;
-        const poNumber = `OP${poNum}`;
-        if (poSetting) {
-          await poSetting.update({ value: { nextNumber: poNum + 1 } });
-        } else {
-          await AppSettings.create({ key: 'next_op_po_number', value: { nextNumber: poNum + 1 } });
-        }
+        // Reserve the PO number from the shared, locked PO sequence (audit H11). OP/TR keep their
+        // prefix but no longer have their own unlocked counter that could repeat material PO numbers.
+        const poNumber = await require('../services/poNumbers').reserveStandalone('OP', {
+          workOrderId: req.params.id, supplier: (typeof vendor !== 'undefined' && vendor) ? vendor.name : null,
+          vendorId: (typeof vendor !== 'undefined' && vendor) ? vendor.id : null });
 
         // Use the first op's notes/expedite for the PO PDF (representative)
         const firstOp = group.parts[0].op;
@@ -5286,15 +5286,11 @@ router.post('/:id/transport-po/:tripId', async (req, res, next) => {
       allocatedParts = (workOrder.parts || []).filter(p => (p.outsideProcessing || []).length > 0);
     }
 
-    // Generate PO number
-    const poSetting = await AppSettings.findOne({ where: { key: 'next_op_po_number' } });
-    let poNum = poSetting?.value?.nextNumber || 1001;
-    const poNumber = `TR${poNum}`;
-    if (poSetting) {
-      await poSetting.update({ value: { nextNumber: poNum + 1 } });
-    } else {
-      await AppSettings.create({ key: 'next_op_po_number', value: { nextNumber: poNum + 1 } });
-    }
+    // Reserve the PO number from the shared, locked PO sequence (audit H11). OP/TR keep their
+    // prefix but no longer have their own unlocked counter that could repeat material PO numbers.
+    const poNumber = await require('../services/poNumbers').reserveStandalone('TR', {
+      workOrderId: req.params.id, supplier: (typeof vendor !== 'undefined' && vendor) ? vendor.name : null,
+      vendorId: (typeof vendor !== 'undefined' && vendor) ? vendor.id : null });
 
     // Generate PDF
     const pdfBuffer = await generateTruckingPO(poNumber, vendor, trip, workOrder, allocatedParts);
@@ -5652,15 +5648,11 @@ router.post('/:id/outside-processing', async (req, res, next) => {
       return res.status(400).json({ error: { message: 'No matching parts found' } });
     }
 
-    // Generate PO number
-    const poSetting = await AppSettings.findOne({ where: { key: 'next_op_po_number' } });
-    let poNum = poSetting?.value?.nextNumber || 1001;
-    const poNumber = `OP${poNum}`;
-    if (poSetting) {
-      await poSetting.update({ value: { nextNumber: poNum + 1 } });
-    } else {
-      await AppSettings.create({ key: 'next_op_po_number', value: { nextNumber: poNum + 1 } });
-    }
+    // Reserve the PO number from the shared, locked PO sequence (audit H11). OP/TR keep their
+    // prefix but no longer have their own unlocked counter that could repeat material PO numbers.
+    const poNumber = await require('../services/poNumbers').reserveStandalone('OP', {
+      workOrderId: req.params.id, supplier: (typeof vendor !== 'undefined' && vendor) ? vendor.name : null,
+      vendorId: (typeof vendor !== 'undefined' && vendor) ? vendor.id : null });
 
     // Determine cost per part
     let perPartCost = parseFloat(costPerPart) || 0;
@@ -6138,10 +6130,8 @@ router.post('/:id/order-material', async (req, res, next) => {
 
     const { purchaseOrderNumber, partIds } = req.body;
 
-    if (!purchaseOrderNumber) {
-      await transaction.rollback();
-      return res.status(400).json({ error: { message: 'Purchase order number is required' } });
-    }
+    // The PO number sent by the screen is only a suggestion now: the server reserves the numbers
+    // under a lock (audit H11), honoring the suggestion if it's still free.
 
     if (!partIds || partIds.length === 0) {
       await transaction.rollback();
@@ -6178,7 +6168,10 @@ router.post('/:id/order-material', async (req, res, next) => {
 
     const groupKeys = Object.keys(supplierGroups).sort();
     const createdOrders = [];
-    const basePONumber = parseInt(purchaseOrderNumber);
+    const { reservePONumbers } = require('../services/poNumbers');
+    const reservation = await reservePONumbers(groupKeys.length, {
+      transaction, requested: parseInt(String(purchaseOrderNumber || '').replace(/\D/g, ''), 10) || null });
+    const basePONumber = reservation.numbers[0];   // consecutive, all free
 
     // Create inbound order for each supplier
     for (let i = 0; i < groupKeys.length; i++) {
@@ -6194,23 +6187,17 @@ router.post('/:id/order-material', async (req, res, next) => {
         `Part ${p.partNumber}: ${p.materialDescription || p.partType} (Qty: ${p.quantity})`
       ).join('\n');
 
-      // Create PONumber record
-      try {
-        const existingPO = await PONumber.findOne({ where: { poNumber: poNumber }, transaction });
-        if (!existingPO) {
-          await PONumber.create({
-            poNumber: poNumber,
-            status: 'active',
-            supplier: supplier,
-            vendorId: vId,
-            workOrderId: workOrder.id,
-            clientName: workOrder.clientName,
-            description: materialDescriptions
-          }, { transaction });
-        }
-      } catch (poError) {
-        console.error('PO creation error:', poError.message);
-      }
+      // Create PONumber record. The number was just reserved, so it's free — no silent re-use of
+      // someone else's PO, and no try/catch that would leave the transaction aborted.
+      await PONumber.create({
+        poNumber: poNumber,
+        status: 'active',
+        supplier: supplier,
+        vendorId: vId,
+        workOrderId: workOrder.id,
+        clientName: workOrder.clientName,
+        description: materialDescriptions
+      }, { transaction });
 
       // Create inbound order
       const inboundOrder = await InboundOrder.create({
@@ -6226,14 +6213,10 @@ router.post('/:id/order-material', async (req, res, next) => {
       }, { transaction });
 
       // Update PONumber record with inbound order ID
-      try {
-        await PONumber.update(
-          { inboundOrderId: inboundOrder.id },
-          { where: { poNumber: poNumber }, transaction }
-        );
-      } catch (updateError) {
-        console.error('PO update error:', updateError.message);
-      }
+      await PONumber.update(
+        { inboundOrderId: inboundOrder.id },
+        { where: { poNumber: poNumber }, transaction }
+      );
 
       createdOrders.push({
         inboundOrder,
@@ -6281,12 +6264,7 @@ router.post('/:id/order-material', async (req, res, next) => {
       }
     }
 
-    // Update next PO number setting
-    const nextPO = basePONumber + groupKeys.length;
-    await AppSettings.upsert({
-      key: 'next_po_number',
-      value: { nextNumber: nextPO }
-    }, { transaction });
+    // (The PO counter was advanced by reservePONumbers — forward only.)
 
     await transaction.commit();
 
@@ -6306,7 +6284,8 @@ router.post('/:id/order-material', async (req, res, next) => {
         purchaseOrders: createdOrders,
         totalOrders: createdOrders.length
       },
-      message: `${createdOrders.length} purchase order(s) created`
+      message: `${createdOrders.length} purchase order(s) created` +
+        (reservation.adjustedFrom ? ` — PO${reservation.adjustedFrom} had just been taken, so PO${basePONumber}${groupKeys.length > 1 ? '–PO' + (basePONumber + groupKeys.length - 1) : ''} was used` : '')
     });
   } catch (error) {
     await transaction.rollback();
@@ -6373,31 +6352,35 @@ router.post('/:id/services/auto-bulk', async (req, res, next) => {
       });
     }
 
-    // Pull next PO number from the SHARED counter unless caller provided an override
-    let basePONumber;
+    // Reserve one PO number per vendor from the shared, locked sequence (audit H11). The starting
+    // number the screen suggests is honored if it's still free.
+    let requestedStart = null;
     if (req.body.startingPONumber !== undefined && req.body.startingPONumber !== null && req.body.startingPONumber !== '') {
-      const override = parseInt(req.body.startingPONumber);
-      if (isNaN(override) || override <= 0) {
+      requestedStart = parseInt(String(req.body.startingPONumber).replace(/\D/g, ''), 10);
+      if (isNaN(requestedStart) || requestedStart <= 0) {
         await transaction.rollback();
         return res.status(400).json({ error: { message: 'Invalid starting PO number' } });
       }
-      basePONumber = override;
-    } else {
-      const poSetting = await AppSettings.findOne({ where: { key: 'next_po_number' }, transaction });
-      basePONumber = poSetting?.value?.nextNumber || 1001;
     }
+    const reservation = await require('../services/poNumbers').reservePONumbers(groupKeys.length, { transaction, requested: requestedStart });
+    const basePONumber = reservation.numbers[0];
 
     const created = [];
     const errors = [];
 
+    const outerTransaction = transaction;
     for (let i = 0; i < groupKeys.length; i++) {
       const group = groups[groupKeys[i]];
       try {
+       // Each vendor group in its own savepoint: a database error rolls back just that group instead
+       // of silently aborting the whole request (the old try/catch left the transaction unusable).
+       await sequelize.transaction({ transaction: outerTransaction }, async (groupT) => {
+        const transaction = groupT;
         // Validate vendor exists
         const vendor = await Vendor.findByPk(group.vendorId, { transaction });
         if (!vendor) {
           errors.push({ vendorName: group.vendorName, error: 'Vendor not found in database' });
-          continue;
+          return;
         }
 
         const poNumberInt = basePONumber + i;
@@ -6436,24 +6419,20 @@ router.post('/:id/services/auto-bulk', async (req, res, next) => {
           documentType: 'outside_processing_po'
         }, { transaction });
 
-        // Create PONumber row in the shared tracker
-        try {
-          await PONumber.create({
-            poNumber: poNumberInt,
-            status: 'active',
-            supplier: vendor.name,
-            vendorId: vendor.id,
-            workOrderId: workOrder.id,
-            clientName: workOrder.clientName,
-            description: `Service PO: ${repServiceType} — ${group.parts.length} part(s)`
-          }, { transaction });
-        } catch (poErr) {
-          console.warn('[services auto-bulk] PONumber row create failed (may already exist):', poErr.message);
-        }
+        // Create PONumber row in the shared tracker (number was reserved, so it's free)
+        await PONumber.create({
+          poNumber: poNumberInt,
+          status: 'active',
+          supplier: vendor.name,
+          vendorId: vendor.id,
+          workOrderId: workOrder.id,
+          clientName: workOrder.clientName,
+          description: `Service PO: ${repServiceType} — ${group.parts.length} part(s)`
+        }, { transaction });
 
         // Create matching inbound order
         let inboundOrderId = null;
-        try {
+        {
           const partDescriptions = group.parts
             .map(gp => `#${gp.part.partNumber}${gp.part.clientPartNumber ? ' (' + gp.part.clientPartNumber + ')' : ''} × ${gp.part.quantity}`)
             .join(', ');
@@ -6469,8 +6448,8 @@ router.post('/:id/services/auto-bulk', async (req, res, next) => {
             notes: `Service return — ${repServiceType} from ${vendor.name}\nDR-${workOrder.drNumber}`
           }, { transaction });
           inboundOrderId = inbound.id;
-        } catch (e) {
-          console.error('[services auto-bulk] Inbound order creation failed:', e.message);
+          // Link the PO row to its delivery (so release / void / delete can find it)
+          await PONumber.update({ inboundOrderId }, { where: { poNumber: poNumberInt }, transaction });
         }
 
         // Stamp the PO number onto each op in this group, preserving other ops on the same part
@@ -6493,32 +6472,23 @@ router.post('/:id/services/auto-bulk', async (req, res, next) => {
         });
 
         console.log(`[services auto-bulk] Created ${poNumber} for ${vendor.name} — ${group.parts.length} parts, $${group.totalCost.toFixed(2)}`);
+       });
       } catch (groupErr) {
         console.error(`[services auto-bulk] Group failed (${group.vendorName}):`, groupErr.message);
         errors.push({ vendorName: group.vendorName, error: groupErr.message });
       }
     }
 
-    // Update next PO number setting — only advance forward, never backward
-    if (created.length > 0) {
-      const highestUsed = basePONumber + groupKeys.length;
-      const currentSetting = await AppSettings.findOne({ where: { key: 'next_po_number' }, transaction });
-      const currentNext = currentSetting?.value?.nextNumber || 1001;
-      if (highestUsed > currentNext) {
-        await AppSettings.upsert({
-          key: 'next_po_number',
-          value: { nextNumber: highestUsed }
-        }, { transaction });
-      }
-    }
+    // (The PO counter was advanced, forward only, when the numbers were reserved.)
 
     await transaction.commit();
 
     res.json({
       data: { created, errors },
-      message: created.length === 1
+      message: (created.length === 1
         ? `Created 1 service PO`
         : `Created ${created.length} service POs${errors.length ? ` (${errors.length} failed)` : ''}`
+      ) + (reservation.adjustedFrom ? ` — PO${reservation.adjustedFrom} had just been taken, so numbering started at PO${basePONumber}` : '')
     });
   } catch (error) {
     await transaction.rollback();
@@ -6810,7 +6780,11 @@ router.post('/repair-pricing', async (req, res, next) => {
     let partsRepaired = 0;
     const details = [];
 
+    const skippedInQuickBooks = [];
     for (const wo of workOrders) {
+      // Orders already in QuickBooks are price-locked (audit H10): report them instead of failing
+      // the whole run part-way through.
+      if (wo.iifExportedAt) { skippedInQuickBooks.push(wo.drNumber ? `DR-${wo.drNumber}` : wo.orderNumber); continue; }
       const estimate = await Estimate.findByPk(wo.estimateId, {
         include: [{ model: EstimatePart, as: 'parts' }]
       });
@@ -6900,9 +6874,11 @@ router.post('/repair-pricing', async (req, res, next) => {
         scanned: workOrders.length,
         orderFieldsRepaired,
         partsRepaired,
-        details
+        details,
+        skippedInQuickBooks
       },
-      message: `Scanned ${workOrders.length} work orders: ${partsRepaired} parts repaired, ${orderFieldsRepaired} orders repaired`
+      message: `Scanned ${workOrders.length} work orders: ${partsRepaired} parts repaired, ${orderFieldsRepaired} orders repaired` +
+        (skippedInQuickBooks.length ? `. Skipped ${skippedInQuickBooks.length} already in QuickBooks (price-locked).` : '')
     });
   } catch (error) {
     console.error('[repair-pricing] Error:', error.message);

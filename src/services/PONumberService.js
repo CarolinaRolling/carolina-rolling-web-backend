@@ -3,83 +3,35 @@
 
 const { Op } = require('sequelize');
 const { DEFAULTS, PO_STATUSES } = require('../constants');
-const { allocatePONumber } = require('./numberAllocator');
+// All PO numbers come from the one locked reservation service (audit H11)
+const poNumbers = require('./poNumbers');
 
 class PONumberService {
   constructor(models) {
     this.models = models;
   }
 
-  // Get next available PO number
+  // Get next available PO number (read-only; never returns a number already used)
   async getNextNumber() {
-    const { PONumber, AppSettings } = this.models;
-
-    // Check settings for custom next number
-    const setting = await AppSettings.findOne({ where: { key: 'next_po_number' } });
-    
-    if (setting?.value?.nextNumber) {
-      return setting.value.nextNumber;
-    }
-
-    // Find the highest PO number used
-    const lastPO = await PONumber.findOne({
-      order: [['poNumber', 'DESC']]
-    });
-
-    return lastPO ? lastPO.poNumber + 1 : DEFAULTS.STARTING_PO_NUMBER;
+    return poNumbers.previewNextPONumber();
   }
 
-  // Set next PO number
+  // Set next PO number (admin) — can't be set at or below a number already used
   async setNextNumber(nextNumber) {
-    const { PONumber, AppSettings } = this.models;
-
-    if (!nextNumber || nextNumber < 1) {
-      throw new Error('Valid next number is required');
-    }
-
-    // Check if number already exists
-    const existing = await PONumber.findOne({ where: { poNumber: nextNumber } });
-    if (existing) {
-      throw new Error(`PO${nextNumber} already exists`);
-    }
-
-    // Save to settings
-    await AppSettings.upsert({
-      key: 'next_po_number',
-      value: { nextNumber }
-    });
-
-    return { nextNumber };
+    if (!nextNumber || nextNumber < 1) throw new Error('Valid next number is required');
+    const n = await poNumbers.setNextPONumber(nextNumber);
+    return { nextNumber: n };
   }
 
-  // Assign a PO number
+  // Assign a PO number. A number typed or pre-filled on the screen is used if it's still free;
+  // if someone took it a moment ago, the next free number is used and `adjustedFrom` says so.
   async assign(data) {
-    const { PONumber, AppSettings, InboundOrder, sequelize } = this.models;
-    const transaction = await sequelize.transaction();
+    const { PONumber, InboundOrder, sequelize } = this.models;
+    return sequelize.transaction(async (transaction) => {
+      const requested = data.customNumber ? parseInt(String(data.customNumber).replace(/\D/g, ''), 10) || null : null;
+      const { numbers, adjustedFrom } = await poNumbers.reservePONumbers(1, { transaction, requested });
+      const poNumber = numbers[0];
 
-    try {
-      let poNumber;
-
-      if (data.customNumber) {
-        // Check if custom number is available
-        const existing = await PONumber.findOne({ 
-          where: { poNumber: data.customNumber }, 
-          transaction 
-        });
-        if (existing) {
-          await transaction.rollback();
-          throw new Error(`PO${data.customNumber} already exists`);
-        }
-        poNumber = data.customNumber;
-      } else {
-        // Allocated under an advisory lock so two simultaneous PO creations cannot claim the
-        // same number. See services/numberAllocator.js.
-        poNumber = await allocatePONumber(this.models, transaction, {
-          startingNumber: DEFAULTS.STARTING_PO_NUMBER
-        });
-      }
-
-      // Create PO number entry
       const poEntry = await PONumber.create({
         poNumber,
         status: PO_STATUSES.ACTIVE,
@@ -91,20 +43,17 @@ class PONumberService {
         description: data.description
       }, { transaction });
 
-      // Update inbound order with PO number if provided
+      // Put the PO number on the linked inbound order (the column is purchaseOrderNumber — the old
+      // code wrote a non-existent "poNumber" column, so this step always failed)
       if (data.inboundOrderId) {
         await InboundOrder.update(
-          { poNumber: `PO${poNumber}` },
+          { purchaseOrderNumber: `PO${poNumber}` },
           { where: { id: data.inboundOrderId }, transaction }
         );
       }
-
-      await transaction.commit();
+      poEntry.setDataValue('adjustedFrom', adjustedFrom);
       return poEntry;
-    } catch (error) {
-      await transaction.rollback();
-      throw error;
-    }
+    });
   }
 
   // Void a PO number
@@ -139,18 +88,19 @@ class PONumberService {
         voidReason: reason
       }, { transaction });
 
-      // Clear PO number from inbound order if linked
+      // A voided PO won't be delivered: cancel its expected delivery unless it already arrived.
+      // (The old code wrote a non-existent "poNumber" column, so voiding a linked PO always failed.)
       if (poEntry.inboundOrderId) {
         await InboundOrder.update(
-          { poNumber: null },
-          { where: { id: poEntry.inboundOrderId }, transaction }
+          { status: 'cancelled' },
+          { where: { id: poEntry.inboundOrderId, status: { [Op.ne]: 'received' } }, transaction }
         );
       }
 
       await transaction.commit();
       return poEntry;
     } catch (error) {
-      await transaction.rollback();
+      if (!transaction.finished) await transaction.rollback();   // earlier checks may have rolled back already
       throw error;
     }
   }
@@ -174,20 +124,31 @@ class PONumberService {
         { where: { materialPurchaseOrderNumber: `PO${poEntry.poNumber}` }, transaction }
       );
 
-      // Delete associated inbound order if exists
       if (poEntry.inboundOrderId) {
+        const inbound = await InboundOrder.findByPk(poEntry.inboundOrderId, { transaction });
+        if (inbound && inbound.status === 'received') {
+          const e = new Error(`Material on PO${poEntry.poNumber} was already received, so it can't be deleted (that would erase the delivery record). Void the PO instead.`);
+          e.status = 409; throw e;
+        }
+      }
+
+      // Remove the PO row first: it references the inbound order, so deleting the inbound order
+      // first failed the database's foreign-key check and the whole delete was refused.
+      const linkedInboundId = poEntry.inboundOrderId;
+      await poEntry.destroy({ transaction });
+
+      // Delete associated inbound order if exists
+      if (linkedInboundId) {
         await InboundOrder.destroy({ 
-          where: { id: poEntry.inboundOrderId }, 
+          where: { id: linkedInboundId }, 
           transaction 
         });
       }
 
-      await poEntry.destroy({ transaction });
-
       await transaction.commit();
       return { success: true, message: `PO${poEntry.poNumber} deleted` };
     } catch (error) {
-      await transaction.rollback();
+      if (!transaction.finished) await transaction.rollback();   // earlier checks may have rolled back already
       throw error;
     }
   }

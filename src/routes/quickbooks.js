@@ -932,7 +932,7 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
 
         const fmtPayDate = (d) => d ? new Date(d).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }) : '';
         const typeLabel = { downpayment: 'Down Payment', partial: 'Partial Payment', full: 'Payment in Full' };
-        const methodLabel = { check: 'Check', ach: 'ACH', wire: 'Wire Transfer', credit_card: 'Credit Card', cash: 'Cash', other: 'Other' };
+        const methodLabel = { check: 'Check', ach: 'ACH', wire: 'Wire Transfer', credit_card: 'Credit Card', cash: 'Cash', other: 'Other', credit_memo: 'Credit Memo' };
         let runningBalance = grandTotal; // start from final invoice total including tax
         const grandTotal2 = runningBalance;
 
@@ -2035,18 +2035,29 @@ router.post('/mark-entered', async (req, res, next) => {
 });
 
 // POST /api/quickbooks/unmark-entered — undo the QB-entered flag (in case of a mistake).
-router.post('/unmark-entered', async (req, res, next) => {
+// Admin only: un-marking re-opens the order's pricing for editing (audit H10), so QuickBooks must be
+// updated by hand afterwards. Each reopen is written to the activity log.
+router.post('/unmark-entered', require('./auth').requireAdmin, async (req, res, next) => {
   try {
     const { workOrderIds } = req.body;
     if (!Array.isArray(workOrderIds) || workOrderIds.length === 0) {
       return res.status(400).json({ error: { message: 'No work order IDs provided' } });
     }
     const { Op } = require('sequelize');
+    const reopened = await WorkOrder.findAll({ where: { id: { [Op.in]: workOrderIds }, iifExportedAt: { [Op.ne]: null } },
+      attributes: ['id', 'drNumber', 'invoiceNumber', 'iifBatchId'] });
     const [count] = await WorkOrder.update(
       { iifExportedAt: null, iifBatchId: null },
       { where: { id: { [Op.in]: workOrderIds } } }
     );
-    res.json({ data: { unmarked: count }, message: `Reset ${count} invoice(s)` });
+    try {
+      const { logActivity } = require('./auth');
+      for (const w of reopened) {
+        await logActivity(req.user?.id || null, req.user?.username || 'api', 'INVOICE_REOPENED', 'work_order', w.id,
+          { drNumber: w.drNumber, invoiceNumber: w.invoiceNumber, previousBatch: w.iifBatchId }, req.ip);
+      }
+    } catch (e) { console.warn('[quickbooks] reopen log failed:', e.message); }
+    res.json({ data: { unmarked: count }, message: `Reset ${count} invoice(s). Their pricing can be edited again — update QuickBooks to match.` });
   } catch (error) { console.error('[quickbooks] unmark-entered error:', error.message); next(error); }
 });
 

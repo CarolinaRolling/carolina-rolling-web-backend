@@ -24,11 +24,12 @@ async function loadPaymentsFor(woIds, { transaction } = {}) {
   // hasRecords = at least one COUNTED payment; everHadRecords = any row at all, voided included
   ids.forEach(id => out.set(id, { recordsPaid: 0, payments: [], hasRecords: false, everHadRecords: false }));
   if (!ids.length) return out;
-  const { WorkOrderPayment, PaymentApplication, ClientPayment } = require('../models');
+  const { WorkOrderPayment, PaymentApplication, ClientPayment, CreditMemoApplication, CreditMemo } = require('../models');
 
-  const [woPayments, apps] = await Promise.all([
+  const [woPayments, apps, creditApps] = await Promise.all([
     WorkOrderPayment.findAll({ where: { workOrderId: ids }, order: [['paymentDate', 'ASC'], ['createdAt', 'ASC']], transaction }),
     PaymentApplication.findAll({ where: { workOrderId: ids }, transaction }),
+    CreditMemoApplication.findAll({ where: { workOrderId: ids }, transaction }),
   ]);
   const cpIds = [...new Set(apps.map(a => a.clientPaymentId).filter(Boolean))];
   const cps = cpIds.length ? await ClientPayment.findAll({ where: { id: cpIds }, attributes: ['id', 'voidedAt'], transaction }) : [];
@@ -51,6 +52,22 @@ async function loadPaymentsFor(woIds, { transaction } = {}) {
     if (!cp || cp.voidedAt) continue;
     e.hasRecords = true;
     e.recordsPaid += parseFloat(a.amount) || 0;
+  }
+  // Credit memos applied to invoices: counted through their WorkOrderPayment row; an application
+  // without one (shouldn't happen) still counts, unless it or its memo was voided.
+  const linkedCreditIds = new Set(woPayments.map(p => p.creditMemoApplicationId).filter(Boolean));
+  const memoIds = [...new Set(creditApps.map(c => c.creditMemoId))];
+  const memos = memoIds.length ? await CreditMemo.findAll({ where: { id: memoIds }, attributes: ['id', 'voidedAt'], transaction }) : [];
+  const memoById = new Map(memos.map(m => [m.id, m]));
+  for (const c of creditApps) {
+    const e = out.get(c.workOrderId);
+    if (!e) continue;
+    e.everHadRecords = true;
+    if (linkedCreditIds.has(c.id) || c.voidedAt) continue;
+    const m = memoById.get(c.creditMemoId);
+    if (!m || m.voidedAt) continue;
+    e.hasRecords = true;
+    e.recordsPaid += parseFloat(c.amount) || 0;
   }
   for (const e of out.values()) e.recordsPaid = round2(e.recordsPaid);
   return out;
@@ -128,7 +145,7 @@ async function linkLegacyTwinPayments(sequelize) {
   for (const a of apps) {
     const [cand] = await sequelize.query(`
       SELECT id FROM work_order_payments
-       WHERE "workOrderId" = :wo AND amount = :amt AND "paymentApplicationId" IS NULL
+       WHERE "workOrderId" = :wo AND amount = :amt AND "paymentApplicationId" IS NULL AND "creditMemoApplicationId" IS NULL
          AND abs(extract(epoch from ("createdAt" - CAST(:at AS timestamptz)))) < 300
        ORDER BY abs(extract(epoch from ("createdAt" - CAST(:at AS timestamptz)))) ASC
        LIMIT 1`, { replacements: { wo: a.workOrderId, amt: a.amount, at: a.createdAt } });
@@ -205,4 +222,156 @@ async function validatePaymentApplications({ applications, paymentAmount, client
   return perWo;
 }
 
-module.exports = { loadPaymentsFor, loadBalances, loadBalance, syncPaidFlag, linkLegacyTwinPayments, validatePaymentApplications, PaymentValidationError };
+// ─────────────────── voids, unapply and credit memos (audit H6) ───────────────────
+//
+// Money in = client payments (checks) and per-invoice payments. A check that was split across
+// invoices must stay fully accounted for: every dollar is either applied to an invoice or held as
+// client credit (a credit memo). So:
+//   • Voiding ONE invoice's share of a check (the Void button on the invoice) moves that amount to a
+//     credit memo for the client — the check itself still exists.
+//   • Voiding the WHOLE check (bounced, entered twice) voids every invoice share and any credit memo
+//     it created.
+//   • A credit memo can be applied to invoices; what's left is always amount − active applications.
+
+// The shop's calendar date (Pacific), not UTC — an evening entry must not be dated tomorrow
+const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+
+async function lockOrdersFor(woIds, t) {
+  const { WorkOrder } = require('../models');
+  const ids = [...new Set(woIds.filter(Boolean))].sort();
+  if (ids.length) await WorkOrder.findAll({ where: { id: ids }, order: [['id', 'ASC']], transaction: t, lock: t.LOCK.UPDATE });
+  return ids;
+}
+
+async function refreshMemoRemaining(memo, t) {
+  const { CreditMemoApplication } = require('../models');
+  const apps = await CreditMemoApplication.findAll({ where: { creditMemoId: memo.id, voidedAt: null }, transaction: t });
+  const used = apps.reduce((s, a) => s + (parseFloat(a.amount) || 0), 0);
+  const remaining = round2(Math.max(0, (parseFloat(memo.amount) || 0) - used));
+  await memo.update({ remainingAmount: remaining }, { transaction: t });
+  return remaining;
+}
+
+/** Void a credit memo and everything applied from it. Invoices it paid go back to owing that amount. */
+async function voidCreditMemoTx(memo, t, { reason } = {}) {
+  const { CreditMemoApplication, WorkOrderPayment } = require('../models');
+  const apps = await CreditMemoApplication.findAll({ where: { creditMemoId: memo.id, voidedAt: null }, transaction: t });
+  const woIds = await lockOrdersFor(apps.map(a => a.workOrderId), t);
+  const now = new Date();
+  if (apps.length) {
+    await CreditMemoApplication.update({ voidedAt: now }, { where: { id: apps.map(a => a.id) }, transaction: t });
+    await WorkOrderPayment.update({ voidedAt: now }, { where: { creditMemoApplicationId: apps.map(a => a.id), voidedAt: null }, transaction: t });
+  }
+  await memo.update({ voidedAt: now, remainingAmount: 0, reason: reason ? `${memo.reason ? memo.reason + ' — ' : ''}VOIDED: ${reason}` : memo.reason }, { transaction: t });
+  for (const id of woIds) await syncPaidFlag(id, { transaction: t });
+  return { invoicesAffected: woIds.length, workOrderIds: woIds };
+}
+
+async function voidCreditMemo(memoId, { reason } = {}) {
+  const { sequelize, CreditMemo } = require('../models');
+  return sequelize.transaction(async (t) => {
+    const memo = await CreditMemo.findByPk(memoId, { transaction: t, lock: t.LOCK.UPDATE });
+    if (!memo) { const e = new Error('Credit memo not found'); e.status = 404; throw e; }
+    if (memo.voidedAt) throw new PaymentValidationError('This credit memo is already voided.');
+    const r = await voidCreditMemoTx(memo, t, { reason });
+    return { memo, ...r };
+  });
+}
+
+/** Void a whole client payment (check): every invoice share, and any credit memo it created. */
+async function voidClientPayment(clientPaymentId, { reason, user } = {}) {
+  const { sequelize, ClientPayment, PaymentApplication, WorkOrderPayment, CreditMemo } = require('../models');
+  return sequelize.transaction(async (t) => {
+    const cp = await ClientPayment.findByPk(clientPaymentId, { transaction: t, lock: t.LOCK.UPDATE });
+    if (!cp) { const e = new Error('Payment not found'); e.status = 404; throw e; }
+    if (cp.voidedAt) throw new PaymentValidationError('This payment is already voided.');
+    const apps = await PaymentApplication.findAll({ where: { clientPaymentId: cp.id }, transaction: t });
+    // Credit memos this check created (overpayment remainder or unapplied shares) go with it.
+    // Locked before the work orders — same order as applyCreditMemo.
+    const memos = await CreditMemo.findAll({ where: { sourceClientPaymentId: cp.id, voidedAt: null }, order: [['id', 'ASC']], transaction: t, lock: t.LOCK.UPDATE });
+    const woIds = await lockOrdersFor(apps.map(a => a.workOrderId), t);
+    const now = new Date();
+    if (apps.length) {
+      await WorkOrderPayment.update({ voidedAt: now }, { where: { paymentApplicationId: apps.map(a => a.id), voidedAt: null }, transaction: t });
+    }
+    for (const m of memos) await voidCreditMemoTx(m, t, { reason: 'source payment voided' });
+    const note = `VOIDED ${today()}${user ? ' by ' + user : ''}${reason ? ': ' + reason : ''}`;
+    await cp.update({ voidedAt: now, notes: cp.notes ? `${cp.notes}\n${note}` : note }, { transaction: t });
+    for (const id of woIds) await syncPaidFlag(id, { transaction: t });
+    return { payment: cp, invoicesAffected: woIds, creditMemosVoided: memos.length };
+  });
+}
+
+/**
+ * The Void button on one invoice payment.
+ *   • a plain payment → voided
+ *   • an invoice's share of a client check → voided, and the amount becomes client credit
+ *   • a credit memo applied to the invoice → un-applied; the credit is available again
+ */
+async function voidInvoicePayment(workOrderPaymentId, { user } = {}) {
+  const { sequelize, WorkOrderPayment, PaymentApplication, ClientPayment, CreditMemo, CreditMemoApplication, WorkOrder } = require('../models');
+  return sequelize.transaction(async (t) => {
+    // Find what this row belongs to without locking, then lock in the one order every payment path
+    // uses — client payment → credit memo → work order → payment row — and re-check after locking.
+    // (Locking the payment row first could deadlock with "void whole check" / "void credit memo",
+    // and checking the check's status without a lock could create credit from a check being voided.)
+    const peek = await WorkOrderPayment.findByPk(workOrderPaymentId, { transaction: t });
+    if (!peek) { const e = new Error('Payment not found'); e.status = 404; throw e; }
+    const app = peek.paymentApplicationId ? await PaymentApplication.findByPk(peek.paymentApplicationId, { transaction: t }) : null;
+    const cp = app ? await ClientPayment.findByPk(app.clientPaymentId, { transaction: t, lock: t.LOCK.UPDATE }) : null;
+    const ca = peek.creditMemoApplicationId ? await CreditMemoApplication.findByPk(peek.creditMemoApplicationId, { transaction: t }) : null;
+    const memo = ca ? await CreditMemo.findByPk(ca.creditMemoId, { transaction: t, lock: t.LOCK.UPDATE }) : null;
+    await lockOrdersFor([peek.workOrderId], t);
+    const pmt = await WorkOrderPayment.findByPk(workOrderPaymentId, { transaction: t, lock: t.LOCK.UPDATE });
+    if (pmt.voidedAt) throw new PaymentValidationError('This payment is already voided.');
+    await pmt.update({ voidedAt: new Date() }, { transaction: t });
+    let outcome = 'voided', creditMemo = null;
+
+    if (cp && !cp.voidedAt) {
+      // An invoice's share of a client check: the check still exists, so keep the money as credit
+      const wo = await WorkOrder.findByPk(pmt.workOrderId, { attributes: ['invoiceNumber', 'drNumber'], transaction: t });
+      const amount = round2(parseFloat(pmt.amount));
+      creditMemo = await CreditMemo.create({
+        clientId: cp.clientId, clientName: cp.clientName, date: today(), amount, remainingAmount: amount,
+        reason: `Removed from ${wo?.invoiceNumber ? 'invoice #' + wo.invoiceNumber : 'DR-' + (wo?.drNumber || '?')} — ${cp.method || 'payment'}${cp.reference ? ' #' + cp.reference : ''}${user ? ' (by ' + user + ')' : ''}`,
+        sourceClientPaymentId: cp.id,
+      }, { transaction: t });
+      outcome = 'moved_to_credit';
+    } else if (ca && !ca.voidedAt) {
+      // A credit memo applied to the invoice: un-apply it, the credit is available again
+      await ca.update({ voidedAt: new Date() }, { transaction: t });
+      if (memo && !memo.voidedAt) await refreshMemoRemaining(memo, t);
+      creditMemo = memo;
+      outcome = 'credit_unapplied';
+    }
+    await syncPaidFlag(pmt.workOrderId, { transaction: t });
+    return { payment: pmt, outcome, creditMemo };
+  });
+}
+
+/** Apply (part of) a credit memo to an invoice. */
+async function applyCreditMemo(memoId, { workOrderId, amount, user } = {}) {
+  const { sequelize, CreditMemo, CreditMemoApplication, WorkOrderPayment } = require('../models');
+  return sequelize.transaction(async (t) => {
+    const memo = await CreditMemo.findByPk(memoId, { transaction: t, lock: t.LOCK.UPDATE });
+    if (!memo) { const e = new Error('Credit memo not found'); e.status = 404; throw e; }
+    if (memo.voidedAt) throw new PaymentValidationError('This credit memo is voided.');
+    const remaining = await refreshMemoRemaining(memo, t);
+    const amt = round2(parseFloat(amount));
+    if (!(amt > 0)) throw new PaymentValidationError('Enter an amount greater than zero.');
+    if (amt > remaining + 0.005) throw new PaymentValidationError(`Only ${fmt(remaining)} of this credit is left.`);
+    await validatePaymentApplications({ applications: [{ workOrderId, amount: amt }], paymentAmount: remaining,
+      clientId: memo.clientId, clientName: memo.clientName, transaction: t });
+    const ca = await CreditMemoApplication.create({ creditMemoId: memo.id, workOrderId, amount: amt, appliedAt: today() }, { transaction: t });
+    await WorkOrderPayment.create({
+      workOrderId, amount: amt, paymentDate: today(), paymentMethod: 'credit_memo', paymentType: 'partial',
+      paymentReference: 'Credit memo', notes: memo.reason || null, recordedBy: user || 'admin', creditMemoApplicationId: ca.id,
+    }, { transaction: t });
+    const left = await refreshMemoRemaining(memo, t);
+    await syncPaidFlag(workOrderId, { transaction: t, paymentDate: today(), paymentMethod: 'credit_memo', recordedBy: user || 'admin' });
+    return { application: ca, remaining: left };
+  });
+}
+
+module.exports = { loadPaymentsFor, loadBalances, loadBalance, syncPaidFlag, linkLegacyTwinPayments, validatePaymentApplications, PaymentValidationError,
+  voidClientPayment, voidInvoicePayment, voidCreditMemo, applyCreditMemo };

@@ -141,6 +141,10 @@ const NUMERIC_FIELDS = [
 function cleanNumericFields(data, fields = NUMERIC_FIELDS) {
   const cleaned = { ...data };
   fields.forEach(field => {
+    // A field the request didn't send is left alone. (Turning absent fields into null made every
+    // partial update — a tablet status tap, a progress count, an operator note — blank the part's
+    // labor, material, setup and total prices.) An explicitly emptied field is still cleared.
+    if (!(field in cleaned)) return;
     if (cleaned[field] === '' || cleaned[field] === undefined) {
       cleaned[field] = null;
     } else if (cleaned[field] !== null && cleaned[field] !== undefined) {
@@ -1870,10 +1874,7 @@ router.post('/:id/order-material', async (req, res, next) => {
 
     const { purchaseOrderNumber, partIds } = req.body;
 
-    if (!purchaseOrderNumber) {
-      await transaction.rollback();
-      return res.status(400).json({ error: { message: 'Purchase order number is required' } });
-    }
+    // The PO number sent is only a suggestion; numbers are reserved under the lock (audit H11)
 
     if (!partIds || partIds.length === 0) {
       await transaction.rollback();
@@ -1900,7 +1901,9 @@ router.post('/:id/order-material', async (req, res, next) => {
 
     const suppliers = Object.keys(supplierGroups).sort();
     const createdOrders = [];
-    const basePONumber = parseInt(purchaseOrderNumber);
+    const reservation = await require('../services/poNumbers').reservePONumbers(suppliers.length, {
+      transaction, requested: parseInt(String(purchaseOrderNumber || '').replace(/\D/g, ''), 10) || null });
+    const basePONumber = reservation.numbers[0];
 
     // Create inbound order for each supplier
     for (let i = 0; i < suppliers.length; i++) {
@@ -1925,22 +1928,15 @@ router.post('/:id/order-material', async (req, res, next) => {
 
       // Create PONumber record
       const vendorId = parts[0]?.vendorId || null;
-      try {
-        const existingPO = await PONumber.findOne({ where: { poNumber: poNumber }, transaction });
-        if (!existingPO) {
-          await PONumber.create({
-            poNumber: poNumber,
-            status: 'active',
-            supplier: supplier,
-            vendorId: vendorId,
-            estimateId: estimate.id,
-            clientName: estimate.clientName,
-            description: materialDescriptions
-          }, { transaction });
-        }
-      } catch (poError) {
-        console.error('PO creation error:', poError.message);
-      }
+      await PONumber.create({
+        poNumber: poNumber,
+        status: 'active',
+        supplier: supplier,
+        vendorId: vendorId,
+        estimateId: estimate.id,
+        clientName: estimate.clientName,
+        description: materialDescriptions
+      }, { transaction });
 
       // Create inbound order
       const inboundOrder = await InboundOrder.create({
@@ -1958,14 +1954,10 @@ router.post('/:id/order-material', async (req, res, next) => {
       }, { transaction });
 
       // Update PONumber record with inbound order ID
-      try {
-        await PONumber.update(
-          { inboundOrderId: inboundOrder.id },
-          { where: { poNumber: poNumber }, transaction }
-        );
-      } catch (updateError) {
-        console.error('PO update error:', updateError.message);
-      }
+      await PONumber.update(
+        { inboundOrderId: inboundOrder.id },
+        { where: { poNumber: poNumber }, transaction }
+      );
 
       createdOrders.push({
         inboundOrder,
@@ -1986,12 +1978,7 @@ router.post('/:id/order-material', async (req, res, next) => {
       }
     }
 
-    // Update next PO number setting
-    const nextPO = basePONumber + suppliers.length;
-    await AppSettings.upsert({
-      key: 'next_po_number',
-      value: { nextNumber: nextPO }
-    }, { transaction });
+    // (PO counter advanced, forward only, by reservePONumbers.)
 
     await transaction.commit();
 
@@ -4255,17 +4242,10 @@ router.post('/:id/parts/:partId/outside-processing-po', async (req, res, next) =
     const vendor = await Vendor.findByPk(part.outsideProcessingVendorId);
     if (!vendor) return res.status(400).json({ error: { message: 'Vendor not found' } });
 
-    // Generate PO number
-    const poSetting = await AppSettings.findOne({ where: { key: 'next_po_number' } });
-    let poNum = poSetting?.value?.nextNumber || 1001;
-    const poNumber = `OP${poNum}`;
-
-    // Update settings
-    if (poSetting) {
-      await poSetting.update({ value: { nextNumber: poNum + 1 } });
-    } else {
-      await AppSettings.create({ key: 'next_po_number', value: { nextNumber: poNum + 1 } });
-    }
+    // Reserve from the shared, locked PO sequence and record it (audit H11). Previously this took a
+    // number from the material counter without recording it, and could reset the counter to 1002.
+    const poNumber = await require('../services/poNumbers').reserveStandalone('OP', {
+      estimateId: estimate.id, clientName: estimate.clientName, supplier: vendor.name, vendorId: vendor.id });
 
     // Save PO number on part
     await part.update({

@@ -60,9 +60,10 @@ router.put('/next', async (req, res, next) => {
 router.post('/assign', async (req, res, next) => {
   try {
     const poEntry = await poService.assign(req.body);
+    const adjustedFrom = poEntry.get('adjustedFrom');
     res.status(201).json({
       data: poEntry,
-      message: `PO${poEntry.poNumber} assigned`
+      message: adjustedFrom ? `PO${poEntry.poNumber} assigned (PO${adjustedFrom} had just been taken)` : `PO${poEntry.poNumber} assigned`
     });
   } catch (error) {
     if (error.message.includes('already exists')) {
@@ -92,10 +93,44 @@ router.post('/:poNumber/void', async (req, res, next) => {
   }
 });
 
+// Every place a PO number string is stored (audit H11). Reassign/release must update all of them —
+// the old code only touched work-order parts and a non-existent InboundOrder.poNumber column.
+async function renamePOEverywhere(fromStr, toStr, transaction) {
+  const { sequelize, WorkOrderPart, InboundOrder, EstimatePart } = require('../models');
+  await WorkOrderPart.update({ materialPurchaseOrderNumber: toStr }, { where: { materialPurchaseOrderNumber: fromStr }, transaction });
+  await WorkOrderPart.update({ awaitingPONumber: toStr }, { where: { awaitingPONumber: fromStr }, transaction });
+  await EstimatePart.update({ materialPurchaseOrderNumber: toStr }, { where: { materialPurchaseOrderNumber: fromStr }, transaction });
+  if (toStr !== null) await InboundOrder.update({ purchaseOrderNumber: toStr }, { where: { purchaseOrderNumber: fromStr }, transaction });
+  // Older single outside-processing PO field on parts
+  await WorkOrderPart.update({ outsideProcessingPONumber: toStr }, { where: { outsideProcessingPONumber: fromStr }, transaction });
+  await EstimatePart.update({ outsideProcessingPONumber: toStr }, { where: { outsideProcessingPONumber: fromStr }, transaction });
+  // Trucking (TR) POs live in the work order's opTransports list
+  await sequelize.query(`
+    UPDATE work_orders SET "opTransports" = (
+      SELECT jsonb_agg(CASE WHEN e->>'poNumber' = :from THEN
+               (CASE WHEN CAST(:to AS text) IS NULL THEN e - 'poNumber' ELSE jsonb_set(e, '{poNumber}', to_jsonb(CAST(:to AS text))) END)
+             ELSE e END)
+      FROM jsonb_array_elements("opTransports") e)
+    WHERE jsonb_typeof("opTransports") = 'array' AND "opTransports" @> jsonb_build_array(jsonb_build_object('poNumber', CAST(:from AS text)))`,
+    { replacements: { from: fromStr, to: toStr }, transaction });
+  // Service / outside-processing POs stamped inside the outsideProcessing JSON list
+  for (const table of ['work_order_parts', 'estimate_parts']) {
+    await sequelize.query(`
+      UPDATE ${table} SET "outsideProcessing" = (
+        SELECT jsonb_agg(CASE WHEN e->>'poNumber' = :from THEN
+                 (CASE WHEN CAST(:to AS text) IS NULL THEN e - 'poNumber' - 'poSentAt' ELSE jsonb_set(e, '{poNumber}', to_jsonb(CAST(:to AS text))) END)
+               ELSE e END)
+        FROM jsonb_array_elements("outsideProcessing") e)
+      WHERE jsonb_typeof("outsideProcessing") = 'array' AND "outsideProcessing" @> jsonb_build_array(jsonb_build_object('poNumber', CAST(:from AS text)))`,
+      { replacements: { from: fromStr, to: toStr }, transaction });
+  }
+}
+
 // PUT /api/po-numbers/:poNumber/reassign - Change a PO number to a different number
 router.put('/:poNumber/reassign', async (req, res, next) => {
   try {
-    const { PONumber, WorkOrderPart, InboundOrder, sequelize } = require('../models');
+    const { PONumber, sequelize, AppSettings } = require('../models');
+    const { acquire, LOCK_KEYS } = require('../services/numberAllocator');
     const oldPO = parseInt(req.params.poNumber);
     const newPO = parseInt(req.body.newPoNumber);
 
@@ -106,40 +141,25 @@ router.put('/:poNumber/reassign', async (req, res, next) => {
       return res.json({ message: 'No change' });
     }
 
-    const poEntry = await PONumber.findOne({ where: { poNumber: oldPO } });
-    if (!poEntry) {
-      return res.status(404).json({ error: { message: `PO${oldPO} not found` } });
-    }
+    // Checks and changes under the PO lock, in one transaction
+    const result = await sequelize.transaction(async (transaction) => {
+      await acquire(sequelize, LOCK_KEYS.po, transaction);
+      const poEntry = await PONumber.findOne({ where: { poNumber: oldPO }, transaction });
+      if (!poEntry) return { status: 404, message: `PO${oldPO} not found` };
+      const existing = await PONumber.findOne({ where: { poNumber: newPO }, transaction });
+      if (existing) return { status: 409, message: `PO${newPO} already exists` };
 
-    // Check if new number already exists
-    const existing = await PONumber.findOne({ where: { poNumber: newPO } });
-    if (existing) {
-      return res.status(409).json({ error: { message: `PO${newPO} already exists` } });
-    }
-
-    const transaction = await sequelize.transaction();
-    try {
-      // Update the PO record
       await poEntry.update({ poNumber: newPO }, { transaction });
-
-      // Update any work order parts that reference the old PO number
-      await WorkOrderPart.update(
-        { materialPurchaseOrderNumber: `PO${newPO}` },
-        { where: { materialPurchaseOrderNumber: `PO${oldPO}` }, transaction }
-      );
-
-      // Update any inbound orders that reference the old PO number
-      await InboundOrder.update(
-        { poNumber: `PO${newPO}` },
-        { where: { poNumber: `PO${oldPO}` }, transaction }
-      );
-
-      await transaction.commit();
-      res.json({ data: poEntry.toJSON(), message: `PO number changed from PO${oldPO} to PO${newPO}` });
-    } catch (err) {
-      await transaction.rollback();
-      throw err;
-    }
+      // Keep the prefix the PO already uses (PO / OP / TR) wherever it's stored
+      for (const pfx of ['PO', 'OP', 'TR']) await renamePOEverywhere(`${pfx}${oldPO}`, `${pfx}${newPO}`, transaction);
+      // Counter only moves forward
+      const row = await AppSettings.findOne({ where: { key: 'next_po_number' }, transaction });
+      const cur = parseInt(row?.value?.nextNumber, 10) || 0;
+      if (newPO + 1 > cur && newPO >= cur) await AppSettings.upsert({ key: 'next_po_number', value: { nextNumber: newPO + 1 } }, { transaction });
+      return { status: 200, data: poEntry.toJSON() };
+    });
+    if (result.status !== 200) return res.status(result.status).json({ error: { message: result.message } });
+    res.json({ data: result.data, message: `PO number changed from PO${oldPO} to PO${newPO}` });
   } catch (error) {
     next(error);
   }
@@ -148,31 +168,38 @@ router.put('/:poNumber/reassign', async (req, res, next) => {
 // DELETE /api/po-numbers/:poNumber/release - Release a PO number (delete entry so it can be reused)
 router.delete('/:poNumber/release', async (req, res, next) => {
   try {
-    const { PONumber, InboundOrder, WorkOrderPart } = require('../models');
+    const { PONumber, InboundOrder, WorkOrderPart, sequelize } = require('../models');
+    const { acquire, LOCK_KEYS } = require('../services/numberAllocator');
     const poNumber = parseInt(req.params.poNumber);
-    const poEntry = await PONumber.findOne({ where: { poNumber } });
-    
-    if (!poEntry) {
-      return res.status(404).json({ error: { message: `PO${poNumber} not found` } });
-    }
 
-    // Clear PO reference from any work order parts
-    await WorkOrderPart.update(
-      { materialPurchaseOrderNumber: null, materialOrdered: false, inboundOrderId: null },
-      { where: { materialPurchaseOrderNumber: `PO${poNumber}` } }
-    );
+    // One transaction under the PO lock — the old version had none and could stop half-way
+    const result = await sequelize.transaction(async (transaction) => {
+      await acquire(sequelize, LOCK_KEYS.po, transaction);
+      const poEntry = await PONumber.findOne({ where: { poNumber }, transaction });
+      if (!poEntry) return { status: 404, message: `PO${poNumber} not found` };
 
-    // Clear PO from linked inbound order if exists
-    if (poEntry.inboundOrderId) {
-      await InboundOrder.update(
-        { poNumber: null },
-        { where: { id: poEntry.inboundOrderId } }
+      // Its expected deliveries: the linked one, or (service / OP POs) any carrying this number
+      const { Op } = require('sequelize');
+      const inbounds = await InboundOrder.findAll({ where: { [Op.or]: [
+        ...(poEntry.inboundOrderId ? [{ id: poEntry.inboundOrderId }] : []),
+        { purchaseOrderNumber: [`PO${poNumber}`, `OP${poNumber}`, `TR${poNumber}`] },
+      ] }, transaction });
+      if (inbounds.some(i => i.status === 'received')) {
+        return { status: 409, message: `Material on PO${poNumber} was already received, so the number can't be released. Void the PO instead.` };
+      }
+
+      // Clear PO reference from work order parts, then everywhere else the number is stored
+      await WorkOrderPart.update(
+        { materialPurchaseOrderNumber: null, materialOrdered: false, inboundOrderId: null },
+        { where: { materialPurchaseOrderNumber: `PO${poNumber}` }, transaction }
       );
-    }
-
-    // Delete the PO entry entirely
-    await poEntry.destroy();
-
+      for (const pfx of ['PO', 'OP', 'TR']) await renamePOEverywhere(`${pfx}${poNumber}`, null, transaction);
+      // The PO row references the delivery, so remove the PO first, then its expected deliveries
+      await poEntry.destroy({ transaction });
+      for (const i of inbounds) await i.destroy({ transaction });
+      return { status: 200 };
+    });
+    if (result.status !== 200) return res.status(result.status).json({ error: { message: result.message } });
     res.json({ message: `PO${poNumber} has been released and can be reused` });
   } catch (error) {
     next(error);

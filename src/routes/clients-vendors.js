@@ -654,8 +654,10 @@ router.get('/clients/:id/history', async (req, res, next) => {
     // Client payments
     let payments = [];
     try {
+      // Records entered without a client link still belong to this client by name
+      const mine = { [Op.or]: [{ clientId: req.params.id }, { clientId: null, clientName: { [Op.iLike]: client.name } }] };
       const pmts = await ClientPayment.findAll({
-        where: { clientId: req.params.id, voidedAt: null },
+        where: { ...mine, voidedAt: null },
         include: [{ model: PaymentApplication, as: 'applications' }],
         order: [['paymentDate','DESC']]
       });
@@ -665,14 +667,14 @@ router.get('/clients/:id/history', async (req, res, next) => {
     // Credit memos
     let creditMemos = [];
     try {
-      const cms = await CreditMemo.findAll({ where: { clientId: req.params.id, voidedAt: null }, order: [['date','DESC']] });
+      const cms = await CreditMemo.findAll({ where: { [Op.or]: [{ clientId: req.params.id }, { clientId: null, clientName: { [Op.iLike]: client.name } }], voidedAt: null }, order: [['date','DESC']] });
       creditMemos = cms.map(c => c.toJSON());
     } catch(e) {}
 
     // Refunds
     let refunds = [];
     try {
-      const refs = await Refund.findAll({ where: { clientId: req.params.id, voidedAt: null }, order: [['date','DESC']] });
+      const refs = await Refund.findAll({ where: { [Op.or]: [{ clientId: req.params.id }, { clientId: null, clientName: { [Op.iLike]: client.name } }], voidedAt: null }, order: [['date','DESC']] });
       refunds = refs.map(r => r.toJSON());
     } catch(e) {}
 

@@ -3763,7 +3763,9 @@ const WorkOrderPayment = sequelize.define('WorkOrderPayment', {
   voidedAt: { type: DataTypes.DATE, allowNull: true },
   // Set when this row is the per-invoice record of a ClientPayment application, so balances
   // count that money once (see services/paymentLedger.js).
-  paymentApplicationId: { type: DataTypes.UUID, allowNull: true }
+  paymentApplicationId: { type: DataTypes.UUID, allowNull: true },
+  // Set when this row is the per-invoice record of a credit memo applied to the invoice
+  creditMemoApplicationId: { type: DataTypes.UUID, allowNull: true }
 }, { tableName: 'work_order_payments', timestamps: true });
 
 WorkOrder.hasMany(WorkOrderPayment, { foreignKey: 'workOrderId', as: 'payments' });
@@ -3916,6 +3918,7 @@ const CreditMemoApplication = sequelize.define('CreditMemoApplication', {
   clientPaymentId: { type: DataTypes.UUID, allowNull: true },
   amount: { type: DataTypes.DECIMAL(10, 2), allowNull: false },
   appliedAt: { type: DataTypes.DATEONLY, allowNull: false },
+  voidedAt: { type: DataTypes.DATE, allowNull: true },
 }, { tableName: 'credit_memo_applications', timestamps: true });
 
 // ── Refund — cash returned to client ──

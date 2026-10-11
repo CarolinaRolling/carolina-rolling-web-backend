@@ -7,7 +7,9 @@ const fs = require('fs');
 const { Liability, Employee, PayrollWeek, PayrollEntry, WorkOrder, WorkOrderPart, WorkOrderPayment, Vendor, PONumber, InboundOrder, Client, ShipmentCharge, ClientPayment, PaymentApplication, CreditMemo, CreditMemoApplication, Refund, sequelize } = require('../models');
 // Shared invoice totals + payment math (audit C2/C4) — every balance on every screen comes from these.
 const { loadInvoiceTotals } = require('../services/invoiceTotals');
-const { loadBalances, loadBalance, syncPaidFlag, validatePaymentApplications } = require('../services/paymentLedger');
+const { loadBalances, loadBalance, syncPaidFlag, validatePaymentApplications, voidClientPayment, voidInvoicePayment, voidCreditMemo, applyCreditMemo } = require('../services/paymentLedger');
+const sendLedgerError = (res, next, e) => (e.status === 400 || e.status === 404) ? res.status(e.status).json({ error: { message: e.message } }) : next(e);
+const regenPdfs = (woIds) => { try { const qb = require('./quickbooks'); if (qb.regenerateInvoicePDF) (async () => { for (const id of woIds) { try { await qb.regenerateInvoicePDF(id); } catch (e) { /* non-fatal */ } } })(); } catch (e) { /* non-fatal */ } };
 const fileStorage = require('../utils/storage');
 
 // Multer config for bill attachments
@@ -229,29 +231,30 @@ router.post('/ledger/:woId/payments', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-// DELETE /api/business/ledger/payments/:paymentId — Void a payment
+// DELETE /api/business/ledger/payments/:paymentId — Void a payment on one invoice (audit H6)
+//   plain payment → voided; share of a client check → moved to client credit (the check still
+//   exists); applied credit memo → un-applied, credit available again.
 router.delete('/ledger/payments/:paymentId', async (req, res, next) => {
   try {
-    const WOP = sequelize.models.WorkOrderPayment || require('../models').WorkOrderPayment;
-    if (!WOP) return res.status(503).json({ error: { message: 'Payment system initializing' } });
-    const payment = await WOP.findByPk(req.params.paymentId);
-    if (!payment) return res.status(404).json({ error: { message: 'Payment not found' } });
-    await payment.update({ voidedAt: new Date() });
+    const r = await voidInvoicePayment(req.params.paymentId, { user: req.user?.username });
+    regenPdfs([r.payment.workOrderId]);
+    const message = r.outcome === 'moved_to_credit'
+      ? `Payment removed from this invoice. The $${parseFloat(r.payment.amount).toFixed(2)} is now client credit (a credit memo) you can apply to another invoice from the client's Credits tab. If the whole check bounced, void it from the client's Payments tab instead. If you give the money back, record the refund and void the credit memo.`
+      : r.outcome === 'credit_unapplied'
+        ? `Credit removed from this invoice — $${parseFloat(r.creditMemo?.remainingAmount || 0).toFixed(2)} of the credit memo is available again.`
+        : 'Payment voided';
+    res.json({ data: r.payment, outcome: r.outcome, creditMemo: r.creditMemo, message });
+  } catch (error) { sendLedgerError(res, next, error); }
+});
 
-    // Clear WO paymentDate if no longer fully paid. If this row was a client-payment application's
-    // invoice record, voiding it also removes that application from the balance (paymentLedger).
-    const wo = await WorkOrder.findByPk(payment.workOrderId);
-    if (wo) {
-      await syncPaidFlag(wo.id);
-      // Re-regen invoice PDF
-      try {
-        const qbRoutes = require('./quickbooks');
-        if (qbRoutes.regenerateInvoicePDF) await qbRoutes.regenerateInvoicePDF(wo.id);
-      } catch {}
-    }
-
-    res.json({ data: payment, message: 'Payment voided' });
-  } catch (error) { next(error); }
+// POST /api/business/client-payments/:id/void — Void a whole client payment (bounced check,
+// entered twice…): every invoice it paid goes back to owing, and credit it created is voided (H6)
+router.post('/client-payments/:id/void', async (req, res, next) => {
+  try {
+    const r = await voidClientPayment(req.params.id, { reason: req.body?.reason, user: req.user?.username });
+    regenPdfs(r.invoicesAffected);
+    res.json({ data: r.payment, message: `Payment voided. ${r.invoicesAffected.length} invoice(s) updated${r.creditMemosVoided ? `, ${r.creditMemosVoided} credit memo(s) voided` : ''}.` });
+  } catch (error) { sendLedgerError(res, next, error); }
 });
 
 // ============= LIABILITIES =============
@@ -1351,14 +1354,24 @@ router.post('/credit-memos', async (req, res, next) => {
   } catch(error) { next(error); }
 });
 
-// DELETE /api/business/credit-memos/:id — void
+// DELETE /api/business/credit-memos/:id — void (and un-apply it from any invoices it paid) (H6)
 router.delete('/credit-memos/:id', async (req, res, next) => {
   try {
-    const memo = await CreditMemo.findByPk(req.params.id);
-    if (!memo) return res.status(404).json({ error: { message: 'Not found' } });
-    await memo.update({ voidedAt: new Date() });
-    res.json({ data: memo, message: 'Credit memo voided' });
-  } catch(error) { next(error); }
+    const r = await voidCreditMemo(req.params.id, { reason: req.body?.reason });
+    regenPdfs(r.workOrderIds || []);
+    res.json({ data: r.memo, message: r.invoicesAffected ? `Credit memo voided and removed from ${r.invoicesAffected} invoice(s)` : 'Credit memo voided' });
+  } catch(error) { sendLedgerError(res, next, error); }
+});
+
+// POST /api/business/credit-memos/:id/apply — apply credit to an invoice { workOrderId, amount } (H6)
+router.post('/credit-memos/:id/apply', async (req, res, next) => {
+  try {
+    const { workOrderId, amount } = req.body || {};
+    if (!workOrderId) return res.status(400).json({ error: { message: 'Choose an invoice to apply the credit to.' } });
+    const r = await applyCreditMemo(req.params.id, { workOrderId, amount, user: req.user?.username });
+    regenPdfs([workOrderId]);
+    res.json({ data: r.application, remaining: r.remaining, message: `Credit applied. $${r.remaining.toFixed(2)} left on this credit memo.` });
+  } catch(error) { sendLedgerError(res, next, error); }
 });
 
 // ── Refunds ──
@@ -1434,7 +1447,7 @@ router.get('/general-ledger', async (req, res, next) => {
     // (rows with paymentApplicationId are the invoice-side copy of a client payment already listed above)
     try {
       const legacyPmts = await WorkOrderPayment.findAll({
-        where: { voidedAt: null, paymentApplicationId: null, ...(startDate && { paymentDate: { [Op.gte]: startDate } }), ...(endDate && { paymentDate: { [Op.lte]: endDate } }) },
+        where: { voidedAt: null, paymentApplicationId: null, creditMemoApplicationId: null, ...(startDate && { paymentDate: { [Op.gte]: startDate } }), ...(endDate && { paymentDate: { [Op.lte]: endDate } }) },
         order: [['paymentDate', 'DESC']]
       });
       legacyPmts.forEach(p => {

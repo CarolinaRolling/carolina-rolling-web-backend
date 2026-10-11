@@ -20,8 +20,13 @@ async function maxPartNumber(Model, fk, parentId, transaction) {
 const isNumberClash = (e) => {
   const code = e && (e.parent?.code || e.original?.code);
   const c = e && (e.parent?.constraint || e.original?.constraint || '');
+  const where = e && (e.parent?.where || e.original?.where || '');
+  if (code === '40P01' && /part_number/.test(where)) return true;   // two adds deadlocked on the same number
   return code === UNIQUE_VIOLATION && /part_?number|_number$|uq_(wop|ep)_/i.test(c);
 };
+// Reorder / renumber move numbers through each other (1↔2): check the one-number-per-line rule at
+// commit, inside that transaction only.
+const deferNumbers = (sequelize, t) => sequelize.query('SET CONSTRAINTS ALL DEFERRED', { transaction: t });
 
 /**
  * Create a part with the next free line number. `data` must contain the parent id under `fk`.
@@ -48,6 +53,7 @@ async function createWithNextPartNumber(Model, fk, data, options = {}) {
 async function reorderParts(Model, fk, parentId, partIds) {
   const { sequelize } = require('../models');
   return sequelize.transaction(async (transaction) => {
+    await deferNumbers(sequelize, transaction);
     const parts = await Model.findAll({ where: { [fk]: parentId }, attributes: ['id', 'partNumber'], order: [['partNumber', 'ASC']], transaction });
     const known = new Set(parts.map(p => p.id));
     const ordered = [...new Set(partIds)].filter(id => known.has(id));
@@ -63,6 +69,7 @@ async function reorderParts(Model, fk, parentId, partIds) {
 async function renumberParts(Model, fk, parentId, { transaction } = {}) {
   const { sequelize } = require('../models');
   const run = async (t) => {
+    await deferNumbers(sequelize, t);
     const parts = await Model.findAll({ where: { [fk]: parentId }, attributes: ['id', 'partNumber'], order: [['partNumber', 'ASC'], ['createdAt', 'ASC']], transaction: t });
     for (let i = 0; i < parts.length; i++) {
       if (parts[i].partNumber !== i + 1) await Model.update({ partNumber: i + 1 }, { where: { id: parts[i].id }, transaction: t, hooks: false });

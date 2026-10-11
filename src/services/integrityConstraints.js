@@ -125,7 +125,18 @@ async function dropDuplicateConstraints(sequelize) {
 async function ensurePartNumberRules(sequelize, cols) {
   const out = [];
   for (const [table, fk, name] of PART_NUMBER_RULES) {
-    if (!cols.has(`${table}.${fk}`) || await constraintExists(sequelize, name)) continue;
+    if (!cols.has(`${table}.${fk}`)) continue;
+    // Checked IMMEDIATELY (a deferred unique check lets two simultaneous adds of the same number deadlock
+    // each other at commit); the reorder / renumber transactions defer it themselves. An older copy
+    // created INITIALLY DEFERRED is replaced.
+    const [[cur]] = await sequelize.query(`SELECT condeferred FROM pg_constraint WHERE conname = :name`, { replacements: { name } });
+    if (cur && !cur.condeferred) continue;
+    if (cur) {
+      await ddl(sequelize, `ALTER TABLE ${table} DROP CONSTRAINT ${name}`);
+      await ddl(sequelize, `ALTER TABLE ${table} ADD CONSTRAINT ${name} UNIQUE ("${fk}", "partNumber") DEFERRABLE INITIALLY IMMEDIATE`);
+      out.push(`${name} now checked immediately`);
+      continue;
+    }
     const [dupParents] = await sequelize.query(`SELECT DISTINCT "${fk}" AS id FROM ${table} WHERE "${fk}" IS NOT NULL GROUP BY "${fk}", "partNumber" HAVING COUNT(*) > 1`);
     await sequelize.transaction(async (t) => {
       for (const { id } of dupParents) {
@@ -134,7 +145,7 @@ async function ensurePartNumberRules(sequelize, cols) {
             SELECT id, ROW_NUMBER() OVER (ORDER BY "partNumber" NULLS LAST, "createdAt", id) AS rn FROM ${table} WHERE "${fk}" = :id) r
           WHERE p.id = r.id AND p."partNumber" IS DISTINCT FROM r.rn`, { replacements: { id }, transaction: t });
       }
-      await ddl(sequelize, `ALTER TABLE ${table} ADD CONSTRAINT ${name} UNIQUE ("${fk}", "partNumber") DEFERRABLE INITIALLY DEFERRED`, t);
+      await ddl(sequelize, `ALTER TABLE ${table} ADD CONSTRAINT ${name} UNIQUE ("${fk}", "partNumber") DEFERRABLE INITIALLY IMMEDIATE`, t);
     });
     out.push(`${name} added${dupParents.length ? ` (renumbered ${dupParents.length} ${table === 'work_order_parts' ? 'work order(s)' : 'estimate(s)'} that had repeated part numbers: ${dupParents.map(d => d.id).join(', ')})` : ''}`);
   }

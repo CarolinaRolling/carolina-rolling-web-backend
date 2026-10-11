@@ -1762,16 +1762,19 @@ router.get('/:id', async (req, res, next) => {
     // canBackfillPricing: true ONLY when at least one part is missing a price on the WORK ORDER but the
     // linked ESTIMATE has a price for that same part. Drives whether the "Fix Pricing" button shows —
     // no point offering it when the estimate is also blank (nothing to copy) or nothing is missing.
+    // Same check the Fix button runs — now also catches parts whose material went missing while a
+    // (too low) total remained, which the old flag never showed (services/pricingRecovery).
     woJson.canBackfillPricing = false;
     try {
       if (workOrder.estimateId) {
-        const hasVal = (v) => v !== null && v !== undefined && v !== '' && parseFloat(v) > 0;
-        const woMissing = (workOrder.parts || []).filter(p => !hasVal(p.partTotal));
-        if (woMissing.length > 0) {
-          const estParts = await EstimatePart.findAll({ where: { estimateId: workOrder.estimateId }, attributes: ['partNumber', 'partTotal'] });
-          const estPriceByNum = {};
-          for (const ep of estParts) estPriceByNum[ep.partNumber] = ep.partTotal;
-          woJson.canBackfillPricing = woMissing.some(p => hasVal(estPriceByNum[p.partNumber]));
+        const { planPart, matchEstimatePart } = require('../services/pricingRecovery');
+        const estParts = (await EstimatePart.findAll({ where: { estimateId: workOrder.estimateId } })).map(e => e.toJSON());
+        const used = new Set();
+        for (const wp of [...(workOrder.parts || [])].sort((a, b) => (a.partNumber || 0) - (b.partNumber || 0))) {
+          const ep = matchEstimatePart(wp, estParts, used);
+          if (!ep) continue;
+          used.add(ep.id);
+          if (planPart(wp, ep)) { woJson.canBackfillPricing = true; break; }
         }
       }
     } catch (e) { /* best-effort flag; default false */ }
@@ -1987,6 +1990,33 @@ router.put('/:id/status', async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+// POST /api/workorders/:id/record-payment - Record COD payment
+// POST /api/workorders/:id/backfill-pricing — recompute pricing columns (materialTotal, laborTotal,
+// partTotal, markup) for work-order parts that came over with NULL pricing. This affects work orders
+// converted before the conversion recalc fix: the formData carried over intact but the top-level
+// pricing columns were left null, so the WO showed no material/price. We re-derive them from the
+// source estimate part using the same (now-correct) conversion logic. Safe: only touches parts whose
+// partTotal is currently null/empty; never overwrites an existing price.
+router.post('/:id/backfill-pricing', async (req, res, next) => {
+  // Shared with the banner flag (services/pricingRecovery). Send { preview: true } to get the list of
+  // changes without saving; the page shows it and asks before applying.
+  try {
+    const { recoverWorkOrderPricing, describe } = require('../services/pricingRecovery');
+    const preview = !!(req.body && req.body.preview);
+    const { items, reason } = await recoverWorkOrderPricing(req.params.id, { apply: !preview });
+    if (reason) return res.status(400).json({ error: { message: reason } });
+    const lines = items.map(it => describe(it) + (it.error ? ` — NOT changed: ${it.error}` : ''));
+    const fixed = items.filter(it => it.applied).length;
+    const failed = items.filter(it => it.applied === false);
+    const message = preview
+      ? (items.length ? `${items.length} part(s) can be fixed from the estimate.` : 'Nothing to fix — every part that matches the estimate already has its pricing.')
+      : (failed.length
+        ? `Fixed ${fixed} part(s); ${failed.length} could not be changed: ${failed[0].error}.`
+        : `Fixed ${fixed} part(s) from the estimate.`);
+    res.json({ data: { preview, count: items.length, fixed, lines }, message });
+  } catch (error) { next(error); }
 });
 
 // POST /api/workorders/:id/record-payment - Record COD payment

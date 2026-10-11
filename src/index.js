@@ -1440,6 +1440,16 @@ async function startServer() {
   try {
     await sequelize.authenticate();
     console.log('Database connected successfully');
+
+    // Schema migrations (src/db/migrations) run first, before anything else touches the schema —
+    // 0001 builds every table on an EMPTY database, which the boot SQL below assumes exist (audit M9).
+    // A failure here is logged loudly; startup continues so the existing boot SQL still runs.
+    try {
+      const ran = await require('./db/migrator').runMigrations(sequelize);
+      if (!ran.length) console.log('[migrate] database is up to date');
+    } catch (migErr) {
+      console.error('[migrate] MIGRATION FAILED — fix and redeploy (it will be retried at next start):', migErr.message);
+    }
     
     // CRITICAL: Convert work_orders status from ENUM to VARCHAR BEFORE sync
     // (sync will fail if model says STRING but DB has ENUM)
@@ -2162,29 +2172,7 @@ async function startServer() {
           // creates a missing table (and missing ENUM values / declared indexes); existing tables are
           // never altered. A new table whose foreign key points at a table not created yet is created
           // without that key.
-          const qi = sequelize.getQueryInterface();
-          const created = [], keyless = [];
-          // Pass 1: create missing tables. A table whose foreign key points at a table that doesn't
-          // exist yet (the cycle) is created without its keys and finished in pass 2.
-          for (const model of Object.values(sequelize.models)) {
-            if (await qi.tableExists(model.getTableName())) { await model.sync({}); continue; }
-            try { await model.sync({}); }
-            catch (e) { await model.sync({ withoutForeignKeyConstraints: true }); keyless.push(model); }
-            created.push(model.getTableName());
-          }
-          // Pass 2: add the declared foreign keys to the tables created without them (new tables only).
-          for (const model of keyless) {
-            const table = model.getTableName();
-            for (const [name, attr] of Object.entries(model.rawAttributes)) {
-              const ref = attr.references; if (!ref || !ref.model) continue;
-              const refTable = typeof ref.model === 'string' ? ref.model : ref.model.tableName || ref.model.getTableName();
-              const col = attr.field || name;
-              try {
-                await sequelize.query(`ALTER TABLE "${table}" ADD CONSTRAINT "${table}_${col}_fkey" FOREIGN KEY ("${col}") REFERENCES "${refTable}" ("${ref.key || 'id'}")` +
-                  ` ON DELETE ${attr.onDelete || 'SET NULL'} ON UPDATE ${attr.onUpdate || 'CASCADE'}`);
-              } catch (e) { console.warn(`[schema] could not add ${table}.${col} → ${refTable}: ${e.message}`); }
-            }
-          }
+          const created = await require('./db/createMissingTables').createMissingTables(sequelize, { syncExisting: true });
           if (created.length) console.log(`[schema] created missing table(s): ${created.join(', ')}`);
         }
         console.log(`Database synchronized (SCHEMA_SYNC_MODE=${syncMode})`);

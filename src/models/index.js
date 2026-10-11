@@ -1117,6 +1117,14 @@ const WorkOrderPart = sequelize.define('WorkOrderPart', {
     type: DataTypes.DATE,
     allowNull: true
   },
+  // These five columns exist in the database (added at boot) but were missing from the model, so
+  // Sequelize silently ignored them: "Mark returned", the expedite cost, service type and expected
+  // return date were never saved or read back (audit H3). Types match the boot SQL.
+  outsideProcessingServiceType: { type: DataTypes.STRING, allowNull: true },
+  outsideProcessingStatus: { type: DataTypes.STRING, allowNull: true, defaultValue: 'not_sent' },
+  outsideProcessingExpectedReturn: { type: DataTypes.DATE, allowNull: true },
+  outsideProcessingReturnedAt: { type: DataTypes.DATE, allowNull: true },
+  outsideProcessingExpediteCost: { type: DataTypes.DECIMAL(10, 2), allowNull: true, defaultValue: 0 },
   // Multiple outside processing operations per part (JSONB array)
   // Each entry: { id, serviceType, vendorId, vendorName, costPerPart, transportCost, transportMarkup, markup, expediteCost, status, poNumber, poSentAt, expectedReturn, returnedAt, notes }
   outsideProcessing: {
@@ -1207,7 +1215,9 @@ const WorkOrderPartFile = sequelize.define('WorkOrderPartFile', {
     type: DataTypes.BOOLEAN,
     defaultValue: false,
     allowNull: false
-  }
+  },
+  // Which cone layer this cut file belongs to (column added at boot; was missing from the model)
+  layer: { type: DataTypes.INTEGER, allowNull: true },
 }, {
   tableName: 'work_order_part_files',
   timestamps: true
@@ -3768,8 +3778,9 @@ const WorkOrderPayment = sequelize.define('WorkOrderPayment', {
   creditMemoApplicationId: { type: DataTypes.UUID, allowNull: true }
 }, { tableName: 'work_order_payments', timestamps: true });
 
-WorkOrder.hasMany(WorkOrderPayment, { foreignKey: 'workOrderId', as: 'payments' });
-WorkOrderPayment.belongsTo(WorkOrder, { foreignKey: 'workOrderId', as: 'workOrder' });
+// Payments are accounting records: a work order that has any can't be deleted (audit H8)
+WorkOrder.hasMany(WorkOrderPayment, { foreignKey: 'workOrderId', as: 'payments', onDelete: 'RESTRICT' });
+WorkOrderPayment.belongsTo(WorkOrder, { foreignKey: 'workOrderId', as: 'workOrder', onDelete: 'RESTRICT' });
 
 
 // WorkOrderInvoiceSend — log of every time an invoice was sent

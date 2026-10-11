@@ -1152,7 +1152,35 @@ router.post('/scrap-confirm-pickup', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// GET /api/settings/ai-usage — today's AI token spend against the daily budget.
+// Set AI_DAILY_TOKEN_BUDGET to change the cap; calls are refused once it is reached.
+// (Must be above the /:key catch-all — it used to be registered after it and was never reached.)
+router.get('/ai-usage', async (req, res, next) => {
+  try {
+    const { summary } = require('../services/aiUsage');
+    res.json({ data: await summary() });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // ==================== GENERIC SETTINGS (catch-all — MUST BE LAST) ====================
+
+// Keys the system manages itself (audit H14). Before, any logged-in user — or a client-portal key —
+// could PUT next_invoice_number / next_po_number / next_dr_number here and make the next invoice,
+// PO or DR collide with existing ones. They have dedicated screens that check the value.
+const SYSTEM_KEYS = new Set([
+  'next_dr_number', 'next_po_number', 'next_op_po_number', 'next_invoice_number', 'freed_invoice_numbers',
+  'last_backup_status', 'backup_history', 'last_auto_backup', 'scrap_log', 'approved_ips',
+]);
+const isSystemKey = (k) => SYSTEM_KEYS.has(k) || /^fix_.*_done$/.test(k);
+// Keys that change prices, tax or security — admins only
+const ADMIN_KEYS = new Set([
+  'tax_settings', 'labor_minimums', 'pricing_config', 'roll_limits', 'mandrel_dies', 'material_grades',
+  'weld_rates', 'certifier_signature_url', 'cod_override_password', 'ai_models', 'email_settings',
+]);
+const isAdmin = (req) => (req.user && req.user.role === 'admin') || (req.apiKey && req.apiKey.permissions === 'admin');
+
 
 // GET /api/settings/:key - Get a general setting by key
 // Returns { data: null } with status 200 if the setting doesn't exist (not set yet).
@@ -1177,6 +1205,13 @@ router.get('/:key', async (req, res, next) => {
 router.put('/:key', async (req, res, next) => {
   try {
     const { value } = req.body;
+    const key = req.params.key;
+    if (isSystemKey(key)) {
+      return res.status(403).json({ error: { message: `"${key}" is managed by the system and can't be set here. Use its own screen (DR Numbers, PO Numbers or the Invoice Center).` } });
+    }
+    if (ADMIN_KEYS.has(key) && !isAdmin(req)) {
+      return res.status(403).json({ error: { message: 'Only an admin can change this setting.' } });
+    }
 
     if (value === undefined) {
       return res.status(400).json({ error: { message: 'Value is required' } });
@@ -1203,15 +1238,5 @@ router.put('/:key', async (req, res, next) => {
 
 module.exports = router;
 
-// GET /api/settings/ai-usage — today's AI token spend against the daily budget.
-// Set AI_DAILY_TOKEN_BUDGET to change the cap; calls are refused once it is reached.
-router.get('/ai-usage', async (req, res, next) => {
-  try {
-    const { summary } = require('../services/aiUsage');
-    res.json({ data: await summary() });
-  } catch (error) {
-    next(error);
-  }
-});
 
 module.exports.sendScheduleEmail = sendScheduleEmail;

@@ -125,50 +125,31 @@ class InboundOrderService {
 
   // Update status
   async updateStatus(id, status) {
-    const { WorkOrderPart } = this.models;
     const order = await this.getById(id);
     
     if (!order) {
       throw new Error('Inbound order not found');
     }
 
-    const updates = { status };
-    
     if (status === INBOUND_STATUSES.RECEIVED) {
-      updates.receivedAt = new Date();
-      
-      // Update linked work order parts
-      await WorkOrderPart.update(
-        { materialReceived: true, materialReceivedAt: new Date() },
-        { where: { inboundOrderId: id } }
-      );
+      // Same receive as the dock and the scanned paperwork — also updates the work order (audit H12)
+      await require('./materialReceiving').receiveInboundOrder(id, {});
+      return this.getById(id);
     }
 
-    await order.update(updates);
+    await order.update({ status });
     return this.getById(id);
   }
 
   // Mark as received
   async markReceived(id, receivedBy) {
-    const { WorkOrderPart } = this.models;
     const order = await this.getById(id);
     
     if (!order) {
       throw new Error('Inbound order not found');
     }
 
-    await order.update({
-      status: INBOUND_STATUSES.RECEIVED,
-      receivedAt: new Date(),
-      receivedBy: receivedBy || null
-    });
-
-    // Update linked work order parts - mark material as received
-    await WorkOrderPart.update(
-      { materialReceived: true, materialReceivedAt: new Date() },
-      { where: { inboundOrderId: id } }
-    );
-
+    await require('./materialReceiving').receiveInboundOrder(id, { receivedBy });
     return this.getById(id);
   }
 }

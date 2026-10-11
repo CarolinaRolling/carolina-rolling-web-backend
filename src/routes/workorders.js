@@ -237,7 +237,7 @@ async function saveShipmentDocument(workOrder, entry, idx) {
     const filename = 'Shipment-' + (idx + 1) + '-' + drLabel + '.pdf';
     const existing = await WorkOrderDocument.findOne({ where: { workOrderId: workOrder.id, originalName: filename } });
     if (existing) {
-      if (existing.cloudinaryId) try { await fileStorage.deleteFile(existing.cloudinaryId); } catch {}
+      if (existing.cloudinaryId) await require('../services/fileRefs').deleteStoredFileIfUnused(existing.cloudinaryId, { exclude: [{ table: 'work_order_documents', id: existing.id }] });
       await existing.destroy();
     }
     const pdfBuffer = await generatePickupReceiptBuffer(workOrder, entry, idx);
@@ -2392,11 +2392,20 @@ router.post('/:id/mark-complete', async (req, res, next) => {
 router.post('/:id/pickup', async (req, res, next) => {
   try {
     const { type, pickedUpBy, items, signature } = req.body; // signature: base64 PNG data URL (optional)
-    
-    const workOrder = await WorkOrder.findByPk(req.params.id, {
-      include: [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }]
+    if (type !== 'full' && (!items || items.length === 0)) {
+      return res.status(400).json({ error: { message: 'No items selected for partial pickup' } });
+    }
+    // Pickup history is read, changed and written back as a whole — the order row is locked so two
+    // pickups recorded at the same moment can't erase each other (audit H15).
+    const t = await sequelize.transaction();
+    let workOrder;
+    try {
+    await WorkOrder.findByPk(req.params.id, { attributes: ['id'], transaction: t, lock: t.LOCK.UPDATE });
+    workOrder = await WorkOrder.findByPk(req.params.id, {
+      include: [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }], transaction: t
     });
     if (!workOrder) {
+      await t.rollback();
       return res.status(404).json({ error: { message: 'Work order not found' } });
     }
 
@@ -2432,7 +2441,7 @@ router.post('/:id/pickup', async (req, res, next) => {
         .filter(p => p.quantity > 0);
       
       if (pickupItems.length === 0) {
-        return res.status(400).json({ error: { message: 'All items have already been picked up' } });
+        await t.rollback(); return res.status(400).json({ error: { message: 'All items have already been picked up' } });
       }
 
       history.push({
@@ -2449,12 +2458,9 @@ router.post('/:id/pickup', async (req, res, next) => {
       workOrder.pickedUpAt = now;
       workOrder.pickedUpBy = pickedUpBy || 'unknown';
       workOrder.changed('pickupHistory', true);
-      await workOrder.save();
+      await workOrder.save({ transaction: t });
     } else {
-      // Partial pickup: only selected items
-      if (!items || items.length === 0) {
-        return res.status(400).json({ error: { message: 'No items selected for partial pickup' } });
-      }
+      // Partial pickup: only selected items (checked above)
       
       history.push({
         date: now,
@@ -2487,8 +2493,10 @@ router.post('/:id/pickup', async (req, res, next) => {
         workOrder.pickedUpBy = pickedUpBy || 'unknown';
       }
       workOrder.changed('pickupHistory', true);
-      await workOrder.save();
+      await workOrder.save({ transaction: t });
     }
+    await t.commit();
+    } catch (e) { try { await t.rollback(); } catch {} throw e; }
     
     // Reload and return
     await workOrder.reload({ include: [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }] });
@@ -2701,14 +2709,20 @@ router.get('/:id/pickup/:index/receipt', async (req, res, next) => {
 // DELETE /:id/pickup/:index - Delete a pickup history entry
 router.delete('/:id/pickup/:index', async (req, res, next) => {
   try {
-    const workOrder = await WorkOrder.findByPk(req.params.id, {
-      include: [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }]
+    // Pickup history is read, changed and written back as a whole — the order row is locked so two
+    // pickups recorded at the same moment can't erase each other (audit H15).
+    const t = await sequelize.transaction();
+    let workOrder;
+    try {
+    await WorkOrder.findByPk(req.params.id, { attributes: ['id'], transaction: t, lock: t.LOCK.UPDATE });
+    workOrder = await WorkOrder.findByPk(req.params.id, {
+      include: [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }], transaction: t
     });
-    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+    if (!workOrder) { await t.rollback(); return res.status(404).json({ error: { message: 'Work order not found' } }); }
 
     const idx = parseInt(req.params.index);
     const history = JSON.parse(JSON.stringify(workOrder.pickupHistory || []));
-    if (idx < 0 || idx >= history.length) return res.status(400).json({ error: { message: 'Invalid pickup index' } });
+    if (!(idx >= 0 && idx < history.length)) { await t.rollback(); return res.status(400).json({ error: { message: 'Invalid pickup index' } }); }
 
     history.splice(idx, 1);
     workOrder.pickupHistory = history;
@@ -2735,7 +2749,9 @@ router.delete('/:id/pickup/:index', async (req, res, next) => {
         workOrder.status = 'stored';
       }
     }
-    await workOrder.save();
+    await workOrder.save({ transaction: t });
+    await t.commit();
+    } catch (e) { try { await t.rollback(); } catch {} throw e; }
     await workOrder.reload({ include: [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }] });
     res.json({ data: workOrder.toJSON(), message: 'Pickup entry deleted' });
   } catch (error) { next(error); }
@@ -2744,14 +2760,20 @@ router.delete('/:id/pickup/:index', async (req, res, next) => {
 // PUT /:id/pickup/:index - Edit a pickup history entry (update quantities)
 router.put('/:id/pickup/:index', async (req, res, next) => {
   try {
-    const workOrder = await WorkOrder.findByPk(req.params.id, {
-      include: [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }]
+    // Pickup history is read, changed and written back as a whole — the order row is locked so two
+    // pickups recorded at the same moment can't erase each other (audit H15).
+    const t = await sequelize.transaction();
+    let workOrder;
+    try {
+    await WorkOrder.findByPk(req.params.id, { attributes: ['id'], transaction: t, lock: t.LOCK.UPDATE });
+    workOrder = await WorkOrder.findByPk(req.params.id, {
+      include: [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }], transaction: t
     });
-    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+    if (!workOrder) { await t.rollback(); return res.status(404).json({ error: { message: 'Work order not found' } }); }
 
     const idx = parseInt(req.params.index);
     const history = JSON.parse(JSON.stringify(workOrder.pickupHistory || []));
-    if (idx < 0 || idx >= history.length) return res.status(400).json({ error: { message: 'Invalid pickup index' } });
+    if (!(idx >= 0 && idx < history.length)) { await t.rollback(); return res.status(400).json({ error: { message: 'Invalid pickup index' } }); }
 
     const { items, pickedUpBy } = req.body;
     if (items) history[idx].items = items;
@@ -2778,7 +2800,10 @@ router.put('/:id/pickup/:index', async (req, res, next) => {
       workOrder.status = 'stored';
     }
 
-    await workOrder.save();
+    await workOrder.save({ transaction: t });
+    await t.commit();
+    } catch (e) { try { await t.rollback(); } catch {} throw e; }
+    const idx = parseInt(req.params.index);
     await workOrder.reload({ include: [{ model: WorkOrderPart, as: 'parts', include: [{ model: WorkOrderPartFile, as: 'files' }] }] });
     res.json({ data: workOrder.toJSON(), message: 'Pickup entry updated' });
     // Regenerate shipment doc in background
@@ -3059,6 +3084,32 @@ router.delete('/:id', async (req, res, next) => {
       console.log(`[delete WO] Force-delete override used for DR-${workOrder.drNumber} by ${req.body?.deletedBy || 'unknown'}`);
     }
 
+    // Invoiced or paid orders are accounting records (audit H8). Before, deleting one silently erased
+    // its payment history (the FK cascaded) and orphaned client-payment applications, so the client's
+    // balance and the QuickBooks books no longer agreed. The override code does NOT bypass this.
+    {
+      const { WorkOrderPayment, PaymentApplication, CreditMemoApplication } = require('../models');
+      // Read the accounting columns under the lock, so an invoice number assigned a moment ago counts
+      const locked = await WorkOrder.findByPk(workOrder.id, { transaction, lock: transaction.LOCK.UPDATE, attributes: ['id', 'invoiceNumber', 'iifExportedAt'] });
+      workOrder.invoiceNumber = locked.invoiceNumber; workOrder.iifExportedAt = locked.iifExportedAt;
+      const [payments, applications, credits] = await Promise.all([
+        WorkOrderPayment.count({ where: { workOrderId: workOrder.id }, transaction }),
+        PaymentApplication.count({ where: { workOrderId: workOrder.id }, transaction }),
+        CreditMemoApplication.count({ where: { workOrderId: workOrder.id }, transaction }),
+      ]);
+      const label = workOrder.drNumber ? `DR-${workOrder.drNumber}` : (workOrder.orderNumber || 'This order');
+      const reasons = [];
+      if (workOrder.invoiceNumber) reasons.push(`has invoice #${workOrder.invoiceNumber}`);
+      if (workOrder.iifExportedAt) reasons.push('was entered in QuickBooks');
+      if (payments || applications || credits) reasons.push('has payment records');
+      if (reasons.length) {
+        await transaction.rollback();
+        return res.status(409).json({ error: { code: 'WORK_ORDER_HAS_ACCOUNTING', message:
+          `${label} ${reasons.join(' and ')}, so it can't be deleted — that would erase accounting history. ` +
+          `Void it instead (DR Numbers → Void). If it really must go, first void its payments and remove the invoice number.` } });
+      }
+    }
+
     console.log('Deleting work order:', workOrder.id);
 
     // Snapshot everything before it goes. The order was loaded with its parts, part files and
@@ -3112,14 +3163,13 @@ router.delete('/:id', async (req, res, next) => {
       console.error('[delete WO] Failed to delete vendor issues:', e.message);
     }
 
-    for (const part of workOrder.parts || []) {
-      for (const file of part.files || []) {
-        if (file.cloudinaryId) try { await fileStorage.deleteFile(file.cloudinaryId); } catch {}
-      }
-    }
-    for (const doc of workOrder.documents || []) {
-      if (doc.cloudinaryId) try { await fileStorage.deleteFile(doc.cloudinaryId); } catch {}
-    }
+    // Stored files are removed only after the delete commits, and only if no other record (e.g. the
+    // estimate this order came from) still uses the same file (audit H13).
+    const storedFiles = [
+      ...(workOrder.parts || []).flatMap(p => (p.files || []).map(f => f.cloudinaryId)),
+      ...(workOrder.documents || []).map(d => d.cloudinaryId),
+      workOrder.invoicePdfCloudinaryId,
+    ].filter(Boolean);
 
     await WorkOrderDocument.destroy({ where: { workOrderId: workOrder.id }, transaction });
     for (const part of workOrder.parts || []) {
@@ -3136,6 +3186,7 @@ router.delete('/:id', async (req, res, next) => {
     const auditSnapshot = { id: workOrder.id, drNumber: workOrder.drNumber, orderNumber: workOrder.orderNumber, clientName: workOrder.clientName, invoiceNumber: workOrder.invoiceNumber };
     await workOrder.destroy({ transaction });
     await transaction.commit();
+    require('../services/fileRefs').deleteStoredFilesIfUnused(storedFiles).catch(() => {});
 
     auditWorkOrder(req, 'workorder_deleted', auditSnapshot, { usedOverride: !!(req.body?.overrideCode || req.query?.overrideCode) });
     res.json({ message: 'Work order deleted successfully' });
@@ -3316,15 +3367,22 @@ router.put('/:id/parts/reorder', async (req, res, next) => {
 
 // PUT /api/workorders/:id/parts/:partId - Update a part
 router.put('/:id/parts/:partId', async (req, res, next) => {
+  // The part row is locked while the update is worked out, so two tablets (or a tablet and the office)
+  // saving at once can't overwrite each other's progress-log entries, formData or OP lines (audit H15).
+  const t = await sequelize.transaction();
+  let committed = false;
   try {
     const part = await WorkOrderPart.findOne({
       where: {
         id: req.params.partId,
         workOrderId: req.params.id
-      }
+      },
+      transaction: t,
+      lock: t.LOCK.UPDATE
     });
 
     if (!part) {
+      await t.rollback(); committed = true;
       return res.status(404).json({ error: { message: 'Part not found' } });
     }
 
@@ -3424,7 +3482,7 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     if (vendorId !== undefined) {
       updates.vendorId = vendorId || null;
       if (vendorId) {
-        const vendor = await Vendor.findByPk(vendorId);
+        const vendor = await Vendor.findByPk(vendorId, { transaction: t });
         if (vendor) updates.supplierName = vendor.name;
       } else {
         updates.supplierName = null;
@@ -3451,8 +3509,10 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     if (cleanedData.otherCharges !== undefined) updates.otherCharges = cleanedData.otherCharges;
     if (cleanedData.partTotal !== undefined) updates.partTotal = cleanedData.partTotal;
 
-    // Outside processing JSONB array
-    if (req.body.outsideProcessing !== undefined) updates.outsideProcessing = req.body.outsideProcessing;
+    // Outside processing JSONB array — PO numbers / links stamped by the server are kept (audit H15)
+    if (req.body.outsideProcessing !== undefined) {
+      updates.outsideProcessing = require('../services/outsideProcessingMerge').mergeOutsideProcessing(part.outsideProcessing, req.body.outsideProcessing);
+    }
     
     if (status !== undefined) {
       updates.status = status;
@@ -3489,11 +3549,11 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     // Auto-fill lot number (<DR>-<line>) if it would still be empty after this update
     const effLot = updates.lotNumber !== undefined ? updates.lotNumber : part.lotNumber;
     if (!effLot || !String(effLot).trim()) {
-      const woForLot = await WorkOrder.findByPk(req.params.id);
+      const woForLot = await WorkOrder.findByPk(req.params.id, { transaction: t });
       if (woForLot?.drNumber) {
         let cleanNum = part.partNumber;
         try {
-          const allForLot = await WorkOrderPart.findAll({ where: { workOrderId: req.params.id }, attributes: ['id', 'partNumber', 'partType', 'formData'] });
+          const allForLot = await WorkOrderPart.findAll({ where: { workOrderId: req.params.id }, attributes: ['id', 'partNumber', 'partType', 'formData'], transaction: t });
           const { display } = computeDisplayNumbers(allForLot.map(p => ({ id: p.id, partNumber: p.partNumber, partType: p.partType, formData: p.formData })));
           cleanNum = display[part.id] || part.partNumber;
         } catch (e) { cleanNum = part.partNumber; }
@@ -3504,7 +3564,8 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     // Capture previous status BEFORE update for auto-advance comparison
     const previousStatus = part.status;
 
-    await part.update(updates);
+    await part.update(updates, { transaction: t });
+    await t.commit(); committed = true;
 
     // Auto-complete linked services when a parent part is marked complete
     // Only run for orders in processing status to avoid unnecessary queries
@@ -3663,6 +3724,7 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
       message: 'Part updated successfully'
     });
   } catch (error) {
+    if (!committed) { try { await t.rollback(); } catch {} }
     next(error);
   }
 });
@@ -3693,7 +3755,8 @@ router.delete('/:id/parts/:partId', async (req, res, next) => {
     for (const file of part.files) {
       if (file.cloudinaryId) {
         try {
-          await fileStorage.deleteFile(file.cloudinaryId);
+          // kept if the estimate (or another record) still shows the same file — audit H13
+          await require('../services/fileRefs').deleteStoredFileIfUnused(file.cloudinaryId, { exclude: part.files.map(f => ({ table: 'work_order_part_files', id: f.id })) });
         } catch (e) {
           console.error('Failed to delete from Cloudinary:', e);
         }
@@ -4045,10 +4108,10 @@ router.delete('/:id/parts/:partId/files/:fileId', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'File not found' } });
     }
 
-    // Delete from Cloudinary
+    // Delete from storage — unless another record (e.g. the estimate) still uses it (audit H13)
     if (file.cloudinaryId) {
       try {
-        await fileStorage.deleteFile(file.cloudinaryId);
+        await require('../services/fileRefs').deleteStoredFileIfUnused(file.cloudinaryId, { exclude: [{ table: 'work_order_part_files', id: file.id }] });
       } catch (e) {
         console.error('Failed to delete from Cloudinary:', e);
       }
@@ -4717,7 +4780,7 @@ router.delete('/:id/documents/:documentId', async (req, res, next) => {
     // Delete from Cloudinary
     if (document.cloudinaryId) {
       try {
-        await fileStorage.deleteFile(document.cloudinaryId);
+        await require('../services/fileRefs').deleteStoredFileIfUnused(document.cloudinaryId, { exclude: [{ table: 'work_order_documents', id: document.id }] });
       } catch (e) {
         console.error('Failed to delete from Cloudinary:', e);
       }
@@ -4815,7 +4878,7 @@ router.post('/:id/documents/:documentId/regenerate', async (req, res, next) => {
       // Delete old Cloudinary file
       if (doc.cloudinaryId) {
         try {
-          await fileStorage.deleteFile(doc.cloudinaryId);
+          await require('../services/fileRefs').deleteStoredFileIfUnused(doc.cloudinaryId, { exclude: [{ table: 'work_order_documents', id: doc.id }] });
         } catch (e) {
           console.error('[regenerate-po] Failed to delete old file:', e.message);
         }
@@ -4862,7 +4925,7 @@ router.post('/:id/documents/:documentId/regenerate', async (req, res, next) => {
     // Delete old Cloudinary file
     if (doc.cloudinaryId) {
       try {
-        await fileStorage.deleteFile(doc.cloudinaryId);
+        await require('../services/fileRefs').deleteStoredFileIfUnused(doc.cloudinaryId, { exclude: [{ table: 'work_order_documents', id: doc.id }] });
       } catch (e) {
         console.error('[regenerate-po] Failed to delete old file:', e.message);
       }
@@ -6561,7 +6624,7 @@ router.post('/:id/services/:documentId/regen', async (req, res, next) => {
 
     // Delete the old file from storage (best-effort)
     if (doc.cloudinaryId) {
-      try { await fileStorage.deleteFile(doc.cloudinaryId); } catch (e) {
+      try { await require('../services/fileRefs').deleteStoredFileIfUnused(doc.cloudinaryId, { exclude: [{ table: 'work_order_documents', id: doc.id }] }); } catch (e) {
         console.warn('[services regen] Old file delete failed:', e.message);
       }
     }
@@ -6667,7 +6730,7 @@ router.delete('/:id/services/:documentId', async (req, res, next) => {
 
     // Delete the file from storage (best-effort)
     if (doc.cloudinaryId) {
-      try { await fileStorage.deleteFile(doc.cloudinaryId); } catch (e) {
+      try { await require('../services/fileRefs').deleteStoredFileIfUnused(doc.cloudinaryId, { exclude: [{ table: 'work_order_documents', id: doc.id }] }); } catch (e) {
         console.warn('[services delete] File delete failed:', e.message);
       }
     }

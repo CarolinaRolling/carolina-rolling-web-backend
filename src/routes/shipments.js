@@ -102,9 +102,10 @@ async function uploadToCloudinary(filePath, shipmentId) {
 }
 
 // Delete file from Cloudinary
-async function deleteFromCloudinary(publicId) {
+async function deleteFromCloudinary(publicId, exclude = []) {
   try {
-    await fileStorage.deleteFile(publicId);
+    // only if no other record still uses the same stored file (audit H13)
+    await require('../services/fileRefs').deleteStoredFileIfUnused(publicId, { exclude });
   } catch (error) {
     console.error('Cloudinary delete error:', error);
     // Don't throw - just log the error
@@ -379,18 +380,13 @@ router.post('/', async (req, res, next) => {
             await workOrder.update({ storageLocation: location }, { transaction });
           }
           
-          // Mark all parts with material ordered as received
-          await WorkOrderPart.update(
-            { materialReceived: true, materialReceivedAt: new Date() },
-            { where: { workOrderId: workOrder.id, materialOrdered: true }, transaction }
-          );
-
-          // Update work order status
-          await workOrder.update({
-            allMaterialReceived: true,
-            receivedBy: receivedBy || workOrder.receivedBy,
-            status: workOrder.status === 'waiting_for_materials' ? 'received' : workOrder.status
-          }, { transaction });
+          // Received against a specific PO → only that PO's parts are marked, below (audit H12).
+          // No PO named → as before, everything ordered on this work order is marked received.
+          if (!inboundOrderId) {
+            const { receiveAllForWorkOrder } = require('../services/materialReceiving');
+            await receiveAllForWorkOrder(workOrder.id, { receivedBy, transaction });
+          }
+          if (receivedBy && !workOrder.receivedBy) await workOrder.update({ receivedBy }, { transaction });
 
           workOrder = await WorkOrder.findByPk(workOrder.id, { transaction });
         }
@@ -439,18 +435,15 @@ router.post('/', async (req, res, next) => {
       // else: No work order — shipment is "waiting for instructions"
 
       // Mark inbound order as received if provided
+      // (marks only that PO's parts, then works out the work order's material status — audit H12)
       if (inboundOrderId) {
         try {
-          const inbound = await InboundOrder.findByPk(inboundOrderId, { transaction });
-          if (inbound) {
-            await inbound.update({
-              status: 'received',
-              receivedAt: new Date(),
-              receivedBy: receivedBy || null
-            }, { transaction });
-          }
+          const { receiveInboundOrder } = require('../services/materialReceiving');
+          await receiveInboundOrder(inboundOrderId, { receivedBy, transaction });
+          if (workOrder) workOrder = await WorkOrder.findByPk(workOrder.id, { transaction });   // fresh status for the reply / email
         } catch (inbErr) {
-          console.error('Inbound update warning:', inbErr.message);
+          if (!inbErr.status) throw inbErr;                // a database error: don't half-receive
+          console.error('Inbound update warning:', inbErr.message);   // not found / cancelled
         }
       }
 
@@ -814,7 +807,7 @@ router.delete('/:id', async (req, res, next) => {
     // Delete photos from Cloudinary
     for (const photo of shipment.photos) {
       if (photo.cloudinaryId) {
-        await deleteFromCloudinary(photo.cloudinaryId);
+        await deleteFromCloudinary(photo.cloudinaryId, shipment.photos.map(p => ({ table: 'shipment_photos', id: p.id })));
       }
     }
 
@@ -897,7 +890,7 @@ router.delete('/:id/photos/:photoId', async (req, res, next) => {
 
     // Delete from Cloudinary
     if (photo.cloudinaryId) {
-      await deleteFromCloudinary(photo.cloudinaryId);
+      await deleteFromCloudinary(photo.cloudinaryId, [{ table: 'shipment_photos', id: photo.id }]);
     }
 
     await photo.destroy();
@@ -1134,7 +1127,7 @@ router.delete('/:id/documents/:documentId', async (req, res, next) => {
     // Delete from Cloudinary if stored there
     if (doc.cloudinaryId) {
       try {
-        await fileStorage.deleteFile(doc.cloudinaryId);
+        await require('../services/fileRefs').deleteStoredFileIfUnused(doc.cloudinaryId, { exclude: [{ table: 'shipment_documents', id: doc.id }] });
       } catch (e) {
         console.error('Failed to delete from Cloudinary:', e);
       }

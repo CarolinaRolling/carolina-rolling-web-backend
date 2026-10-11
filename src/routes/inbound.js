@@ -75,6 +75,7 @@ router.put('/:id', async (req, res, next) => {
     if (error.message === 'Inbound order not found') {
       return res.status(404).json({ error: { message: error.message } });
     }
+    if (error.status && error.status < 500) return res.status(error.status).json({ error: { message: error.message } });
     next(error);
   }
 });
@@ -90,6 +91,7 @@ router.put('/:id/status', async (req, res, next) => {
     if (error.message === 'Inbound order not found') {
       return res.status(404).json({ error: { message: error.message } });
     }
+    if (error.status && error.status < 500) return res.status(error.status).json({ error: { message: error.message } });
     next(error);
   }
 });
@@ -105,6 +107,7 @@ router.put('/:id/receive', async (req, res, next) => {
     if (error.message === 'Inbound order not found') {
       return res.status(404).json({ error: { message: error.message } });
     }
+    if (error.status && error.status < 500) return res.status(error.status).json({ error: { message: error.message } });
     next(error);
   }
 });
@@ -119,6 +122,7 @@ router.delete('/:id', async (req, res, next) => {
     if (error.message === 'Inbound order not found') {
       return res.status(404).json({ error: { message: error.message } });
     }
+    if (error.status && error.status < 500) return res.status(error.status).json({ error: { message: error.message } });
     next(error);
   }
 });

@@ -304,17 +304,14 @@ router.post('/:id/confirm', async (req, res, next) => {
       // Mark the inbound order received + flip its WO out of waiting_for_materials, and attach the scan.
       let woForCheck = null;
       if (inboundOrderId) {
-        const inbound = await InboundOrder.findByPk(inboundOrderId);
-        if (inbound) {
-          await inbound.update({ status: 'received', receivedAt: new Date() });
-          if (inbound.workOrderId) {
-            const { WorkOrderPart } = require('../models');
-            await WorkOrderPart.update({ materialReceived: true, materialReceivedAt: new Date() }, { where: { workOrderId: inbound.workOrderId, materialOrdered: true } });
-            const wo = await WorkOrder.findByPk(inbound.workOrderId);
-            woForCheck = wo;
-            if (wo && wo.status === 'waiting_for_materials') await wo.update({ status: 'received', allMaterialReceived: true });
-            resultRef = wo ? (wo.drNumber ? `DR-${wo.drNumber}` : wo.orderNumber) : null;
-          }
+        // Only this PO's parts are marked received; the work order leaves "waiting for materials"
+        // only when nothing else it ordered is still out (audit H12).
+        const { receiveInboundOrder } = require('../services/materialReceiving');
+        const r = await receiveInboundOrder(inboundOrderId, {}).catch(e => { if (e.status === 404) return null; throw e; });
+        const wo = r && r.workOrder;
+        if (wo) {
+          woForCheck = wo;
+          resultRef = wo.drNumber ? `DR-${wo.drNumber}` : wo.orderNumber;
         }
       }
       await attachScanToWorkOrder(item, workOrderId);

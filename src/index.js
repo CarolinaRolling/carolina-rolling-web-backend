@@ -178,11 +178,22 @@ app.get('/api/email-scanner/oauth/callback', async (req, res) => {
 });
 
 // All other routes require authentication (JWT token or API key)
-const { authenticate } = require('./routes/auth');
+const { authenticate, requireAdmin } = require('./routes/auth');
 app.use('/api/shipments', authenticate, shipmentRoutes);
 
 
 
+
+// Settings hold prices, tax rates, number counters and passwords: no vendor or client-portal key may
+// read or change them (audit H14). Device keys (shop tablets) and logged-in users still can.
+// Registered ahead of every /api/settings route, including the ones defined directly below.
+function blockPortalKeysFromSettings(req, res, next) {
+  if (req.apiKey && (req.apiKey.vendorName || req.apiKey.clientName) && !req.apiKey.deviceName) {
+    return res.status(403).json({ error: { message: 'Portal API keys cannot access settings.' } });
+  }
+  next();
+}
+app.use('/api/settings', authenticate, blockPortalKeysFromSettings);
 
 // === Pricing config (new-client uplift) — must be registered before the /api/settings catch-all router ===
 app.get('/api/settings/pricing-config', authenticate, async (req, res) => {
@@ -192,7 +203,7 @@ app.get('/api/settings/pricing-config', authenticate, async (req, res) => {
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
-app.put('/api/settings/pricing-config', authenticate, async (req, res) => {
+app.put('/api/settings/pricing-config', authenticate, requireAdmin, async (req, res) => {
   try {
     const value = {
       newClientUpliftPct: parseFloat(req.body.newClientUpliftPct) || 0,
@@ -234,7 +245,7 @@ app.get('/api/settings/pricing-worksheet', authenticate, async (req, res) => {
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
-app.post('/api/settings/pricing-worksheet', authenticate, async (req, res) => {
+app.post('/api/settings/pricing-worksheet', authenticate, requireAdmin, async (req, res) => {
   try {
     const { buildWorksheet, fitFromWorksheet } = require('./services/pricingCalibration');
     const partType = req.body.partType || 'plate_roll';
@@ -303,7 +314,7 @@ app.get('/api/settings/ai-models', authenticate, (req, res) => {
   } catch (e) { res.status(500).json({ error: { message: e.message } }); }
 });
 
-app.put('/api/settings/ai-models', authenticate, async (req, res) => {
+app.put('/api/settings/ai-models', authenticate, requireAdmin, async (req, res) => {
   try {
     const { AppSettings } = require('./models');
     const { setAiModels, getAiModels } = require('./services/aiConfig');
@@ -410,7 +421,7 @@ app.get('/api/settings/available-models', authenticate, async (req, res) => {
   }
 });
 
-app.use('/api/settings', authenticate, settingsRoutes);
+app.use('/api/settings', authenticate, blockPortalKeysFromSettings, settingsRoutes);
 app.use('/api/inbound', authenticate, inboundRoutes);
 app.use('/api/inbound-paperwork', authenticate, inboundPaperworkRoutes);
 // Middleware to block portal/vendor API keys from accessing internal routes
@@ -2011,6 +2022,22 @@ async function startServer() {
       const r = await linkLegacyTwinPayments(sequelize);
       if (r.linked || r.unmatched) console.log(`[payments] linked ${r.linked} client-payment application(s) to their invoice payment rows; ${r.unmatched} application(s) have no twin and count on their own`);
     } catch(e) { console.log('Payment application link migration error:', e.message); }
+
+    // Payment rows must never disappear with a deleted work order (audit H8). The old FK was
+    // ON DELETE CASCADE, so deleting an order silently erased its payment history.
+    try {
+      // Every FK from work_order_payments to work_orders (an old alter-sync can leave duplicates)
+      const [fks] = await sequelize.query(`SELECT conname, pg_get_constraintdef(oid) AS def FROM pg_constraint
+        WHERE conrelid = 'work_order_payments'::regclass AND contype = 'f' AND confrelid = 'work_orders'::regclass`);
+      for (const fk of fks.filter(f => /ON DELETE CASCADE/i.test(f.def))) {
+        await sequelize.transaction(async (t) => {
+          await sequelize.query(`ALTER TABLE work_order_payments DROP CONSTRAINT "${fk.conname}"`, { transaction: t });
+          await sequelize.query(`ALTER TABLE work_order_payments ADD CONSTRAINT "${fk.conname}" FOREIGN KEY ("workOrderId")
+            REFERENCES work_orders(id) ON UPDATE CASCADE ON DELETE RESTRICT`, { transaction: t });
+        });
+        console.log(`[payments] ${fk.conname}: work orders with payments can no longer be deleted`);
+      }
+    } catch(e) { console.log('Payment FK migration error:', e.message); }
 
     // Database guards for invoice numbers (audit H4): one live work order per number, one active
     // number per work order. Only added when existing data allows; otherwise the duplicates are

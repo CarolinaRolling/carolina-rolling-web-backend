@@ -880,7 +880,14 @@ router.post('/restore', requireAdmin, async (req, res, next) => {
     if (backup.data.workOrders) {
       results.workOrders = { restored: 0, skipped: 0, errors: [] };
       if (clearExisting) {
-        try { await WorkOrderPartFile.destroy({ where: {}, force: true }); await WorkOrderPart.destroy({ where: {}, force: true }); await WorkOrderDocument.destroy({ where: {}, force: true }); await WorkOrder.destroy({ where: {}, force: true }); } catch {}
+        try {
+          // Payments point at work orders and no longer cascade-delete with them (audit H8), so they
+          // are cleared first (the backup's own payments are restored further down).
+          const { WorkOrderPayment: WOP, PaymentApplication: PA } = require('../models');
+          await PA.destroy({ where: {}, force: true, hooks: false });
+          await WOP.destroy({ where: {}, force: true, hooks: false });
+          await WorkOrderPartFile.destroy({ where: {}, force: true }); await WorkOrderPart.destroy({ where: {}, force: true }); await WorkOrderDocument.destroy({ where: {}, force: true }); await WorkOrder.destroy({ where: {}, force: true });
+        } catch (e) { console.warn(`[restore] Clear work orders failed: ${e.message}`); }
       }
       for (const od of backup.data.workOrders) {
         try {

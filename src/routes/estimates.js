@@ -161,6 +161,29 @@ function cleanNumericFields(data, fields = NUMERIC_FIELDS) {
   return cleaned;
 }
 
+// Fields a part request may never set (audit H9). Before, the part PUT spread the whole request body
+// into the update, so a request could move a part to another estimate (estimateId), change its id,
+// or back-date it. A request can also no longer save a price that isn't a number ("abc" used to be
+// stored silently as blank) or a negative labor rate, labor hours or material cost.
+const PROTECTED_PART_FIELDS = ['id', 'estimateId', 'createdAt', 'updatedAt'];
+const NON_NEGATIVE_FIELDS = ['laborRate', 'laborHours', 'materialUnitCost'];
+function sanitizePartInput(body) {
+  const data = { ...(body || {}) };
+  for (const k of PROTECTED_PART_FIELDS) delete data[k];
+  const bad = [];
+  for (const f of NUMERIC_FIELDS) {
+    if (f === 'quantity' || !(f in data)) continue;   // quantity: blank/invalid already becomes 1
+    const v = data[f];
+    if (v === '' || v === null || v === undefined) continue;
+    const n = typeof v === 'number' ? v : parseFloat(String(v).replace(/[$,\s]/g, ''));
+    if (!Number.isFinite(n)) { bad.push(`${f} must be a number`); continue; }
+    if (NON_NEGATIVE_FIELDS.includes(f) && n < 0) { bad.push(`${f} can't be negative`); continue; }
+    data[f] = n;
+  }
+  if (bad.length) { const e = new Error(`Invalid part pricing: ${bad.join('; ')}.`); e.status = 400; throw e; }
+  return data;
+}
+
 // Helper to log activity for daily email
 
 // Whitelist — only expose what the portal needs from estimates
@@ -1259,18 +1282,15 @@ router.delete('/:id/permanent', async (req, res, next) => {
       reason: 'permanent delete from trash'
     });
 
-    // Delete files from Cloudinary
-    for (const file of estimate.files || []) {
-      if (file.cloudinaryId) {
-        try {
-          await fileStorage.deleteFile(file.cloudinaryId);
-        } catch (e) {
-          console.error('Failed to delete from Cloudinary:', e);
-        }
-      }
-    }
-
+    const storedFiles = [
+      ...(estimate.files || []).map(f => f.cloudinaryId),
+      ...(estimate.parts || []).flatMap(p => (p.files || []).map(f => f.cloudinaryId)),
+    ];
     await estimate.destroy();
+    // Converting an estimate copies its files onto the work order with the SAME stored file, so a
+    // file is only removed from storage when nothing else still uses it (audit H13). Part files
+    // used to be left behind in storage; they're now cleaned up the same way.
+    await require('../services/fileRefs').deleteStoredFilesIfUnused(storedFiles);
 
     res.json({ message: 'Estimate permanently deleted' });
   } catch (error) {
@@ -1292,9 +1312,9 @@ router.post('/:id/parts', async (req, res, next) => {
     const existingParts = await EstimatePart.count({ where: { estimateId: estimate.id } });
     
     let partData = cleanNumericFields({
-      estimateId: estimate.id,
       partNumber: existingParts + 1,
-      ...req.body
+      ...sanitizePartInput(req.body),
+      estimateId: estimate.id,
     });
 
     // Sanitize ENUM fields — empty strings break Postgres
@@ -1349,7 +1369,9 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Part not found' } });
     }
 
-    let updates = cleanNumericFields({ ...req.body });
+    // The web form still does the pricing math and sends the results; the server only refuses ids
+    // and non-numeric / negative values (audit H9).
+    let updates = cleanNumericFields(sanitizePartInput(req.body));
     
     // Sanitize ENUM fields — empty strings break Postgres
     if (updates.rollType === '') updates.rollType = null;
@@ -1813,13 +1835,10 @@ router.delete('/:id/parts/:partId/files/:fileId', async (req, res, next) => {
     // Delete from Cloudinary
     if (file.cloudinaryId) {
       try {
-        await fileStorage.deleteFile(file.cloudinaryId);
+        await require('../services/fileRefs').deleteStoredFileIfUnused(file.cloudinaryId, { exclude: [{ table: 'estimate_part_files', id: file.id }] });
       } catch (err) {
-        // Try image type for old files uploaded with resource_type: 'auto'
-        try {
-          await fileStorage.deleteFile(file.cloudinaryId);
-        } catch (err2) {
-          console.error('Failed to delete from Cloudinary:', err2);
+        {
+          console.error('Failed to delete from Cloudinary:', err);
         }
       }
     }
@@ -2191,7 +2210,7 @@ router.delete('/:id/files/:fileId', async (req, res, next) => {
 
     if (file.cloudinaryId) {
       try {
-        await fileStorage.deleteFile(file.cloudinaryId);
+        await require('../services/fileRefs').deleteStoredFileIfUnused(file.cloudinaryId, { exclude: [{ table: 'estimate_files', id: file.id }] });
       } catch (e) {
         console.error('Failed to delete from Cloudinary:', e);
       }

@@ -339,11 +339,9 @@ router.delete('/liabilities/:id', async (req, res, next) => {
   try {
     const liability = await Liability.findByPk(req.params.id);
     if (!liability) return res.status(404).json({ error: { message: 'Not found' } });
-    // Clean up file if exists
-    if (liability.invoiceFileCloudinaryId) {
-      try { await fileStorage.deleteFile(liability.invoiceFileCloudinaryId); } catch {}
-    }
     await liability.destroy();
+    // The file goes only if nothing (including the Deleted Items snapshot just taken) still uses it
+    require('../services/fileRefs').deleteStoredFileIfUnused(liability.invoiceFileCloudinaryId, { resourceType: 'any' }).catch(() => {});
     res.json({ message: 'Deleted' });
   } catch (error) { next(error); }
 });
@@ -401,10 +399,8 @@ router.post('/liabilities/:id/reject', async (req, res, next) => {
   try {
     const liability = await Liability.findByPk(req.params.id);
     if (!liability) return res.status(404).json({ error: { message: 'Not found' } });
-    if (liability.invoiceFileCloudinaryId) {
-      try { await fileStorage.deleteFile(liability.invoiceFileCloudinaryId); } catch {}
-    }
     await liability.destroy();
+    require('../services/fileRefs').deleteStoredFileIfUnused(liability.invoiceFileCloudinaryId, { resourceType: 'any' }).catch(() => {});
     res.json({ message: 'Bill rejected and deleted' });
   } catch (error) { next(error); }
 });

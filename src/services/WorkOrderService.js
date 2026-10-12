@@ -144,14 +144,7 @@ class WorkOrderService {
       // Snapshot before anything is destroyed. The work order was loaded with parts, files and
       // documents, so the archived JSON is a complete record — enough to reconstruct the order
       // if this delete turns out to have been a mistake.
-      const { archiveRecord, labelFor } = require('./deletionArchive');
-      await archiveRecord(workOrder, {
-        modelName: 'WorkOrder',
-        label: labelFor(workOrder),
-        deletedBy: options.deletedBy || null,
-        reason: options.reason || null,
-        transaction,
-      });
+      // (snapshotted automatically by the undo hooks when the rows are destroyed below)
 
       // Collect remote asset ids now, but do NOT delete them yet. Cloudinary deletes cannot be
       // rolled back — if the transaction below fails, the work order comes back but its prints,
@@ -218,20 +211,15 @@ class WorkOrderService {
       });
 
       // Delete work order
-      await workOrder.destroy({ transaction });
+      await workOrder.destroy({ transaction, archiveBy: options.deletedBy || null, archiveReason: options.reason || null });
 
       await transaction.commit();
 
       // Committed — the database no longer references these assets, so it is now safe to
       // remove them. Failures here leave orphaned files in Cloudinary, which is recoverable;
       // deleting before the commit would not have been.
-      for (const cloudinaryId of cloudinaryIdsToDelete) {
-        try {
-          await cloudinary.uploader.destroy(cloudinaryId, { resource_type: 'raw' });
-        } catch (e) {
-          console.error('Failed to delete asset from Cloudinary (orphaned):', cloudinaryId, e.message);
-        }
-      }
+      // Only files nothing else uses — the estimate it came from, or the Deleted Items snapshot (round 8)
+      await require('./fileRefs').deleteStoredFilesIfUnused(cloudinaryIdsToDelete);
 
       return { success: true, message: 'Work order deleted successfully' };
     } catch (error) {

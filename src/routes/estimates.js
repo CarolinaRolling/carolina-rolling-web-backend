@@ -1280,20 +1280,13 @@ router.delete('/:id/permanent', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Estimate not found' } });
     }
 
-    // This is the one irreversible estimate path — trash is recoverable, this is not.
-    const { archiveRecord, labelFor } = require('../services/deletionArchive');
-    await archiveRecord(estimate, {
-      modelName: 'Estimate',
-      label: labelFor(estimate),
-      deletedBy: req.body?.deletedBy || req.user?.username || null,
-      reason: 'permanent delete from trash'
-    });
+    // Snapshotted with its parts and files by the undo hooks (Admin → Deleted Items → Undo).
 
     const storedFiles = [
       ...(estimate.files || []).map(f => f.cloudinaryId),
       ...(estimate.parts || []).flatMap(p => (p.files || []).map(f => f.cloudinaryId)),
     ];
-    await estimate.destroy();
+    await estimate.destroy({ archiveReason: 'permanent delete from trash' });
     // Converting an estimate copies its files onto the work order with the SAME stored file, so a
     // file is only removed from storage when nothing else still uses it (audit H13). Part files
     // used to be left behind in storage; they're now cleaned up the same way.

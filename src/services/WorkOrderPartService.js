@@ -125,17 +125,7 @@ class WorkOrderPartService {
         throw new Error('Part not found');
       }
 
-      // Delete files from Cloudinary
-      for (const file of part.files || []) {
-        if (file.cloudinaryId) {
-          try {
-            await cloudinary.uploader.destroy(file.cloudinaryId, { resource_type: 'raw' });
-          } catch (e) {
-            console.error('Failed to delete file from Cloudinary:', e);
-          }
-        }
-      }
-
+      const partFileIds = (part.files || []).map(f => f.cloudinaryId).filter(Boolean);   // removed after commit, if unused
       // Delete file records
       await WorkOrderPartFile.destroy({
         where: { workOrderPartId: partId },
@@ -157,6 +147,7 @@ class WorkOrderPartService {
       }
 
       await transaction.commit();
+      require('./fileRefs').deleteStoredFilesIfUnused(partFileIds).catch(() => {});
       return { success: true, message: 'Part deleted successfully' };
     } catch (error) {
       await transaction.rollback();

@@ -237,8 +237,8 @@ async function saveShipmentDocument(workOrder, entry, idx) {
     const filename = 'Shipment-' + (idx + 1) + '-' + drLabel + '.pdf';
     const existing = await WorkOrderDocument.findOne({ where: { workOrderId: workOrder.id, originalName: filename } });
     if (existing) {
-      if (existing.cloudinaryId) await require('../services/fileRefs').deleteStoredFileIfUnused(existing.cloudinaryId, { exclude: [{ table: 'work_order_documents', id: existing.id }] });
-      await existing.destroy();
+      await existing.destroy({ undoSkip: true });   // regenerated below — not a Deleted Items entry
+      if (existing.cloudinaryId) await require('../services/fileRefs').deleteStoredFileIfUnused(existing.cloudinaryId);
     }
     const pdfBuffer = await generatePickupReceiptBuffer(workOrder, entry, idx);
     const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, { folder: 'work-orders/' + workOrder.id + '/documents', filename, mimeType: 'application/pdf' });
@@ -3211,17 +3211,8 @@ router.delete('/:id', async (req, res, next) => {
 
     console.log('Deleting work order:', workOrder.id);
 
-    // Snapshot everything before it goes. The order was loaded with its parts, part files and
-    // documents, so the archived JSON is enough to reconstruct it if this delete turns out to
-    // have been a mistake. Archiving never blocks the delete — see services/deletionArchive.js.
-    const { archiveRecord, labelFor } = require('../services/deletionArchive');
-    await archiveRecord(workOrder, {
-      modelName: 'WorkOrder',
-      label: labelFor(workOrder),
-      deletedBy: req.body?.deletedBy || req.user?.username || null,
-      reason: req.body?.reason || (workOrder.drNumber ? 'force-delete override' : null),
-      transaction
-    });
+    // Every row this delete removes (the order, parts, files, documents, deliveries, messages…) is
+    // snapshotted automatically by the undo hooks, as one group — Admin → Deleted Items → Undo.
 
     await DRNumber.update({ workOrderId: null }, { where: { workOrderId: workOrder.id }, transaction });
     await PONumber.update({ workOrderId: null }, { where: { workOrderId: workOrder.id }, transaction });
@@ -3283,7 +3274,7 @@ router.delete('/:id', async (req, res, next) => {
 
     // Capture audit details before the row is gone.
     const auditSnapshot = { id: workOrder.id, drNumber: workOrder.drNumber, orderNumber: workOrder.orderNumber, clientName: workOrder.clientName, invoiceNumber: workOrder.invoiceNumber };
-    await workOrder.destroy({ transaction });
+    await workOrder.destroy({ transaction, archiveReason: req.body?.reason || (workOrder.drNumber ? 'force-delete override' : null) });
     await transaction.commit();
     require('../services/fileRefs').deleteStoredFilesIfUnused(storedFiles).catch(() => {});
 

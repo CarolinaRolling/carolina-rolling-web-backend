@@ -718,8 +718,8 @@ async function saveInspectionReportDocument(jobId, pre) {
   const filename = `${irNumber || 'Inspection-Report'}.pdf`.replace(/[\/\\:]/g, '-');
   const existing = await WorkOrderDocument.findOne({ where: { workOrderId: job.workOrderId, originalName: filename } });
   if (existing) {
-    if (existing.cloudinaryId) { try { await fileStorage.deleteFile(existing.cloudinaryId); } catch (e) {} }
-    await existing.destroy();
+    await existing.destroy({ undoSkip: true });   // replaced by the new copy below — not a Deleted Items entry
+    require('../services/fileRefs').deleteStoredFileIfUnused(existing.cloudinaryId).catch(() => {});
   }
   const uploadResult = await fileStorage.uploadBuffer(buffer, { folder: 'work-orders/' + job.workOrderId + '/documents', filename, mimeType: 'application/pdf' });
   await WorkOrderDocument.create({

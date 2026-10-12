@@ -276,12 +276,10 @@ router.delete('/:id', async (req, res, next) => {
     if (!supply) {
       return res.status(404).json({ error: { message: 'Item not found' } });
     }
-    // Delete image from Cloudinary if exists
-    if (supply.imageCloudinaryId) {
-      try { await storage.deleteFile(supply.imageCloudinaryId); } catch (e) { console.error('Cloudinary delete:', e.message); }
-    }
     await ShopSupplyLog.destroy({ where: { shopSupplyId: supply.id } });
     await supply.destroy();
+    // image removed only if nothing (including the Deleted Items snapshot) still uses it
+    require('../services/fileRefs').deleteStoredFileIfUnused(supply.imageCloudinaryId, { resourceType: 'any' }).catch(() => {});
     res.json({ message: `${supply.name} deleted` });
   } catch (error) {
     next(error);

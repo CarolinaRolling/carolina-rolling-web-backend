@@ -31,6 +31,15 @@ const REFS = [
   ['vendor_issues', 'photoStorageId'],
 ];
 
+let undoTableSet = null;
+function undoTables() {
+  if (!undoTableSet) {
+    const models = require('../models');
+    undoTableSet = new Set(require('./undo').ARCHIVED_MODELS.map(n => models[n] && models[n].getTableName()).filter(Boolean));
+  }
+  return undoTableSet;
+}
+
 let existingRefs = null;   // the subset of REFS that exist in this database (checked once)
 async function refsInDb(sequelize) {
   if (existingRefs) return existingRefs;
@@ -49,6 +58,12 @@ async function countReferences(storageId, { exclude = [], transaction } = {}) {
   const { sequelize } = require('../models');
   const refs = await refsInDb(sequelize);
   let total = 0;
+  // A deleted record that can still be undone keeps its files (round 8). The GIN index makes this cheap.
+  try {
+    const [[{ n }]] = await sequelize.query(`SELECT COUNT(*)::int AS n FROM deletion_archive WHERE "storageIds" @> ARRAY[:id]::text[] AND "restoredAt" IS NULL`,
+      { replacements: { id: storageId }, transaction });
+    total += n;
+  } catch (_) { /* archive columns not there yet (before migration 0002) */ }
   for (const [table, col] of refs) {
     const skip = exclude.filter(e => e.table === table).map(e => e.id).filter(Boolean);
     const [[{ n }]] = await sequelize.query(
@@ -60,19 +75,40 @@ async function countReferences(storageId, { exclude = [], transaction } = {}) {
 }
 
 /** Delete the stored object unless another row still uses it. Never throws. Returns true if deleted. */
-async function deleteStoredFileIfUnused(storageId, { exclude, resourceType, transaction } = {}) {
+const RECHECK_MS = parseInt(process.env.FILE_RECHECK_MS) || 60 * 1000;
+async function deleteStoredFileIfUnused(storageId, { exclude, resourceType, transaction, recheck = false } = {}) {
   if (!storageId) return false;
+  // The row being removed is one Deleted Items can bring back (round 8), and this call comes before
+  // its delete — the snapshot that will hold the file doesn't exist yet. Check again shortly, after
+  // the delete: by then the snapshot references the file (kept until it expires), or — if no snapshot
+  // was taken (paused during a restore, or it failed) — nothing does and the file is removed then.
+  if (!recheck && (exclude || []).some(e => undoTables().has(e.table))) {
+    const t = setTimeout(() => deleteStoredFileIfUnused(storageId, { resourceType, recheck: 1 }).catch(() => {}), RECHECK_MS);
+    if (t.unref) t.unref();
+    console.log(`[files] kept ${storageId} for now: its record can be undone (checked again after the delete)`);
+    return false;
+  }
   try {
     const n = await countReferences(storageId, { exclude, transaction });
     if (n > 0) {
       console.log(`[files] kept ${storageId}: still used by ${n} other record(s)`);
+      // A re-check that still finds a user may have run before a slow delete committed: look twice more
+      if (recheck && recheck < 3) { const t = setTimeout(() => deleteStoredFileIfUnused(storageId, { resourceType, recheck: recheck + 1 }).catch(() => {}), RECHECK_MS * 10); if (t.unref) t.unref(); }
       return false;
     }
   } catch (e) {
     console.warn(`[files] could not check references for ${storageId}, keeping it: ${e.message}`);
     return false;
   }
-  try { await fileStorage.deleteFile(storageId, resourceType); return true; }
+  try {
+    // 'any': the caller doesn't know how the file was stored (Cloudinary keeps images and other files
+    // apart and ignores a delete of the wrong kind) — try both. S3 ids have one kind.
+    if (resourceType === 'any') {
+      await fileStorage.deleteFile(storageId, 'raw');
+      if (!String(storageId).startsWith('s3:')) await fileStorage.deleteFile(storageId, 'image');
+    } else await fileStorage.deleteFile(storageId, resourceType);
+    return true;
+  }
   catch (e) { console.warn(`[files] delete failed for ${storageId}: ${e.message}`); return false; }
 }
 

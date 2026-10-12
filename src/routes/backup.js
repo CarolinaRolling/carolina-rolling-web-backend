@@ -733,7 +733,21 @@ router.post('/test', requireAdmin, async (req, res, next) => {
 });
 
 // POST /api/backup/restore - Restore from backup JSON
+let restoreRunning = false;   // one restore at a time (each lifts and re-adds the same guards)
 router.post('/restore', requireAdmin, async (req, res, next) => {
+  if (restoreRunning) return res.status(409).json({ error: { message: 'A restore is already running. Wait for it to finish.' } });
+  // The restore's single transaction (round 8) starts here and takes a database lock, so a restore
+  // started on another dyno is refused too.
+  let restoreTx;
+  try {
+    restoreTx = await sequelize.transaction();
+    const [[{ got }]] = await sequelize.query('SELECT pg_try_advisory_xact_lock(8410100) AS got', { transaction: restoreTx });
+    if (!got) { await restoreTx.rollback(); return res.status(409).json({ error: { message: 'A restore is already running. Wait for it to finish.' } }); }
+  } catch (e) {
+    if (restoreTx) { try { await restoreTx.rollback(); } catch (_) { /* ended */ } }
+    return next(e);
+  }
+  restoreRunning = true;
   // Pause the invoice-total hooks while tables are wiped and re-inserted (they would otherwise
   // recompute totals from half-restored data and overwrite the restored values).
   const invoiceTotals = require('../services/invoiceTotals');
@@ -741,6 +755,8 @@ router.post('/restore', requireAdmin, async (req, res, next) => {
   const invoiceLock = require('../services/invoiceLock');
   invoiceTotals.suspendTotalsHooks();
   invoiceLock.suspendInvoiceLock();   // a restore rewrites exported orders wholesale
+  const undo = require('../services/undo');
+  const resumeUndo = undo.suspendUndo();   // this request's deletes aren't copied into Deleted Items (others' still are)
   let invoiceGuardReport = null;
   // An older backup may contain duplicate invoice numbers (from before the H4 fix). Lift the two
   // unique guards during the restore so those rows aren't silently skipped, and put them back after
@@ -759,6 +775,28 @@ router.post('/restore', requireAdmin, async (req, res, next) => {
 
     const { clearExisting = false } = options;
     const results = {};
+
+    // ALL-OR-NOTHING (round 8): every write below happens in ONE transaction. A row that can't be
+    // inserted is skipped and reported (it runs in its own savepoint), but if anything else fails —
+    // or the server stops mid-restore — the transaction rolls back and the database is exactly as it
+    // was before the restore started. Deletes here bypass the deletion-archive hooks (hooks: false):
+    // a restore must not copy the whole database into the archive.
+    const tx = restoreTx;
+    const sp = (fn) => sequelize.transaction({ transaction: tx }, fn);   // savepoint inside the restore
+    // Clear tables before re-inserting (clearExisting). A table other records still point at with a
+    // "no action" rule (users ← activity log, clients ← scanned emails, employees ← payroll) can't be
+    // emptied: as before, its rows are kept and the backup's rows are written over them — reported in
+    // results.notCleared. Any other failure stops the restore and rolls everything back.
+    const notCleared = [];
+    const clearTables = async (label, ...models) => {
+      try {
+        await sp(async (t) => { for (const m of models) await m.destroy({ where: {}, force: true, transaction: t, hooks: false }); });
+      } catch (e) {
+        if ((e.parent?.code || e.original?.code) !== '23503') throw e;
+        notCleared.push(`${label}: ${(e.parent?.detail || e.message).slice(0, 160)}`);
+        console.warn(`[restore] ${label} not cleared (still referenced) — backup rows written over existing ones`);
+      }
+    };
 
     // FK columns that reference other tables — null these on first pass, set in second pass
     const FK_COLS = {
@@ -796,7 +834,7 @@ router.post('/restore', requireAdmin, async (req, res, next) => {
     };
 
     // Raw upsert — nulls out FK cols and defers them for second pass
-    const rawUpsert = async (model, record, nullFKs = true) => {
+    const rawUpsert = async (model, record, nullFKs = true, keepExisting = false) => {
       const clean = cleanRecord(model, record);
       const tableName = model.getTableName();
       const fkCols = nullFKs ? (FK_COLS[tableName] || []) : [];
@@ -830,10 +868,10 @@ router.post('/restore', requireAdmin, async (req, res, next) => {
       const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
       const updates = cols.filter(c => c !== 'id').map(c => `"${c}" = EXCLUDED."${c}"`).join(', ');
       const colNames = cols.map(c => `"${c}"`).join(', ');
-      await sequelize.query(
-        `INSERT INTO "${tableName}" (${colNames}) VALUES (${placeholders}) ON CONFLICT ("id") DO UPDATE SET ${updates}`,
-        { bind: vals, type: sequelize.QueryTypes.INSERT }
-      );
+      await sp((t) => sequelize.query(
+        `INSERT INTO "${tableName}" (${colNames}) VALUES (${placeholders}) ON CONFLICT ("id") ` + (keepExisting || !updates ? 'DO NOTHING' : `DO UPDATE SET ${updates}`),
+        { bind: vals, type: sequelize.QueryTypes.INSERT, transaction: t }
+      ));
     };
 
     // Upsert helper for simple models
@@ -847,13 +885,12 @@ router.post('/restore', requireAdmin, async (req, res, next) => {
       if (!data || !data.length) return;
       results[label] = { restored: 0, skipped: 0, errors: [] };
       if (clearExisting && !partial.has(label)) {
-        try { await model.destroy({ where: {}, force: true }); } catch (e) {
-          console.warn(`[restore] Clear ${label} failed: ${e.message}`);
-        }
+        await clearTables(label, model);
       }
       for (const record of data) {
         try {
-          await rawUpsert(model, record);
+          // Deleted Items entries already here keep their state (e.g. "restored" since the backup was taken)
+          await rawUpsert(model, record, true, label === 'deletionArchive');
           results[label].restored++;
         } catch (e) {
           results[label].skipped++;
@@ -882,7 +919,7 @@ router.post('/restore', requireAdmin, async (req, res, next) => {
     if (backup.data.shipments) {
       results.shipments = { restored: 0, skipped: 0, errors: [] };
       if (clearExisting) {
-        try { await ShipmentDocument.destroy({ where: {}, force: true }); await ShipmentPhoto.destroy({ where: {}, force: true }); await Shipment.destroy({ where: {}, force: true }); } catch {}
+        await clearTables('shipments', ShipmentDocument, ShipmentPhoto, Shipment);
       }
       for (const sd of backup.data.shipments) {
         try {
@@ -904,14 +941,10 @@ router.post('/restore', requireAdmin, async (req, res, next) => {
     if (backup.data.workOrders) {
       results.workOrders = { restored: 0, skipped: 0, errors: [] };
       if (clearExisting) {
-        try {
-          // Payments point at work orders and no longer cascade-delete with them (audit H8), so they
-          // are cleared first (the backup's own payments are restored further down).
-          const { WorkOrderPayment: WOP, PaymentApplication: PA } = require('../models');
-          await PA.destroy({ where: {}, force: true, hooks: false });
-          await WOP.destroy({ where: {}, force: true, hooks: false });
-          await WorkOrderPartFile.destroy({ where: {}, force: true }); await WorkOrderPart.destroy({ where: {}, force: true }); await WorkOrderDocument.destroy({ where: {}, force: true }); await WorkOrder.destroy({ where: {}, force: true });
-        } catch (e) { console.warn(`[restore] Clear work orders failed: ${e.message}`); }
+        // Payments point at work orders and no longer cascade-delete with them (audit H8), so they
+        // are cleared first (the backup's own payments are restored further down).
+        const { WorkOrderPayment: WOP, PaymentApplication: PA } = require('../models');
+        await clearTables('workOrders', PA, WOP, WorkOrderPartFile, WorkOrderPart, WorkOrderDocument, WorkOrder);
       }
       for (const od of backup.data.workOrders) {
         try {
@@ -939,7 +972,7 @@ router.post('/restore', requireAdmin, async (req, res, next) => {
     if (backup.data.estimates) {
       results.estimates = { restored: 0, skipped: 0, errors: [] };
       if (clearExisting) {
-        try { await EstimatePartFile.destroy({ where: {}, force: true }); await EstimatePart.destroy({ where: {}, force: true }); await EstimateFile.destroy({ where: {}, force: true }); await Estimate.destroy({ where: {}, force: true }); } catch {}
+        await clearTables('estimates', EstimatePartFile, EstimatePart, EstimateFile, Estimate);
       }
       for (const ed of backup.data.estimates) {
         try {
@@ -968,8 +1001,10 @@ router.post('/restore', requireAdmin, async (req, res, next) => {
       results.settings = { restored: 0, skipped: 0 };
       for (const sd of backup.data.settings) {
         try {
-          const [s, created] = await AppSettings.findOrCreate({ where: { key: sd.key }, defaults: sd });
-          if (!created && clearExisting) await s.update({ value: sd.value });
+          await sp(async (t) => {
+            const [s, created] = await AppSettings.findOrCreate({ where: { key: sd.key }, defaults: sd, transaction: t });
+            if (!created && clearExisting) await s.update({ value: sd.value }, { transaction: t });
+          });
           results.settings.restored++;
         } catch (e) { results.settings.skipped++; }
       }
@@ -1045,10 +1080,10 @@ router.post('/restore', requireAdmin, async (req, res, next) => {
     for (const [tableName, updates] of Object.entries(deferredUpdates)) {
       for (const { id, col, value } of updates) {
         try {
-          await sequelize.query(
+          await sp((t) => sequelize.query(
             `UPDATE "${tableName}" SET "${col}" = $1 WHERE "id" = $2`,
-            { bind: [value, id], type: sequelize.QueryTypes.UPDATE }
-          );
+            { bind: [value, id], type: sequelize.QueryTypes.UPDATE, transaction: t }
+          ));
           fkUpdated++;
         } catch (e) {
           fkFailed++;
@@ -1058,67 +1093,77 @@ router.post('/restore', requireAdmin, async (req, res, next) => {
     }
     console.log(`[restore] FK second pass: ${fkUpdated} updated, ${fkFailed} failed (target missing)`);
     results.fkUpdates = { updated: fkUpdated, failed: fkFailed };
+    if (notCleared.length) results.notCleared = notCleared;
+
+    // Everything is in — make it permanent in one step. (Re-uploading missing files and the checks
+    // below happen after this, on the committed data.)
+    await tx.commit();
+    restoreTx = null;
+    console.log('[restore] committed');
 
     // After restore: re-upload any files from backup that are missing on Cloudinary
     let fileResults = { checked: 0, reuploaded: 0, alreadyExist: 0, failed: 0 };
-    if (backup.files && Object.keys(backup.files).length > 0) {
-      const https = require('https');
-      const http = require('http');
+    // The data is committed: nothing below may turn this into a "failed" answer
+    try {
+      if (backup.files && Object.keys(backup.files).length > 0) {
+        const https = require('https');
+        const http = require('http');
 
-      const checkUrl = (url) => new Promise((resolve) => {
-        const client = url.startsWith('https') ? https : http;
-        const req = client.request(url, { method: 'HEAD', timeout: 5000 }, (res) => {
-          resolve(res.statusCode >= 200 && res.statusCode < 400);
+        const checkUrl = (url) => new Promise((resolve) => {
+          const client = url.startsWith('https') ? https : http;
+          const req = client.request(url, { method: 'HEAD', timeout: 5000 }, (res) => {
+            resolve(res.statusCode >= 200 && res.statusCode < 400);
+          });
+          req.on('error', () => resolve(false));
+          req.on('timeout', () => { req.destroy(); resolve(false); });
+          req.end();
         });
-        req.on('error', () => resolve(false));
-        req.on('timeout', () => { req.destroy(); resolve(false); });
-        req.end();
-      });
 
-      const allFileRecords = [];
-      const woPartFiles = await WorkOrderPartFile.findAll();
-      woPartFiles.forEach(f => allFileRecords.push({ model: WorkOrderPartFile, record: f }));
-      const woDocs = await WorkOrderDocument.findAll();
-      woDocs.forEach(f => allFileRecords.push({ model: WorkOrderDocument, record: f }));
-      const estPartFiles = await EstimatePartFile.findAll();
-      estPartFiles.forEach(f => allFileRecords.push({ model: EstimatePartFile, record: f }));
-      const estFiles = await EstimateFile.findAll();
-      estFiles.forEach(f => allFileRecords.push({ model: EstimateFile, record: f }));
-      const shipDocs = await ShipmentDocument.findAll();
-      shipDocs.forEach(f => allFileRecords.push({ model: ShipmentDocument, record: f }));
+        const allFileRecords = [];
+        const woPartFiles = await WorkOrderPartFile.findAll();
+        woPartFiles.forEach(f => allFileRecords.push({ model: WorkOrderPartFile, record: f }));
+        const woDocs = await WorkOrderDocument.findAll();
+        woDocs.forEach(f => allFileRecords.push({ model: WorkOrderDocument, record: f }));
+        const estPartFiles = await EstimatePartFile.findAll();
+        estPartFiles.forEach(f => allFileRecords.push({ model: EstimatePartFile, record: f }));
+        const estFiles = await EstimateFile.findAll();
+        estFiles.forEach(f => allFileRecords.push({ model: EstimateFile, record: f }));
+        const shipDocs = await ShipmentDocument.findAll();
+        shipDocs.forEach(f => allFileRecords.push({ model: ShipmentDocument, record: f }));
 
-      for (const { model, record } of allFileRecords) {
-        const url = record.url;
-        const backupFile = backup.files[url];
-        if (!backupFile || !backupFile.data) continue;
+        for (const { model, record } of allFileRecords) {
+          const url = record.url;
+          const backupFile = backup.files[url];
+          if (!backupFile || !backupFile.data) continue;
 
-        fileResults.checked++;
-        try {
-          const exists = await checkUrl(url);
-          if (exists) {
-            fileResults.alreadyExist++;
-            continue;
-          }
+          fileResults.checked++;
+          try {
+            const exists = await checkUrl(url);
+            if (exists) {
+              fileResults.alreadyExist++;
+              continue;
+            }
 
-          const buffer = Buffer.from(backupFile.data, 'base64');
-          const base64Data = buffer.toString('base64');
-          const mimeType = record.mimeType || 'application/octet-stream';
-          const folder = record.cloudinaryId ? record.cloudinaryId.split('/').slice(0, -1).join('/') : 'restored-files';
+            const buffer = Buffer.from(backupFile.data, 'base64');
+            const base64Data = buffer.toString('base64');
+            const mimeType = record.mimeType || 'application/octet-stream';
+            const folder = record.cloudinaryId ? record.cloudinaryId.split('/').slice(0, -1).join('/') : 'restored-files';
           
-          const uploadResult = await cloudinary.uploader.upload(
-            `data:${mimeType};base64,${base64Data}`,
-            { resource_type: 'raw', folder, use_filename: true, unique_filename: true }
-          );
+            const uploadResult = await cloudinary.uploader.upload(
+              `data:${mimeType};base64,${base64Data}`,
+              { resource_type: 'raw', folder, use_filename: true, unique_filename: true }
+            );
 
-          await record.update({ url: uploadResult.secure_url, cloudinaryId: uploadResult.public_id });
-          fileResults.reuploaded++;
-          console.log(`[restore] Re-uploaded: ${backupFile.name}`);
-        } catch (e) {
-          console.warn(`[restore] Failed to re-upload ${backupFile.name}: ${e.message}`);
-          fileResults.failed++;
+            await record.update({ url: uploadResult.secure_url, cloudinaryId: uploadResult.public_id });
+            fileResults.reuploaded++;
+            console.log(`[restore] Re-uploaded: ${backupFile.name}`);
+          } catch (e) {
+            console.warn(`[restore] Failed to re-upload ${backupFile.name}: ${e.message}`);
+            fileResults.failed++;
+          }
         }
       }
-    }
+    } catch (e) { console.warn('[restore] file re-upload step failed (data is restored):', e.message); fileResults.error = e.message; }
 
     // An older backup may hold client payments recorded before payment linking existed —
     // link them now so they are not double counted (same as the boot step).
@@ -1142,14 +1187,25 @@ router.post('/restore', requireAdmin, async (req, res, next) => {
       throw innerErr;
     }
   } catch (error) {
+    if (restoreTx) {
+      try { await restoreTx.rollback(); console.warn('[restore] rolled back — the database is unchanged'); } catch (_) {}
+      error.message = `Restore failed and was rolled back — nothing was changed. (${error.message})`;
+      error.status = error.status || 500;
+    }
     console.error('[restore] Error:', error.message);
-    next(error);
+    // Put the guards back BEFORE answering, so the database is fully as it was when the error shows
+    if (!invoiceGuardReport) { try { await invoiceNumbersSvc.ensureInvoiceConstraints(sequelize); invoiceGuardReport = []; } catch (e) { /* logged at next boot */ } }
+    if (!integrityRestored) { try { await integrity.ensureIntegrityConstraints(sequelize); integrityRestored = true; } catch (e) { /* re-added at next boot */ } }
+    if (!res.headersSent) res.status(error.status === 400 ? 400 : 500).json({ error: { message: error.message } });
   } finally {
     invoiceTotals.resumeTotalsHooks();
     invoiceLock.resumeInvoiceLock();
-    // If the restore failed part-way, still try to put the guards back
+    resumeUndo();
+    if (restoreTx && !restoreTx.finished) { try { await restoreTx.rollback(); } catch (_) { /* already ended */ } }
+    // (the early "Invalid backup file" return also lands here)
     if (!invoiceGuardReport) { try { await invoiceNumbersSvc.ensureInvoiceConstraints(sequelize); } catch (e) { /* logged at next boot */ } }
     if (!integrityRestored) { try { await integrity.ensureIntegrityConstraints(sequelize); } catch (e) { /* re-added at next boot */ } }
+    restoreRunning = false;
   }
 });
 

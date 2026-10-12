@@ -10,6 +10,9 @@ const { sequelize, Shipment, ShipmentPhoto, ShipmentDocument, User, AppSettings,
 require('./services/invoiceTotals').registerTotalsHooks(require('./models'));
 // Pricing on orders already in QuickBooks can't change without an admin reopening them (audit H10).
 require('./services/invoiceLock').registerInvoiceLockHooks(require('./models'));
+// Every delete of a business record is snapshotted first so it can be undone (round 8)
+require('./services/undo').registerUndoHooks(require('./models'));
+require('./services/undo').keepContextThroughMulter();   // before routes build their upload middleware (round 8)
 const shipmentRoutes = require('./routes/shipments');
 const settingsRoutes = require('./routes/settings');
 const { sendScheduleEmail } = require('./routes/settings');
@@ -65,6 +68,8 @@ if (ALLOWED_ORIGINS.length > 0) {
 }
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true }));
+// One "action" per request: everything a request deletes is grouped, so Undo brings it back together
+app.use(require('./services/undo').requestContext);
 
 // Rate limiting. The shop shares one public IP, so the general limit is deliberately generous
 // and exists only to blunt runaway loops and scrapers. Login is limited per USERNAME rather
@@ -85,7 +90,11 @@ const loginLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   skipSuccessfulRequests: true,   // a correct login never counts against you
-  keyGenerator: (req) => String(req.body?.username || req.ip).toLowerCase(),
+  // Per username; with no username, per IP — through the library's helper so an IPv6 user can't dodge
+  // the limit by rotating through the addresses in their /64 (this was the startup ValidationError).
+  keyGenerator: (req) => req.body?.username
+    ? 'user:' + String(req.body.username).toLowerCase()
+    : 'ip:' + rateLimit.ipKeyGenerator(req.ip || ''),
   message: { error: { message: 'Too many login attempts. Try again in a few minutes.' } }
 });
 
@@ -443,7 +452,7 @@ const blockPortalKeys = (req, res, next) => {
 app.use('/api/workorders', authenticate, blockPortalKeys, workordersRoutes);
 app.use('/api/estimates', authenticate, blockPortalKeys, estimatesRoutes);
 app.use('/api/backup', authenticate, blockPortalKeys, backupRoutes);
-app.use('/api/deletion-archive', authenticate, deletionArchiveRoutes);
+app.use('/api/deletion-archive', authenticate, blockPortalKeys, deletionArchiveRoutes);
 const businessRoutes = require('./routes/business');
 app.use('/api/business', authenticate, blockPortalKeys, businessRoutes);
 app.use('/api/inspections', authenticate, blockPortalKeys, require('./routes/inspection'));
@@ -1376,12 +1385,16 @@ async function cleanupOldShippedItems() {
       let deletedCount = 0;
       console.log(`[Cleanup] Stripping photos from ${shipmentsWithPhotos.length} shipments older than 3 months...`);
       
+      const { withUndoGroup } = require('./services/undo');
       for (const shipment of shipmentsWithPhotos) {
-        for (const photo of shipment.photos) {
-          const storageId = photo.cloudinaryId;
-          await photo.destroy();
-          if (storageId && await deleteStoredFileIfUnused(storageId, { resourceType: 'image' })) deletedCount++;
-        }
+        // one undo group per shipment; the photo files are kept while that snapshot can bring them back
+        await withUndoGroup(async () => {
+          for (const photo of shipment.photos) {
+            const storageId = photo.cloudinaryId;
+            await photo.destroy({ archiveReason: 'automatic cleanup: photos older than 3 months' });
+            if (storageId && await deleteStoredFileIfUnused(storageId, { resourceType: 'image' })) deletedCount++;
+          }
+        }, { by: 'system' });
       }
       console.log(`[Cleanup] Phase 1 complete: Deleted ${deletedCount} photos from ${shipmentsWithPhotos.length} shipments`);
     }
@@ -1407,12 +1420,10 @@ async function cleanupOldShippedItems() {
     if (shipmentsToDelete.length > 0) {
       console.log(`[Cleanup] Deleting ${shipmentsToDelete.length} shipment records older than 6 months...`);
       
-      const { archiveRecord, labelFor } = require('./services/deletionArchive');
       for (const shipment of shipmentsToDelete) {
         const photoIds = (shipment.photos || []).map(p => p.cloudinaryId).filter(Boolean);
         const docIds = (shipment.documents || []).map(d => d.cloudinaryId).filter(Boolean);
-        await archiveRecord(shipment, { modelName: 'Shipment', label: labelFor(shipment), deletedBy: 'system', reason: 'automatic cleanup: shipped 6+ months ago' });
-        await shipment.destroy();
+        await shipment.destroy({ archiveBy: 'system', archiveReason: 'automatic cleanup: shipped 6+ months ago' });   // snapshotted by the undo hooks
         for (const id of photoIds) await deleteStoredFileIfUnused(id, { resourceType: 'image' });
         for (const id of docIds) await deleteStoredFileIfUnused(id, { resourceType: 'raw' });
       }
@@ -3248,14 +3259,23 @@ Please confirm with the operator and mark the order complete if ready.`,
           include: [{ model: EstimateFile, as: 'files' }]
         });
         if (trashed.length > 0) {
+          const { withUndoGroup } = require('./services/undo');
+          const { deleteStoredFilesIfUnused } = require('./services/fileRefs');
           for (const est of trashed) {
-            for (const file of est.files || []) {
-              if (file.cloudinaryId) try { const cloudinary = require('cloudinary').v2; await cloudinary.uploader.destroy(file.cloudinaryId); } catch {}
-            }
-            await EstimatePartFile.destroy({ where: { '$part.estimateId$': est.id }, include: [{ model: EstimatePart, as: 'part' }] }).catch(() => {});
-            await EstimatePart.destroy({ where: { estimateId: est.id } });
-            await EstimateFile.destroy({ where: { estimateId: est.id } });
-            await est.destroy();
+            // one undo group per estimate (Deleted Items → Undo brings back the estimate with its parts and files)
+            await withUndoGroup(async () => {
+              const partIds = (await EstimatePart.findAll({ where: { estimateId: est.id }, attributes: ['id'] })).map(p => p.id);
+              const partFiles = partIds.length ? await EstimatePartFile.findAll({ where: { partId: partIds }, attributes: ['cloudinaryId'] }) : [];
+              const fileIds = [...(est.files || []).map(f => f.cloudinaryId), ...partFiles.map(f => f.cloudinaryId)];
+              await sequelize.transaction(async (transaction) => {
+                if (partIds.length) await EstimatePartFile.destroy({ where: { partId: partIds }, transaction, archiveReason: 'trash emptied (30 days)' });
+                await EstimatePart.destroy({ where: { estimateId: est.id }, transaction, archiveReason: 'trash emptied (30 days)' });
+                await EstimateFile.destroy({ where: { estimateId: est.id }, transaction, archiveReason: 'trash emptied (30 days)' });
+                await est.destroy({ transaction, archiveReason: 'trash emptied (30 days)' });
+              });
+              // kept while the snapshot can bring them back, or while a converted work order shares them (H13)
+              await deleteStoredFilesIfUnused(fileIds);
+            }, { by: 'trash cleanup' });
           }
           console.log(`[Trash] Permanently deleted ${trashed.length} estimates older than 30 days`);
         }
@@ -3264,6 +3284,14 @@ Please confirm with the operator and mark the order complete if ready.`,
       }
     });
     console.log('Trash cleanup cron configured (daily at 2 AM, 30-day retention)');
+    // Deleted-item snapshots expire after ARCHIVE_RETENTION_DAYS (default 90); their stored files are
+    // removed then if nothing else uses them (round 8)
+    cron.schedule('30 2 * * *', async () => {
+      try {
+        const r = await require('./services/undo').purgeExpired();
+        if (r.purged) console.log(`[undo] removed ${r.purged} expired deleted-item snapshot(s)`);
+      } catch (e) { console.error('[undo] purge failed:', e.message); }
+    }, { timezone: 'America/Los_Angeles' });
 
   } catch (error) {
     console.error('Startup error (server still running):', error.message);

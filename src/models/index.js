@@ -352,6 +352,14 @@ const DeletionArchive = sequelize.define('DeletionArchive', {
     type: DataTypes.JSONB,
     allowNull: false
   },
+  // Round 8 (undo): the database table the row came from, the "action" it was deleted in (everything
+  // one request deleted shares a groupId, so Undo brings it all back together), the stored files it
+  // points at (kept in storage while archived), and when / by whom it was restored.
+  tableName: { type: DataTypes.STRING, allowNull: true },
+  groupId: { type: DataTypes.UUID, allowNull: true },
+  storageIds: { type: DataTypes.ARRAY(DataTypes.TEXT), allowNull: true },
+  restoredAt: { type: DataTypes.DATE, allowNull: true },
+  restoredBy: { type: DataTypes.STRING, allowNull: true },
   deletedBy: {
     type: DataTypes.STRING,
     allowNull: true

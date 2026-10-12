@@ -24,7 +24,7 @@ const cli = (dbUrl, cmd) => run('node', [path.join(__dirname, '../../src/db/cli.
     const [a, b] = await Promise.all([cli(url, 'up'), cli(url, 'up')]);
     const outs = [a.stdout, b.stdout];
     check('two processes at once: exactly one runs the migration, the other skips or finds it done',
-      outs.filter(o => /Ran 1 migration/.test(o)).length === 1 && outs.filter(o => /up to date|skipping/.test(o)).length === 1, outs.join(' | '));
+      outs.filter(o => /Ran \d+ migration/.test(o)).length === 1 && outs.filter(o => /up to date|skipping/.test(o)).length === 1, outs.join(' | '));
     const pg = new PG({ connectionString: url }); await pg.connect();
     const t = (await pg.query(`SELECT COUNT(*)::int n FROM pg_tables WHERE schemaname='public' AND tablename <> 'schema_migrations'`)).rows[0].n;
     const models = require(path.join(__dirname, '../../src/models'));
@@ -33,7 +33,7 @@ const cli = (dbUrl, cmd) => run('node', [path.join(__dirname, '../../src/db/cli.
     const fks = (await pg.query(`SELECT COUNT(*)::int n FROM pg_constraint WHERE contype='f'`)).rows[0].n;
     check('…including the foreign keys between them (work orders ↔ estimates cycle too)', fks >= 50, fks);
     const recorded = (await pg.query(`SELECT name FROM schema_migrations`)).rows.map(r => r.name);
-    check('each migration is recorded once', recorded.length === new Set(recorded).size && recorded.includes('0001-create-missing-tables.js'), recorded.join(','));
+    check('each migration is recorded once', recorded.length === new Set(recorded).size && recorded.includes('0001-create-missing-tables.js') && recorded.includes('0002-deletion-archive-undo.js'), recorded.join(','));
     const again = await cli(url, 'up');
     check('running again does nothing', /up to date/.test(again.stdout), again.stdout);
     await pg.end();
@@ -43,7 +43,7 @@ const cli = (dbUrl, cmd) => run('node', [path.join(__dirname, '../../src/db/cli.
   }
   // the real test database (already migrated by the server) reports up to date
   const st = await cli(DB, 'status');
-  check('`npm run migrate:status` on the test database shows 0001 as run', /✓ 0001-create-missing-tables\.js/.test(st.stdout), st.stdout);
+  check('`npm run migrate:status` on the test database shows 0001 and 0002 as run', /✓ 0001-create-missing-tables\.js/.test(st.stdout) && /✓ 0002-deletion-archive-undo\.js/.test(st.stdout), st.stdout);
   await admin.end();
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

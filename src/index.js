@@ -3045,7 +3045,7 @@ async function startServer() {
     });
     console.log('Annual CDTFA permit verification configured for January 2nd at 3:00 AM Pacific');
 
-    // Auto-backup to Cloudinary every Saturday at 11 PM Pacific
+    // Auto-backup (to S3 when configured, else Cloudinary) every Saturday at 11 PM Pacific
     const { runAutoBackup } = require('./routes/backup');
     cron.schedule('0 23 * * 6', async () => {
       console.log('[CRON] Running scheduled Saturday night auto-backup...');
@@ -3058,7 +3058,7 @@ async function startServer() {
             await DailyActivity.create({
               activityType: 'system',
               resourceType: 'backup',
-              description: `✅ Auto-backup completed — ${(result.size / 1024).toFixed(0)}KB saved to Cloudinary`
+              description: `✅ Auto-backup completed — ${(result.size / 1024).toFixed(0)}KB saved to ${result.provider === 's3' ? 'Amazon S3' : 'Cloudinary'}`
             });
           } catch {}
           // Store last backup status in AppSettings

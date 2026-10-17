@@ -841,36 +841,112 @@ router.post('/warehouse-map', upload.single('image'), async (req, res, next) => 
 
 
 
-// GET /api/settings/printer-config - Get printer config (accessible by tablets via API key)
+// ==================== LABEL PRINTERS (17 Oct: several printers, a default per type) ====================
+// Stored in app_settings.printer_config as { printers: [...], defaultQrPrinterId, defaultPartPrinterId }.
+// Each printer: { id, name, type: 'qr'|'part', ip, labelType, labelLengthMm, active }. Tablets pick
+// their own printer per type locally; the shop default is used otherwise. The old single-printer
+// fields (qrPrinterIp, partPrinterIp, …) are still answered, computed from the defaults, so tablet
+// app versions from before this change keep printing.
+const PRINTER_TYPES = ['qr', 'part'];
+const LEGACY_PRINTER_DEFAULTS = { qrPrinterIp: '', qrLabelType: 'CONTINUOUS_29', qrLabelLengthMm: 25, partPrinterIp: '', partLabelType: 'DK_11202_62x100' };
+const PRINTER_ID = /^(p_[0-9a-f]{8}|legacy_qr|legacy_part)$/;
+const IPV4 = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+const HOSTNAME = /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/i;
+// a printer address: IPv4, or a hostname — numbers-and-dots only must be a real IPv4 (10.0.0.300 is a typo)
+const validPrinterAddress = (ip) => IPV4.test(ip) || (HOSTNAME.test(ip) && !/^[\d.]+$/.test(ip));
+
+/** Any stored shape → the current one (an old single-printer config becomes up to two printers) */
+function normalizePrinterConfig(raw) {
+  const v = raw && typeof raw === 'object' ? raw : {};
+  const legacy = !Array.isArray(v.printers);
+  const old = { ...LEGACY_PRINTER_DEFAULTS, ...v };
+  let printers, dq, dp;
+  if (Array.isArray(v.printers)) {
+    printers = v.printers.filter(p => p && typeof p === 'object');
+    dq = v.defaultQrPrinterId || null; dp = v.defaultPartPrinterId || null;
+  } else {
+    printers = [];
+    // labelLengthMm null: tablets keep printing QR stickers exactly as before (their own cut length)
+    if (String(old.qrPrinterIp || '').trim()) printers.push({ id: 'legacy_qr', name: 'QR printer', type: 'qr', ip: String(old.qrPrinterIp).trim(), labelType: old.qrLabelType || LEGACY_PRINTER_DEFAULTS.qrLabelType, labelLengthMm: null, active: true });
+    // no part printer of its own: part labels went to the QR printer (tablets fell back to it) — keep
+    // that as an explicit entry, so new tablets keep printing part labels there too
+    const partIp = String(old.partPrinterIp || '').trim() || String(old.qrPrinterIp || '').trim();
+    if (partIp) printers.push({ id: 'legacy_part', name: String(old.partPrinterIp || '').trim() ? 'Part label printer' : 'Part labels (QR printer)', type: 'part', ip: partIp, labelType: old.partLabelType || LEGACY_PRINTER_DEFAULTS.partLabelType, labelLengthMm: null, active: true });
+    dq = printers.some(p => p.id === 'legacy_qr') ? 'legacy_qr' : null;
+    dp = printers.some(p => p.id === 'legacy_part') ? 'legacy_part' : null;
+  }
+  const pick = (type, id) => {
+    const ok = (p) => p.type === type && p.active !== false;
+    return (printers.find(p => p.id === id && ok(p)) || printers.find(ok) || null)?.id || null;
+  };
+  const defaultQrPrinterId = pick('qr', dq), defaultPartPrinterId = pick('part', dp);
+  const byId = (id) => printers.find(p => p.id === id);
+  const q = byId(defaultQrPrinterId), pt = byId(defaultPartPrinterId);
+  return {
+    printers, defaultQrPrinterId, defaultPartPrinterId,
+    // legacy fields for older tablet apps (a missing part printer falls back to the QR one there, as before)
+    // an old config keeps its own label types even for a type with no printer (one printer doing both)
+    qrPrinterIp: q?.ip || '', qrLabelType: q?.labelType || (legacy && old.qrLabelType) || LEGACY_PRINTER_DEFAULTS.qrLabelType,
+    qrLabelLengthMm: q?.labelLengthMm || (legacy ? (parseInt(old.qrLabelLengthMm) || 25) : 25),
+    partPrinterIp: pt?.ip || '', partLabelType: pt?.labelType || (legacy && old.partLabelType) || LEGACY_PRINTER_DEFAULTS.partLabelType,
+  };
+}
+
+// GET /api/settings/printer-config - readable by tablets via API key
 router.get('/printer-config', async (req, res, next) => {
   try {
     const setting = await AppSettings.findOne({ where: { key: 'printer_config' } });
-    const defaults = {
-      qrPrinterIp: '',
-      qrLabelType: 'CONTINUOUS_29',
-      qrLabelLengthMm: 25,
-      partPrinterIp: '',
-      partLabelType: 'DK_11202_62x100'
-    };
-    res.json({ data: setting?.value || defaults });
+    res.json({ data: normalizePrinterConfig(setting?.value) });
   } catch (error) {
     next(error);
   }
 });
 
-// PUT /api/settings/printer-config - Update printer config (admin only)
+// PUT /api/settings/printer-config - admin only (staffRoles ADMIN_ONLY)
 router.put('/printer-config', async (req, res, next) => {
   try {
-    const { qrPrinterIp, qrLabelType, qrLabelLengthMm, partPrinterIp, partLabelType } = req.body;
-    const config = {
-      qrPrinterIp: qrPrinterIp || '',
-      qrLabelType: qrLabelType || 'CONTINUOUS_29',
-      qrLabelLengthMm: parseInt(qrLabelLengthMm) || 25,
-      partPrinterIp: partPrinterIp || '',
-      partLabelType: partLabelType || 'DK_11202_62x100'
-    };
-    await AppSettings.upsert({ key: 'printer_config', value: config });
-    res.json({ data: config, message: 'Printer configuration updated' });
+    const b = req.body || {};
+    // An older client still sends the single-printer fields: store them in the new shape
+    if (!Array.isArray(b.printers)) {
+      const cfg = normalizePrinterConfig({
+        qrPrinterIp: String(b.qrPrinterIp || '').trim(), qrLabelType: b.qrLabelType, qrLabelLengthMm: b.qrLabelLengthMm,
+        partPrinterIp: String(b.partPrinterIp || '').trim(), partLabelType: b.partLabelType,
+      });
+      for (const p of cfg.printers) {
+        if (!validPrinterAddress(p.ip)) return res.status(400).json({ error: { message: `"${p.ip}" is not a valid IP address.` } });
+      }
+      const stored = { printers: cfg.printers, defaultQrPrinterId: cfg.defaultQrPrinterId, defaultPartPrinterId: cfg.defaultPartPrinterId };
+      await AppSettings.upsert({ key: 'printer_config', value: stored });
+      return res.json({ data: normalizePrinterConfig(stored), message: 'Printer configuration updated' });
+    }
+    if (b.printers.length > 30) return res.status(400).json({ error: { message: 'At most 30 printers.' } });
+    const idMap = new Map(); const used = new Set();
+    const printers = [];
+    for (const [i, p] of b.printers.entries()) {
+      if (!p || typeof p !== 'object') return res.status(400).json({ error: { message: `Printer ${i + 1} is not valid.` } });
+      const name = String(p.name || '').trim();
+      if (!name) return res.status(400).json({ error: { message: `Printer ${i + 1} needs a name.` } });
+      if (name.length > 60) return res.status(400).json({ error: { message: `"${name.slice(0, 20)}…": the name can be at most 60 characters.` } });
+      const type = String(p.type || '').toLowerCase();
+      if (!PRINTER_TYPES.includes(type)) return res.status(400).json({ error: { message: `"${name}": choose QR code or Part label as the type.` } });
+      const ip = String(p.ip || '').trim();
+      if (!validPrinterAddress(ip)) return res.status(400).json({ error: { message: `"${name}": "${ip}" is not a valid IP address.` } });
+      const labelType = String(p.labelType || (type === 'qr' ? 'CONTINUOUS_29' : 'DK_11202_62x100')).trim().slice(0, 40);
+      let labelLengthMm = p.labelLengthMm === '' || p.labelLengthMm == null ? null : parseInt(p.labelLengthMm, 10);
+      if (labelLengthMm != null && !(labelLengthMm >= 5 && labelLengthMm <= 1000)) return res.status(400).json({ error: { message: `"${name}": the cut length must be 5–1000 mm.` } });
+      // keep a real id; anything else (a new printer, a client's temporary id) gets a fresh one
+      const given = p.id == null ? '' : String(p.id);
+      let id = PRINTER_ID.test(given) && !used.has(given) ? given : 'p_' + require('crypto').randomBytes(4).toString('hex');
+      while (used.has(id)) id = 'p_' + require('crypto').randomBytes(4).toString('hex');
+      used.add(id); if (given && !idMap.has(given)) idMap.set(given, id);   // a repeated id: the default stays on the first
+      printers.push({ id, name, type, ip, labelType, labelLengthMm, active: p.active !== false });
+    }
+    const mapId = (x) => (x == null || x === '' ? null : (idMap.get(String(x)) || null));
+    const stored = { printers, defaultQrPrinterId: mapId(b.defaultQrPrinterId), defaultPartPrinterId: mapId(b.defaultPartPrinterId) };
+    const data = normalizePrinterConfig(stored);
+    stored.defaultQrPrinterId = data.defaultQrPrinterId; stored.defaultPartPrinterId = data.defaultPartPrinterId;
+    await AppSettings.upsert({ key: 'printer_config', value: stored });
+    res.json({ data, message: 'Printer configuration updated' });
   } catch (error) {
     next(error);
   }

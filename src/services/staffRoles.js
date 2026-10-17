@@ -42,6 +42,8 @@ const ADMIN_ONLY = [
   ['GET', R('/email-scanner/oauth/start')],
   [WRITE, R('/email-scanner/accounts(/.*)?')],
   ['PUT', R('/email-scanner/general-notes')],
+  // The shop's label printers (a wrong IP stops every tablet printing) — 17 Oct
+  ['PUT', R('/settings/printer-config')],
   // Merging clients / vendors rewrites references across the database (R20)
   ['POST', R('/(clients|vendors)/[^/]+/merge')],
 ];

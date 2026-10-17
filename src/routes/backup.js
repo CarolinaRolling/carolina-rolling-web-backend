@@ -375,8 +375,20 @@ const BACKUP_DELIVERY_TYPE = 'authenticated';
 // was signed once, never expired, and was stored in settings and e-mailed — anyone who ever saw it
 // could download the whole database later.
 const BACKUP_LINK_TTL_S = 3600;
-function backupDownloadUrl(publicId, type) {
+// Database backups go to the shop's PRIVATE S3 bucket when S3 is configured (17 Oct), under
+// db-backups/, encrypted at rest; the newest 8 are kept. Older backups still in Cloudinary stay
+// listed and downloadable. type 's3' = an S3 key; anything else = a Cloudinary delivery type.
+const S3_BACKUP_PREFIX = 'db-backups/';
+const BACKUPS_KEPT = 8;
+const backupsOnS3 = () => !!require('../utils/storage').getS3();
+const s3Cmd = () => require('@aws-sdk/client-s3');
+async function backupDownloadUrl(publicId, type) {
   if (!publicId) return null;
+  if (type === 's3') {
+    try {
+      return await require('../utils/storage').getPresignedUrl('s3:' + publicId, BACKUP_LINK_TTL_S, publicId.split('/').pop());
+    } catch (e) { console.warn('[backup] could not make an expiring S3 download link:', e.message); return null; }
+  }
   try {
     if (cloudinary.utils && typeof cloudinary.utils.private_download_url === 'function') {
       return cloudinary.utils.private_download_url(publicId, '', {
@@ -389,38 +401,69 @@ function backupDownloadUrl(publicId, type) {
 // What is stored about a backup: never its link (links are made on request)
 const withoutLink = (o) => { if (!o || typeof o !== 'object') return o; const { url, ...rest } = o; return rest; };
 
-async function uploadBackupToCloudinary(backup) {
+async function uploadBackupToCloud(backup, { test = false } = {}) {
   const jsonStr = JSON.stringify(backup);
   const compressed = await gzip(Buffer.from(jsonStr, 'utf-8'));
-  const base64 = compressed.toString('base64');
-  
   const dateStr = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const publicId = `shipment-tracker-backups/backup-${dateStr}`;
+
+  if (backupsOnS3()) {
+    const storage = require('../utils/storage');
+    // unique name: two backups in the same second must never share (and later delete) one file
+    const key = `${S3_BACKUP_PREFIX}${test ? 'test' : 'backup'}-${dateStr}-${require('crypto').randomBytes(3).toString('hex')}.json.gz`;
+    await storage.getS3().send(new (s3Cmd().PutObjectCommand)({
+      Bucket: storage.bucketName(), Key: key, Body: compressed,
+      ContentType: 'application/gzip', ServerSideEncryption: 'AES256',
+    }));
+    return {
+      url: await backupDownloadUrl(key, 's3'),
+      publicId: key, type: 's3', provider: 's3',
+      size: compressed.length, uncompressedSize: jsonStr.length, createdAt: new Date().toISOString(),
+    };
+  }
+
+  const base64 = compressed.toString('base64');
+  const publicId = `shipment-tracker-backups/${test ? 'test' : 'backup'}-${dateStr}${test ? '-' + Date.now() : ''}`;
 
   const result = await cloudinary.uploader.upload(
     `data:application/gzip;base64,${base64}`,
-    { public_id: publicId, resource_type: 'raw', type: BACKUP_DELIVERY_TYPE, overwrite: true, tags: ['auto-backup', 'database-backup'] }
+    { public_id: publicId, resource_type: 'raw', type: BACKUP_DELIVERY_TYPE, overwrite: true, tags: test ? ['test-backup'] : ['auto-backup', 'database-backup'] }
   );
 
   return {
-    url: backupDownloadUrl(result.public_id, BACKUP_DELIVERY_TYPE),
+    url: await backupDownloadUrl(result.public_id, BACKUP_DELIVERY_TYPE),
     publicId: result.public_id,
-    type: BACKUP_DELIVERY_TYPE,
+    type: BACKUP_DELIVERY_TYPE, provider: 'cloudinary',
     size: compressed.length,
     uncompressedSize: jsonStr.length,
     createdAt: new Date().toISOString()
   };
 }
 
+/** S3 backups, newest first (needs s3:ListBucket; returns null when listing isn't allowed) */
+async function listS3Backups(max = 50) {
+  if (!backupsOnS3()) return [];
+  const storage = require('../utils/storage');
+  try {
+    const out = await storage.getS3().send(new (s3Cmd().ListObjectsV2Command)({ Bucket: storage.bucketName(), Prefix: S3_BACKUP_PREFIX + 'backup-', MaxKeys: 1000 }));
+    return (out.Contents || []).sort((a, b) => new Date(b.LastModified) - new Date(a.LastModified)).slice(0, max)
+      .map(o => ({ publicId: o.Key, type: 's3', provider: 's3', size: o.Size, createdAt: new Date(o.LastModified).toISOString() }));
+  } catch (e) { console.warn('[backup] could not list S3 backups:', e.message); return null; }
+}
+async function deleteS3Backup(key) {
+  if (!key || !String(key).startsWith(S3_BACKUP_PREFIX)) return;   // never anything outside db-backups/
+  const storage = require('../utils/storage');
+  await storage.getS3().send(new (s3Cmd().DeleteObjectCommand)({ Bucket: storage.bucketName(), Key: key }));
+}
+
 // ============= AUTO BACKUP (called by cron or run-now) =============
 async function runAutoBackup(includeFiles = false) {
   const startTime = Date.now();
-  console.log(`[auto-backup] Starting backup${includeFiles ? ' (with files — local only, not uploaded to Cloudinary)' : ''}...`);
+  console.log(`[auto-backup] Starting database backup to ${backupsOnS3() ? 'Amazon S3' : 'Cloudinary'}...`);
   
   try {
-    // Always build database-only for Cloudinary upload
+    // The cloud backup is always database-only (files are covered by S3 versioning)
     const dbBackup = await buildBackup(false);
-    const uploadResult = await uploadBackupToCloudinary(dbBackup);
+    const uploadResult = await uploadBackupToCloud(dbBackup);
     
     const duration = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`[auto-backup] Database backup uploaded: ${(uploadResult.size / 1024).toFixed(0)}KB compressed in ${duration}s`);
@@ -442,6 +485,7 @@ async function runAutoBackup(includeFiles = false) {
       duration: `${duration}s`,
       createdAt: new Date().toISOString()
     });
+    const fullHistory = history;   // before trimming: the S3 cleanup below deletes what falls off
     history = history.slice(0, 10); // keep last 10
     await AppSettings.upsert({ key: 'backup_history', value: JSON.stringify(history) });
 
@@ -455,19 +499,33 @@ async function runAutoBackup(includeFiles = false) {
       })
     });
 
-    // Clean up old backups (keep last 10)
+    // Clean up old backups: keep the newest 8 in each place
     try {
-      const searchResult = await cloudinary.search
-        .expression('folder:shipment-tracker-backups AND resource_type:raw')
-        .sort_by('created_at', 'desc')
-        .max_results(50)
-        .execute();
-      
-      if (searchResult.resources && searchResult.resources.length > 8) {
-        const toDelete = searchResult.resources.slice(8);
-        for (const old of toDelete) {
-          await cloudinary.uploader.destroy(old.public_id, { resource_type: 'raw', type: old.type || 'upload' });
-          console.log(`[auto-backup] Deleted old backup: ${old.public_id}`);
+      if (uploadResult.provider === 's3') {
+        // From the history (works even if the AWS key may not list the bucket)…
+        const s3Hist = fullHistory.filter(h => h && h.type === 's3' && h.publicId);
+        const keep = new Set(s3Hist.slice(0, BACKUPS_KEPT).map(h => h.publicId));
+        for (const old of s3Hist.slice(BACKUPS_KEPT)) {
+          if (keep.has(old.publicId)) continue;
+          await deleteS3Backup(old.publicId); console.log(`[auto-backup] Deleted old backup: ${old.publicId}`);
+        }
+        // …and anything else in db-backups/ beyond the newest 8, when listing is allowed
+        const listed = await listS3Backups(1000);
+        if (listed) for (const old of listed.slice(BACKUPS_KEPT)) {
+          if (keep.has(old.publicId) || old.publicId === uploadResult.publicId) continue;
+          await deleteS3Backup(old.publicId); console.log(`[auto-backup] Deleted old backup: ${old.publicId}`);
+        }
+      } else {
+        const searchResult = await cloudinary.search
+          .expression('folder:shipment-tracker-backups AND resource_type:raw')
+          .sort_by('created_at', 'desc')
+          .max_results(50)
+          .execute();
+        if (searchResult.resources && searchResult.resources.length > BACKUPS_KEPT) {
+          for (const old of searchResult.resources.slice(BACKUPS_KEPT)) {
+            await cloudinary.uploader.destroy(old.public_id, { resource_type: 'raw', type: old.type || 'upload' });
+            console.log(`[auto-backup] Deleted old backup: ${old.public_id}`);
+          }
         }
       }
     } catch (cleanErr) {
@@ -551,33 +609,33 @@ router.get('/info', requireAdmin, async (req, res, next) => {
     } catch {}
 
     let cloudBackups = [];
+    // S3 (where backups go now) and, until they age out, older ones still in Cloudinary
+    const onS3 = (await listS3Backups(10)) || [];
+    let onCloudinary = [];
     try {
       const searchResult = await cloudinary.search
         .expression('folder:shipment-tracker-backups AND resource_type:raw')
         .sort_by('created_at', 'desc')
         .max_results(10)
         .execute();
-      cloudBackups = (searchResult.resources || []).map(r => ({
-        publicId: r.public_id,
-        type: r.type,
-        url: backupDownloadUrl(r.public_id, r.type),
-        size: r.bytes,
-        createdAt: r.created_at
+      onCloudinary = (searchResult.resources || []).map(r => ({
+        publicId: r.public_id, type: r.type, provider: 'cloudinary', size: r.bytes, createdAt: r.created_at,
       }));
     } catch (e) { /* cloudinary may not be configured */ }
+    cloudBackups = await Promise.all([...onS3, ...onCloudinary].map(async b => ({ ...b, url: await backupDownloadUrl(b.publicId, b.type) })));
 
     // Older entries were stored with a permanent link — drop it from the stored copy (R3)
     try {
       if (backupHistory.some(h => h && h.url)) await AppSettings.upsert({ key: 'backup_history', value: JSON.stringify(backupHistory.map(withoutLink)) });
       if (lastAutoBackup && lastAutoBackup.url) await AppSettings.upsert({ key: 'last_auto_backup', value: JSON.stringify(withoutLink(lastAutoBackup)) });
     } catch (e) { console.warn('[backup] could not clean stored links:', e.message); }
-    if (lastAutoBackup && lastAutoBackup.publicId) lastAutoBackup = { ...lastAutoBackup, url: backupDownloadUrl(lastAutoBackup.publicId, lastAutoBackup.type || 'upload') };
+    if (lastAutoBackup && lastAutoBackup.publicId) lastAutoBackup = { ...lastAutoBackup, url: await backupDownloadUrl(lastAutoBackup.publicId, lastAutoBackup.type || 'upload') };
 
     // Re-sign history links with each backup's real delivery type (old public backups may have
     // been converted to private by scripts/secure-cloud-backups.js since they were recorded)
     const typeById = new Map(cloudBackups.map(b => [b.publicId, b.type]));
-    backupHistory = backupHistory.map(h => (h && h.publicId)
-      ? { ...h, url: backupDownloadUrl(h.publicId, typeById.get(h.publicId) || h.type || 'upload') } : h);
+    backupHistory = await Promise.all(backupHistory.map(async h => (h && h.publicId)
+      ? { ...h, url: await backupDownloadUrl(h.publicId, typeById.get(h.publicId) || h.type || 'upload') } : h));
 
     const { getProvider } = require('../utils/storage');
     
@@ -725,20 +783,18 @@ router.post('/test', requireAdmin, async (req, res, next) => {
     const ratio = ((1 - compressed.length / jsonStr.length) * 100).toFixed(0);
     results.steps.push({ step: 'Compress', status: 'ok', detail: `${(jsonStr.length / 1024).toFixed(0)}KB -> ${(compressed.length / 1024).toFixed(0)}KB (${ratio}% smaller)` });
 
-    // Step 3: Upload to Cloudinary
-    const base64 = compressed.toString('base64');
-    const testPublicId = `shipment-tracker-backups/test-${Date.now()}`;
-    const uploadResult = await cloudinary.uploader.upload(
-      `data:application/gzip;base64,${base64}`,
-      { public_id: testPublicId, resource_type: 'raw', type: BACKUP_DELIVERY_TYPE, tags: ['test-backup'] }
-    );
-    const testUrl = backupDownloadUrl(uploadResult.public_id, BACKUP_DELIVERY_TYPE);
-    results.steps.push({ step: 'Upload to Cloudinary', status: 'ok', detail: `${uploadResult.public_id} (private)` });
+    // Step 3: Upload (S3 when configured, otherwise Cloudinary)
+    const uploadResult = await uploadBackupToCloud(backup, { test: true });
+    const where = uploadResult.provider === 's3' ? 'Amazon S3' : 'Cloudinary';
+    results.steps.push({ step: `Upload to ${where}`, status: 'ok', detail: `${uploadResult.publicId} (private)` });
 
     // Step 4: Download and verify
     const https = require('https');
-    if (!testUrl) throw new Error('Could not create an expiring download link (Cloudinary private_download_url)');
-    const downloadedData = await new Promise((resolve, reject) => {
+    const testUrl = uploadResult.url;
+    if (!testUrl) throw new Error(`Could not create an expiring download link (${where})`);
+    const downloadedData = uploadResult.provider === 's3'
+      ? await require('../utils/storage').downloadToBuffer('s3:' + uploadResult.publicId)
+      : await new Promise((resolve, reject) => {
       const get = (u, hops) => https.get(u, (response) => {
         if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location && hops > 0) { response.resume(); return get(response.headers.location, hops - 1); }
         const chunks = [];
@@ -757,7 +813,8 @@ router.post('/test', requireAdmin, async (req, res, next) => {
     });
 
     // Step 5: Clean up test file
-    await cloudinary.uploader.destroy(testPublicId, { resource_type: 'raw', type: BACKUP_DELIVERY_TYPE });
+    if (uploadResult.provider === 's3') await deleteS3Backup(uploadResult.publicId);
+    else await cloudinary.uploader.destroy(uploadResult.publicId, { resource_type: 'raw', type: BACKUP_DELIVERY_TYPE });
     results.steps.push({ step: 'Clean up test file', status: 'ok' });
 
     results.success = countsMatch;

@@ -295,6 +295,8 @@ async function downloadToBuffer(storageId, fileUrl) {
 }
 
 module.exports = {
+  getS3,          // the S3 client (null when S3 isn't configured) — database backups use it directly
+  bucketName: BUCKET,
   uploadFile,
   uploadBuffer,
   deleteFile,

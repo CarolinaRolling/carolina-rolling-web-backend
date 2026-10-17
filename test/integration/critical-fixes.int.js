@@ -41,13 +41,13 @@ async function login() {
 async function seed(pg, token) {
   await pg.query(`DELETE FROM app_settings WHERE key = 'labor_minimums'`);
   await pg.query(`INSERT INTO app_settings (id, key, value, "createdAt", "updatedAt") VALUES (gen_random_uuid(), 'labor_minimums', $1, now(), now())`,
-    [JSON.stringify(JSON.stringify([{ partTypes: ['plate_roll'], minimum: 150 }]))]);
+    [JSON.stringify(JSON.stringify([{ partTypes: ['plate_roll'], minimum: 300 }]))]);   // round 13: labor = 50 × 2 + $100 fab line = 200 → +100
   await pg.query(`INSERT INTO clients (id, name, "taxStatus", "isActive", "createdAt", "updatedAt") VALUES ($1, 'Totals Test Co', 'taxable', true, now(), now()) ON CONFLICT (id) DO NOTHING`, [CLIENT_ID]);
 
   const wo = await api(token, 'POST', '/workorders', { clientId: CLIENT_ID, clientName: 'Totals Test Co' });
   const woId = wo.body.data?.id;
   if (!woId) throw new Error('create WO failed: ' + JSON.stringify(wo.body).slice(0, 300));
-  // Part 1: plate roll, $400 stored total, $50 labor (labor minimum $150 → +$100 adjustment)
+  // Part 1: plate roll, $400 stored total, $50 labor each × 2 (+ the $100 fab line = $200 labor; minimum $300 → +$100)
   await api(token, 'POST', `/workorders/${woId}/parts`, { partType: 'plate_roll', quantity: 2, laborTotal: 50, partTotal: 400, materialDescription: 'Test plate' });
   // Part 2: fab service $100
   await api(token, 'POST', `/workorders/${woId}/parts`, { partType: 'fab_service', quantity: 1, partTotal: 100 });
@@ -84,7 +84,7 @@ async function verify(pg, token) {
   if (clerkTok) check('non-admin user → 403 on /backup/info (lists cloud backup links)', (await code('/backup/info', { Authorization: `Bearer ${clerkTok}` })) === 403);
   if (process.env.TEST_PORTAL_KEY || true) check('client portal key → refused', [400, 403].includes(await code('/backup', { 'X-API-Key': process.env.TEST_PORTAL_KEY || 'clientportalkey123' })));
 
-  // Expected (QuickBooks rules): parts 500 + minimum 100 + shipping 110 = 710 pre-tax; tax 10% of 600 = 60; total 770
+  // Expected (round 13 shared engine): parts 500 + minimum 100 + shipping 110 = 710 pre-tax; tax 10% of 600 = 60; total 770
   console.log('\nC4 — one invoice total everywhere');
   check('stored grandTotal refreshed by hooks = 770', near(rows[0].grandTotal, 770), rows[0].grandTotal);
   check('stored taxAmount = 60', near(rows[0].taxAmount, 60), rows[0].taxAmount);

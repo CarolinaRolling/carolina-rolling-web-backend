@@ -240,7 +240,7 @@ async function api(method, url, body, token = TOKEN) {
   const drBefore = (await q(`SELECT COUNT(*)::int n FROM dr_numbers`))[0].n;
   const woBefore = (await q(`SELECT COUNT(*)::int n FROM work_orders`))[0].n;
   const cid = crypto.randomUUID();
-  const broken = await api('POST', '/backup/restore', { options: { clearExisting: true }, backup: { data: {
+  const broken = await api('POST', '/backup/restore', { options: { clearExisting: true, allowMissingSections: true }, backup: { data: {   // a partial file on purpose (round 16 refuses those by default)
     clients: [{ id: cid, name: tag + ' Restored Client', createdAt: new Date(), updatedAt: new Date() }],
     drNumbers: [{ id: crypto.randomUUID(), drNumber: 997000 + Math.floor(Math.random() * 999), status: 'active', createdAt: new Date(), updatedAt: new Date() }],
     shipments: 5,   // malformed section part-way through → the restore fails

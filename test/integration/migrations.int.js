@@ -26,14 +26,14 @@ const cli = (dbUrl, cmd) => run('node', [path.join(__dirname, '../../src/db/cli.
     check('two processes at once: exactly one runs the migration, the other skips or finds it done',
       outs.filter(o => /Ran \d+ migration/.test(o)).length === 1 && outs.filter(o => /up to date|skipping/.test(o)).length === 1, outs.join(' | '));
     const pg = new PG({ connectionString: url }); await pg.connect();
-    const t = (await pg.query(`SELECT COUNT(*)::int n FROM pg_tables WHERE schemaname='public' AND tablename <> 'schema_migrations'`)).rows[0].n;
+    const t = (await pg.query(`SELECT COUNT(*)::int n FROM pg_tables WHERE schemaname='public' AND tablename NOT IN ('schema_migrations', 'idempotency_keys')`)).rows[0].n;   // idempotency_keys: infrastructure table, no model (round 12)
     const models = require(path.join(__dirname, '../../src/models'));
     const expected = new Set(Object.values(models.sequelize.models).map(m => m.getTableName())).size;
     check('an empty database gets every model table from the migrations alone', t === expected, `${t} of ${expected}`);
     const fks = (await pg.query(`SELECT COUNT(*)::int n FROM pg_constraint WHERE contype='f'`)).rows[0].n;
     check('…including the foreign keys between them (work orders ↔ estimates cycle too)', fks >= 50, fks);
     const recorded = (await pg.query(`SELECT name FROM schema_migrations`)).rows.map(r => r.name);
-    check('each migration is recorded once', recorded.length === new Set(recorded).size && recorded.includes('0001-create-missing-tables.js') && recorded.includes('0002-deletion-archive-undo.js'), recorded.join(','));
+    check('each migration is recorded once', recorded.length === new Set(recorded).size && recorded.includes('0001-create-missing-tables.js') && recorded.includes('0002-deletion-archive-undo.js') && recorded.includes('0003-estimate-dual-pricing.js'), recorded.join(','));
     const again = await cli(url, 'up');
     check('running again does nothing', /up to date/.test(again.stdout), again.stdout);
     await pg.end();

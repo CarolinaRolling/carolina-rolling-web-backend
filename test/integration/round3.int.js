@@ -169,7 +169,7 @@ async function api(method, url, body, token = TOKEN) {
   check('two people ordering material with the same suggested PO → two different POs', om.every(o => o.status === 201) && new Set(pos.map(p => p.po)).size === 2 && pos.every(p => p.po), `${om.map(o => o.status)} ${pos.map(p => p.po)}`);
   const inb = (await q(`SELECT id, "purchaseOrderNumber" FROM inbound_orders WHERE "workOrderId" = $1`, [M1.id]))[0];
   const oldNum = parseInt(inb.purchaseOrderNumber.replace(/\D/g, ''), 10);
-  const newNum = oldNum + 5000;
+  const newNum = oldNum + 500;   // round 12: a reassign more than 1000 past the highest PO is refused (typo guard)
   const ra = await api('PUT', `/po-numbers/${oldNum}/reassign`, { newPoNumber: newNum });
   const inbAfter = (await q(`SELECT "purchaseOrderNumber" FROM inbound_orders WHERE id = $1`, [inb.id]))[0];
   const partAfter = (await q(`SELECT "materialPurchaseOrderNumber" AS po FROM work_order_parts WHERE id = $1`, [pm1]))[0];

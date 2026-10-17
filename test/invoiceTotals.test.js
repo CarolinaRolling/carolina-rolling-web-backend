@@ -21,10 +21,38 @@ test('parts + tax, nothing else', () => {
   assert.strictEqual(t.grandTotal, 440);
 });
 
-test('labor minimum is billed (the old PDF left it out)', () => {
+test('labor minimum is billed, on labor × quantity (round 13: same engine as the estimate)', () => {
   const t = computeInvoiceTotals({ wo: { taxRate: 10 }, parts: [plate()], laborMinimums: MIN });
-  assert.strictEqual(t.minimumAdjustment, 100);   // 150 minimum − 50 labor
-  assert.strictEqual(t.grandTotal, 550);          // (400 + 100) × 1.10
+  assert.strictEqual(t.minimumAdjustment, 50);    // 150 minimum − (50 labor × 2 pcs)
+  assert.strictEqual(t.grandTotal, 495);          // (400 + 50) × 1.10
+});
+
+test('the Admin-screen rule shape works and a size rule that doesn\'t match never applies (T1)', () => {
+  const rules = [{ partType: 'plate_roll', maxSize: 0.375, minimum: 125 }, { partType: 'plate_roll', minSize: 0.376, minimum: 200 }];
+  const thin = computeInvoiceTotals({ wo: {}, parts: [plate({ thickness: '1/4"', quantity: 1 })], laborMinimums: rules });
+  const thick = computeInvoiceTotals({ wo: {}, parts: [plate({ thickness: '1/2"', quantity: 1 })], laborMinimums: rules });
+  assert.strictEqual(thin.minimumAdjustment, 75);    // 125 − 50
+  assert.strictEqual(thick.minimumAdjustment, 150);  // 200 − 50
+});
+
+test('no minimum when there is no labor, or labor is already above it (T1)', () => {
+  const noLabor = computeInvoiceTotals({ wo: {}, parts: [plate({ laborTotal: 0 })], laborMinimums: MIN });
+  const above = computeInvoiceTotals({ wo: {}, parts: [plate({ quantity: 10, laborTotal: 20 })], laborMinimums: MIN });
+  assert.strictEqual(noLabor.minimumAdjustment, 0);
+  assert.strictEqual(above.minimumAdjustment, 0);    // 10 × 20 = 200 ≥ 150
+});
+
+test('expedite % uses the labor actually billed, not the rolling base of an outside-processed part (T2)', () => {
+  const op = plate({ quantity: 4, partTotal: 144, laborTotal: 6, formData: { _baseLaborTotal: 80 } });
+  const rush = { id: 'r', partNumber: 2, partType: 'rush_service', quantity: 1, partTotal: 0, formData: { _expediteEnabled: true, _expediteType: '25' } };
+  const t = computeInvoiceTotals({ wo: {}, parts: [op, rush] });
+  assert.strictEqual(t.rushAmount, 6);               // 25% of (6 × 4)
+});
+
+test('a discount can never make the invoice negative (T7)', () => {
+  const t = computeInvoiceTotals({ wo: { taxRate: 10, discountAmount: 500 }, parts: [plate({ laborTotal: 200 })] });
+  assert.strictEqual(t.discountTotal, 400);
+  assert.strictEqual(t.grandTotal, 0);
 });
 
 test('minimumOverride turns the minimum off', () => {
@@ -57,13 +85,22 @@ test('tax exempt from the client OR the work order flag', () => {
   assert.strictEqual(byWO.grandTotal, 400);
 });
 
-test('percent discount follows QuickBooks: taken on parts + minimum + shipping', () => {
+test('percent discount is taken on parts + minimum, never on shipping (same as the estimate — N4)', () => {
   const t = computeInvoiceTotals({ wo: { taxRate: 10, discountPercent: 10 }, parts: [plate({ laborTotal: 200 })],
     shipmentCharges: [{ shippingCost: 100 }] });
-  assert.strictEqual(t.discountTotal, 50);         // 10% of (400 + 100)
-  assert.strictEqual(t.taxableAmount, 350);        // 400 + 100 − 50 − 100 shipping
-  assert.strictEqual(t.taxAmount, 35);
-  assert.strictEqual(t.grandTotal, 485);           // 450 + 35
+  assert.strictEqual(t.discountTotal, 40);         // 10% of 400 (shipping not discounted)
+  assert.strictEqual(t.taxableAmount, 360);        // 400 − 40
+  assert.strictEqual(t.taxAmount, 36);
+  assert.strictEqual(t.grandTotal, 496);           // 360 + 100 shipping + 36
+});
+
+test('order-level outside-processing trips are billed, taxable and discountable (N4)', () => {
+  const t = computeInvoiceTotals({ wo: { taxRate: 10, discountPercent: 10, truckingCost: 50,
+    opTransports: [{ cost: 100, markup: 20 }, { cost: 10.005, markup: 0 }, null] }, parts: [plate({ laborTotal: 200 })] });
+  assert.strictEqual(t.opTransportTotal, 130.01);  // 120 + 10.01 (each trip rounded)
+  assert.strictEqual(t.discountTotal, 53);         // 10% of (400 + 130.01) = 53.001
+  assert.strictEqual(t.taxableAmount, 477.01);
+  assert.strictEqual(t.preTaxTotal, 527.01);
 });
 
 test('flat discount amount', () => {
@@ -114,7 +151,7 @@ test('a negative rush amount is ignored, as in the QuickBooks export', () => {
 test('unpriced parts + labor minimum do not replace a stored legacy total', () => {
   const unpriced = { id: 'u', partNumber: 1, partType: 'plate_roll', quantity: 1, partTotal: 0 };
   const t = computeInvoiceTotals({ wo: { taxRate: 10 }, parts: [unpriced], laborMinimums: MIN });
-  assert.strictEqual(t.minimumAdjustment, 150);                       // the minimum still computes…
+  assert.strictEqual(t.minimumAdjustment, 0);                         // no labor → no minimum (T1)…
   assert.strictEqual(invoiceAmount(t, { grandTotal: 4000 }), 4000);   // …but the stored total wins
 });
 

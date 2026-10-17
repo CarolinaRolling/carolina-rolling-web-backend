@@ -78,8 +78,9 @@ async function api(method, url, body, token = TOKEN, headers = {}) {
   check('a non-admin can\'t change the tax rate', s3.status === 403 && near(tax.value.defaultTaxRate, 9.5), `${s3.status} ${JSON.stringify(tax?.value)}`);
   const s4 = await api('PUT', '/settings/tax_settings', { value: { defaultTaxRate: 9.5 } });
   check('an admin still can', s4.status === 200, s4.status);
-  const s5 = await api('PUT', '/settings/payroll_email', { value: 'payroll@example.com' }, CLERK);
-  check('ordinary settings still save for everyone', s5.status === 200, s5.status);
+  const s5 = await api('PUT', '/settings/section_sizes_angle', { value: ['2x2x1/4'] }, CLERK);
+  const s5b = await api('PUT', '/settings/payroll_email', { value: 'payroll@example.com' }, CLERK);
+  check('shop settings (section sizes) still save for everyone; payroll e-mail is admin-only (round 12)', s5.status === 200 && s5b.status === 403, `${s5.status} ${s5b.status}`);
   const s6 = await api('GET', '/settings/cod_override_password', null, null, { 'X-API-Key': PORTAL_KEY });
   const s7 = await api('PUT', '/settings/payroll_email', { value: 'x' }, null, { 'X-API-Key': PORTAL_KEY });
   check('client-portal keys can\'t read or write settings', s6.status === 403 && s7.status === 403, `${s6.status} ${s7.status}`);

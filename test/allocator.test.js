@@ -53,12 +53,18 @@ const check = (name, got, want) => {
   check('refuses to allocate outside a transaction', threw, true);
 
   let rejected = false;
-  try { await reserveCustomDRNumber(fakeModels({configured:null,maxDR:1,maxWO:1,existing:[2975]}), tx, 2975); }
-  catch (e) { rejected = e.status === 400; }
+  try { await reserveCustomDRNumber(fakeModels({configured:null,maxDR:2970,maxWO:2970,existing:[2975]}), tx, 2975); }
+  catch (e) { rejected = e.status === 400 && /in use/.test(e.message); }
   check('custom number already in use -> 400', rejected, true);
 
   check('custom number free -> returned',
-    await reserveCustomDRNumber(fakeModels({configured:null,maxDR:1,maxWO:1}), tx, '2976'), 2976);
+    await reserveCustomDRNumber(fakeModels({configured:null,maxDR:2970,maxWO:2970}), tx, '2976'), 2976);
+
+  // round 12 (N14): every typed DR gets the jump guard
+  let jumped = false;
+  try { await reserveCustomDRNumber(fakeModels({configured:null,maxDR:2970,maxWO:2970}), tx, 12970); }
+  catch (e) { jumped = e.status === 400 && /past the highest/.test(e.message); }
+  check('custom number far past the sequence -> 400 (typo guard)', jumped, true);
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

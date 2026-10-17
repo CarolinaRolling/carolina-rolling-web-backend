@@ -32,6 +32,10 @@ const TERMS_MAP = {
 };
 
 function formatQBDate(dateStr) {
+  // A typed invoice date saved before round 11 is midnight UTC — that calendar day, not the evening
+  // before in Pacific time (audit N8)
+  const ymd = require('../utils/shopTime').calendarDay(dateStr || new Date());
+  if (ymd) { const [y, m, d] = ymd.split('-'); return `${m}/${d}/${y}`; }
   const d = dateStr ? new Date(dateStr) : new Date();
   // Format in the shop's timezone (Pacific) so the QB invoice date matches what CR Admin shows, and a
   // near-midnight UTC timestamp doesn't roll to the wrong calendar day.
@@ -269,49 +273,27 @@ async function buildInvoiceIIF(wo, parts, client, invoiceNum) {
   // Rush / Expedite — a percentage expedite is computed from the order's LABOR (not stored on the
   // rush part), so getPartAmount() returns 0 and the loop above skips it. Add it here so the IIF
   // export matches the invoice PDF. Expedite applies to labor only; it is a taxable service line.
+  // Same rush fee as the shared invoice totals (round 13, T2): expedite % of the labor actually
+  // billed, plus the labor minimum when it applies
+  const iifMinimums = await loadLaborMinimums();
+  const iifMinInfo = calculateMinimumAdjustment(sorted, wo.minimumOverride, iifMinimums);
   const rushSvc = sorted.find(p => p.partType === 'rush_service' && getPartAmount(p) <= 0);
   if (rushSvc) {
-    const rfd = rushSvc.formData && typeof rushSvc.formData === 'object' ? rushSvc.formData : {};
-    let rushAmt = 0;
-    const rushLabels = [];
-    if (rfd._expediteEnabled) {
-      if (rfd._expediteType === 'custom_amt') {
-        rushAmt += parseFloat(rfd._expediteCustomAmt) || 0;
-        rushLabels.push('Expedite Fee');
-      } else {
-        let pct = parseFloat(rfd._expediteType) || 0;
-        if (rfd._expediteType === 'custom_pct') pct = parseFloat(rfd._expediteCustomPct) || 0;
-        let rushLaborBase = 0;
-        for (const bp of parts) {
-          if (bp.partType === 'rush_service') continue;
-          if (['fab_service', 'shop_rate'].includes(bp.partType)) {
-            rushLaborBase += getPartAmount(bp);
-          } else {
-            try {
-              const bd = partBreakdown(bp);
-              const bq = parseInt(bp.quantity) || 1;
-              rushLaborBase += (parseFloat(bd.labEach) || 0) * bq;
-            } catch (e) { /* skip */ }
-          }
-        }
-        rushAmt += Math.round(rushLaborBase * (pct / 100) * 100) / 100;
-        rushLabels.push(`Expedite Service (${pct}% of labor)`);
-      }
-    }
-    if (rfd._emergencyEnabled) {
-      const emergOpts = { 'Saturday': 600, 'Saturday Night': 800, 'Sunday': 600, 'Sunday Night': 800 };
-      const em = emergOpts[rfd._emergencyDay] || 0;
-      if (em > 0) { rushAmt += em; rushLabels.push(`Emergency Off-Hours (${rfd._emergencyDay})`); }
-    }
-    rushAmt = Math.round(rushAmt * 100) / 100;
-    if (rushAmt > 0) {
-      lineItems.push({
-        description: clean(rushLabels.join(' + ') || 'Rush / Emergency Service').substring(0, 200),
-        amount: rushAmt, qty: 1, invItem: itemType, isPriced: true
-      });
-      subtotal += rushAmt;
+    const rf = require('../services/invoiceTotals').rushFee(rushSvc, parts, iifMinInfo);
+    if (rf.amount > 0) {
+      lineItems.push({ description: clean(rf.label).substring(0, 200), amount: rf.amount, qty: 1, invItem: itemType, isPriced: true });
+      subtotal += rf.amount;
     }
   }
+
+  // Order-level outside-processing trips (opTransports) — quoted on the estimate, billed as one
+  // taxable line (round 11, audit N4; before, they were copied to the order but never billed)
+  const opTransportAmt = require('../services/invoiceTotals').opTransportBilled(wo);
+  if (opTransportAmt > 0) {
+    lineItems.push({ description: 'Outside processing transport', amount: opTransportAmt, qty: 1, invItem: itemType, isPriced: true });
+    subtotal += opTransportAmt;
+  }
+  let freightSubtotal = 0;
 
   // Shipping & Handling — multi-shipment freight. Each shipment is a non-taxed line on the
   // FREIGHT account (isFreight routes it there with TAXABLE=N). Falls back to the legacy single
@@ -335,6 +317,7 @@ async function buildInvoiceIIF(wo, parts, client, invoiceNum) {
         amount: billed, qty: 1, isFreight: true, isPriced: true, invItem: ''
       });
       subtotal += billed;
+      freightSubtotal += billed;
     }
   } else {
     const trucking = parseFloat(wo.truckingCost) || 0;
@@ -348,6 +331,7 @@ async function buildInvoiceIIF(wo, parts, client, invoiceNum) {
         invItem: ''
       });
       subtotal += trucking;
+      freightSubtotal += trucking;
     }
   }
   
@@ -369,38 +353,25 @@ async function buildInvoiceIIF(wo, parts, client, invoiceNum) {
   
   if (lineItems.length === 0) return null;
   
-  // Check minimum labor charge using shared utility
+  // Labor minimum — the shared engine (round 13, T1)
   let minimumAdjustment = 0;
-  if (!wo.minimumOverride) {
-    try {
-      const minimums = await loadLaborMinimums();
-      const minInfo = calculateMinimumAdjustment(sorted, wo.minimumOverride, minimums);
-      if (minInfo.applies) {
-        minimumAdjustment = minInfo.adjustment;
-        console.log(`[IIF] Minimum labor applies: totalLabor=$${minInfo.totalLabor}, minimum=$${minInfo.minimum}, adjustment=$${minimumAdjustment}`);
-        lineItems.push({
-          description: `Minimum labor charge adjustment`,
-          amount: minimumAdjustment,
-          qty: 1,
-          invItem: itemType,
-          isPriced: true
-        });
-        subtotal += minimumAdjustment;
-      }
-    } catch (e) {
-      console.error('[IIF] Minimum labor check error:', e.message);
-    }
+  if (iifMinInfo.applies) {
+    minimumAdjustment = iifMinInfo.adjustment;
+    lineItems.push({ description: `Minimum labor charge adjustment`, amount: minimumAdjustment, qty: 1, invItem: itemType, isPriced: true });
+    subtotal += minimumAdjustment;
   }
-  
+
   // Apply discount
   const discountPct = parseFloat(wo.discountPercent) || 0;
   const discountAmt = parseFloat(wo.discountAmount) || 0;
   let discountTotal = 0;
   if (discountPct > 0) {
-    discountTotal = Math.round(subtotal * discountPct / 100 * 100) / 100;
+    // Shipping is never discounted (same base as the estimate and the shared totals — audit N4)
+    discountTotal = Math.round((subtotal - freightSubtotal) * Math.min(100, discountPct) / 100 * 100) / 100;
   } else if (discountAmt > 0) {
     discountTotal = discountAmt;
   }
+  discountTotal = Math.min(discountTotal, Math.max(0, Math.round((subtotal - freightSubtotal) * 100) / 100));   // T7
   if (discountTotal > 0) {
     const reason = wo.discountReason ? ` (${clean(wo.discountReason)})` : '';
     const label = discountPct > 0 ? `Discount ${discountPct}%${reason}` : `Discount${reason}`;
@@ -431,6 +402,18 @@ async function buildInvoiceIIF(wo, parts, client, invoiceNum) {
     }
   } catch (e) { console.warn('[IIF] totals self-check failed:', e.message); }
   
+  // An invoice already in QuickBooks: a re-download must carry what QuickBooks has (the frozen total).
+  // If something outside the price lock changed since (client tax status, minimum settings), the file
+  // would now say something else — refuse instead of sending a different total (round 15, U14).
+  let frozenMismatch = null;
+  if (wo.iifExportedAt && wo.totalsComputedAt) {
+    try {
+      const T = computeInvoiceTotals({ wo, parts, client, shipmentCharges: woShipCharges, laborMinimums: await loadLaborMinimums() });
+      const frozen = Math.round((parseFloat(wo.grandTotal) || 0) * 100) / 100;
+      if (Math.abs(T.grandTotal - frozen) > 0.005) frozenMismatch = { frozen, live: T.grandTotal };
+    } catch (e) { console.warn('[IIF] frozen check failed:', e.message); }
+  }
+
   // DR number for Delivery Receipt field — just the number, no prefix
   const drNum = wo.drNumber ? String(wo.drNumber) : '';
   
@@ -473,6 +456,7 @@ async function buildInvoiceIIF(wo, parts, client, invoiceNum) {
   
   return {
     lines,
+    frozenMismatch,
     summary: {
       drNumber: drLabel,
       invoiceNumber: docNum,
@@ -518,7 +502,8 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
       try { if (fs.existsSync(yellowcakePath)) { doc.registerFont('Yellowcake', yellowcakePath); hasYellowcake = true; } } catch {}
 
       const fmtCur = (v) => '$' + (parseFloat(v) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-      const fmtDate = (d) => d ? new Date(d).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'America/Los_Angeles' }) : '';
+      // shop-calendar day; a legacy midnight-UTC invoice date counts as that day (N8)
+      const fmtDate = (d) => { const ymd = d ? require('../utils/shopTime').calendarDay(d) : null; return ymd ? new Date(ymd + 'T12:00:00Z').toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' }) : ''; };
 
       const primaryColor = '#1976d2';
       const darkColor = '#333';
@@ -621,7 +606,9 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
       let subtotal = 0;
       // Totals come from the shared calculation so this PDF, the ledger and QuickBooks agree.
       // (Tax exemption now also honors the work order's own Tax Exempt flag, like the IIF export.)
-      const T = computeInvoiceTotals({ wo, parts, client, shipmentCharges, laborMinimums: await loadLaborMinimums() });
+      // Frozen invoices print their QuickBooks total (R16)
+      const T = require('../services/invoiceTotals').printableTotals(
+        computeInvoiceTotals({ wo, parts, client, shipmentCharges, laborMinimums: await loadLaborMinimums() }), wo);
       const isResale = T.isTaxExempt;
 
       const PART_LABELS = {
@@ -772,6 +759,20 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
         itemNum++;
       }
 
+      // ── Order-level outside-processing transport (quoted on the estimate — audit N4) ──
+      if (T.opTransportTotal > 0) {
+        if (yPos > 700) { doc.addPage(); yPos = 50; }
+        doc.font('Helvetica').fontSize(10).fillColor(grayColor).text(String(itemNum), 50, yPos, { width: 30, lineBreak: false });
+        doc.font('Helvetica').fontSize(10).fillColor(darkColor).text('Outside processing transport', 85, yPos, { width: 310, lineBreak: false });
+        doc.text('1', 400, yPos, { width: 30, align: 'center', lineBreak: false });
+        doc.text(fmtCur(T.opTransportTotal), 438, yPos, { width: 52, align: 'right', lineBreak: false });
+        doc.font('Helvetica-Bold').text(fmtCur(T.opTransportTotal), 498, yPos, { width: 64, align: 'right', lineBreak: false });
+        yPos += 20;
+        doc.strokeColor(lightGray).lineWidth(0.3).moveTo(50, yPos).lineTo(562, yPos).stroke();
+        yPos += 6;
+        itemNum++;
+      }
+
       // ── Minimum labor charge (billed in QuickBooks; previously missing from the PDF) ──
       if (T.minimumAdjustment > 0) {
         if (yPos > 700) { doc.addPage(); yPos = 50; }
@@ -897,7 +898,19 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
 
       // Grand total box
       yPos += 4;
-      const hasPayments = payments.filter(p => !p.voidedAt).length > 0;
+      // Money given back to the client from this invoice (refunded, or held as client credit) no
+      // longer pays it — shown as its own line so the balance matches the ledger (round 16, V18).
+      // Read up front: it still counts after the payments themselves were voided (W4).
+      let returnedAmt = 0;
+      try {
+        const [[ret]] = await sequelize.query(`SELECT COALESCE((SELECT SUM(amount) FROM refunds WHERE "voidedAt" IS NULL AND "sourceWorkOrderId" = :id), 0)
+          + COALESCE((SELECT SUM(amount) FROM credit_memos WHERE "voidedAt" IS NULL AND "sourceWorkOrderId" = :id), 0) AS amt`, { replacements: { id: wo.id } });
+        returnedAmt = Math.round((parseFloat(ret && ret.amt) || 0) * 100) / 100;
+      } catch (_) { /* print without it */ }
+      // The ledger's balance is what TOTAL / BALANCE DUE prints (W4); the running figure is the fallback
+      let ledgerBalance = null;
+      try { const lb = wo.id ? await require('../services/paymentLedger').loadBalance(wo.id) : null; if (lb) ledgerBalance = lb.balance; } catch (_) { /* fall back */ }
+      const hasPayments = payments.filter(p => !p.voidedAt).length > 0 || returnedAmt > 0.005;
       doc.rect(350, yPos, 212, 26).fill(primaryColor).stroke();
       doc.font('Helvetica-Bold').fontSize(12).fillColor('white');
       doc.text(hasPayments ? 'INVOICE TOTAL' : 'TOTAL DUE', 355, yPos + 7, { width: 100, lineBreak: false });
@@ -922,7 +935,7 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
 
       // ── Payment History ──
       const activePayments = payments.filter(p => !p.voidedAt);
-      if (activePayments.length > 0) {
+      if (activePayments.length > 0 || returnedAmt > 0.005) {
         if (yPos > 650) { doc.addPage(); yPos = 50; }
         yPos += 8;
         doc.strokeColor(lightGray).lineWidth(0.5).moveTo(50, yPos).lineTo(562, yPos).stroke();
@@ -930,7 +943,13 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
         doc.font('Helvetica-Bold').fontSize(10).fillColor(primaryColor).text('PAYMENT HISTORY', 50, yPos, { lineBreak: false });
         yPos += 14;
 
-        const fmtPayDate = (d) => d ? new Date(d).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }) : '';
+        // A date-only value is printed as written — new Date('2026-10-12') is UTC midnight, the 11th here (W27)
+        const fmtPayDate = (d) => {
+          if (!d) return '';
+          const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(d));
+          if (m) return `${m[2]}/${m[3]}/${m[1]}`;
+          return new Date(d).toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric', timeZone: 'America/Los_Angeles' });
+        };
         const typeLabel = { downpayment: 'Down Payment', partial: 'Partial Payment', full: 'Payment in Full' };
         const methodLabel = { check: 'Check', ach: 'ACH', wire: 'Wire Transfer', credit_card: 'Credit Card', cash: 'Cash', other: 'Other', credit_memo: 'Credit Memo' };
         let runningBalance = grandTotal; // start from final invoice total including tax
@@ -954,8 +973,14 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
           doc.font('Helvetica').fontSize(9).fillColor(grayColor);
           doc.text('Bal: ' + fmtCur(Math.max(0, runningBalance)), 452, yPos, { width: 110, align: 'right', lineBreak: false });
           yPos += 18;
-          // Credit card fee as its own line under the payment.
-          if (pmt.ccFeeAmount && parseFloat(pmt.ccFeeAmount) > 0) {
+          // Card surcharge the customer paid on top of the invoice (T6) — shown, not applied to the balance
+          if (pmt.cardSurcharge && parseFloat(pmt.cardSurcharge) > 0) {
+            doc.font('Helvetica').fontSize(9).fillColor('#e65100');
+            doc.text('   \u21B3 Credit card surcharge paid (not part of the invoice)', 135, yPos, { width: 260, lineBreak: false });
+            doc.text(fmtCur(parseFloat(pmt.cardSurcharge)), 358, yPos, { width: 90, align: 'right', lineBreak: false });
+            yPos += 16;
+          } else if (pmt.ccFeeAmount && parseFloat(pmt.ccFeeAmount) > 0) {
+            // Credit card fee as its own line under the payment.
             const pctLbl = pmt.ccProcessingType === 'manual' ? '3.5%' : '2.6%';
             const typeLbl = pmt.ccProcessingType === 'manual' ? 'manual/keyed' : 'in-person';
             doc.font('Helvetica').fontSize(9).fillColor('#e65100');
@@ -966,10 +991,19 @@ async function generateInvoicePDFBuffer(wo, parts, client, payments = [], shipme
           doc.strokeColor('#f0f0f0').lineWidth(0.3).moveTo(50, yPos - 2).lineTo(562, yPos - 2).stroke();
         }
 
+        if (returnedAmt > 0.005) {
+          if (yPos > 690) { doc.addPage(); yPos = 50; }
+          doc.font('Helvetica').fontSize(10).fillColor(darkColor);
+          doc.text('Overpayment returned to client (refund / credit)', 135, yPos, { width: 220, lineBreak: false });
+          doc.text('+' + fmtCur(returnedAmt), 358, yPos, { width: 90, align: 'right', lineBreak: false });
+          runningBalance += returnedAmt;
+          yPos += 18;
+        }
+
         // Balance due — check page room first
         yPos += 4;
         if (yPos + 26 > 720) { doc.addPage(); yPos = 50; }
-        const finalBalance = Math.max(0, runningBalance);
+        const finalBalance = ledgerBalance != null ? ledgerBalance : Math.max(0, runningBalance);
         if (finalBalance <= 0.01) {
           doc.rect(50, yPos, 512, 22).fill('#e8f5e9');
           doc.font('Helvetica-Bold').fontSize(11).fillColor('#2e7d32');
@@ -1155,13 +1189,23 @@ router.get('/next-invoice-number', async (req, res, next) => {
 
 // PUT /api/quickbooks/next-invoice-number — Set next invoice number (admin)
 router.put('/next-invoice-number', async (req, res, next) => {
+  // Admin only, as the comment always said (round 15, U44)
+  if (!require('../services/staffRoles').isAdminCaller(req)) return res.status(403).json({ error: { message: 'Only an admin can set the next invoice number.' } });
   try {
     const { nextNumber } = req.body;
     if (!nextNumber || isNaN(parseInt(nextNumber))) {
       return res.status(400).json({ error: { message: 'Valid number required' } });
     }
-    await AppSettings.upsert({ key: 'next_invoice_number', value: parseInt(nextNumber) });
-    res.json({ data: { nextNumber: parseInt(nextNumber) }, message: 'Next invoice number updated' });
+    // V8: the setting is now obeyed (next = max(highest + 1, setting)), so it must be above every number
+    // in use and not a typo far past them
+    const n = parseInt(nextNumber);
+    if (n < 1) return res.status(400).json({ error: { message: 'Valid number required' } });
+    const high = (await invoiceNumbers.highestInvoiceNumber()) || 0;   // W7: a never-exported void typo doesn't count
+    if (n <= high) return res.status(400).json({ error: { message: `Invoice #${high} is already in use — the next invoice number must be higher than ${high}.` } });
+    const jump = await invoiceNumbers.jumpProblem(n);
+    if (jump) return res.status(400).json({ error: { message: jump } });
+    await AppSettings.upsert({ key: 'next_invoice_number', value: n });
+    res.json({ data: { nextNumber: n }, message: 'Next invoice number updated' });
   } catch (error) { next(error); }
 });
 
@@ -1181,63 +1225,127 @@ router.post('/assign-invoice-number/:id', async (req, res, next) => {
 
 // GET /api/quickbooks/export/:id
 router.get('/export/:id', async (req, res, next) => {
+  let claim = null;
   try {
-    const wo = await WorkOrder.findByPk(req.params.id, {
+    const head = await WorkOrder.findByPk(req.params.id, { attributes: ['id', 'invoiceNumber', 'reusedInvoiceNumber'] });
+    if (!head) return res.status(404).json({ error: { message: 'Work order not found' } });
+    if (head.reusedInvoiceNumber) return res.status(400).json({ error: { message: `Invoice #${head.invoiceNumber} reuses a freed number and must be entered MANUALLY in QuickBooks (IIF export is blocked to prevent a duplicate).` } });
+
+    // Lock first, then read what goes in the file — so the file matches the totals frozen below
+    claim = await claimForExport([head.id], { reexport: req.query.reexport === '1' });
+    if (!claim.include.has(head.id)) { await claim.t.rollback(); claim = null; return res.status(409).json(alreadyExportedError(1)); }
+    const wo = await WorkOrder.findByPk(head.id, {
       include: [
         { model: WorkOrderPart, as: 'parts' },
         { model: Client, as: 'client', attributes: ['id', 'name', 'taxStatus', 'paymentTerms', 'quickbooksName'] }
       ]
     });
-    if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
-    if (wo.reusedInvoiceNumber) return res.status(400).json({ error: { message: `Invoice #${wo.invoiceNumber} reuses a freed number and must be entered MANUALLY in QuickBooks (IIF export is blocked to prevent a duplicate).` } });
-    
     const client = await resolveClient(wo);
     const result = await buildInvoiceIIF(wo, wo.parts || [], client, wo.invoiceNumber);
-    if (!result) return res.status(400).json({ error: { message: 'No billable items found' } });
-    
+    if (!result) { await claim.t.rollback(); claim = null; return res.status(400).json({ error: { message: 'No billable items found' } }); }
+    if (result.frozenMismatch) { await claim.t.rollback(); claim = null; return res.status(409).json({ error: { code: 'FROZEN_TOTAL_CHANGED', message: frozenMismatchMessage(result.summary.drNumber, result.frozenMismatch) } }); }
+    const exportDate = new Date();
+    await finishExport(claim, `SINGLE-${exportDate.toISOString().slice(0, 10)}-${Date.now().toString(36).toUpperCase()}`, exportDate, new Set([wo.id]));
+    claim = null;
+
     const iifContent = [...IIF_HEADER, ...result.lines].join('\r\n') + '\r\n';
     const filename = `invoice-${result.summary.invoiceNumber || result.summary.drNumber}-${(wo.clientName || '').replace(/[^a-zA-Z0-9]/g, '_')}.iif`;
     res.setHeader('Content-Type', 'text/plain');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(iifContent);
   } catch (error) {
+    if (claim) { try { await claim.t.rollback(); } catch (_) {} }
     console.error('[quickbooks] Export error:', error.message);
     next(error);
   }
 });
 
+
+// ── Every IIF export marks and freezes what it exports (round 9, audit R8) ──
+// Before: the per-invoice "IIF" button and /export-batch only downloaded a file. The invoice stayed in
+// "needs export" with its price unlocked, so it could be edited after entering QuickBooks and then
+// exported a second time; two people exporting at once could both export the same invoices.
+// Now each export locks its orders, takes only those not yet exported (unless the caller explicitly
+// asks to download an exported one again, which changes nothing), builds the file, then freezes
+// totals and marks them in the same transaction.
+async function claimForExport(workOrderIds, { reexport = false } = {}) {
+  const { Op } = require('sequelize');
+  const t = await sequelize.transaction();
+  try {
+    const rows = await WorkOrder.findAll({ where: { id: { [Op.in]: workOrderIds } }, attributes: ['id', 'iifExportedAt', 'reusedInvoiceNumber'],
+      order: [['id', 'ASC']], lock: t.LOCK.UPDATE, transaction: t });
+    const fresh = rows.filter(r => !r.iifExportedAt && !r.reusedInvoiceNumber).map(r => r.id);
+    const already = rows.filter(r => r.iifExportedAt).map(r => r.id);
+    const include = new Set(reexport ? [...fresh, ...already] : fresh);
+    return { t, fresh, already, include };
+  } catch (e) { await t.rollback(); throw e; }
+}
+async function finishExport(claim, batchId, exportDate, billedIds = null) {
+  const { Op } = require('sequelize');
+  const { t } = claim;
+  // only orders that actually went into the file are marked as entered
+  const fresh = billedIds ? claim.fresh.filter(id => billedIds.has(id)) : claim.fresh;
+  try {
+    if (fresh.length) {
+      await snapshotTotalsForExport(fresh, { transaction: t });
+      await InvoiceNumber.update({ iifExportedAt: exportDate, iifBatchId: batchId },
+        { where: { workOrderId: { [Op.in]: fresh }, iifExportedAt: null }, transaction: t });
+      await WorkOrder.update({ iifExportedAt: exportDate, iifBatchId: batchId },
+        { where: { id: { [Op.in]: fresh }, iifExportedAt: null }, transaction: t });
+    }
+    await t.commit();
+  } catch (e) { try { await t.rollback(); } catch (_) {} throw e; }
+}
+const frozenMismatchMessage = (label, m) => `${label} is in QuickBooks at $${m.frozen.toFixed(2)}, but today's settings would make it $${m.live.toFixed(2)} (the client's tax status or the labor-minimum settings changed). A new file would put a different total into QuickBooks — enter it by hand from the invoice PDF, or reopen it in the Invoice Center first.`;
+const alreadyExportedError = (n) => ({ error: { code: 'ALREADY_EXPORTED', message: n === 1
+  ? 'This invoice was already exported to QuickBooks. Exporting it again would create a duplicate there. Download it again only if the first file was never imported.'
+  : 'All of these invoices were already exported to QuickBooks.' } });
+
 // POST /api/quickbooks/export-batch
 router.post('/export-batch', async (req, res, next) => {
+  let claim = null;
   try {
-    const { workOrderIds } = req.body;
+    const { workOrderIds, reexport = false } = req.body;
     if (!workOrderIds || !workOrderIds.length) {
       return res.status(400).json({ error: { message: 'No work order IDs provided' } });
     }
     const { Op } = require('sequelize');
+    claim = await claimForExport(workOrderIds, { reexport: !!reexport });
+    if (!claim.include.size) { await claim.t.rollback(); claim = null; return res.status(409).json(alreadyExportedError(workOrderIds.length)); }
     const workOrders = await WorkOrder.findAll({
-      where: { id: { [Op.in]: workOrderIds } },
+      where: { id: { [Op.in]: [...claim.include] } },
       include: [
         { model: WorkOrderPart, as: 'parts' },
         { model: Client, as: 'client', attributes: ['id', 'name', 'taxStatus', 'paymentTerms', 'quickbooksName'] }
       ],
       order: [['drNumber', 'ASC']]
     });
-    
+
     const allLines = [];
     const summaries = [];
+    const billed = new Set();
+    const skippedChanged = [];
     for (const wo of workOrders) {
+      if (wo.reusedInvoiceNumber) continue;   // must be entered by hand (never in an IIF)
       const client = await resolveClient(wo);
       const result = await buildInvoiceIIF(wo, wo.parts || [], client, wo.invoiceNumber);
-      if (result) { allLines.push(...result.lines); summaries.push(result.summary); }
+      if (result && result.frozenMismatch) { skippedChanged.push(result.summary.drNumber); continue; }   // U14
+      if (result) { allLines.push(...result.lines); summaries.push(result.summary); billed.add(wo.id); }
     }
-    if (allLines.length === 0) return res.status(400).json({ error: { message: 'No billable items found' } });
-    
+    if (allLines.length === 0) { await claim.t.rollback(); claim = null; return res.status(skippedChanged.length ? 409 : 400).json({ error: { message: skippedChanged.length ? `Not re-downloaded — their totals changed since they were entered in QuickBooks: ${skippedChanged.join(', ')}. Enter them by hand from the invoice PDF.` : 'No billable items found' } }); }
+    if (skippedChanged.length) res.setHeader('X-Skipped-Changed-Since-Export', skippedChanged.join(','));
+    const exportDate = new Date();
+    await finishExport(claim, `BATCH-${exportDate.toISOString().slice(0, 10)}-${Date.now().toString(36).toUpperCase()}`, exportDate, billed);
+    claim = null;
+
     const iifContent = [...IIF_HEADER, ...allLines].join('\r\n') + '\r\n';
     const filename = `quickbooks-invoices-${new Date().toISOString().split('T')[0]}.iif`;
     res.setHeader('Content-Type', 'text/plain');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('X-Skipped-Already-Exported', String(Math.max(0, workOrderIds.length - workOrders.length)));
     res.send(iifContent);
   } catch (error) {
+    if (claim) { try { await claim.t.rollback(); } catch (_) {} }
     console.error('[quickbooks] Batch export error:', error.message);
     next(error);
   }
@@ -1262,6 +1370,7 @@ router.get('/preview/:id', async (req, res, next) => {
     // if CR Admin's name doesn't match QB, the import creates a DUPLICATE customer. Setting
     // quickbooksName to the exact QB name prevents that.
     const warnings = [];
+    if (result.frozenMismatch) warnings.push(frozenMismatchMessage(result.summary.drNumber, result.frozenMismatch));
     if (!client || !client.quickbooksName || !String(client.quickbooksName).trim()) {
       warnings.push({
         type: 'no_quickbooks_name',
@@ -1346,39 +1455,54 @@ router.get('/invoice-numbers/health', async (req, res, next) => {
 // invoiceNumber but no matching InvoiceNumber tracking row, and create the missing rows so they show
 // on the tracking page. Safe to run repeatedly (skips numbers already tracked).
 router.post('/invoice-numbers/backfill', async (req, res, next) => {
+  // Admin only, under the invoice-number lock, plain numbers only, and never far past the sequence:
+  // it used to read "209500-1" as 209500 and move every later invoice number there (round 15, U17)
+  if (!require('../services/staffRoles').isAdminCaller(req)) return res.status(403).json({ error: { message: 'Only an admin can run the invoice-number backfill.' } });
   try {
     const { Op } = require('sequelize');
-    const wos = await WorkOrder.findAll({
-      where: { invoiceNumber: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] } },
-      attributes: ['id', 'invoiceNumber', 'clientId', 'clientName', 'drNumber'],
-    });
-    let created = 0, skipped = 0, invalid = 0, errored = 0;
-    const errors = [];
-    for (const wo of wos) {
-      try {
-        const numInt = parseInt(wo.invoiceNumber, 10);
-        if (isNaN(numInt) || numInt <= 0) { invalid++; continue; }
-        const existing = await InvoiceNumber.findOne({ where: { invoiceNumber: numInt } });
-        if (existing) {
-          if (!existing.workOrderId) {
-            await existing.update({ workOrderId: wo.id, clientId: wo.clientId || existing.clientId, clientName: wo.clientName || existing.clientName });
-          }
-          skipped++;
-          continue;
+    const inv = require('../services/invoiceNumbers');
+    const result = await inv.locked(null, async (t) => {
+      const wos = await WorkOrder.findAll({
+        where: { invoiceNumber: { [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: '' }] } },
+        attributes: ['id', 'invoiceNumber', 'clientId', 'clientName', 'drNumber'], transaction: t,
+      });
+      let created = 0, skipped = 0, invalid = 0, errored = 0, tooFar = 0;
+      const errors = [];
+      // lowest first, so each number is compared with the ones below it (review of round 15: in no
+      // particular order, an early 1500 made a real 9000 look like a typo)
+      wos.sort((a, b) => (parseInt(a.invoiceNumber, 10) || 0) - (parseInt(b.invoiceNumber, 10) || 0));
+      for (const wo of wos) {
+        const typed = String(wo.invoiceNumber).trim();
+        if (!/^\d+$/.test(typed)) { invalid++; continue; }   // "209500-1", "INV1045": stays on the order, not tracked
+        const numInt = parseInt(typed, 10);
+        if (!(numInt > 0)) { invalid++; continue; }
+        try {
+          await sequelize.transaction({ transaction: t }, async (sp) => {
+            const existing = await InvoiceNumber.findOne({ where: { invoiceNumber: numInt }, transaction: sp });
+            if (existing) {
+              if (!existing.workOrderId) await existing.update({ workOrderId: wo.id, clientId: wo.clientId || existing.clientId, clientName: wo.clientName || existing.clientName }, { transaction: sp });
+              skipped++;
+              return;
+            }
+            const jump = await inv.jumpProblem(numInt, sp);
+            if (jump) { tooFar++; if (errors.length < 10) errors.push(`#${typed} (DR ${wo.drNumber || '?'}): far past the highest tracked number — not added`); return; }
+            await InvoiceNumber.create({ invoiceNumber: numInt, workOrderId: wo.id, clientId: wo.clientId || null, clientName: wo.clientName || null }, { transaction: sp });
+            created++;
+          });
+        } catch (rowErr) {
+          // One bad row (e.g. a duplicate/constraint) must not abort the whole backfill.
+          errored++;
+          if (errors.length < 10) errors.push(`#${wo.invoiceNumber} (DR ${wo.drNumber || '?'}): ${rowErr.message}`);
+          console.warn(`[backfill] skipped invoice #${wo.invoiceNumber} on WO ${wo.id}: ${rowErr.message}`);
         }
-        await InvoiceNumber.create({ invoiceNumber: numInt, workOrderId: wo.id, clientId: wo.clientId || null, clientName: wo.clientName || null });
-        created++;
-      } catch (rowErr) {
-        // One bad row (e.g. a duplicate/constraint) must not abort the whole backfill.
-        errored++;
-        if (errors.length < 10) errors.push(`#${wo.invoiceNumber} (DR ${wo.drNumber || '?'}): ${rowErr.message}`);
-        console.warn(`[backfill] skipped invoice #${wo.invoiceNumber} on WO ${wo.id}: ${rowErr.message}`);
       }
-    }
-    let msg = `Backfill complete: ${created} added, ${skipped} already tracked`;
-    if (invalid) msg += `, ${invalid} non-numeric`;
-    if (errored) msg += `, ${errored} could not be added (see details)`;
-    res.json({ data: { created, skipped, invalid, errored, scanned: wos.length, errors }, message: msg + '.' });
+      return { created, skipped, invalid, errored, tooFar, scanned: wos.length, errors };
+    });
+    let msg = `Backfill complete: ${result.created} added, ${result.skipped} already tracked`;
+    if (result.invalid) msg += `, ${result.invalid} not plain numbers (left on their orders, not tracked)`;
+    if (result.tooFar) msg += `, ${result.tooFar} far past the sequence (check for typos)`;
+    if (result.errored) msg += `, ${result.errored} could not be added (see details)`;
+    res.json({ data: result, message: msg + '.' });
   } catch (error) {
     console.error('[backfill] fatal:', error);
     res.status(500).json({ error: { message: `Backfill failed: ${error.message}` } });
@@ -1389,6 +1513,9 @@ router.post('/invoice-numbers/backfill', async (req, res, next) => {
 router.post('/invoice-numbers/manual', async (req, res, next) => {
   try {
     const { invoiceNumber, clientName, workOrderId } = req.body;
+    // Adding a number to the log by hand moves the sequence — admin only, with the typo guard (T11)
+    if (!require('../services/staffRoles').isAdminCaller(req)) return res.status(403).json({ error: { message: 'Only an admin can add invoice numbers by hand.' } });
+    if (!/^\d+$/.test(String(invoiceNumber || '').trim())) return res.status(400).json({ error: { message: 'Invoice number must be a plain positive number' } });
     if (!invoiceNumber) return res.status(400).json({ error: { message: 'Invoice number is required' } });
     
     const num = parseInt(invoiceNumber);
@@ -1400,10 +1527,16 @@ router.post('/invoice-numbers/manual', async (req, res, next) => {
     
     // Linking to a work order goes through the locked service (refuses a number a live order holds)
     if (workOrderId && await WorkOrder.findByPk(workOrderId)) {
-      await invoiceNumbers.claimInvoiceNumber(workOrderId, num);
+      try { await invoiceNumbers.claimInvoiceNumber(workOrderId, num, { guard: req }); }
+      catch (claimErr) {
+        if (claimErr.status === 409 || claimErr.status === 403) return res.status(claimErr.status).json({ error: { message: claimErr.message, code: claimErr.code || undefined } });
+        throw claimErr;
+      }
       const inv = await InvoiceNumber.findOne({ where: { invoiceNumber: num } });
       return res.json({ data: inv, message: `Invoice #${num} created` });
     }
+    const jump = await invoiceNumbers.jumpProblem(num);
+    if (jump) return res.status(409).json({ error: { message: jump } });
     const inv = await InvoiceNumber.create({ invoiceNumber: num, clientName: clientName || null });
     
     // Update next number if this one is >= current next
@@ -1422,27 +1555,32 @@ router.post('/invoice-numbers/manual', async (req, res, next) => {
 
 // POST /api/quickbooks/invoice-numbers/:id/void - Void an invoice number
 router.post('/invoice-numbers/:id/void', async (req, res, next) => {
+  const t = await sequelize.transaction();
   try {
-    const inv = await InvoiceNumber.findByPk(req.params.id);
-    if (!inv) return res.status(404).json({ error: { message: 'Invoice number not found' } });
-    
+    const inv = await InvoiceNumber.findByPk(req.params.id, { transaction: t, lock: t.LOCK.UPDATE });
+    if (!inv) { await t.rollback(); return res.status(404).json({ error: { message: 'Invoice number not found' } }); }
+    const wo = inv.workOrderId ? await WorkOrder.findByPk(inv.workOrderId, { transaction: t, lock: t.LOCK.UPDATE }) : null;
+    const isCurrent = !!(wo && wo.invoiceNumber === String(inv.invoiceNumber));
+    // Voiding the number an order is actually billed under takes that invoice out of receivables, so
+    // it follows the same rules as deleting an invoice (N3): admin only, never once it's in QuickBooks
+    // or has payments. A stray / duplicate entry the order doesn't use can still be voided by anyone.
+    if (isCurrent) {
+      if (req.user?.role !== 'admin') { await t.rollback(); return res.status(403).json({ error: { message: 'Only an admin can void the invoice number a work order is billed under.' } }); }
+      if (wo.iifExportedAt) { await t.rollback(); return res.status(409).json({ error: { message: `Invoice #${inv.invoiceNumber} is already in QuickBooks. Void it there, then reopen it in the Invoice Center before voiding the number here.` } }); }
+      const { accountingState } = require('../services/drGuard');
+      const st = await accountingState(require('../models'), wo, { transaction: t });
+      if (st.payments) { await t.rollback(); return res.status(409).json({ error: { message: `Invoice #${inv.invoiceNumber} has payments. Void or move them first.` } }); }
+    }
     await inv.update({
       status: 'void',
       voidedAt: new Date(),
       voidedBy: req.user?.username || 'Unknown',
       voidReason: req.body.reason || null
-    });
-    
-    // Clear invoice number from linked work order
-    if (inv.workOrderId) {
-      const wo = await WorkOrder.findByPk(inv.workOrderId);
-      if (wo && wo.invoiceNumber === String(inv.invoiceNumber)) {
-        await wo.update({ invoiceNumber: null, invoiceDate: null, invoicedBy: null });
-      }
-    }
-    
+    }, { transaction: t });
+    if (isCurrent) await wo.update({ invoiceNumber: null, invoiceDate: null, invoicedBy: null }, { transaction: t });
+    await t.commit();
     res.json({ data: inv, message: `Invoice #${inv.invoiceNumber} voided` });
-  } catch (error) { next(error); }
+  } catch (error) { if (!t.finished) await t.rollback(); next(error); }
 });
 
 
@@ -1459,11 +1597,16 @@ router.post('/import-invoice-numbers', async (req, res, next) => {
     }
 
     const results = { matched: [], notFound: [], alreadySet: [], errors: [] };
+    const importBatchId = `import-${Date.now()}`;   // V9: these numbers already exist in QuickBooks
 
     for (const { drNumber, invoiceNumber, qbName, terms } of pairs) {
       if (!drNumber || !invoiceNumber) continue;
       const drNum = parseInt(String(drNumber).replace(/[^0-9]/g, ''));
-      const invNum = parseInt(String(invoiceNumber).replace(/[^0-9]/g, ''));
+      // Only a plain number is an invoice number in the sequence: "209500-1" used to become 2095001 and
+      // move the counter for good (T11) — such rows are reported, not imported
+      const invText = String(invoiceNumber).trim().replace(/^#/, '');
+      if (!/^\d+$/.test(invText)) { results.errors.push({ drNumber, invoiceNumber, error: 'Not a plain invoice number (letters or dashes) — enter it on the order by hand.' }); continue; }
+      const invNum = parseInt(invText, 10);
       if (!drNum || !invNum) continue;
 
       try {
@@ -1479,6 +1622,9 @@ router.post('/import-invoice-numbers', async (req, res, next) => {
 
         // Skip if already has the same invoice number
         if (wo.invoiceNumber && wo.invoiceNumber === String(invNum)) {
+          // V9: it is in QuickBooks — make sure clearing it later never frees it for reuse
+          await InvoiceNumber.update({ iifExportedAt: new Date(), iifBatchId: importBatchId },
+            { where: { invoiceNumber: invNum, workOrderId: wo.id, iifExportedAt: null }, transaction });
           results.alreadySet.push({ drNumber: drNum, invoiceNumber: invNum, clientName: wo.clientName });
           return;
         }
@@ -1486,10 +1632,10 @@ router.post('/import-invoice-numbers', async (req, res, next) => {
         // Stamp the number through the locked service. It refuses a number that another live work
         // order already holds (the old import stamped it anyway, giving two orders one number).
         try {
-          await invoiceNumbers.claimInvoiceNumber(wo.id, invNum, {
-            transaction, moveCounter: false, extraUpdates: { invoiceDate: wo.invoiceDate || new Date() } });
+          await invoiceNumbers.claimInvoiceNumber(wo.id, invNum, { guard: req,
+            transaction, moveCounter: false, inQuickBooks: importBatchId, extraUpdates: { invoiceDate: wo.invoiceDate || new Date() } });
         } catch (claimErr) {
-          if (claimErr.status !== 409) throw claimErr;
+          if (claimErr.status !== 409 && claimErr.status !== 403) throw claimErr;
           results.errors.push({ drNumber: drNum, invoiceNumber: invNum, error: claimErr.message });
           return;
         }
@@ -1629,13 +1775,26 @@ router.get('/invoice-pdf/:id', async (req, res, next) => {
 // POST /api/quickbooks/export-batch-with-reconciliation
 // Exports IIF + marks exported + returns reconciliation PDF
 router.post('/export-batch-with-reconciliation', async (req, res, next) => {
+  let claim = null;
   try {
     const { workOrderIds } = req.body;
     if (!workOrderIds?.length) return res.status(400).json({ error: { message: 'No work order IDs provided' } });
 
     const { Op } = require('sequelize');
+    // Only invoices not yet in QuickBooks: this used to re-export (and re-number) already-exported
+    // ones, and two people exporting at once both got the same invoices (R8).
+    const pending = await WorkOrder.findAll({ where: { id: { [Op.in]: workOrderIds }, iifExportedAt: null }, attributes: ['id', 'invoiceNumber'] });
+    if (!pending.length) return res.status(409).json(alreadyExportedError(workOrderIds.length));
+
+    // Assign invoice numbers to any without one
+    for (const w of pending) {
+      if (!w.invoiceNumber) await invoiceNumbers.assignNextInvoiceNumber(w.id, { setDate: false });
+    }
+
+    // Lock, then read what goes in the file (so it matches the totals frozen at commit)
+    claim = await claimForExport(pending.map(w => w.id));
     const workOrders = await WorkOrder.findAll({
-      where: { id: { [Op.in]: workOrderIds } },
+      where: { id: { [Op.in]: pending.map(w => w.id) } },
       include: [
         { model: WorkOrderPart, as: 'parts' },
         { model: Client, as: 'client', attributes: ['id', 'name', 'taxStatus', 'paymentTerms', 'quickbooksName'] }
@@ -1643,69 +1802,50 @@ router.post('/export-batch-with-reconciliation', async (req, res, next) => {
       order: [['drNumber', 'ASC']]
     });
 
-    // Assign invoice numbers to any without one
-    for (const wo of workOrders) {
-      if (!wo.invoiceNumber) {
-        const r = await invoiceNumbers.assignNextInvoiceNumber(wo.id, { setDate: false });
-        wo.invoiceNumber = r.number;
-        wo.reusedInvoiceNumber = r.isReused;
-      }
-    }
-
-    // Build IIF
     const allLines = [];
     const summaries = [];
+    const reusedSummaries = [];
+    const billed = new Set();
     const batchId = `BATCH-${new Date().toISOString().slice(0, 10)}-${Date.now().toString(36).toUpperCase()}`;
     const exportDate = new Date();
-
-    const reusedSummaries = [];
     for (const wo of workOrders) {
+      if (!wo.reusedInvoiceNumber && !claim.include.has(wo.id)) continue;   // another export took it meanwhile
       const client = await resolveClient(wo);
       const result = await buildInvoiceIIF(wo, wo.parts || [], client, wo.invoiceNumber);
-      if (result) {
-        const summ = {
-          invoiceNumber: result.summary.invoiceNumber,
-          drLabel: result.summary.drNumber,
-          clientName: result.summary.clientName,
-          clientPO: result.summary.clientPO,
-          total: result.summary.total,
-          reused: !!wo.reusedInvoiceNumber
-        };
-        if (wo.reusedInvoiceNumber) {
-          // Reused number: do NOT put it in the IIF (would risk a QuickBooks duplicate). List it separately
-          // on the reconciliation report so it can be entered/corrected manually in QuickBooks.
-          reusedSummaries.push(summ);
-        } else {
-          allLines.push(...result.lines);
-          summaries.push(summ);
-        }
+      if (!result) continue;
+      const summ = {
+        invoiceNumber: result.summary.invoiceNumber,
+        drLabel: result.summary.drNumber,
+        clientName: result.summary.clientName,
+        clientPO: result.summary.clientPO,
+        total: result.summary.total,
+        reused: !!wo.reusedInvoiceNumber
+      };
+      if (wo.reusedInvoiceNumber) {
+        // Reused number: do NOT put it in the IIF (would risk a QuickBooks duplicate). List it separately
+        // on the reconciliation report so it can be entered/corrected manually in QuickBooks.
+        reusedSummaries.push(summ);
+      } else {
+        allLines.push(...result.lines);
+        summaries.push(summ);
+        billed.add(wo.id);
       }
     }
 
-    if (allLines.length === 0) return res.status(400).json({ error: { message: 'No billable items found' } });
-
-    // Mark all as exported — on BOTH the InvoiceNumber record AND the WorkOrder (the Invoiced tab reads the
-    // WorkOrder.iifExportedAt to show status and prevent double-entry, so it MUST be set there too).
-    const exportedIds = workOrders.filter(w => !w.reusedInvoiceNumber).map(w => w.id);
-    if (exportedIds.length) {
-      // Freeze each invoice's total as sent to QuickBooks, so later edits don't move the AR ledger
-      const notYetExported = workOrders.filter(w => !w.reusedInvoiceNumber && !w.iifExportedAt).map(w => w.id);
-      await snapshotTotalsForExport(notYetExported);
-      await InvoiceNumber.update(
-        { iifExportedAt: exportDate, iifBatchId: batchId },
-        { where: { workOrderId: { [Op.in]: exportedIds }, iifExportedAt: null } }
-      );
-      await WorkOrder.update(
-        { iifExportedAt: exportDate, iifBatchId: batchId },
-        { where: { id: { [Op.in]: exportedIds }, iifExportedAt: null } }
-      );
+    if (allLines.length === 0) {
+      await claim.t.rollback(); claim = null;
+      return res.status(400).json({ error: { message: 'No billable items found' } });
     }
 
-    // Generate reconciliation PDF
+    // Everything the user receives is built BEFORE the orders are marked, so a failure here leaves
+    // nothing marked as entered without a file
     const reconcPdf = await generateReconciliationPDFBuffer(summaries, batchId, exportDate, reusedSummaries);
     const iifContent = [...IIF_HEADER, ...allLines].join('\r\n') + '\r\n';
 
-    // Return both as JSON with base64 encoded content
+    // Mark as exported on BOTH the InvoiceNumber record and the WorkOrder, freezing totals, in one transaction
+    await finishExport(claim, batchId, exportDate, billed);
+    claim = null;
+
     res.json({
       data: {
         batchId,
@@ -1714,10 +1854,12 @@ router.post('/export-batch-with-reconciliation', async (req, res, next) => {
         iifFilename: `quickbooks-batch-${exportDate.toISOString().split('T')[0]}.iif`,
         reconcPdf: reconcPdf.toString('base64'),
         reconcFilename: `reconciliation-${batchId}.pdf`,
-        summaries
+        summaries,
+        skippedAlreadyExported: workOrderIds.length - pending.length
       }
     });
   } catch (error) {
+    if (claim) { try { await claim.t.rollback(); } catch (_) { /* ended */ } }
     console.error('[export-batch-with-reconciliation] Error:', error.message);
     next(error);
   }
@@ -1819,7 +1961,7 @@ router.post('/invoice-email/:id', async (req, res, next) => {
 
 Please find attached Invoice ${invNum} for work order ${drLabel}${clientPO}.
 
-${wo.invoiceDate ? `Invoice Date: ${new Date(wo.invoiceDate).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}` : ''}
+${wo.invoiceDate ? `Invoice Date: ${new Date(require('../utils/shopTime').calendarDay(wo.invoiceDate) + 'T12:00:00Z').toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' })}` : ''}
 
 If you have any questions regarding this invoice, please do not hesitate to contact us.
 
@@ -1978,9 +2120,9 @@ router.put('/invoice-number/:id', async (req, res, next) => {
     // so two people can't both take the same number between the checks above and the write)
     const oldNum = wo.invoiceNumber;
     try {
-      await invoiceNumbers.claimInvoiceNumber(wo.id, newNum, { moveCounter: false });
+      await invoiceNumbers.claimInvoiceNumber(wo.id, newNum, { moveCounter: false, guard: req });
     } catch (claimErr) {
-      if (claimErr.status === 409) return res.status(409).json({ error: { message: claimErr.message } });
+      if (claimErr.status === 409 || claimErr.status === 403) return res.status(claimErr.status).json({ error: { message: claimErr.message, code: claimErr.code || undefined } });
       throw claimErr;
     }
     await wo.reload();
@@ -2004,30 +2146,28 @@ router.post('/mark-entered', async (req, res, next) => {
     const { Op } = require('sequelize');
     const now = new Date();
     const batchId = 'manual-' + now.toISOString().slice(0, 10);
-    // Mark whatever the user explicitly selected. Update in chunks to avoid any large-array query limits,
-    // and don't overwrite rows already tied to a real (non-manual) IIF export.
+    // Only invoices NOT already entered are marked and frozen. Marking one again used to re-freeze it
+    // from live data, so the total recorded for QuickBooks moved after it was entered (round 12, N12).
+    // The invoice-number log is marked too, like an IIF export.
     let count = 0;
     const CHUNK = 100;
     for (let i = 0; i < workOrderIds.length; i += CHUNK) {
       const chunk = workOrderIds.slice(i, i + CHUNK);
-      // Freeze totals for the ones being marked now (not ones already tied to a real IIF export)
-      const toMark = await WorkOrder.findAll({ attributes: ['id'], where: { id: { [Op.in]: chunk },
-        [Op.or]: [{ iifExportedAt: { [Op.is]: null } }, { iifBatchId: { [Op.like]: 'manual-%' } }] } });
-      await snapshotTotalsForExport(toMark.map(w => w.id));
-      const [n] = await WorkOrder.update(
-        { iifExportedAt: now, iifBatchId: batchId },
-        { where: {
-            id: { [Op.in]: chunk },
-            [Op.or]: [
-              { iifExportedAt: { [Op.is]: null } },
-              { iifBatchId: { [Op.like]: 'manual-%' } }
-            ]
-        } }
-      );
-      count += n;
+      count += await sequelize.transaction(async (t) => {
+        const toMark = await WorkOrder.findAll({ attributes: ['id'], where: { id: { [Op.in]: chunk }, iifExportedAt: { [Op.is]: null } },
+          lock: t.LOCK.UPDATE, transaction: t });
+        const ids = toMark.map(w => w.id);
+        if (!ids.length) return 0;
+        await snapshotTotalsForExport(ids, { transaction: t });
+        await InvoiceNumber.update({ iifExportedAt: now, iifBatchId: batchId },
+          { where: { workOrderId: { [Op.in]: ids }, iifExportedAt: null, status: 'active' }, transaction: t });
+        const [n] = await WorkOrder.update({ iifExportedAt: now, iifBatchId: batchId },
+          { where: { id: { [Op.in]: ids }, iifExportedAt: { [Op.is]: null } }, transaction: t });
+        return n;
+      });
     }
     console.log(`[quickbooks] mark-entered: requested ${workOrderIds.length}, updated ${count}`);
-    res.json({ data: { marked: count, batchId, requested: workOrderIds.length }, message: `Marked ${count} of ${workOrderIds.length} invoice(s) as entered in QuickBooks` });
+    res.json({ data: { marked: count, batchId, requested: workOrderIds.length }, message: `Marked ${count} of ${workOrderIds.length} invoice(s) as entered in QuickBooks${count < workOrderIds.length ? ' (the rest were already entered — their totals stay as recorded)' : ''}` });
   } catch (error) {
     console.error('[quickbooks] mark-entered error:', error.message, error.stack);
     return res.status(500).json({ error: { message: 'Mark failed: ' + error.message } });

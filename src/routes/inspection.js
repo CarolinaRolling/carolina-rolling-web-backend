@@ -162,34 +162,57 @@ router.post('/job', async (req, res, next) => {
 
     // Get WO and part info to generate unit IDs
     const wo = await WorkOrder.findByPk(workOrderId, { attributes: ['id','drNumber','orderNumber'] });
-    const part = await WorkOrderPart.findByPk(workOrderPartId, { attributes: ['id','partNumber','quantity'] });
+    const part = await WorkOrderPart.findByPk(workOrderPartId, { attributes: ['id','partNumber','quantity','workOrderId'] });
     if (!wo || !part) return res.status(404).json({ error: { message: 'Work order or part not found' } });
+    if (part.workOrderId !== wo.id) return res.status(400).json({ error: { message: 'That part is not on this work order' } });
 
     const count = parseInt(unitCount) || parseInt(part.quantity) || 1;
-    const drNum = wo.drNumber || wo.orderNumber || workOrderId.slice(0,8);
+    const drNum = wo.drNumber || wo.orderNumber || String(workOrderId).slice(0,8);
     const lineNum = await cleanLineNumber(workOrderId, part.id, part.partNumber);
 
-    const job = await InspectionJob.create({
-      workOrderId, workOrderPartId, inspectionPartId: inspectionPartId || null,
-      inspectionType: inspectionType || 'cylinder',
-      unitCount: count, operatorName: operatorName || null,
-      skipPreRoll: !!skipPreRoll,
+    // One inspection job per part (+ inspection line) — round 13, T37. Adding the inspection line
+    // twice (double tap, the web panel and a tablet at once, a retry) used to create a second job
+    // with its own units. The part row is locked so two requests can't both see "none" and create;
+    // when one already exists it is returned as-is (200, same shape) instead.
+    let created = false;
+    const jobId = await sequelize.transaction(async (transaction) => {
+      await WorkOrderPart.findByPk(part.id, { attributes: ['id'], transaction, lock: transaction.LOCK.UPDATE });
+      // The tablet sends no inspection line id and the web does: a job for the same part matches when the
+      // lines are equal OR either side has none (review of round 14)
+      const { Op } = require('sequelize');
+      const existing = await InspectionJob.findOne({
+        where: { workOrderPartId, ...(inspectionPartId ? { inspectionPartId: { [Op.or]: [inspectionPartId, null] } } : {}) },
+        order: [['createdAt', 'ASC']],
+        transaction
+      });
+      if (existing) {
+        if (inspectionPartId && !existing.inspectionPartId) await existing.update({ inspectionPartId }, { transaction });
+        return existing.id;
+      }
+
+      const job = await InspectionJob.create({
+        workOrderId, workOrderPartId, inspectionPartId: inspectionPartId || null,
+        inspectionType: inspectionType || 'cylinder',
+        unitCount: count, operatorName: operatorName || null,
+        skipPreRoll: !!skipPreRoll,
+      }, { transaction });
+
+      // Create unit records
+      for (let i = 0; i < count; i++) {
+        await InspectionUnit.create({
+          inspectionJobId: job.id,
+          unitId: makeUnitId(drNum, lineNum, i),
+          sequence: i,
+        }, { transaction });
+      }
+      created = true;
+      return job.id;
     });
 
-    // Create unit records
-    const units = [];
-    for (let i = 0; i < count; i++) {
-      units.push(await InspectionUnit.create({
-        inspectionJobId: job.id,
-        unitId: makeUnitId(drNum, lineNum, i),
-        sequence: i,
-      }));
-    }
-
-    const result = await InspectionJob.findByPk(job.id, {
+    const result = await InspectionJob.findByPk(jobId, {
       include: [{ model: InspectionUnit, as: 'units', order: [['sequence', 'ASC']] }]
     });
-    res.json({ data: result });
+    res.json({ data: result, ...(created ? {} : { existing: true }) });
   } catch(error) { next(error); }
 });
 

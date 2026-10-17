@@ -917,25 +917,68 @@ function mergeAttachmentParts(emailParsed, attachmentResults) {
   return emailParsed;
 }
 
+// ── The customer's own RFQ / quote reference on a scanned estimate (round 13, R22) ──
+// Scanned estimates used to take the customer's reference AS the estimate number. Estimate numbers
+// are unique across all clients, so a second client's RFQ with the same reference ("1234") was
+// skipped as a "duplicate". Now every scanned estimate gets a number from the normal estimate counter
+// and the reference is kept on its own line of the estimate's internal notes (the Estimate table has
+// no reference column yet). Duplicates are (client + reference).
+const CUSTOMER_REF_PREFIX = 'Customer reference: ';
+const customerRefLine = (ref) => `${CUSTOMER_REF_PREFIX}${String(ref).trim()}`;
+function withCustomerRef(internalNotes, ref) {
+  const r = String(ref || '').trim();
+  if (!r) return internalNotes || null;
+  return [customerRefLine(r), internalNotes].filter(Boolean).join('\n\n');
+}
+/** The client's estimate carrying this customer reference (also older ones numbered with it), or null */
+async function findEstimateByCustomerRef({ clientId, clientName } = {}, ref) {
+  const r = String(ref || '').trim();
+  if (!r) return null;
+  const { fn, col, where: sqlWhere } = require('sequelize');
+  const clientConds = [];
+  if (clientId) clientConds.push({ clientId });
+  if (clientName && String(clientName).trim()) {
+    clientConds.push({ [Op.and]: [{ clientId: null }, sqlWhere(fn('lower', fn('trim', col('clientName'))), String(clientName).trim().toLowerCase())] });
+    if (!clientId) clientConds.push(sqlWhere(fn('lower', fn('trim', col('clientName'))), String(clientName).trim().toLowerCase()));
+  }
+  if (!clientConds.length) return null;
+  const esc = r.replace(/[\\%_]/g, m => '\\' + m);
+  const rows = await Estimate.findAll({
+    where: { [Op.and]: [
+      { [Op.or]: clientConds },
+      { [Op.or]: [{ estimateNumber: r }, sqlWhere(fn('lower', fn('trim', col('customerReference'))), r.toLowerCase()),
+        { internalNotes: { [Op.iLike]: `%${CUSTOMER_REF_PREFIX}${esc}%` } }] },
+    ] },
+    order: [['createdAt', 'DESC']],
+    limit: 25,
+  });
+  const want = customerRefLine(r).toLowerCase();
+  return rows.find(e => e.estimateNumber === r
+    || String(e.customerReference || '').trim().toLowerCase() === r.toLowerCase()
+    || String(e.internalNotes || '').split('\n').some(l => l.trim().toLowerCase() === want)) || null;
+}
+
 // Create an estimate from parsed email data
 async function createEstimateFromParsed(parsed, clientInfo, scannedEmail, attachmentFiles = []) {
   try {
-    // Use reference number as estimate number for clients like GNB
-    const estNumber = parsed.referenceNumber || await require('./docNumbers').nextDocNumber('EST');
-    
-    // Check for duplicate
-    const existing = await Estimate.findOne({ where: { estimateNumber: estNumber } });
-    if (existing) {
-      console.log(`[EmailScanner] Estimate ${estNumber} already exists, skipping`);
-      return { duplicate: true, estimateId: existing.id };
+    // Duplicate = the same client already has an estimate for this reference (round 13, R22)
+    const customerRef = parsed.referenceNumber ? String(parsed.referenceNumber).trim() : '';
+    if (customerRef) {
+      const existing = await findEstimateByCustomerRef(clientInfo, customerRef);
+      if (existing) {
+        console.log(`[EmailScanner] ${clientInfo.clientName} already has estimate ${existing.estimateNumber} for reference ${customerRef}, skipping`);
+        return { duplicate: true, estimateId: existing.id };
+      }
     }
+    // Our own number, from the normal estimate counter — never the customer's reference
+    const estNumber = await require('./docNumbers').nextDocNumber('EST');
 
     // Build internal notes from AI analysis
     const missingInfo = (parsed.parts || [])
       .filter(p => p.missingFieldNotes)
       .map((p, i) => `Part #${i + 1}: ${p.missingFieldNotes}`)
       .join('\n');
-    const internalNotes = [parsed.aiNotes, missingInfo].filter(Boolean).join('\n\n') || null;
+    const internalNotes = withCustomerRef([parsed.aiNotes, missingInfo].filter(Boolean).join('\n\n') || null, customerRef);
 
     // Match sender email to a contact in the client's contacts array
     const senderEmail = (scannedEmail.fromEmail || '').toLowerCase().trim();
@@ -995,6 +1038,7 @@ async function createEstimateFromParsed(parsed, clientInfo, scannedEmail, attach
       status: 'draft',
       notes: parsed.notes || null,
       internalNotes: internalNotes,
+      customerReference: customerRef || null,
       emailLink: scannedEmail.gmailLink,
       scannedEmailId: scannedEmail.id
     }, { transaction: t });
@@ -1130,7 +1174,11 @@ async function createPendingOrderFromParsed(parsed, clientInfo, scannedEmail) {
       if (matchedEstimate) console.log(`[EmailScanner] Matched by reference number: ${parsed.referencesQuote} → ${matchedEstimate.estimateNumber}`);
     }
 
-    // Strategy 2: AI extracted a generic reference number — check against estimate numbers for this client
+    // Strategy 2: AI extracted a generic reference number — the client's estimate scanned with that
+    // reference (round 13, R22), else check against estimate numbers for this client
+    if (!matchedEstimate && parsed.referenceNumber) {
+      matchedEstimate = await findEstimateByCustomerRef(clientInfo, parsed.referenceNumber);
+    }
     if (!matchedEstimate && parsed.referenceNumber) {
       matchedEstimate = await Estimate.findOne({
         where: {
@@ -2359,6 +2407,8 @@ const fileStorage = require('../utils/storage');
 
 module.exports = {
   createEstimateFromParsed,   // exported for the round-7 integration test (all-or-nothing estimate creation)
+  findEstimateByCustomerRef,
+  withCustomerRef,
   getOAuth2Client,
   getGmailClient,
   runScan,

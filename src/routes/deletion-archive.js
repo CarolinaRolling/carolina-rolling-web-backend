@@ -75,7 +75,8 @@ router.post('/:id/undo', async (req, res, next) => {
     const result = await undo.undoDeletion(req.params.id, { by: req.user?.username });
     const message = result.alreadyThere
       ? 'Nothing needed restoring: those records are still there (the delete did not go through).'
-      : `Restored ${result.restored} item(s)` + (result.truncated ? '. Note: this was a very large delete — some deeply nested records were not saved and could not be brought back.' : '');
+      : `Restored ${result.restored} item(s)` + (result.truncated ? '. Note: this was a very large delete — some deeply nested records were not saved and could not be brought back.' : '')
+        + ((result.notes && result.notes.length) ? '. ' + result.notes.join(' ') : '');
     res.json({ data: result, message });
   } catch (error) {
     if (error instanceof undo.UndoError) return res.status(error.status).json({ error: { message: error.message } });

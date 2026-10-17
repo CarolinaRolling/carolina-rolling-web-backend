@@ -521,8 +521,9 @@ router.get('/files/:fileId/download', authenticate, requireVendorScope, async (r
     let downloadUrl = file.url;
     if (file.cloudinaryId && file.cloudinaryId.startsWith('s3:')) {
       try {
-        const key = file.cloudinaryId.replace(/^s3:/, '');
-        const signed = await fileStorage.getPresignedUrl(key);
+        // getPresignedUrl takes the storage id WITH its "s3:" prefix (this used to strip it and
+        // always fall back to the raw URL — R7)
+        const signed = await fileStorage.getPresignedUrl(file.cloudinaryId);
         if (signed) downloadUrl = signed;
       } catch (e) { /* fall back to file.url */ }
     }
@@ -636,7 +637,10 @@ router.post('/issues', authenticate, requireVendorScope, upload.single('photo'),
           return;
         }
         const woNum = wo.drNumber ? `DR-${wo.drNumber}` : wo.orderNumber;
-        const photoHtml = photoUrl ? `<p><strong>Photo:</strong><br><img src="${photoUrl}" style="max-width:500px;border:1px solid #ccc" /></p>` : '';
+        // a week-long signed link (the longest S3 allows) so the photo shows with a private bucket (R7)
+        let mailPhoto = photoUrl;
+        try { mailPhoto = await require('../utils/storage').accessUrl(photoStorageId, photoUrl, { expiresIn: 7 * 24 * 3600 }); } catch (_) { /* keep stored */ }
+        const photoHtml = mailPhoto ? `<p><strong>Photo:</strong><br><img src="${mailPhoto}" style="max-width:500px;border:1px solid #ccc" /></p>` : '';
         await transporter.sendMail({
           from: process.env.SMTP_FROM || process.env.SMTP_USER,
           to: toEmail,

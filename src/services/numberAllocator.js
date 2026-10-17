@@ -46,7 +46,7 @@ async function allocateDRNumber(models, transaction, { startingNumber = 0 } = {}
 
   // An explicit "next number" set by an admin wins, but only if it has not already been used.
   const setting = await AppSettings.findOne({ where: { key: 'next_dr_number' }, transaction });
-  const configured = setting?.value?.nextNumber;
+  const configured = parseInt(setting?.value?.nextNumber, 10) || 0;   // stored as text by old builds (U42)
 
   const maxFromTable = (await DRNumber.max('drNumber', { transaction })) || 0;
   const maxFromWorkOrders = (await WorkOrder.max('drNumber', { transaction })) || 0;
@@ -87,6 +87,10 @@ async function reserveCustomDRNumber(models, transaction, customNumber) {
     throw err;
   }
 
+  // Every typed DR gets the jump guard — create and convert used to skip it (round 12, audit N14)
+  const jump = await require('./drGuard').jumpProblem(models, drNumber, { transaction });
+  if (jump) { const err = new Error(jump.message); err.status = jump.status || 400; throw err; }
+
   const existingDR = await DRNumber.findOne({ where: { drNumber }, transaction });
   const existingWO = await WorkOrder.findOne({ where: { drNumber }, transaction });
   if (existingDR || existingWO) {
@@ -105,7 +109,7 @@ async function allocatePONumber(models, transaction, { startingNumber = 0 } = {}
   await acquire(sequelize, LOCK_KEYS.po, transaction);
 
   const setting = await AppSettings.findOne({ where: { key: 'next_po_number' }, transaction });
-  const configured = setting?.value?.nextNumber;
+  const configured = parseInt(setting?.value?.nextNumber, 10) || 0;   // stored as text by old builds (U42)
 
   const maxFromTable = (await PONumber.max('poNumber', { transaction })) || 0;
   const highWater = Math.max(maxFromTable, startingNumber);

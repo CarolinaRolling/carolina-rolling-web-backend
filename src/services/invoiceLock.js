@@ -32,9 +32,19 @@ class InvoiceLockedError extends Error {
   }
 }
 
-let suspended = 0;
-const suspendInvoiceLock = () => { suspended++; };
-const resumeInvoiceLock = () => { suspended = Math.max(0, suspended - 1); };
+// Paused only for the request that asks (a backup restore) — other users' edits during a restore
+// are still checked (round 12, audit N20: the pause used to be process-wide). Outside a request it
+// pauses globally. suspendInvoiceLock() returns the function that resumes.
+let globalSuspended = 0;
+const store = () => { try { return require('./undo').contextStore(); } catch (_) { return null; } };
+const isLockSuspended = () => globalSuspended > 0 || !!store()?.invoiceLockSuspended;
+function suspendInvoiceLock() {
+  const st = store();
+  if (st) { st.invoiceLockSuspended = (st.invoiceLockSuspended || 0) + 1; return () => { st.invoiceLockSuspended = Math.max(0, (st.invoiceLockSuspended || 1) - 1); }; }
+  globalSuspended++;
+  return () => { globalSuspended = Math.max(0, globalSuspended - 1); };
+}
+const resumeInvoiceLock = () => { const st = store(); if (st && st.invoiceLockSuspended) st.invoiceLockSuspended--; else globalSuspended = Math.max(0, globalSuspended - 1); };
 
 const plain = (x) => (x && typeof x.toJSON === 'function') ? x.toJSON() : { ...x };
 const cents = (n) => Math.round((Number(n) || 0) * 100);
@@ -91,7 +101,7 @@ const mergedPart = (prevPlain, changes) => {
 
 /** Used by routes that must check BEFORE doing irreversible work (e.g. deleting files). */
 async function assertPartRemovable(part, options) {
-  if (suspended) return;
+  if (isLockSuspended()) return;
   const ctx = await loadLockedContext(part.workOrderId, options);
   if (!ctx) return;
   await assertSameInvoice(ctx, { parts: ctx.parts.filter(p => p.id !== part.id) });
@@ -104,12 +114,12 @@ function registerInvoiceLockHooks(models) {
 
   // ── parts ──
   WorkOrderPart.addHook('beforeCreate', 'invoiceLock', async (inst, options) => {
-    if (suspended) return;
+    if (isLockSuspended()) return;
     const ctx = await loadLockedContext(inst.workOrderId, options);
     if (ctx) await assertSameInvoice(ctx, { parts: [...ctx.parts, { ...plain(inst), id: inst.id || '__new__' }] });
   });
   WorkOrderPart.addHook('beforeUpdate', 'invoiceLock', async (inst, options) => {
-    if (suspended) return;
+    if (isLockSuspended()) return;
     const prev = inst._previousDataValues || {};
     const fields = options.fields || inst.changed() || [];
     if (!fields.length) return;
@@ -128,7 +138,7 @@ function registerInvoiceLockHooks(models) {
   });
   WorkOrderPart.addHook('beforeDestroy', 'invoiceLock', (inst, options) => assertPartRemovable(inst, options));
   WorkOrderPart.addHook('beforeBulkUpdate', 'invoiceLock', async (options) => {
-    if (suspended || !options.where) return;
+    if (isLockSuspended() || !options.where) return;
     const attrs = { ...(options.attributes || {}) };
     delete attrs.updatedAt;
     if (!Object.keys(attrs).length) return;
@@ -143,12 +153,12 @@ function registerInvoiceLockHooks(models) {
 
   // ── shipping charges ──
   ShipmentCharge.addHook('beforeCreate', 'invoiceLock', async (inst, options) => {
-    if (suspended) return;
+    if (isLockSuspended()) return;
     const ctx = await loadLockedContext(inst.workOrderId, options);
     if (ctx) await assertSameInvoice(ctx, { charges: [...ctx.charges, { ...plain(inst), id: inst.id || '__new__' }] });
   });
   ShipmentCharge.addHook('beforeUpdate', 'invoiceLock', async (inst, options) => {
-    if (suspended) return;
+    if (isLockSuspended()) return;
     const fields = options.fields || inst.changed() || [];
     const changes = {};
     for (const f of fields) changes[f] = inst.dataValues[f];
@@ -162,14 +172,14 @@ function registerInvoiceLockHooks(models) {
     }
   });
   ShipmentCharge.addHook('beforeDestroy', 'invoiceLock', async (inst, options) => {
-    if (suspended) return;
+    if (isLockSuspended()) return;
     const ctx = await loadLockedContext(inst.workOrderId, options);
     if (ctx) await assertSameInvoice(ctx, { charges: ctx.charges.filter(c => c.id !== inst.id) });
   });
 
   // ── the order itself (tax, discount, minimum, trucking, client) ──
   WorkOrder.addHook('beforeUpdate', 'invoiceLock', async (inst, options) => {
-    if (suspended) return;
+    if (isLockSuspended()) return;
     const prev = inst._previousDataValues || {};
     if (!prev.iifExportedAt || !inst.iifExportedAt) return;   // not locked, or being un-marked now
     const fields = options.fields || inst.changed() || [];
@@ -182,7 +192,7 @@ function registerInvoiceLockHooks(models) {
     await assertSameInvoice(ctx, { wo: { ...ctx.wo, ...changes } });
   });
   WorkOrder.addHook('beforeBulkUpdate', 'invoiceLock', async (options) => {
-    if (suspended || !options.where) return;
+    if (isLockSuspended() || !options.where) return;
     const attrs = { ...(options.attributes || {}) };
     delete attrs.updatedAt;
     if (!Object.keys(attrs).length || 'iifExportedAt' in attrs) return;

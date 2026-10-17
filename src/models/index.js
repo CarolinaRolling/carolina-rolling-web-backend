@@ -63,6 +63,11 @@ const User = sequelize.define('User', {
   signatureName: {
     type: DataTypes.STRING,
     allowNull: true
+  },
+  // Tokens issued before this are refused (round 12) — set whenever the password changes
+  passwordChangedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
   }
 }, {
   tableName: 'users',
@@ -76,6 +81,7 @@ const User = sequelize.define('User', {
     beforeUpdate: async (user) => {
       if (user.changed('password')) {
         user.password = await bcrypt.hash(user.password, 10);
+        user.passwordChangedAt = new Date();
       }
     }
   }
@@ -540,6 +546,11 @@ const WorkOrder = sequelize.define('WorkOrder', {
     type: DataTypes.TEXT,
     allowNull: true
   },
+  // What linking an estimate changed on this order, so unlinking can put it back (audit T22, round 14)
+  estimateLinkSnapshot: {
+    type: DataTypes.JSONB,
+    allowNull: true
+  },
   receivedAt: {
     type: DataTypes.DATE,
     allowNull: true
@@ -822,10 +833,22 @@ const WorkOrder = sequelize.define('WorkOrder', {
   assignedAt: {
     type: DataTypes.DATE,
     allowNull: true
+  },
+  // W6: highest lot suffix (<DR>-n) ever handed out on this order — deleted parts' lots are never reissued
+  lotSuffixHighWater: {
+    type: DataTypes.INTEGER,
+    allowNull: true
   }
 }, {
   tableName: 'work_orders',
   timestamps: true
+});
+
+// W18: an order that gets its DR after parts were added fills those parts' blank lot numbers
+// (every path that sets the DR: create, dr-number change, DR log assign, shipments).
+WorkOrder.addHook('afterUpdate', 'fillLotsOnFirstDR', async (wo, options) => {
+  if (!wo.changed('drNumber') || !wo.drNumber || wo.previous('drNumber')) return;
+  await require('../services/lotNumbers').fillMissingLots(wo.id, wo.drNumber, { transaction: options && options.transaction });
 });
 
 // WorkOrderPart Model - individual parts within a work order
@@ -1354,6 +1377,12 @@ const Estimate = sequelize.define('Estimate', {
     defaultValue: DataTypes.UUIDV4,
     primaryKey: true
   },
+  // "Show dual pricing" on the estimate PDF — the checkbox existed, the column didn't (round 10, R32)
+  showDualPricing: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: false
+  },
   estimateNumber: {
     type: DataTypes.STRING,
     unique: true,
@@ -1490,6 +1519,12 @@ const Estimate = sequelize.define('Estimate', {
   },
   internalNotes: {
     type: DataTypes.TEXT,
+    allowNull: true
+  },
+  // The customer's own RFQ / quote reference (email-scanned requests). Not the estimate number,
+  // which always comes from the shop's counter (audit R22, round 14)
+  customerReference: {
+    type: DataTypes.STRING,
     allowNull: true
   },
   // Dates
@@ -3786,6 +3821,9 @@ const WorkOrderPayment = sequelize.define('WorkOrderPayment', {
   // Credit card processing details (only when paymentMethod = credit_card).
   ccProcessingType: { type: DataTypes.STRING, allowNull: true }, // 'in_person' (2.6%+$0.15) | 'manual' (3.5%+$0.15)
   ccFeeAmount: { type: DataTypes.DECIMAL(10, 2), allowNull: true }, // the Square fee for this payment, auto-calculated
+  // Card surcharge the customer paid on top of the invoice ("Total with Credit Card Fees"), kept
+  // apart from the amount applied to the invoice so it is income, not credit (audit T6, round 14)
+  cardSurcharge: { type: DataTypes.DECIMAL(10, 2), allowNull: true },
   notes: { type: DataTypes.TEXT, allowNull: true },
   recordedBy: { type: DataTypes.STRING, allowNull: true },
   voidedAt: { type: DataTypes.DATE, allowNull: true },
@@ -3912,6 +3950,8 @@ const ClientPayment = sequelize.define('ClientPayment', {
   paymentDate: { type: DataTypes.DATEONLY, allowNull: false },
   amount: { type: DataTypes.DECIMAL(10, 2), allowNull: false },
   method: { type: DataTypes.STRING, defaultValue: 'check' }, // cash, check, credit_card, ach, other
+  // amount = money for invoices / credit; the card surcharge collected on top is kept here (T6)
+  cardSurcharge: { type: DataTypes.DECIMAL(10, 2), allowNull: true },
   reference: { type: DataTypes.STRING, allowNull: true },
   notes: { type: DataTypes.TEXT, allowNull: true },
   recordedBy: { type: DataTypes.STRING, allowNull: true },
@@ -3936,6 +3976,7 @@ const CreditMemo = sequelize.define('CreditMemo', {
   remainingAmount: { type: DataTypes.DECIMAL(10, 2), allowNull: false },
   reason: { type: DataTypes.TEXT, allowNull: true },
   sourceClientPaymentId: { type: DataTypes.UUID, allowNull: true }, // if auto-created from overpayment
+  sourceWorkOrderId: { type: DataTypes.UUID, allowNull: true },     // an invoice's overpayment moved to credit (T4)
   voidedAt: { type: DataTypes.DATE, allowNull: true },
 }, { tableName: 'credit_memos', timestamps: true });
 
@@ -3962,6 +4003,7 @@ const Refund = sequelize.define('Refund', {
   reason: { type: DataTypes.TEXT, allowNull: true },
   sourceWorkOrderId: { type: DataTypes.UUID, allowNull: true },
   sourceClientPaymentId: { type: DataTypes.UUID, allowNull: true },
+  creditMemoId: { type: DataTypes.UUID, allowNull: true },   // paid out of this memo (round 16)
   recordedBy: { type: DataTypes.STRING, allowNull: true },
   voidedAt: { type: DataTypes.DATE, allowNull: true },
 }, { tableName: 'refunds', timestamps: true });

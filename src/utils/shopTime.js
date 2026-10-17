@@ -65,4 +65,36 @@ function dueStatus(due, today = shopDate()) {
   return 'normal';
 }
 
-module.exports = { TZ, shopDate, asYmd, daysBetween, addDays, shopMidnight, mondayOf, dueStatus, offsetMinutes };
+/**
+ * A date typed for an invoice ('YYYY-MM-DD', no time) → the instant of NOON that day in the shop's
+ * time zone, so every reader (Pacific or UTC) sees the same calendar day. Stored as-is it was
+ * midnight UTC = 4–5 pm Pacific the day before, so QuickBooks and the PDF dated it a day early
+ * (round 11, audit N8). Anything else (a timestamp, a Date) passes through as a Date.
+ */
+function calendarInstant(v) {
+  if (v == null || v === '') return null;
+  if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v.trim())) {
+    const ymd = v.trim();
+    const check = new Date(ymd + 'T12:00:00Z');
+    if (isNaN(check) || check.toISOString().slice(0, 10) !== ymd) return null;   // 2026-13-45, 2026-02-30
+    return new Date(shopMidnight(ymd).getTime() + 12 * 3600000);
+  }
+  const d = v instanceof Date ? v : new Date(v);
+  return isNaN(d) ? null : d;
+}
+
+/**
+ * The shop-calendar day ('YYYY-MM-DD') of a stored invoice-style timestamp. A value at exactly
+ * midnight UTC was saved from a date-only string (before round 11) — it means that calendar day,
+ * not the evening before in Pacific time.
+ */
+function calendarDay(v) {
+  if (!v) return null;
+  if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v.trim())) return v.trim();
+  const d = v instanceof Date ? v : new Date(v);
+  if (isNaN(d)) return null;
+  if (d.getUTCHours() === 0 && d.getUTCMinutes() === 0 && d.getUTCSeconds() === 0 && d.getUTCMilliseconds() === 0) return d.toISOString().slice(0, 10);
+  return shopDate(d);
+}
+
+module.exports = { calendarInstant, calendarDay, TZ, shopDate, asYmd, daysBetween, addDays, shopMidnight, mondayOf, dueStatus, offsetMinutes };

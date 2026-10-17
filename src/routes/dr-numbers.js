@@ -62,19 +62,11 @@ router.get('/', async (req, res, next) => {
 // GET /api/dr-numbers/next - Get next available DR number
 router.get('/next', async (req, res, next) => {
   try {
-    // Check settings for custom next number
+    // What the allocator will actually hand out: max(setting, highest in use + 1) (V25)
     const setting = await AppSettings.findOne({ where: { key: 'next_dr_number' } });
-    
-    if (setting?.value?.nextNumber) {
-      return res.json({ data: { nextNumber: setting.value.nextNumber } });
-    }
-
-    // Find the highest DR number used
-    const lastDR = await DRNumber.findOne({
-      order: [['drNumber', 'DESC']]
-    });
-
-    const nextNumber = lastDR ? lastDR.drNumber + 1 : 1;
+    const configured = parseInt(setting?.value?.nextNumber, 10) || 0;
+    const high = Math.max((await DRNumber.max('drNumber')) || 0, (await WorkOrder.max('drNumber')) || 0);
+    const nextNumber = Math.max(configured, high + 1);
     res.json({ data: { nextNumber } });
   } catch (error) {
     next(error);
@@ -84,10 +76,21 @@ router.get('/next', async (req, res, next) => {
 // PUT /api/dr-numbers/next - Set next DR number
 router.put('/next', async (req, res, next) => {
   try {
-    const { nextNumber } = req.body;
+    // A whole number, stored as a number: "20" stored as text made the allocator do "20"+1 = "201" (U42)
+    const nextNumber = Number(req.body && req.body.nextNumber);
 
-    if (!nextNumber || nextNumber < 1) {
+    if (!Number.isInteger(nextNumber) || nextNumber < 1) {
       return res.status(400).json({ error: { message: 'Valid next number is required' } });
+    }
+    // Moving the DR sequence is an admin action, and a typo far past the highest DR is refused (R17)
+    if (req.user?.role !== 'admin') return res.status(403).json({ error: { message: 'Only an admin can set the next DR number.' } });
+    const jump = await require('../services/drGuard').jumpProblem(require('../models'), parseInt(nextNumber));
+    if (jump) return res.status(jump.status).json({ error: { message: jump.message } });
+
+    // V25: at or below a DR already in use would be skipped anyway — say so instead of saving it
+    const high = Math.max((await DRNumber.max('drNumber')) || 0, (await WorkOrder.max('drNumber')) || 0);
+    if (nextNumber <= high) {
+      return res.status(400).json({ error: { message: `DR-${high} is already in use — the next DR number must be higher than ${high}.` } });
     }
 
     // Check if number already exists
@@ -115,31 +118,21 @@ router.post('/assign', async (req, res, next) => {
   try {
     const { estimateId, workOrderId, clientName, customNumber } = req.body;
 
+    // The shared, locked allocator (R17 / R34: this used an unlocked max + 1)
+    const alloc = require('../services/numberAllocator');
+    const models = require('../models');
     let drNumber;
-
-    if (customNumber) {
-      // Check if custom number is available
-      const existing = await DRNumber.findOne({ where: { drNumber: customNumber }, transaction });
-      if (existing) {
-        await transaction.rollback();
-        return res.status(400).json({ error: { message: `DR-${customNumber} already exists` } });
-      }
-      drNumber = customNumber;
-    } else {
-      // Get next available number
-      const setting = await AppSettings.findOne({ where: { key: 'next_dr_number' }, transaction });
-      
-      if (setting?.value?.nextNumber) {
-        drNumber = setting.value.nextNumber;
-        // Increment for next time
-        await setting.update({ value: { nextNumber: drNumber + 1 } }, { transaction });
+    try {
+      if (customNumber) {
+        const jump = await require('../services/drGuard').jumpProblem(models, parseInt(customNumber), { transaction });
+        if (jump) { await transaction.rollback(); return res.status(jump.status).json({ error: { message: jump.message } }); }
+        drNumber = await alloc.reserveCustomDRNumber(models, transaction, customNumber);
       } else {
-        const lastDR = await DRNumber.findOne({
-          order: [['drNumber', 'DESC']],
-          transaction
-        });
-        drNumber = lastDR ? lastDR.drNumber + 1 : 1;
+        drNumber = await alloc.allocateDRNumber(models, transaction);
       }
+    } catch (e) {
+      if (e.status === 400) { await transaction.rollback(); return res.status(400).json({ error: { message: e.message } }); }
+      throw e;
     }
 
     // Create DR number entry
@@ -181,41 +174,58 @@ router.post('/assign', async (req, res, next) => {
 
 // DELETE /api/dr-numbers/:drNumber/release - Release a DR number (delete entry so it can be reused)
 router.delete('/:drNumber/release', async (req, res, next) => {
+  const transaction = await sequelize.transaction();
   try {
     const drNumber = parseInt(req.params.drNumber);
-    const drEntry = await DRNumber.findOne({ where: { drNumber } });
-    
+    const models = require('../models');
+    const guard = require('../services/drGuard');
+    await guard.lockDR(sequelize, transaction);   // one DR writer at a time (R17)
+    const drEntry = await DRNumber.findOne({ where: { drNumber }, transaction });
     if (!drEntry) {
+      await transaction.rollback();
       return res.status(404).json({ error: { message: `DR-${drNumber} not found` } });
     }
+    const wo = drEntry.workOrderId ? await WorkOrder.findByPk(drEntry.workOrderId, { transaction, lock: transaction.LOCK.UPDATE }) : null;
+    // Admins only, and never on an order with an invoice or payments (R17)
+    const problem = await guard.drActionProblem(models, req, wo || { id: null }, 'release', { transaction });
+    if (problem) { await transaction.rollback(); return res.status(problem.status).json({ error: { message: problem.message } }); }
 
-    // If it has a linked work order, just clear the reference (don't delete the WO)
-    if (drEntry.workOrderId) {
-      const wo = await WorkOrder.findByPk(drEntry.workOrderId);
-      if (wo) {
-        await wo.update({ drNumber: null });
-      }
+    // Lot numbers are "<DR>-<line>": once the order has shipped, those lots are on certs / COCs the
+    // customer holds, and a reused DR would print the same lots again (audit T17)
+    // V7: any pickup (a partial one sets no shipped/picked-up stamp) counts as shipped
+    if (wo && guard.hasShipped(wo)) {
+      await transaction.rollback();
+      return res.status(409).json({ error: { code: 'DR_SHIPPED', message: `DR-${drNumber} has shipped (in full or in part) — its lot numbers are on the customer's paperwork, so it can't be released for reuse. Void it instead.` } });
     }
-
-    // If it has a linked estimate, clear the reference
-    if (drEntry.estimateId) {
-      await Estimate.update({ workOrderId: null }, { where: { id: drEntry.estimateId } });
+    // Clear the number from the order (the order stays) and from the estimate it came from — the
+    // estimate stays linked to its order (this used to unlink it, wrongly)
+    // What Undo must put back (R26): the order's DR, the estimate's, and the lots cleared below
+    const relink = [];
+    if (wo) {
+      relink.push({ table: 'work_orders', col: 'drNumber', value: drNumber, ids: [wo.id] });
+      const [lots] = await sequelize.query(`SELECT id, "lotNumber" FROM work_order_parts WHERE "workOrderId" = :id AND "lotNumber" LIKE :p`,
+        { replacements: { id: wo.id, p: `${drNumber}-%` }, transaction });
+      for (const l of lots) relink.push({ table: 'work_order_parts', col: 'lotNumber', value: l.lotNumber, ids: [l.id], onlyIf: { table: 'work_orders', col: 'drNumber', id: wo.id, value: drNumber } });
     }
+    const ests = await Estimate.findAll({ where: { drNumber }, attributes: ['id'], transaction });
+    if (ests.length) relink.push({ table: 'estimates', col: 'drNumber', value: drNumber, ids: ests.map(e => e.id) });
+    if (wo) {
+      await wo.update({ drNumber: null }, { transaction });
+      // ...and the lots made from it, so a reused DR doesn't hand out the same lot numbers (T17)
+      await sequelize.query(`UPDATE work_order_parts SET "lotNumber" = NULL
+        WHERE "workOrderId" = :id AND "lotNumber" LIKE :p`, { replacements: { id: wo.id, p: `${drNumber}-%` }, transaction });
+      await sequelize.query(`UPDATE work_order_parts SET "formData" = "formData" - 'lotNumber'
+        WHERE "workOrderId" = :id AND jsonb_typeof("formData") = 'object' AND "formData"->>'lotNumber' LIKE :p`, { replacements: { id: wo.id, p: `${drNumber}-%` }, transaction });
+    }
+    await Estimate.update({ drNumber: null }, { where: { drNumber }, transaction });
+    await drEntry.destroy({ transaction, undoRelink: relink });
+    await transaction.commit();
 
-    // Delete the DR entry entirely
-    await drEntry.destroy();
-
-    await logActivity(
-      'deleted',
-      'dr_number',
-      drEntry.id,
-      `DR-${drNumber}`,
-      drEntry.clientName,
-      `DR-${drNumber} released/deleted`
-    );
-
+    await logActivity('deleted', 'dr_number', drEntry.id, `DR-${drNumber}`, drEntry.clientName,
+      `DR-${drNumber} released/deleted by ${req.user?.username || 'unknown'}`);
     res.json({ message: `DR-${drNumber} has been released and can be reused` });
   } catch (error) {
+    if (!transaction.finished) await transaction.rollback();
     next(error);
   }
 });
@@ -229,6 +239,7 @@ router.post('/:drNumber/void', async (req, res, next) => {
     const { reason, voidedBy } = req.body;
 
     if (!reason) {
+      await transaction.rollback();
       return res.status(400).json({ error: { message: 'Void reason is required' } });
     }
 
@@ -247,7 +258,10 @@ router.post('/:drNumber/void', async (req, res, next) => {
 
     // Mark associated work order as voided — keep the record intact for expense tracking
     if (drEntry.workOrderId) {
-      const workOrder = await WorkOrder.findByPk(drEntry.workOrderId, { transaction });
+      const workOrder = await WorkOrder.findByPk(drEntry.workOrderId, { transaction, lock: transaction.LOCK.UPDATE });
+      // invoiced / in QuickBooks: admins only; with payments: void those first (R17)
+      const problem = workOrder ? await require('../services/drGuard').drActionProblem(require('../models'), req, workOrder, 'void', { transaction }) : null;
+      if (problem) { await transaction.rollback(); return res.status(problem.status).json({ error: { message: problem.message } }); }
       if (workOrder) {
         await workOrder.update({
           isVoided: true,
@@ -291,6 +305,8 @@ router.post('/:drNumber/void', async (req, res, next) => {
 
 // POST /api/dr-numbers/:drNumber/unvoid - Restore a voided DR number
 router.post('/:drNumber/unvoid', async (req, res, next) => {
+  // Restoring puts the order (and its invoice) back into receivables — admin only (round 12, N14)
+  if (!require('../services/staffRoles').isAdminCaller(req)) return res.status(403).json({ error: { message: 'Only an admin can restore a voided DR number.' } });
   const transaction = await sequelize.transaction();
   try {
     const drNumber = parseInt(req.params.drNumber);

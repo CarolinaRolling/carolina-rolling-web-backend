@@ -8,6 +8,7 @@ const cron = require('node-cron');
 const { sequelize, Shipment, ShipmentPhoto, ShipmentDocument, User, AppSettings, WorkOrder, Client, DailyActivity, Estimate, TodoItem } = require('./models');
 // Keep each work order's stored grandTotal/taxAmount in step with its parts and charges (audit C4).
 require('./services/invoiceTotals').registerTotalsHooks(require('./models'));
+require('./services/clientLink').registerClientIdHooks(require('./models'));   // round 13, T3
 // Pricing on orders already in QuickBooks can't change without an admin reopening them (audit H10).
 require('./services/invoiceLock').registerInvoiceLockHooks(require('./models'));
 // Every delete of a business record is snapshotted first so it can be undone (round 8)
@@ -60,16 +61,25 @@ if (ALLOWED_ORIGINS.length > 0) {
       if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
       return cb(new Error('Not allowed by CORS'));
     },
-    credentials: true
+    credentials: true,
+    exposedHeaders: ['Content-Disposition', 'X-Skipped-Already-Exported']
   }));
 } else {
   console.warn('[cors] ALLOWED_ORIGINS not set — allowing all origins. Set it to lock this down.');
-  app.use(cors());
+  app.use(cors({ exposedHeaders: ['Content-Disposition', 'X-Skipped-Already-Exported'] }));
 }
-app.use(express.json({ limit: '5mb' }));
+// 5 MB for every route except a backup restore, which parses its own (much larger) body in
+// routes/backup.js — after authentication and the admin check (R27).
+const jsonParser = express.json({ limit: '5mb' });
+const isRestoreUpload = (req) => req.method === 'POST' && /^\/api\/backup\/restore\/?$/.test(req.path);
+app.use((req, res, next) => (isRestoreUpload(req) ? next() : jsonParser(req, res, next)));
 app.use(express.urlencoded({ extended: true }));
 // One "action" per request: everything a request deletes is grouped, so Undo brings it back together
 app.use(require('./services/undo').requestContext);
+// Every link to our S3 bucket leaving the API is signed and expiring; signed links coming back are stored plain (R7)
+app.use(require('./services/signedUrls').signStoredUrls);
+// A stray promise rejection is logged, never allowed to stop the process (Node 22 exits on them)
+process.on('unhandledRejection', (reason) => { console.error('[unhandledRejection]', reason && reason.stack ? reason.stack : reason); });
 
 // Rate limiting. The shop shares one public IP, so the general limit is deliberately generous
 // and exists only to blunt runaway loops and scrapers. Login is limited per USERNAME rather
@@ -78,7 +88,7 @@ const rateLimit = require('express-rate-limit');
 
 const generalLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 600,               // per IP per minute across the whole API
+  max: parseInt(process.env.API_RATE_LIMIT_PER_MIN) || 600,   // per IP per minute across the whole API (env override, e.g. for test runs)
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: { message: 'Too many requests, please slow down.' } }
@@ -111,7 +121,8 @@ app.use((req, res, next) => {
 });
 
 // Serve uploaded files
-app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+// /uploads is only a temporary folder for files being processed (scanned PDFs, bills); nothing links to
+// it, so it is no longer served to the world without a login (round 12, N24).
 
 // Serve static assets (orientation diagrams, etc.)
 app.use('/assets', express.static(path.join(__dirname, 'assets')));
@@ -125,8 +136,35 @@ app.get('/', (req, res) => {
   });
 });
 
-app.get('/health', (req, res) => {
-  res.json({ status: 'healthy' });
+// /health checks what matters (round 12, N22): the database answers, start-up finished (scheduled jobs
+// registered) and the last cloud backup isn't stale. 503 when the database is down.
+const bootState = { dbError: null, jobsRegistered: false, startupError: null };
+app.get('/health', async (req, res) => {
+  const out = { status: 'healthy', database: 'ok', jobs: bootState.jobsRegistered ? 'registered' : 'starting' };
+  try {
+    await Promise.race([sequelize.query('SELECT 1'), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 3000))]);
+  } catch (e) {
+    console.error('[health] database check failed:', bootState.dbError || e.message);   // details in the log, not the public answer
+    return res.status(503).json({ status: 'unhealthy', database: 'unreachable' });
+  }
+  if (bootState.migrating) return res.status(503).json({ status: 'starting', database: 'ok', migrations: 'running' });
+  if (bootState.migrationFailed) {
+    console.error('[health] a database migration failed — see the start-up log');
+    // a busy table (lock timeout) or another server's migration lock is re-tried every 30 s (U26/U45)
+    return res.status(503).json({ status: 'unhealthy', database: 'ok', migrations: bootState.migrationRetrying ? 'pending — a table was busy, retrying in the background' : 'failed (see server log)' });
+  }
+  if (bootState.schemaIncomplete) { console.error('[health] schema changes skipped at start-up:', bootState.schemaIncomplete); return res.status(503).json({ status: 'unhealthy', database: 'ok', schema: 'incomplete — restart when the database is quiet (see server log)' }); }
+  if (bootState.schemaSkipped) { out.status = 'degraded'; out.schema = 'some index/constraint changes postponed to the next start'; }
+  if (bootState.startupError) { out.status = 'degraded'; out.startup = 'error (see server log)'; }
+  try {
+    const row = await AppSettings.findOne({ where: { key: 'last_backup_status' } });
+    const v = row && (typeof row.value === 'string' ? JSON.parse(row.value) : row.value);
+    if (v && v.timestamp) {
+      out.lastBackup = { status: v.status, at: v.timestamp, ageDays: Math.round((Date.now() - new Date(v.timestamp).getTime()) / 864e5 * 10) / 10 };
+      if (v.status !== 'success' || out.lastBackup.ageDays > 8) out.status = 'degraded';
+    }
+  } catch (_) { /* settings table may not exist yet */ }
+  res.json(out);
 });
 
 // API Routes
@@ -137,58 +175,28 @@ app.use('/api', (req, res, next) => {
   if (req.path.startsWith('/auth')) return next();
   return generalLimiter(req, res, next);
 });
+// While a backup restore runs on this dyno, its integrity / invoice-number guards are lifted for the
+// whole database (audit N20), so every other write is refused until it finishes. Reads, sign-in and
+// the backup routes themselves (a second restore gets its own 409) still go through. One boolean
+// check per request. Other dynos are not covered — restores belong in a maintenance window.
+app.use('/api', (req, res, next) => {
+  if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next();
+  if (!backupRoutes.isRestoreRunning()) return next();
+  if (req.path.startsWith('/auth') || req.path.startsWith('/backup')) return next();
+  res.set('Retry-After', '60');
+  return res.status(503).json({ error: { message: 'Restore in progress — changes are paused until it finishes. Try again in a minute.', code: 'RESTORE_IN_PROGRESS' } });
+});
 app.use('/api/auth/login', loginLimiter);
 app.use('/api/auth', authRoutes);
 
 // Email Scanner - OAuth callback MUST be before authenticate middleware (Google redirects browser here)
 const { getOAuth2Client } = require('./services/emailScanner');
-app.get('/api/email-scanner/oauth/callback', async (req, res) => {
-  try {
-    const { code } = req.query;
-    if (!code) return res.status(400).send('No authorization code received');
-
-    const oauth2 = getOAuth2Client();
-    const { tokens } = await oauth2.getToken(code);
-    oauth2.setCredentials(tokens);
-
-    const { google } = require('googleapis');
-    const oauth2Api = google.oauth2({ version: 'v2', auth: oauth2 });
-    const userInfo = await oauth2Api.userinfo.get();
-    const email = userInfo.data.email;
-
-    const { GmailAccount } = require('./models');
-    const [account, created] = await GmailAccount.findOrCreate({
-      where: { email },
-      defaults: {
-        accessToken: tokens.access_token,
-        refreshToken: tokens.refresh_token,
-        tokenExpiry: tokens.expiry_date ? new Date(tokens.expiry_date) : null,
-        isActive: true,
-        connectedBy: 'admin'
-      }
-    });
-    if (!created) {
-      await account.update({
-        accessToken: tokens.access_token,
-        refreshToken: tokens.refresh_token || account.refreshToken,
-        tokenExpiry: tokens.expiry_date ? new Date(tokens.expiry_date) : null,
-        isActive: true,
-        lastError: null
-      });
-    }
-
-    const baseUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-    res.redirect(`${baseUrl}/admin/shop-config?tab=emailScanner&connected=${encodeURIComponent(email)}`);
-  } catch (error) {
-    console.error('[EmailScanner] OAuth callback error:', error.message);
-    const baseUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-    res.redirect(`${baseUrl}/admin/shop-config?tab=emailScanner&error=${encodeURIComponent(error.message)}`);
-  }
-});
+// The state issued by /oauth/start must come back (round 12, R25)
+app.get('/api/email-scanner/oauth/callback', (req, res) => require('./services/gmailOAuth').handleCallback(req, res));
 
 // All other routes require authentication (JWT token or API key)
 const { authenticate, requireAdmin } = require('./routes/auth');
-app.use('/api/shipments', authenticate, shipmentRoutes);
+app.use('/api/shipments', authenticate, require('./services/deviceView').deviceWorkOrderView, shipmentRoutes);   // tablets: no prices (U7)
 
 
 
@@ -431,7 +439,7 @@ app.get('/api/settings/available-models', authenticate, async (req, res) => {
 });
 
 app.use('/api/settings', authenticate, blockPortalKeysFromSettings, settingsRoutes);
-app.use('/api/inbound', authenticate, inboundRoutes);
+app.use('/api/inbound', authenticate, require('./services/deviceView').deviceWorkOrderView, inboundRoutes);   // tablets: no prices (U7)
 app.use('/api/inbound-paperwork', authenticate, inboundPaperworkRoutes);
 // Middleware to block portal/vendor API keys from accessing internal routes
 // Middleware to block portal/vendor API keys from write operations on internal routes
@@ -449,8 +457,9 @@ const blockPortalKeys = (req, res, next) => {
   next();
 };
 
-app.use('/api/workorders', authenticate, blockPortalKeys, workordersRoutes);
+app.use('/api/workorders', authenticate, blockPortalKeys, require('./services/deviceView').deviceWorkOrderView, workordersRoutes);   // tablets see no prices (T36)
 app.use('/api/estimates', authenticate, blockPortalKeys, estimatesRoutes);
+app.get('/api/backup-status/:jobId', backupRoutes.publicStatus);   // V28: restore status by statusToken, no sign-in (status and counts only)
 app.use('/api/backup', authenticate, blockPortalKeys, backupRoutes);
 app.use('/api/deletion-archive', authenticate, blockPortalKeys, deletionArchiveRoutes);
 const businessRoutes = require('./routes/business');
@@ -1225,7 +1234,7 @@ portalRouter.get('/:drNumber/documents', async (req, res, next) => {
     const drNumber = parseInt(req.params.drNumber);
     if (!drNumber) return res.status(400).json({ error: { message: 'Invalid DR number' } });
     const workOrder = await portalModels.WorkOrder.findOne({ where: { drNumber } });
-    if (!workOrder) return res.status(404).json({ error: { message: 'Order not found' } });
+    if (!workOrder || !(await require('./services/keyScope').owns(req, workOrder))) return res.status(404).json({ error: { message: 'Order not found' } });   // a portal key sees only its own client's orders (R2)
     const { Op: portalOp } = require('sequelize');
     // Whitelist: only show document types appropriate for clients
     const PORTAL_ALLOWED_TYPES = ['coc', 'shipping_doc', 'mtr', 'usmca', 'invoice', 'inspection_report', 'general'];
@@ -1256,7 +1265,7 @@ portalRouter.get('/:drNumber/documents/:docId/download', async (req, res, next) 
     const drNumber = parseInt(req.params.drNumber);
     if (!drNumber) return res.status(400).json({ error: { message: 'Invalid DR number' } });
     const workOrder = await portalModels.WorkOrder.findOne({ where: { drNumber } });
-    if (!workOrder) return res.status(404).json({ error: { message: 'Order not found' } });
+    if (!workOrder || !(await require('./services/keyScope').owns(req, workOrder))) return res.status(404).json({ error: { message: 'Order not found' } });   // a portal key sees only its own client's orders (R2)
     const document = await portalModels.WorkOrderDocument.findOne({
       where: { id: req.params.docId, workOrderId: workOrder.id, portalVisible: true }
     });
@@ -1276,7 +1285,8 @@ portalRouter.get('/:drNumber/documents/:docId/download', async (req, res, next) 
 portalRouter.get('/estimate/:estimateNumber/files', async (req, res, next) => {
   try {
     const estimate = await portalModels.Estimate.findOne({ where: { estimateNumber: req.params.estimateNumber } });
-    if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
+    // never a draft or trashed estimate (round 11, N2 — same rule as the estimates routes)
+    if (!estimate || estimate.status === 'draft' || estimate.trashedAt || !(await require('./services/keyScope').owns(req, estimate))) return res.status(404).json({ error: { message: 'Estimate not found' } });
     const parts = await portalModels.EstimatePart.findAll({ where: { estimateId: estimate.id }, include: [{ model: portalModels.EstimatePartFile, as: 'files', where: { portalVisible: true }, required: true }] });
     const files = await Promise.all(parts.flatMap(p => (p.files || []).map(async (f) => {
       let downloadUrl = null;
@@ -1295,7 +1305,8 @@ portalRouter.get('/estimate/:estimateNumber/files', async (req, res, next) => {
 portalRouter.get('/estimate/:estimateNumber/files/:fileId/download', async (req, res, next) => {
   try {
     const estimate = await portalModels.Estimate.findOne({ where: { estimateNumber: req.params.estimateNumber } });
-    if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
+    // never a draft or trashed estimate (round 11, N2 — same rule as the estimates routes)
+    if (!estimate || estimate.status === 'draft' || estimate.trashedAt || !(await require('./services/keyScope').owns(req, estimate))) return res.status(404).json({ error: { message: 'Estimate not found' } });
     const parts = await portalModels.EstimatePart.findAll({ where: { estimateId: estimate.id }, include: [{ model: portalModels.EstimatePartFile, as: 'files' }] });
     const file = parts.flatMap(p => p.files || []).find(f => f.id === req.params.fileId && f.portalVisible);
     if (!file) return res.status(404).json({ error: { message: 'File not found or not available' } });
@@ -1420,14 +1431,36 @@ async function cleanupOldShippedItems() {
     if (shipmentsToDelete.length > 0) {
       console.log(`[Cleanup] Deleting ${shipmentsToDelete.length} shipment records older than 6 months...`);
       
+      let keptForDocs = 0;
       for (const shipment of shipmentsToDelete) {
+       try {
+        // Certificates and other shipment documents must outlive the shipment record (round 12, N22):
+        // they are copied onto the work order first (the file is then still referenced and kept). A
+        // shipment with documents but no work order is kept.
+        const docs = shipment.documents || [];
+        if (docs.length) {
+          if (!shipment.workOrderId) { keptForDocs++; continue; }
+          const { WorkOrderDocument } = require('./models');
+          for (const d of docs) {
+            const exists = await WorkOrderDocument.findOne({ where: { workOrderId: shipment.workOrderId, url: d.url } });
+            if (!exists) {
+              await WorkOrderDocument.create({ workOrderId: shipment.workOrderId, originalName: d.originalName || d.filename,
+                mimeType: d.mimeType, size: d.size, url: d.url, cloudinaryId: d.cloudinaryId, documentType: 'shipment_document' });
+            }
+          }
+        }
         const photoIds = (shipment.photos || []).map(p => p.cloudinaryId).filter(Boolean);
         const docIds = (shipment.documents || []).map(d => d.cloudinaryId).filter(Boolean);
         await shipment.destroy({ archiveBy: 'system', archiveReason: 'automatic cleanup: shipped 6+ months ago' });   // snapshotted by the undo hooks
         for (const id of photoIds) await deleteStoredFileIfUnused(id, { resourceType: 'image' });
         for (const id of docIds) await deleteStoredFileIfUnused(id, { resourceType: 'raw' });
+       } catch (oneErr) {
+        // one bad shipment must not stop the clean-up of the rest (it's retried at the next run)
+        keptForDocs++;
+        console.error(`[Cleanup] shipment ${shipment.id} skipped:`, oneErr.message);
+       }
       }
-      console.log(`[Cleanup] Phase 2 complete: Deleted ${shipmentsToDelete.length} shipment records`);
+      console.log(`[Cleanup] Phase 2 complete: Deleted ${shipmentsToDelete.length - keptForDocs} shipment records${keptForDocs ? ` (kept ${keptForDocs}: documents with no work order, or an error — see above)` : ''}`);
     }
   } catch (error) {
     console.error('[Cleanup] Error:', error);
@@ -1435,6 +1468,66 @@ async function cleanupOldShippedItems() {
 }
 
 // Database sync and server start
+/**
+ * Boot DDL lock limit (round 13, R23). The boot statements run on pooled connections in autocommit, so
+ * a session-level SET would leak to whatever request uses that connection next. Instead, while boot
+ * DDL runs, each schema-changing statement issued outside a transaction is run inside its own short
+ * transaction with SET LOCAL lock_timeout = '5s' (the setting ends with that transaction). A statement
+ * that times out on its lock is logged and skipped (result: no rows), so startup continues; it is
+ * retried at the next boot (all boot DDL is safe to repeat). Not wrapped: statements already in a
+ * transaction (they manage their own), CREATE/DROP INDEX CONCURRENTLY and ALTER TYPE … ADD VALUE
+ * (neither may run in a transaction block on older Postgres). Returns the function that ends this.
+ */
+const { ddlAlreadyDone } = require('./db/migrator');
+function bootDdlLockTimeout(sequelize, timeout = '5s') {
+  const DDL = /^\s*(ALTER|CREATE|DROP|DO|COMMENT)\b/i;
+  const original = sequelize.query;
+  const skipped = [];
+  const wrapped = function (sql, options) {
+    const text = typeof sql === 'string' ? sql : (sql && sql.query) || '';
+    // Only the boot's own statements: a web request served while booting (it carries a request
+    // context) runs as normal (review of round 14)
+    let inRequest = false;
+    try { inRequest = !!(require('./services/undo').contextStore() || {}).req; } catch (_) { /* no context */ }
+    if (inRequest || (options && options.transaction) || !DDL.test(text) || /\bCONCURRENTLY\b/i.test(text) || /^\s*ALTER\s+TYPE\b[\s\S]*\bADD\s+VALUE\b/i.test(text)) {
+      return original.call(this, sql, options);
+    }
+    // A missing column or table breaks every query on that model, so those are retried (up to about a
+    // minute) instead of skipped; other changes (indexes, constraints, defaults) are skipped on a timeout
+    const essential = /\bADD\s+COLUMN\b|^\s*CREATE\s+TABLE\b/i.test(text);
+    const run = (q, o) => original.call(this, q, o);
+    // Already in place (column there with that type, table/index exists)? Skip it without taking the
+    // table lock — ADD COLUMN IF NOT EXISTS / ALTER COLUMN TYPE lock the table even when nothing changes (U27).
+    // The result's metadata says why nothing ran: { bootDdlSkipped: 'done' | 'lock' }.
+    const attempt = (n) => sequelize.transaction(async (t) => {
+      await original.call(this, `SET LOCAL lock_timeout = '${timeout}'`, { transaction: t });
+      return original.call(this, sql, { ...(options || {}), transaction: t });
+    }).catch(async (e) => {
+      if ((e.parent?.code || e.original?.code) !== '55P03') throw e;
+      // done meanwhile (e.g. by another server)? then nothing is missing (U27)
+      if (await ddlAlreadyDone(run, text)) return [[], { bootDdlSkipped: 'done' }];
+      if (essential && n < 6) { await new Promise(r => setTimeout(r, Math.min(1000 * 2 ** n, 8000))); return attempt(n + 1); }
+      const what = text.replace(/\s+/g, ' ').trim().slice(0, 120);
+      skipped.push({ what, essential });
+      console.warn(`[boot] schema change skipped — table lock not available within ${timeout} (retried next boot): ${what}`);
+      return [[], { bootDdlSkipped: 'lock' }];
+    });
+    return ddlAlreadyDone(run, text).then(done => (done ? [[], { bootDdlSkipped: 'done' }] : attempt(0)));
+  };
+  sequelize.query = wrapped;
+  let ended = false;
+  return () => {
+    if (ended) return skipped;
+    ended = true;
+    if (sequelize.query === wrapped) delete sequelize.query;   // back to the prototype method
+    if (skipped.length) console.warn(`[boot] ${skipped.length} schema change(s) were skipped on a lock timeout and will be retried at the next start`);
+    // /health reports it: a skipped column / table means some queries will fail until a restart
+    if (skipped.some(x => x.essential)) bootState.schemaIncomplete = skipped.filter(x => x.essential).map(x => x.what);
+    else if (skipped.length) bootState.schemaSkipped = skipped.map(x => x.what);
+    return skipped;
+  };
+}
+
 async function startServer() {
   // Start listening IMMEDIATELY so Heroku doesn't kill us during DB sync
   const server = app.listen(PORT, () => {
@@ -1445,22 +1538,73 @@ async function startServer() {
 
   // Prevent Heroku H13 (Connection closed without response) and H18 (Server Request Interrupted)
   // Heroku's router timeout is 30s, keep Node's alive longer to avoid premature close
+  // Idempotency keys older than a day are removed (round 12)
+  setInterval(() => require('./services/idempotency').prune(), 6 * 3600 * 1000).unref();
   server.keepAliveTimeout = 65000; // 65s > Heroku's 55s ALB idle timeout
   server.headersTimeout = 66000;   // Slightly higher than keepAlive
 
+  let endBootDdl = () => [];
   try {
-    await sequelize.authenticate();
+    // Wait for the database instead of giving up: before, a database that was unreachable at boot
+    // meant no scheduled job (backups, reminders, cleanups) was registered until the next restart,
+    // silently (round 12, audit N22)
+    for (let attempt = 1; ; attempt++) {
+      try { await sequelize.authenticate(); break; }
+      catch (dbErr) {
+        bootState.dbError = dbErr.message;
+        console.error(`[boot] database not reachable (attempt ${attempt}): ${dbErr.message} — retrying in 15s`);
+        await new Promise(r => setTimeout(r, 15000));
+      }
+    }
+    bootState.dbError = null;
     console.log('Database connected successfully');
 
     // Schema migrations (src/db/migrations) run first, before anything else touches the schema —
     // 0001 builds every table on an EMPTY database, which the boot SQL below assumes exist (audit M9).
     // A failure here is logged loudly; startup continues so the existing boot SQL still runs.
+    bootState.migrating = true;   // /health: 503 "running" until the schema is known to be done (U26)
     try {
       const ran = await require('./db/migrator').runMigrations(sequelize);
       if (!ran.length) console.log('[migrate] database is up to date');
     } catch (migErr) {
-      console.error('[migrate] MIGRATION FAILED — fix and redeploy (it will be retried at next start):', migErr.message);
-    }
+      if (/migration lock|lock timeout/i.test(migErr.message)) console.error('[migrate] MIGRATION NOT DONE — re-trying in the background every 30 s:', migErr.message);
+      else console.error('[migrate] MIGRATION FAILED — fix and redeploy (it will be retried at next start):', migErr.message);
+      // /health reports it (round 13, T27 — it said "healthy" while every login failed on the old schema)
+      bootState.startupError = 'migration failed: ' + migErr.message;
+      bootState.migrationFailed = true;
+      // Lost the lock to a slow migration on another server, or a table was busy (lock timeout, U26/U45):
+      // keep re-trying in the background and clear the failure once the schema is done, instead of
+      // staying "unhealthy" until a restart (review of round 14). One background run at a time, and
+      // only 2 short tries per statement so a still-busy table is held up for at most a few seconds.
+      const transient = (m) => /migration lock|lock timeout/i.test(m);
+      if (transient(migErr.message)) {
+        bootState.migrationRetrying = true;
+        let busy = false;
+        const recheck = setInterval(async () => {
+          if (busy) return;
+          busy = true;
+          try {
+            const ran = await require('./db/migrator').runMigrations(sequelize, { waitMs: 0, lockAttempts: 2, log: () => {} });
+            clearInterval(recheck);
+            bootState.migrationFailed = false; bootState.migrationRetrying = false;
+            if (bootState.startupError && /^migration failed: /.test(bootState.startupError)) bootState.startupError = null;
+            console.log(`[migrate] schema is up to date now${ran.length ? ` (ran ${ran.map(r => r.name).join(', ')})` : ''}`);
+          } catch (e) {
+            bootState.startupError = 'migration failed: ' + e.message;
+            if (!transient(e.message)) { clearInterval(recheck); bootState.migrationRetrying = false; console.error('[migrate] background re-check failed:', e.message); }
+            else console.warn('[migrate] still waiting (re-trying every 30 s):', e.message);
+          } finally { busy = false; }
+        }, 30000);
+        recheck.unref();
+      }
+    } finally { bootState.migrating = false; }
+    try { await require('./services/integrityConstraints').ensureEnumValues(sequelize); }   // round 13, T28
+    catch (e) { console.warn('[enums] check failed:', e.message); }
+
+    // Every schema change below (ALTER / CREATE / DROP / DO, until the cron jobs are registered) waits
+    // at most 5 s for its table lock, so one stuck behind a long transaction gives up — logged, retried
+    // next boot — instead of queueing every query on that table behind it (round 13, R23).
+    endBootDdl = bootDdlLockTimeout(sequelize);
     
     // CRITICAL: Convert work_orders status from ENUM to VARCHAR BEFORE sync
     // (sync will fail if model says STRING but DB has ENUM)
@@ -1529,9 +1673,9 @@ async function startServer() {
         );
         if (typeInfo.length > 0) {
           const enumName = typeInfo[0].udt_name;
-          const [vals] = await sequelize.query(`SELECT unnest(enum_range(NULL::${enumName}))::text as val`);
+          const [vals] = await sequelize.query(`SELECT unnest(enum_range(NULL::"${enumName}"))::text as val`);
           if (!vals.some(v => v.val === 'rush_service')) {
-            await sequelize.query(`ALTER TYPE ${enumName} ADD VALUE IF NOT EXISTS 'rush_service'`);
+            await sequelize.query(`ALTER TYPE "${enumName}" ADD VALUE IF NOT EXISTS 'rush_service'`);
             console.log(`Added rush_service to ${enumName}`);
           }
         }
@@ -1548,9 +1692,9 @@ async function startServer() {
         );
         if (typeInfo.length > 0) {
           const enumName = typeInfo[0].udt_name;
-          const [vals] = await sequelize.query(`SELECT unnest(enum_range(NULL::${enumName}))::text as val`);
+          const [vals] = await sequelize.query(`SELECT unnest(enum_range(NULL::"${enumName}"))::text as val`);
           if (!vals.some(v => v.val === 'on_edge')) {
-            await sequelize.query(`ALTER TYPE ${enumName} ADD VALUE IF NOT EXISTS 'on_edge'`);
+            await sequelize.query(`ALTER TYPE "${enumName}" ADD VALUE IF NOT EXISTS 'on_edge'`);
             console.log(`Added on_edge to ${enumName}`);
           }
         }
@@ -2008,10 +2152,15 @@ async function startServer() {
 
     // Widen tax-rate columns so precise custom rates (e.g. 3.9375%) don't get rounded to 2 decimals.
     try {
-      await sequelize.query(`ALTER TABLE clients ALTER COLUMN "customTaxRate" TYPE DECIMAL(12,6)`);
-      await sequelize.query(`ALTER TABLE work_orders ALTER COLUMN "taxRate" TYPE DECIMAL(7,4)`);
-      await sequelize.query(`ALTER TABLE estimates ALTER COLUMN "taxRate" TYPE DECIMAL(7,4)`);
-      console.log('Tax-rate precision columns widened');
+      const widen = [
+        await sequelize.query(`ALTER TABLE clients ALTER COLUMN "customTaxRate" TYPE DECIMAL(12,6)`),
+        await sequelize.query(`ALTER TABLE work_orders ALTER COLUMN "taxRate" TYPE DECIMAL(7,4)`),
+        await sequelize.query(`ALTER TABLE estimates ALTER COLUMN "taxRate" TYPE DECIMAL(7,4)`),
+      ].map(r => (r && r[1] && r[1].bootDdlSkipped) || 'changed');
+      // say what really happened (U27): already wide / widened now / postponed on a busy table
+      if (widen.includes('lock')) console.log(`Tax-rate precision columns: ${widen.filter(x => x === 'lock').length} postponed (table busy) — retried next start`);
+      else if (widen.every(x => x === 'done')) console.log('Tax-rate precision columns already widened');
+      else console.log('Tax-rate precision columns widened');
     } catch(e) { console.log('Tax-rate precision migration error:', e.message); }
 
     // Bill-extraction attempt counter (queue safety — limits retries so bills can't loop forever).
@@ -2138,11 +2287,8 @@ async function startServer() {
       await sequelize.query(`ALTER TABLE invoice_numbers ADD COLUMN IF NOT EXISTS "invoicePdfGenerated" BOOLEAN DEFAULT false`);
     } catch (e) { console.log('Invoice fields migration skip:', e.message); }
 
-    // Fix existing MTR/COC docs that weren't set as portalVisible
-    try {
-      await sequelize.query(`UPDATE work_order_documents SET "portalVisible" = true WHERE "documentType" IN ('mtr','coc','shipping_doc') AND "portalVisible" = false`);
-      console.log('MTR/COC portalVisible backfill complete');
-    } catch (e) { console.log('portalVisible backfill skip:', e.message); }
+    // (Removed in round 9, audit R6: a one-time backfill that set portalVisible=true on every MTR / COC /
+    // shipping document at EVERY boot — re-showing documents staff had hidden from the client portal.)
 
     for (const sql of migrations) {
       try { await sequelize.query(sql); } catch (e) { console.log('migration skip:', e.message.split('\n')[0]); }
@@ -2243,22 +2389,10 @@ async function startServer() {
       if (poCount > 0 || ioCount > 0) console.log(`Backfilled vendorId: ${poCount} POs, ${ioCount} inbound orders`);
     } catch (e) { console.log('VendorId backfill skipped:', e.message); }
 
-    // Backfill clientId on WOs, Estimates, etc. that only have clientName
+    // Backfill clientId on orders, estimates, etc. that only have clientName (new rows get it from the
+    // model hook — services/clientLink.js)
     try {
-      const tables = ['work_orders', 'estimates', 'po_numbers', 'inbound_orders', 'dr_numbers'];
-      let totalFixed = 0;
-      for (const tbl of tables) {
-        try {
-          const [fixed] = await sequelize.query(`
-            UPDATE "${tbl}" SET "clientId" = c.id 
-            FROM clients c 
-            WHERE "${tbl}"."clientId" IS NULL 
-            AND "${tbl}"."clientName" IS NOT NULL 
-            AND LOWER("${tbl}"."clientName") = LOWER(c.name)
-          `);
-          totalFixed += fixed?.rowCount || 0;
-        } catch {}
-      }
+      const totalFixed = await require('./services/clientLink').backfillClientIds(sequelize);
       if (totalFixed > 0) console.log(`Backfilled clientId: ${totalFixed} records across tables`);
     } catch (e) { console.log('ClientId backfill skipped:', e.message); }
     
@@ -2300,45 +2434,45 @@ async function startServer() {
           if (typeInfo.length > 0) {
             const enumName = typeInfo[0].udt_name;
             // Check if flat_stock exists
-            const [vals] = await sequelize.query(`SELECT unnest(enum_range(NULL::${enumName}))::text as val`);
+            const [vals] = await sequelize.query(`SELECT unnest(enum_range(NULL::"${enumName}"))::text as val`);
             const hasFlat = vals.some(v => v.val === 'flat_stock');
             if (!hasFlat) {
-              await sequelize.query(`ALTER TYPE ${enumName} ADD VALUE IF NOT EXISTS 'flat_stock'`);
+              await sequelize.query(`ALTER TYPE "${enumName}" ADD VALUE IF NOT EXISTS 'flat_stock'`);
               console.log(`Added flat_stock to ${enumName}`);
             }
             const hasTube = vals.some(v => v.val === 'tube_roll');
             if (!hasTube) {
-              await sequelize.query(`ALTER TYPE ${enumName} ADD VALUE IF NOT EXISTS 'tube_roll'`);
+              await sequelize.query(`ALTER TYPE "${enumName}" ADD VALUE IF NOT EXISTS 'tube_roll'`);
               console.log(`Added tube_roll to ${enumName}`);
             }
             const hasCone = vals.some(v => v.val === 'cone_roll');
             if (!hasCone) {
-              await sequelize.query(`ALTER TYPE ${enumName} ADD VALUE IF NOT EXISTS 'cone_roll'`);
+              await sequelize.query(`ALTER TYPE "${enumName}" ADD VALUE IF NOT EXISTS 'cone_roll'`);
               console.log(`Added cone_roll to ${enumName}`);
             }
             const hasTee = vals.some(v => v.val === 'tee_bar');
             if (!hasTee) {
-              await sequelize.query(`ALTER TYPE ${enumName} ADD VALUE IF NOT EXISTS 'tee_bar'`);
+              await sequelize.query(`ALTER TYPE "${enumName}" ADD VALUE IF NOT EXISTS 'tee_bar'`);
               console.log(`Added tee_bar to ${enumName}`);
             }
             const hasPressBrake = vals.some(v => v.val === 'press_brake');
             if (!hasPressBrake) {
-              await sequelize.query(`ALTER TYPE ${enumName} ADD VALUE IF NOT EXISTS 'press_brake'`);
+              await sequelize.query(`ALTER TYPE "${enumName}" ADD VALUE IF NOT EXISTS 'press_brake'`);
               console.log(`Added press_brake to ${enumName}`);
             }
             const hasFabService = vals.some(v => v.val === 'fab_service');
             if (!hasFabService) {
-              await sequelize.query(`ALTER TYPE ${enumName} ADD VALUE IF NOT EXISTS 'fab_service'`);
+              await sequelize.query(`ALTER TYPE "${enumName}" ADD VALUE IF NOT EXISTS 'fab_service'`);
               console.log(`Added fab_service to ${enumName}`);
             }
             const hasShopRate = vals.some(v => v.val === 'shop_rate');
             if (!hasShopRate) {
-              await sequelize.query(`ALTER TYPE ${enumName} ADD VALUE IF NOT EXISTS 'shop_rate'`);
+              await sequelize.query(`ALTER TYPE "${enumName}" ADD VALUE IF NOT EXISTS 'shop_rate'`);
               console.log(`Added shop_rate to ${enumName}`);
             }
             const hasRushService = vals.some(v => v.val === 'rush_service');
             if (!hasRushService) {
-              await sequelize.query(`ALTER TYPE ${enumName} ADD VALUE IF NOT EXISTS 'rush_service'`);
+              await sequelize.query(`ALTER TYPE "${enumName}" ADD VALUE IF NOT EXISTS 'rush_service'`);
               console.log(`Added rush_service to ${enumName}`);
             }
           }
@@ -2582,6 +2716,7 @@ async function startServer() {
     } catch (e) { console.log('portalVisible migration (wo_docs):', e.message); }
     try {
       await sequelize.query(`ALTER TABLE estimate_part_files ADD COLUMN IF NOT EXISTS "portalVisible" BOOLEAN DEFAULT false`);
+      await sequelize.query(`ALTER TABLE estimate_files ADD COLUMN IF NOT EXISTS "portalVisible" BOOLEAN NOT NULL DEFAULT false`);
       console.log('Ensured portalVisible column on estimate_part_files');
     } catch (e) { console.log('portalVisible migration (est_files):', e.message); }
 
@@ -2746,6 +2881,8 @@ async function startServer() {
       await sequelize.query(`CREATE INDEX IF NOT EXISTS idx_vendor_issues_vendor ON vendor_issues("vendorId")`);
       console.log('Ensured outside processing tracking columns on work_order_parts');
     } catch (e) { console.log('outside processing tracking migration:', e.message); }
+
+    endBootDdl();
 
     // Quote reminders — every 4 hours during business hours (7:30am–4pm Pacific), Mon–Fri.
     // 7:30, 11:30, 3:30 — all inside the 7:30a–4p window.
@@ -3258,10 +3395,24 @@ Please confirm with the operator and mark the order complete if ready.`,
           where: { trashedAt: { [Op.lt]: cutoff } },
           include: [{ model: EstimateFile, as: 'files' }]
         });
-        if (trashed.length > 0) {
+        // V21: the same rule as a permanent delete by hand — an estimate with material still on order
+        // (an active PO whose delivery isn't received, or an open delivery) stays in the trash
+        let held = new Set();
+        if (trashed.length) {
+          const [open] = await sequelize.query(`SELECT e.id, e."estimateNumber" FROM estimates e WHERE e.id IN (:ids) AND (
+              EXISTS (SELECT 1 FROM po_numbers p WHERE p."estimateId" = e.id AND p.status = 'active'
+                AND NOT EXISTS (SELECT 1 FROM inbound_orders i WHERE i.status = 'received'
+                  AND (i.id = p."inboundOrderId" OR i."purchaseOrderNumber" IN ('PO' || p."poNumber", 'OP' || p."poNumber", 'TR' || p."poNumber"))))
+              OR EXISTS (SELECT 1 FROM inbound_orders i WHERE i."estimateId" = e.id AND COALESCE(i.status, '') NOT IN ('received', 'cancelled')))`,
+            { replacements: { ids: trashed.map(e => e.id) } });
+          held = new Set(open.map(r => r.id));
+          if (open.length) console.warn(`[Trash] Kept ${open.length} estimate(s) with material still on order: ${open.map(r => r.estimateNumber || r.id).join(', ')}`);
+        }
+        const toDelete = trashed.filter(e => !held.has(e.id));
+        if (toDelete.length > 0) {
           const { withUndoGroup } = require('./services/undo');
           const { deleteStoredFilesIfUnused } = require('./services/fileRefs');
-          for (const est of trashed) {
+          for (const est of toDelete) {
             // one undo group per estimate (Deleted Items → Undo brings back the estimate with its parts and files)
             await withUndoGroup(async () => {
               const partIds = (await EstimatePart.findAll({ where: { estimateId: est.id }, attributes: ['id'] })).map(p => p.id);
@@ -3277,7 +3428,7 @@ Please confirm with the operator and mark the order complete if ready.`,
               await deleteStoredFilesIfUnused(fileIds);
             }, { by: 'trash cleanup' });
           }
-          console.log(`[Trash] Permanently deleted ${trashed.length} estimates older than 30 days`);
+          console.log(`[Trash] Permanently deleted ${toDelete.length} estimates older than 30 days`);
         }
       } catch (err) {
         console.error('[Trash] Cleanup error:', err.message);
@@ -3292,8 +3443,11 @@ Please confirm with the operator and mark the order complete if ready.`,
         if (r.purged) console.log(`[undo] removed ${r.purged} expired deleted-item snapshot(s)`);
       } catch (e) { console.error('[undo] purge failed:', e.message); }
     }, { timezone: 'America/Los_Angeles' });
+    bootState.jobsRegistered = true;
 
   } catch (error) {
+    endBootDdl();   // never leave the boot lock-timeout wrapper in place after a startup error
+    bootState.startupError = error.message;
     console.error('Startup error (server still running):', error.message);
   }
 }

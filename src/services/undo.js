@@ -180,8 +180,11 @@ async function snapshot(model, { ids, where }, options = {}) {
       const byTable = { [table]: rowsHere.map(r => r.id) };
       for (const [tb, rs] of Object.entries(cascade)) if (rs[0]?.id !== undefined) (byTable[tb] ||= []).push(...rs.map(r => r.id));
       const nulled = await collectNulled(sequelize, byTable, t);
+      // Links the route cleared by hand before this delete (a DR release clears the order's DR and its
+      // lot numbers, a PO release the parts' PO fields): put back on Undo like the database's own (R26)
+      if (Array.isArray(options.undoRelink)) nulled.push(...options.undoRelink.filter(n => n && n.table && n.col && n.ids && n.ids.length));
       const storageIds = [...new Set([...storageIdsOf(table, rowsHere), ...Object.entries(cascade).flatMap(([tb, rs]) => storageIdsOf(tb, rs))])];
-      return { cascade, nulled, truncated: budget.truncated || undefined, storageIds: storageIds.length ? storageIds : null };
+      return { cascade, nulled, undoNote: options.undoNote || undefined, truncated: budget.truncated || undefined, storageIds: storageIds.length ? storageIds : null };
     };
     if (rows.length <= PER_ROW_LIMIT) {
       for (const row of rows) {
@@ -228,6 +231,9 @@ function explain(e, entry) {
   const detail = e.parent?.detail || e.original?.detail || '';
   const what = entry.label || entry.modelName;
   if (code === '23505') return `${what} can't come back: something now uses the same value (${detail.replace(/^Key /, '')}).`;
+  // V11: a missing client / vendor is not "deleted too" with this record — say what it is
+  const parent = (detail.match(/not present in table "([^"]+)"/) || [])[1];
+  if (code === '23503' && (parent === 'clients' || parent === 'vendors')) return `${what} can't come back: the ${parent === 'clients' ? 'client' : 'vendor'} it belonged to no longer exists. Undo that ${parent === 'clients' ? 'client' : 'vendor'}'s deletion first, or re-create it.`;
   if (code === '23503') return `${what} can't come back on its own: the record it belonged to is deleted too. Undo that deletion first.`;
   return `${what} can't come back: ${e.message}`;
 }
@@ -264,6 +270,106 @@ async function insertRow(sequelize, table, row, transaction, colCache) {
     { replacements: { row: JSON.stringify(clean) }, transaction });
 }
 
+// V11: a restored row's client / vendor as they are NOW. The snapshot's id may have been merged away
+// (FK error) or renamed since (the old name came back). By id → its current name; else the merge log's
+// target; else the same name (ignoring case / spaces); else no id, name kept. Rows linked only by name
+// are left alone. Ids being restored in this same undo are kept as they are.
+let partySpecs = null, jsonSpecs = null;
+function partyColumns(table) {
+  if (!partySpecs) {
+    const { CLIENT, VENDOR } = require('./partyRefs');
+    partySpecs = {}; jsonSpecs = {};
+    for (const [kind, parent, spec] of [['clients', 'clients', CLIENT], ['vendors', 'vendors', VENDOR]]) {
+      for (const [t, idCol, names] of spec.linked) (partySpecs[t] ||= []).push({ kind, parent, idCol, names });
+      // W21: ids kept inside JSONB lists (outside-processing lines, trucking trips)
+      for (const [t, col, idKey, nameKey] of spec.jsonLists || []) (jsonSpecs[t] ||= []).push({ kind, parent, col, idKey, nameKey });
+    }
+  }
+  return partySpecs[table] || [];
+}
+function partyFinder(sequelize, transaction, cache) {
+  return async (parent, sql, rep) => {
+    const k = `${parent}:${sql}:${JSON.stringify(rep)}`;
+    if (!(k in cache)) { const [[r]] = await sequelize.query(sql, { replacements: rep, transaction }); cache[k] = r || null; }
+    return cache[k];
+  };
+}
+// One party id as it is now: { hit } (null = gone, unlink) or { keep: true } (deleted, still in Deleted Items)
+async function resolveParty(sequelize, transaction, find, kind, parent, id, name) {
+  const { mergedInto } = require('./partyRefs');
+  let hit = await find(parent, `SELECT id, name FROM ${q(parent)} WHERE id = :id`, { id });
+  if (!hit) {
+    const to = await mergedInto(sequelize, kind, id, transaction);
+    if (to) hit = await find(parent, `SELECT id, name FROM ${q(parent)} WHERE id = :id`, { id: to });
+  }
+  if (!hit && name) hit = await find(parent, `SELECT id, name FROM ${q(parent)} WHERE lower(trim(name)) = lower(trim(CAST(:n AS text))) ORDER BY "createdAt" LIMIT 1`, { n: name });
+  if (!hit) {
+    // Deleted (not merged) and still in Deleted Items: keep the link — Undo then asks to bring the
+    // client back first, as before, instead of restoring the order with no client (review of round 16)
+    const archived = await find(parent, `SELECT 1 AS x FROM deletion_archive WHERE "tableName" = :t AND "recordId" = :id AND "restoredAt" IS NULL LIMIT 1`, { t: parent, id: String(id) });
+    if (archived) return { keep: true };
+  }
+  return { hit };
+}
+async function resolveParties(sequelize, table, row, transaction, restoringIds, cache) {
+  const specs = partyColumns(table);
+  const lists = jsonSpecs[table] || [];
+  if (!specs.length && !lists.length) return row;
+  const out = { ...row };
+  const find = partyFinder(sequelize, transaction, cache);
+  for (const { kind, parent, idCol, names } of specs) {
+    const id = out[idCol];
+    if (!id || restoringIds.has(`${parent}:${id}`)) continue;
+    const names_ = names.filter(n => n in out);
+    const name = names_.map(n => out[n]).find(v => v && String(v).trim());
+    const { hit, keep } = await resolveParty(sequelize, transaction, find, kind, parent, id, name);
+    if (keep) continue;
+    out[idCol] = hit ? hit.id : null;
+    if (hit) for (const n of names_) if (out[n] != null && String(out[n]).trim()) out[n] = hit.name;
+  }
+  // W21: the same for ids inside JSONB lists
+  for (const { kind, parent, col, idKey, nameKey } of lists) {
+    let list = out[col], wasString = false;
+    if (typeof list === 'string') { try { list = JSON.parse(list); wasString = true; } catch (_) { continue; } }
+    if (!Array.isArray(list)) continue;
+    let changed = false;
+    const next = [];
+    for (const e of list) {
+      const id = e && typeof e === 'object' ? e[idKey] : null;
+      if (!id || restoringIds.has(`${parent}:${id}`)) { next.push(e); continue; }
+      const name = nameKey && e[nameKey] && String(e[nameKey]).trim() ? e[nameKey] : null;
+      const { hit, keep } = await resolveParty(sequelize, transaction, find, kind, parent, id, name);
+      if (keep) { next.push(e); continue; }
+      const ne = { ...e, [idKey]: hit ? String(hit.id) : null };
+      if (hit && name) ne[nameKey] = hit.name;
+      if (String(ne[idKey]) !== String(id) || (nameKey && ne[nameKey] !== e[nameKey])) changed = true;
+      next.push(ne);
+    }
+    if (changed) out[col] = wasString ? JSON.stringify(next) : next;
+  }
+  return out;
+}
+// W21: a shipment names its client only. It takes its order's client (as it is now, or as it comes back
+// in this undo); with no order, a client merged away since is followed by name → merge log.
+async function resolveShipmentClient(sequelize, row, transaction, restoringOrders, restoringIds, cache) {
+  const name = row.clientName && String(row.clientName).trim() ? row.clientName : null;
+  if (!name) return row;
+  const find = partyFinder(sequelize, transaction, cache);
+  if (row.workOrderId) {
+    const wo = restoringOrders.get(row.workOrderId)
+      || await find('work_orders', `SELECT "clientName" FROM work_orders WHERE id = :id`, { id: row.workOrderId });
+    if (wo && wo.clientName && String(wo.clientName).trim()) return wo.clientName === row.clientName ? row : { ...row, clientName: wo.clientName };
+  }
+  const live = await find('clients', `SELECT id, name FROM clients WHERE lower(trim(name)) = lower(trim(CAST(:n AS text))) ORDER BY "createdAt" LIMIT 1`, { n: name });
+  if (live) return live.name === row.clientName ? row : { ...row, clientName: live.name };
+  const gone = await find('clients', `SELECT "recordId" AS id FROM deletion_archive WHERE "tableName" = 'clients' AND "recordId" IS NOT NULL
+    AND lower(trim(snapshot->'row'->>'name')) = lower(trim(CAST(:n AS text))) ORDER BY "createdAt" DESC LIMIT 1`, { n: name });
+  if (!gone || restoringIds.has(`clients:${gone.id}`)) return row;
+  const to = await require('./partyRefs').mergedInto(sequelize, 'clients', gone.id, transaction);
+  const target = to ? await find('clients', `SELECT id, name FROM clients WHERE id = :id`, { id: to }) : null;
+  return target ? { ...row, clientName: target.name } : row;
+}
+
 /** Undo the deletion that `entryId` belongs to (its whole group). */
 async function undoDeletion(entryId, { by } = {}) {
   const { sequelize } = require('../models');
@@ -280,6 +386,7 @@ async function undoDeletion(entryId, { by } = {}) {
   const restoredWorkOrders = new Set();
   let inserted = 0;
   const colCache = {};
+  const lotNotes = [];
   await sequelize.transaction(async (t) => {
     await sequelize.query('SET CONSTRAINTS ALL DEFERRED', { transaction: t });
     // Every row to put back: each snapshot's own row, then its cascade children (shallow → deep).
@@ -293,14 +400,81 @@ async function undoDeletion(entryId, { by } = {}) {
       for (const [table, rows] of Object.entries(cascade)) for (const r of rows) add(table, r, r.__depth || 1);
     }
     items.sort((a, b) => a.depth - b.depth || ((a.row.partNumber ?? 0) - (b.row.partNumber ?? 0)));
+    // A priced line can't come back onto an invoice that is already in QuickBooks — the same rule as
+    // adding one by hand (audit R26). Restoring the whole order (with its lines) is fine.
+    const restoringOrders = new Set(items.filter(it => it.table === 'work_orders').map(it => it.row.id));
+    for (const it of items) {
+      if (!['work_order_parts', 'shipment_charges'].includes(it.table)) continue;
+      const woId = it.row.workOrderId;
+      if (!woId || restoringOrders.has(woId)) continue;
+      const [[wo]] = await sequelize.query(`SELECT "iifExportedAt" FROM work_orders WHERE id = :id`, { replacements: { id: woId }, transaction: t });
+      if (wo && wo.iifExportedAt) throw new UndoError(`${it.entry.label || 'This line'} can't come back: its invoice is already in QuickBooks, so its prices are locked. Reopen the invoice in the Invoice Center first.`);
+    }
+    // A work order whose estimate has since been converted (or linked) again can't come back: there
+    // would be two orders billing the same estimate (round 13, T19)
+    for (const it of items) {
+      if (it.table !== 'work_orders' || !it.row.estimateId) continue;
+      const [[est]] = await sequelize.query(`SELECT e."workOrderId", e."estimateNumber", w."drNumber", w."orderNumber" FROM estimates e
+        LEFT JOIN work_orders w ON w.id = e."workOrderId" WHERE e.id = :e`, { replacements: { e: it.row.estimateId }, transaction: t });
+      if (est && est.workOrderId && est.workOrderId !== it.row.id && (est.drNumber || est.orderNumber)) {
+        throw new UndoError(`${it.entry.label || 'This work order'} can't come back: its estimate ${est.estimateNumber || ''} now belongs to ${est.drNumber ? 'DR-' + est.drNumber : est.orderNumber}. Restoring it would bill the same estimate twice.`, 409);
+      }
+    }
+    // A line an estimate link added (formData._fromEstimateId) comes back only while that estimate is
+    // still on this line's order — after an unlink the estimate is open again and could be converted
+    // onto a second order (U19). Fine when the order itself comes back in this undo, linked to it.
+    const restoringOrderEstimate = new Map(items.filter(it => it.table === 'work_orders').map(it => [it.row.id, it.row.estimateId || null]));
+    for (const it of items) {
+      if (it.table !== 'work_order_parts') continue;
+      let fd = it.row.formData;
+      if (typeof fd === 'string') { try { fd = JSON.parse(fd); } catch (_) { fd = null; } }
+      const estId = fd && fd._fromEstimateId;
+      if (!estId) continue;
+      if (restoringOrderEstimate.has(it.row.workOrderId) && restoringOrderEstimate.get(it.row.workOrderId) === estId) continue;
+      const [[est]] = await sequelize.query(`SELECT e."workOrderId", e."estimateNumber", e.status, w."drNumber", w."orderNumber" FROM estimates e
+        LEFT JOIN work_orders w ON w.id = e."workOrderId" WHERE e.id = :e`, { replacements: { e: estId }, transaction: t });
+      if (!est) continue;   // the estimate is gone: nothing could convert it again
+      if (est.workOrderId === it.row.workOrderId) {
+        // V20: the estimate was linked again since this line was deleted (unlink → re-link): the order
+        // already has the estimate's lines from the new link, so this one would be a duplicate
+        const [[again]] = await sequelize.query(`SELECT 1 AS x FROM work_order_parts WHERE "workOrderId" = :wo
+          AND "formData"->>'_fromEstimateId' = :e AND "createdAt" > :at LIMIT 1`,
+          { replacements: { wo: it.row.workOrderId, e: String(estId), at: it.entry.createdAt }, transaction: t });
+        if (again) throw new UndoError(`${it.entry.label || 'This line'} can't come back: estimate ${est.estimateNumber || ''} was linked to this order again after it was removed, so its lines are already there. Restoring it would add the line twice.`.replace(/\s+/g, ' '), 409);
+        continue;
+      }
+      const where = est.workOrderId ? `it now belongs to ${est.drNumber ? 'DR-' + est.drNumber : (est.orderNumber || 'another order')}` : 'it is open again (the estimate was unlinked)';
+      throw new UndoError(`${it.entry.label || 'This line'} can't come back: it came from estimate ${est.estimateNumber || ''} and ${where}, so the same estimate line would be on two orders. Link the estimate again instead, or add the line by hand.`.replace(/\s+/g, ' '), 409);
+    }
     // Put rows back; a row whose parent isn't back yet (foreign key) waits for the next pass. Stops
     // when everything is in, or a pass makes no progress (then nothing at all is restored).
+    const restoringIds = new Set(items.map(it => `${it.table}:${it.row.id}`));
+    const partyCache = {};
+    for (const it of items) it.row = await resolveParties(sequelize, it.table, it.row, t, restoringIds, partyCache);   // V11
+    const restoringOrderRows = new Map(items.filter(it => it.table === 'work_orders').map(it => [it.row.id, it.row]));
+    for (const it of items) if (it.table === 'shipments') it.row = await resolveShipmentClient(sequelize, it.row, t, restoringOrderRows, restoringIds, partyCache);   // W21
     let pending = items, lastFk = null;
     while (pending.length) {
       const next = [];
       for (const it of pending) {
         const [[exists]] = await sequelize.query(`SELECT 1 AS x FROM ${q(it.table)} WHERE id = :id`, { replacements: { id: it.row.id }, transaction: t });
         if (exists) continue;   // already back (or never actually gone)
+        // W6: a part whose lot number another live part on the order now has gets a fresh lot
+        if (it.table === 'work_order_parts' && it.row.workOrderId && it.row.lotNumber && String(it.row.lotNumber).trim()) {
+          const [[clash]] = await sequelize.query(`SELECT 1 AS x FROM work_order_parts WHERE "workOrderId" = :wo AND id <> :id
+            AND lower(trim("lotNumber")) = lower(trim(CAST(:lot AS text))) LIMIT 1`, { replacements: { wo: it.row.workOrderId, id: it.row.id, lot: it.row.lotNumber }, transaction: t });
+          if (clash) {
+            const wo = restoringOrderRows.get(it.row.workOrderId)
+              || (await sequelize.query(`SELECT "drNumber" FROM work_orders WHERE id = :id`, { replacements: { id: it.row.workOrderId }, transaction: t }))[0][0];
+            const m = /^(.*)-\d+$/.exec(String(it.row.lotNumber).trim());
+            const dr = (wo && wo.drNumber) || (m && m[1]) || null;
+            const lot = dr ? await require('./lotNumbers').nextLotNumber(it.row.workOrderId, dr, null, { transaction: t }) : null;
+            if (lot) {
+              lotNotes.push(`${it.entry.label || 'A part'} came back with lot ${lot} (its old lot ${it.row.lotNumber} is now on another part).`);
+              it.row = { ...it.row, lotNumber: lot };
+            }
+          }
+        }
         try {
           await sequelize.transaction({ transaction: t }, (sp) => insertRow(sequelize, it.table, it.row, sp, colCache));
           inserted++;
@@ -318,9 +492,18 @@ async function undoDeletion(entryId, { by } = {}) {
     // where nothing has been linked there since
     for (const e of todo) {
       for (const n of e.snapshot?.nulled || []) {
+        // n.when: the value the route set instead of NULL (e.g. materialOrdered false) — also replaced
+        // n.onlyIf: re-link only while another value is (back) in place — lots "<DR>-n" only while the
+        // order has that DR again, not after it was given a new one (review of round 14)
+        if (n.onlyIf) {
+          const [[ok]] = await sequelize.query(`SELECT 1 AS x FROM ${q(n.onlyIf.table)} WHERE id = :id AND ${q(n.onlyIf.col)} = :v`,
+            { replacements: { id: n.onlyIf.id, v: n.onlyIf.value }, transaction: t });
+          if (!ok) continue;
+        }
+        const cond = n.when !== undefined ? `(${q(n.col)} IS NULL OR ${q(n.col)} = :when)` : `${q(n.col)} IS NULL`;
         await sequelize.transaction({ transaction: t }, (sp) => sequelize.query(
-          `UPDATE ${q(n.table)} SET ${q(n.col)} = :v WHERE id IN (:ids) AND ${q(n.col)} IS NULL`,
-          { replacements: { v: n.value, ids: n.ids }, transaction: sp })).catch((err) => console.warn(`[undo] could not re-link ${n.table}.${n.col}:`, err.message));
+          `UPDATE ${q(n.table)} SET ${q(n.col)} = :v WHERE id IN (:ids) AND ${cond}`,
+          { replacements: { v: n.value, ids: n.ids, when: n.when === undefined ? null : n.when }, transaction: sp })).catch((err) => console.warn(`[undo] could not re-link ${n.table}.${n.col}:`, err.message));
       }
     }
     await sequelize.query('SET CONSTRAINTS ALL IMMEDIATE', { transaction: t });   // check the line-number rule now, inside the undo
@@ -350,7 +533,8 @@ async function undoDeletion(entryId, { by } = {}) {
   // Stored totals for orders whose parts came back (not for orders in QuickBooks — frozen)
   const { refreshStoredTotals } = require('./invoiceTotals');
   for (const id of restoredWorkOrders) { try { await refreshStoredTotals(id); } catch (_) { /* best effort */ } }
-  return { restored: todo.length, rows: inserted, alreadyThere: inserted === 0,
+  const notes = [...new Set([...todo.map(e => e.snapshot?.undoNote).filter(Boolean), ...lotNotes])];
+  return { restored: todo.length, rows: inserted, alreadyThere: inserted === 0, notes,
     truncated: todo.some(e => e.snapshot?.truncated), labels: todo.map(e => e.label || e.modelName) };
 }
 
@@ -380,4 +564,5 @@ module.exports = {
   requestContext, withUndoGroup, keepContextThroughMulter, registerUndoHooks, undoDeletion, purgeExpired, UndoError,
   ARCHIVED_MODELS, suspendUndo, isSuspended,
   currentGroup: () => context.getStore()?.groupId || null,
+  contextStore: () => context.getStore() || null,
 };

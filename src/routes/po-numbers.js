@@ -44,8 +44,17 @@ router.get('/next', async (req, res, next) => {
 
 // PUT /api/po-numbers/next - Set next PO number
 router.put('/next', async (req, res, next) => {
+  // Moving the PO counter is an admin decision, and never far past the highest PO (round 13, T12 —
+  // any user could set it to 8,888,888 and every later PO would start there)
+  if (!require('../services/staffRoles').isAdminCaller(req)) return res.status(403).json({ error: { message: 'Only an admin can set the next PO number.' } });
   try {
     const { nextNumber } = req.body;
+    const n = parseInt(nextNumber, 10);
+    const { PONumber } = require('../models');
+    const high = (await PONumber.max('poNumber')) || 0;
+    if (Number.isFinite(n) && high && n > high + 1000) {
+      return res.status(400).json({ error: { message: `PO${n} is more than 1000 past the highest PO in use (PO${high}). Check for a typo.` } });
+    }
     const result = await poService.setNextNumber(nextNumber);
     res.json({ data: result, message: 'Next PO number updated' });
   } catch (error) {
@@ -93,43 +102,17 @@ router.post('/:poNumber/void', async (req, res, next) => {
   }
 });
 
-// Every place a PO number string is stored (audit H11). Reassign/release must update all of them —
-// the old code only touched work-order parts and a non-existent InboundOrder.poNumber column.
-async function renamePOEverywhere(fromStr, toStr, transaction) {
-  const { sequelize, WorkOrderPart, InboundOrder, EstimatePart } = require('../models');
-  await WorkOrderPart.update({ materialPurchaseOrderNumber: toStr }, { where: { materialPurchaseOrderNumber: fromStr }, transaction });
-  await WorkOrderPart.update({ awaitingPONumber: toStr }, { where: { awaitingPONumber: fromStr }, transaction });
-  await EstimatePart.update({ materialPurchaseOrderNumber: toStr }, { where: { materialPurchaseOrderNumber: fromStr }, transaction });
-  if (toStr !== null) await InboundOrder.update({ purchaseOrderNumber: toStr }, { where: { purchaseOrderNumber: fromStr }, transaction });
-  // Older single outside-processing PO field on parts
-  await WorkOrderPart.update({ outsideProcessingPONumber: toStr }, { where: { outsideProcessingPONumber: fromStr }, transaction });
-  await EstimatePart.update({ outsideProcessingPONumber: toStr }, { where: { outsideProcessingPONumber: fromStr }, transaction });
-  // Trucking (TR) POs live in the work order's opTransports list
-  await sequelize.query(`
-    UPDATE work_orders SET "opTransports" = (
-      SELECT jsonb_agg(CASE WHEN e->>'poNumber' = :from THEN
-               (CASE WHEN CAST(:to AS text) IS NULL THEN e - 'poNumber' ELSE jsonb_set(e, '{poNumber}', to_jsonb(CAST(:to AS text))) END)
-             ELSE e END)
-      FROM jsonb_array_elements("opTransports") e)
-    WHERE jsonb_typeof("opTransports") = 'array' AND "opTransports" @> jsonb_build_array(jsonb_build_object('poNumber', CAST(:from AS text)))`,
-    { replacements: { from: fromStr, to: toStr }, transaction });
-  // Service / outside-processing POs stamped inside the outsideProcessing JSON list
-  for (const table of ['work_order_parts', 'estimate_parts']) {
-    await sequelize.query(`
-      UPDATE ${table} SET "outsideProcessing" = (
-        SELECT jsonb_agg(CASE WHEN e->>'poNumber' = :from THEN
-                 (CASE WHEN CAST(:to AS text) IS NULL THEN e - 'poNumber' - 'poSentAt' ELSE jsonb_set(e, '{poNumber}', to_jsonb(CAST(:to AS text))) END)
-               ELSE e END)
-        FROM jsonb_array_elements("outsideProcessing") e)
-      WHERE jsonb_typeof("outsideProcessing") = 'array' AND "outsideProcessing" @> jsonb_build_array(jsonb_build_object('poNumber', CAST(:from AS text)))`,
-      { replacements: { from: fromStr, to: toStr }, transaction });
-  }
-}
+// Every place a PO number string is stored (audit H11) — lives in PONumberService so void can use it too (V10)
+const renamePOEverywhere = (...args) => require('../services/PONumberService').renamePOEverywhere(...args);
 
 // PUT /api/po-numbers/:poNumber/reassign - Change a PO number to a different number
 router.put('/:poNumber/reassign', async (req, res, next) => {
+  // Renumbering a PO the vendor already has is an admin decision (round 12, audit N15)
+  if (req.user?.role !== 'admin' && req.apiKey?.permissions !== 'admin') {
+    return res.status(403).json({ error: { message: 'Only an admin can change a PO number.' } });
+  }
   try {
-    const { PONumber, sequelize, AppSettings } = require('../models');
+    const { PONumber, InboundOrder, sequelize, AppSettings } = require('../models');
     const { acquire, LOCK_KEYS } = require('../services/numberAllocator');
     const oldPO = parseInt(req.params.poNumber);
     const newPO = parseInt(req.body.newPoNumber);
@@ -148,6 +131,16 @@ router.put('/:poNumber/reassign', async (req, res, next) => {
       if (!poEntry) return { status: 404, message: `PO${oldPO} not found` };
       const existing = await PONumber.findOne({ where: { poNumber: newPO }, transaction });
       if (existing) return { status: 409, message: `PO${newPO} already exists` };
+      // A typo with an extra digit would move the automatic sequence for good (same guard as assign)
+      const high = (await PONumber.max('poNumber', { transaction })) || 0;
+      if (high && newPO > high + 1000) return { status: 400, message: `PO${newPO} is far past the highest PO in use (PO${high}). Check the number for a typo.` };
+      // Material already received on it: the vendor's paperwork carries the old number
+      const { Op } = require('sequelize');
+      const received = await InboundOrder.findOne({ where: { status: 'received', [Op.or]: [
+        ...(poEntry.inboundOrderId ? [{ id: poEntry.inboundOrderId }] : []),
+        { purchaseOrderNumber: [`PO${oldPO}`, `OP${oldPO}`, `TR${oldPO}`] },
+      ] }, transaction });
+      if (received) return { status: 409, message: `Material on PO${oldPO} was already received, so its number can't be changed (the vendor's paperwork carries it).` };
 
       await poEntry.update({ poNumber: newPO }, { transaction });
       // Keep the prefix the PO already uses (PO / OP / TR) wherever it's stored
@@ -170,7 +163,7 @@ router.delete('/:poNumber/release', async (req, res, next) => {
   try {
     const { PONumber, InboundOrder, WorkOrderPart, sequelize } = require('../models');
     const { acquire, LOCK_KEYS } = require('../services/numberAllocator');
-    const poNumber = parseInt(req.params.poNumber);
+    const poNumber = req._poNumberFromId || parseInt(req.params.poNumber);
 
     // One transaction under the PO lock — the old version had none and could stop half-way
     const result = await sequelize.transaction(async (transaction) => {
@@ -188,6 +181,34 @@ router.delete('/:poNumber/release', async (req, res, next) => {
         return { status: 409, message: `Material on PO${poNumber} was already received, so the number can't be released. Void the PO instead.` };
       }
 
+      // What Undo must put back (R26): the parts' PO fields cleared below. PO stamps inside trip /
+      // outside-processing lists are not restored — Undo says so.
+      const relink = [];
+      const [pts] = await sequelize.query(`SELECT id, "materialPurchaseOrderNumber" AS m, "materialOrdered" AS o, "inboundOrderId" AS i,
+          "awaitingPONumber" AS a, "outsideProcessingPONumber" AS op FROM work_order_parts
+        WHERE "materialPurchaseOrderNumber" IN (:s) OR "awaitingPONumber" IN (:s) OR "outsideProcessingPONumber" IN (:s)`,
+        { replacements: { s: [`PO${poNumber}`, `OP${poNumber}`, `TR${poNumber}`] }, transaction });
+      for (const p of pts) {
+        if (p.m) relink.push({ table: 'work_order_parts', col: 'materialPurchaseOrderNumber', value: p.m, ids: [p.id] });
+        if (p.m && p.o) relink.push({ table: 'work_order_parts', col: 'materialOrdered', value: true, when: false, ids: [p.id] });
+        if (p.i) relink.push({ table: 'work_order_parts', col: 'inboundOrderId', value: p.i, ids: [p.id] });
+        if (p.a) relink.push({ table: 'work_order_parts', col: 'awaitingPONumber', value: p.a, ids: [p.id] });
+        if (p.op) relink.push({ table: 'work_order_parts', col: 'outsideProcessingPONumber', value: p.op, ids: [p.id] });
+      }
+      const [eps] = await sequelize.query(`SELECT id, "materialPurchaseOrderNumber" AS m, "outsideProcessingPONumber" AS op,
+          "materialOrdered" AS o, "materialOrderedAt" AS oa, "inboundOrderId" AS i FROM estimate_parts
+        WHERE "materialPurchaseOrderNumber" IN (:s) OR "outsideProcessingPONumber" IN (:s)`,
+        { replacements: { s: [`PO${poNumber}`, `OP${poNumber}`, `TR${poNumber}`] }, transaction });
+      for (const p of eps) {
+        if (p.m) relink.push({ table: 'estimate_parts', col: 'materialPurchaseOrderNumber', value: p.m, ids: [p.id] });
+        // U22: the order fields release now clears on estimate parts too
+        if (p.m && p.o) relink.push({ table: 'estimate_parts', col: 'materialOrdered', value: true, when: false, ids: [p.id] });
+        if (p.m && p.oa) relink.push({ table: 'estimate_parts', col: 'materialOrderedAt', value: p.oa, ids: [p.id] });
+        if (p.m && p.i) relink.push({ table: 'estimate_parts', col: 'inboundOrderId', value: p.i, ids: [p.id] });
+        if (p.op) relink.push({ table: 'estimate_parts', col: 'outsideProcessingPONumber', value: p.op, ids: [p.id] });
+      }
+      const undoNote = `PO${poNumber} is back with its parts; re-enter it on any trip or outside-processing line that showed it.`;
+
       // Clear PO reference from work order parts, then everywhere else the number is stored
       await WorkOrderPart.update(
         { materialPurchaseOrderNumber: null, materialOrdered: false, inboundOrderId: null },
@@ -195,7 +216,7 @@ router.delete('/:poNumber/release', async (req, res, next) => {
       );
       for (const pfx of ['PO', 'OP', 'TR']) await renamePOEverywhere(`${pfx}${poNumber}`, null, transaction);
       // The PO row references the delivery, so remove the PO first, then its expected deliveries
-      await poEntry.destroy({ transaction });
+      await poEntry.destroy({ transaction, undoRelink: relink, undoNote });
       for (const i of inbounds) await i.destroy({ transaction });
       return { status: 200 };
     });
@@ -208,15 +229,17 @@ router.delete('/:poNumber/release', async (req, res, next) => {
 
 // DELETE /api/po-numbers/:id - Delete a PO number
 router.delete('/:id', async (req, res, next) => {
+  // Deleting a PO is the same as releasing it (round 13, T15): under the PO lock, refused once material
+  // was received on it, and the number cleared everywhere it is stored (OP/TR numbers on parts, trips
+  // and estimates used to be left pointing at a PO that no longer existed)
   try {
-    const result = await poService.delete(req.params.id);
-    res.json(result);
-  } catch (error) {
-    if (error.message.includes('not found')) {
-      return res.status(404).json({ error: { message: error.message } });
-    }
-    next(error);
-  }
+    const { PONumber } = require('../models');
+    const po = /^[0-9a-f-]{36}$/i.test(req.params.id) ? await PONumber.findByPk(req.params.id) : null;
+    if (!po) return res.status(404).json({ error: { message: 'PO number not found' } });
+    req._poNumberFromId = po.poNumber;
+    const release = router.stack.find(l => l.route && l.route.path === '/:poNumber/release' && l.route.methods.delete);
+    return release.route.stack[0].handle(req, res, next);
+  } catch (error) { next(error); }
 });
 
 // GET /api/po-numbers/stats - Get PO number statistics

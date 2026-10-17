@@ -6,6 +6,42 @@ const { DEFAULTS, PO_STATUSES } = require('../constants');
 // All PO numbers come from the one locked reservation service (audit H11)
 const poNumbers = require('./poNumbers');
 
+// Every place a PO number string is stored (audit H11). Reassign/release must update all of them —
+// the old code only touched work-order parts and a non-existent InboundOrder.poNumber column.
+async function renamePOEverywhere(fromStr, toStr, transaction) {
+  const { sequelize, WorkOrderPart, InboundOrder, EstimatePart } = require('../models');
+  await WorkOrderPart.update({ materialPurchaseOrderNumber: toStr }, { where: { materialPurchaseOrderNumber: fromStr }, transaction });
+  await WorkOrderPart.update({ awaitingPONumber: toStr }, { where: { awaitingPONumber: fromStr }, transaction });
+  // Released: the estimate's parts are no longer ordered either (U22: they kept materialOrdered, so they
+  // couldn't be ordered again and the converted order waited for material forever)
+  if (toStr === null) await EstimatePart.update({ materialOrdered: false, materialOrderedAt: null, inboundOrderId: null }, { where: { materialPurchaseOrderNumber: fromStr }, transaction });
+  await EstimatePart.update({ materialPurchaseOrderNumber: toStr }, { where: { materialPurchaseOrderNumber: fromStr }, transaction });
+  if (toStr !== null) await InboundOrder.update({ purchaseOrderNumber: toStr }, { where: { purchaseOrderNumber: fromStr }, transaction });
+  // Older single outside-processing PO field on parts
+  await WorkOrderPart.update({ outsideProcessingPONumber: toStr }, { where: { outsideProcessingPONumber: fromStr }, transaction });
+  await EstimatePart.update({ outsideProcessingPONumber: toStr }, { where: { outsideProcessingPONumber: fromStr }, transaction });
+  // Trucking (TR) POs live in the work order's opTransports list
+  await sequelize.query(`
+    UPDATE work_orders SET "opTransports" = (
+      SELECT jsonb_agg(CASE WHEN e->>'poNumber' = :from THEN
+               (CASE WHEN CAST(:to AS text) IS NULL THEN e - 'poNumber' ELSE jsonb_set(e, '{poNumber}', to_jsonb(CAST(:to AS text))) END)
+             ELSE e END)
+      FROM jsonb_array_elements("opTransports") e)
+    WHERE jsonb_typeof("opTransports") = 'array' AND "opTransports" @> jsonb_build_array(jsonb_build_object('poNumber', CAST(:from AS text)))`,
+    { replacements: { from: fromStr, to: toStr }, transaction });
+  // Service / outside-processing POs stamped inside the outsideProcessing JSON list
+  for (const table of ['work_order_parts', 'estimate_parts']) {
+    await sequelize.query(`
+      UPDATE ${table} SET "outsideProcessing" = (
+        SELECT jsonb_agg(CASE WHEN e->>'poNumber' = :from THEN
+                 (CASE WHEN CAST(:to AS text) IS NULL THEN e - 'poNumber' - 'poSentAt' ELSE jsonb_set(e, '{poNumber}', to_jsonb(CAST(:to AS text))) END)
+               ELSE e END)
+        FROM jsonb_array_elements("outsideProcessing") e)
+      WHERE jsonb_typeof("outsideProcessing") = 'array' AND "outsideProcessing" @> jsonb_build_array(jsonb_build_object('poNumber', CAST(:from AS text)))`,
+      { replacements: { from: fromStr, to: toStr }, transaction });
+  }
+}
+
 class PONumberService {
   constructor(models) {
     this.models = models;
@@ -87,6 +123,24 @@ class PONumberService {
         voidedBy: voidedBy || 'admin',
         voidReason: reason
       }, { transaction });
+
+      // V10: nothing will arrive on a voided PO, so (unless its material was already received) its parts
+      // are no longer "ordered" — they kept "already ordered on PO…" and couldn't be ordered again.
+      // Cleared wherever the number is stored, like release; the PO row itself stays, as void.
+      const nums = [`PO${poEntry.poNumber}`, `OP${poEntry.poNumber}`, `TR${poEntry.poNumber}`];
+      const inbounds = await InboundOrder.findAll({ where: { [Op.or]: [
+        ...(poEntry.inboundOrderId ? [{ id: poEntry.inboundOrderId }] : []),
+        { purchaseOrderNumber: nums },
+      ] }, attributes: ['id', 'status'], transaction });
+      if (!inbounds.some(i => i.status === 'received')) {
+        const { WorkOrderPart, EstimatePart } = this.models;
+        const cleared = { materialOrdered: false, materialOrderedAt: null, materialPurchaseOrderNumber: null, inboundOrderId: null };
+        // parts whose material was received on the part itself keep their PO (traceability) — review of round 16
+        await WorkOrderPart.update(cleared, { where: { materialPurchaseOrderNumber: nums, [Op.or]: [{ materialReceived: false }, { materialReceived: null }] }, transaction });
+        await EstimatePart.update(cleared, { where: { materialPurchaseOrderNumber: nums, [Op.or]: [{ materialReceived: false }, { materialReceived: null }] }, transaction });
+        // only the material PO fields above; outside-processing / trip stamps (OP…/TR…) record work that
+        // may be done, so they are left as they are
+      }
 
       // A voided PO won't be delivered: cancel its expected delivery unless it already arrived.
       // (The old code wrote a non-existent "poNumber" column, so voiding a linked PO always failed.)
@@ -198,3 +252,4 @@ class PONumberService {
 }
 
 module.exports = PONumberService;
+module.exports.renamePOEverywhere = renamePOEverywhere;

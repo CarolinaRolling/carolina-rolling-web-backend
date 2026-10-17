@@ -160,6 +160,67 @@ function getProvider() {
  * @param {number} expiresIn - Seconds until expiry (default 3600 = 1 hour)
  * @returns {string|null} Presigned URL or null if not S3
  */
+/**
+ * The link to give a browser or tablet for a stored file (audit R7). S3 files get a signed link
+ * that expires in an hour — it works whether or not the bucket is public, so the bucket can be made
+ * private without breaking downloads. Legacy Cloudinary files keep their stored URL.
+ */
+function s3IdFor(storageId, storedUrl) {
+  if (storageId && String(storageId).startsWith('s3:')) return storageId;
+  // only OUR bucket's URLs map to a key in our bucket (any "bucket.s3[.-]region" host form)
+  const ours = bucketUrlPattern();
+  const looksS3 = ours ? (storedUrl && ours.test(storedUrl)) : (storedUrl && /\.s3[.-][^/]*amazonaws\.com\//.test(storedUrl));
+  if (looksS3) {
+    try { return 's3:' + decodeURIComponent(new URL(storedUrl).pathname.slice(1)); } catch (_) { return null; }
+  }
+  return null;
+}
+/**
+ * Signed links for every stored-URL string the API hands out (round 10, R7). The signing time is
+ * rounded down to the hour, so the same file gets the same link for an hour (browsers and the tablet
+ * can cache images) and each link stays valid for at least two more hours.
+ */
+const SIGN_WINDOW_MS = 60 * 60 * 1000;
+const SIGN_EXPIRES_S = 3 * 60 * 60;
+const signCache = new Map();   // "<hour>|<key>" -> url
+let signCacheHour = 0;
+function bucketUrlPattern() {
+  const b = BUCKET();
+  if (!b) return null;
+  const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp('^https://' + esc(b) + '\\.s3(?:[.-][a-z0-9-]+)?\\.amazonaws\\.com/', 'i');
+}
+async function signedViewUrl(storedUrl) {
+  if (!useS3() || typeof storedUrl !== 'string') return storedUrl;
+  const pat = bucketUrlPattern();
+  if (!pat || !pat.test(storedUrl) || /[?&]X-Amz-Signature=/i.test(storedUrl)) return storedUrl;
+  let key;
+  try { key = decodeURIComponent(new URL(storedUrl).pathname.slice(1)); } catch (_) { return storedUrl; }
+  const hour = Math.floor(Date.now() / SIGN_WINDOW_MS) * SIGN_WINDOW_MS;
+  if (hour !== signCacheHour) { signCache.clear(); signCacheHour = hour; }
+  const ck = hour + '|' + key;
+  if (signCache.has(ck)) return signCache.get(ck);
+  const url = await getSignedUrl(getS3(), new GetObjectCommand({ Bucket: BUCKET(), Key: key }),
+    { expiresIn: SIGN_EXPIRES_S, signingDate: new Date(hour) });
+  signCache.set(ck, url);
+  return url;
+}
+/** A signed link sent back to the API (e.g. a settings value saved from a form) → the plain stored URL */
+function unsignedStoredUrl(s) {
+  if (typeof s !== 'string' || !/[?&]X-Amz-Signature=/i.test(s)) return s;
+  const pat = bucketUrlPattern();
+  if (!pat || !pat.test(s)) return s;
+  return s.split('?')[0];
+}
+
+async function accessUrl(storageId, storedUrl, { expiresIn = 3600, downloadName = null } = {}) {
+  const sid = s3IdFor(storageId, storedUrl);
+  if (sid && useS3()) {
+    try { return await getPresignedUrl(sid, expiresIn, downloadName); } catch (e) { console.warn('[storage] could not sign', sid, e.message); }
+  }
+  return storedUrl || null;
+}
+
 async function getPresignedUrl(storageId, expiresIn = 3600, originalName = null) {
   if (!storageId || !storageId.startsWith('s3:') || !useS3()) return null;
   const key = storageId.slice(3);
@@ -205,9 +266,10 @@ async function streamToResponse(storageId, res, options = {}) {
 
 // Read a stored file back into a Buffer. Supports S3 (via GetObject) and Cloudinary/https URLs.
 async function downloadToBuffer(storageId, fileUrl) {
-  // S3
-  if (storageId && storageId.startsWith('s3:') && useS3()) {
-    const key = storageId.slice(3);
+  // S3 — by id, or recognised from a stored bucket URL (works with a private bucket; round 10, R7)
+  const s3Id = s3IdFor(storageId, fileUrl);
+  if (s3Id && useS3()) {
+    const key = s3Id.slice(3);
     const command = new GetObjectCommand({ Bucket: BUCKET(), Key: key });
     const response = await getS3().send(command);
     const chunks = [];
@@ -239,6 +301,11 @@ module.exports = {
   getProvider,
   useS3,
   getPresignedUrl,
+  accessUrl,
+  signedViewUrl,
+  unsignedStoredUrl,
+  bucketUrlPattern,
+  s3IdFor,
   streamToResponse,
   downloadToBuffer
 };

@@ -27,6 +27,16 @@ const isVoidRow = (r) => !!r && (r.status === 'void' || r.status === 'voided' ||
 // Must match the unique index predicate exactly (COALESCE("isVoided", false) = false)
 const isVoidWO = (w) => !!w && w.isVoided === true;
 
+/**
+ * W7: the highest invoice number that counts for the sequence — every tracking row except a voided one
+ * that never reached QuickBooks (a typo corrected before export must not move the sequence for good).
+ */
+async function highestInvoiceNumber(transaction) {
+  const { InvoiceNumber } = models();
+  const live = { [Op.and]: [{ [Op.or]: [{ status: null }, { status: { [Op.ne]: 'void' } }] }, { voidedAt: null }] };   // status is ENUM('active','void')
+  return (await InvoiceNumber.max('invoiceNumber', { where: { [Op.or]: [live, { iifExportedAt: { [Op.ne]: null } }] }, transaction })) || 0;
+}
+
 /** Run fn inside the caller's transaction, or a new one. Always holds the invoice lock. */
 async function locked(transaction, fn) {
   const { sequelize } = models();
@@ -58,7 +68,10 @@ async function pickNextNumber(t, { consume }) {
   const freed = (await readFreedPool(t)).sort((a, b) => a - b);
   let reuse = null;
   const remaining = [];
+  // A number ever entered in QuickBooks is never reused automatically (U16) — dropped from the pool
+  const exported = freed.length ? new Set((await InvoiceNumber.findAll({ where: { invoiceNumber: freed, iifExportedAt: { [Op.ne]: null } }, attributes: ['invoiceNumber'], transaction: t })).map(r => Number(r.invoiceNumber))) : new Set();
   for (const n of freed) {
+    if (exported.has(n)) continue;
     if (reuse === null && await isNumberFree(n, t)) reuse = n; else if (n !== reuse) remaining.push(n);
   }
   if (consume && freed.length) {
@@ -68,12 +81,13 @@ async function pickNextNumber(t, { consume }) {
     await AppSettings.upsert({ key: 'freed_invoice_numbers', value: stillFree }, { transaction: t });
   }
   if (reuse !== null) return { number: reuse, isReused: true };
-  const highest = (await InvoiceNumber.max('invoiceNumber', { transaction: t })) || 0;
+  const highest = await highestInvoiceNumber(t);   // W7: never-exported void rows don't count
   const setting = await AppSettings.findOne({ where: { key: 'next_invoice_number' }, transaction: t });
   const configured = parseInt(setting?.value, 10) || 0;
-  // Same rule as before: highest number ever issued + 1; the configured "next number" only
-  // seeds a brand-new system. Numbers already sitting on a work order (typed in by hand) are skipped.
-  let next = highest ? highest + 1 : (configured || 1001);
+  // max(highest ever issued + 1, the configured "next number") — an admin who set the next number
+  // past numbers typed straight into QuickBooks is obeyed (V8; it used to only seed a new system).
+  // Numbers already sitting on a work order (typed in by hand) are skipped.
+  let next = highest ? Math.max(highest + 1, configured) : (configured || 1001);
   while (!(await isNumberFree(next, t))) next++;
   return { number: next, isReused: false };
 }
@@ -83,6 +97,20 @@ async function bumpCounter(num, t) {
   const setting = await AppSettings.findOne({ where: { key: 'next_invoice_number' }, transaction: t });
   const cur = parseInt(setting?.value, 10) || 0;
   if (num + 1 > cur) await AppSettings.upsert({ key: 'next_invoice_number', value: num + 1 }, { transaction: t });
+}
+
+/**
+ * W7: the counter still reads `num + 1` (set when `num` was claimed) but `num` was voided before export —
+ * put it back to the highest counting number + 1. An admin's own setting (any other value) is kept.
+ */
+async function retractCounter(num, t) {
+  if (!num || isNaN(num)) return;
+  const { AppSettings } = models();
+  const setting = await AppSettings.findOne({ where: { key: 'next_invoice_number' }, transaction: t });
+  const cur = parseInt(setting?.value, 10) || 0;
+  if (cur !== num + 1) return;
+  const high = await highestInvoiceNumber(t);
+  if (high && high + 1 < cur) await AppSettings.upsert({ key: 'next_invoice_number', value: high + 1 }, { transaction: t });
 }
 
 /** Read-only preview of the next number (the old preview consumed a freed number). */
@@ -127,7 +155,19 @@ async function assignNextInvoiceNumber(workOrderId, { transaction, setDate = 'if
  * Throws InvoiceNumberConflict (409) if a live work order already holds it.
  * A voided or unlinked tracking row for that number is reclaimed.
  */
-async function claimInvoiceNumber(workOrderId, rawNumber, { transaction, extraUpdates = {}, moveCounter = true } = {}) {
+/** A message when `num` is more than 1000 past the highest invoice number in the log, else null */
+async function jumpProblem(num, transaction) {
+  const high = await highestInvoiceNumber(transaction);   // W7
+  if (high && num > high + 1000) return `Invoice #${num} is more than 1000 past the highest invoice number in use (#${high}). Check for a typo — the next automatic number would jump there too.`;
+  return null;
+}
+
+/**
+ * @param opts.inQuickBooks  the number already exists in QuickBooks (e.g. imported from it): its tracking
+ *                           row is stamped as exported (iifExportedAt/iifBatchId) so releaseInvoiceNumber
+ *                           never frees it for reuse (V9). The work order's own iifExportedAt is untouched.
+ */
+async function claimInvoiceNumber(workOrderId, rawNumber, { transaction, extraUpdates = {}, moveCounter = true, guard = null, inQuickBooks = false } = {}) {
   // Only plain digits are tracked as a sequence number. Anything else ("209500-1", "INV1045") is
   // stored exactly as typed and never moves the counter (stripping the dash would turn 209500-1
   // into 2095001 and push every later number into the millions).
@@ -137,6 +177,26 @@ async function claimInvoiceNumber(workOrderId, rawNumber, { transaction, extraUp
     const { WorkOrder, InvoiceNumber } = models();
     const wo = await WorkOrder.findByPk(workOrderId, { transaction: t, lock: t.LOCK.UPDATE });
     if (!wo) { const e = new Error('Work order not found'); e.status = 404; throw e; }
+    // Replacing the number an order is already billed under voids that number — the same rules as
+    // voiding it directly (round 11, audit N3): admin only, never once in QuickBooks or paid.
+    // `guard` is the request (routes pass it); internal callers that already checked omit it.
+    if (guard && wo.invoiceNumber && String(wo.invoiceNumber) !== typed) {
+      const fail = (status, msg) => { const e = new Error(msg); e.status = status; throw e; };
+      if (wo.iifExportedAt) fail(409, `Invoice #${wo.invoiceNumber} is already in QuickBooks, so its number can't be replaced here. Reopen it in the Invoice Center first.`);
+      const st = await require('./drGuard').accountingState(models(), wo, { transaction: t });
+      if (st.payments) fail(409, `Invoice #${wo.invoiceNumber} has payments, so its number can't be replaced. Void or move the payments first.`);
+      if (guard.user?.role !== 'admin') fail(403, `This order is already billed as invoice #${wo.invoiceNumber}. Only an admin can replace its number.`);
+    }
+
+    // A typed number far past the sequence is almost always a typo, and it would move the automatic
+    // counter for good (a typed 99001 made the next invoice 99002) — round 12, N12
+    // Every typed number is checked, whatever moveCounter says — the next number is always the highest
+    // in the log + 1, so any row moves it (T11). Only an admin can confirm a deliberate jump.
+    if (guard && num && num > 0) {
+      const confirmed = guard.body?.confirmJump && require('./staffRoles').isAdminCaller(guard);
+      const problem = confirmed ? null : await jumpProblem(num, t);
+      if (problem) { const e = new Error(problem); e.status = 409; e.code = 'INVOICE_NUMBER_JUMP'; throw e; }
+    }
 
     if (!num || num < 1) {
       // Non-numeric numbers: store on the work order only (no tracking row), as before
@@ -166,12 +226,24 @@ async function claimInvoiceNumber(workOrderId, rawNumber, { transaction, extraUp
     for (const p of previous) {
       await p.update({ status: 'void', voidedAt: new Date(), voidReason: `Replaced by #${num}` }, { transaction: t });
     }
+    // W7: a mistyped number replaced before export gives back the counter bump it made
+    for (const p of previous) if (!p.iifExportedAt) await retractCounter(Number(p.invoiceNumber), t);
 
+    // V9: an "already in QuickBooks" number keeps an export stamp on its tracking row
+    const qbStamp = inQuickBooks ? { iifExportedAt: new Date(), iifBatchId: typeof inQuickBooks === 'string' ? inQuickBooks : `import-${Date.now()}` } : {};
     if (row) {
+      // A number already entered in QuickBooks for another order would be a duplicate there (T16) — the
+      // same confirmation every path now asks for
+      if (guard && row.iifExportedAt && row.workOrderId !== wo.id && !guard.body?.confirmReuseExported) {
+        const e = new Error(`Invoice #${num} was already exported to QuickBooks for another order. Reusing it can create a duplicate in QuickBooks — make sure that invoice was removed there first.`);
+        e.status = 409; e.code = 'QB_EXPORTED'; throw e;
+      }
       await row.update({ workOrderId: wo.id, clientId: wo.clientId || row.clientId || null, clientName: wo.clientName || row.clientName || null,
-        status: 'active', voidedAt: null, voidedBy: null, voidReason: null }, { transaction: t });
+        status: 'active', voidedAt: null, voidedBy: null, voidReason: null,
+        ...(row.workOrderId !== wo.id ? { iifExportedAt: null, iifBatchId: null } : {}),
+        ...(inQuickBooks && row.iifExportedAt && row.workOrderId === wo.id ? {} : qbStamp) }, { transaction: t });
     } else {
-      await InvoiceNumber.create({ invoiceNumber: num, workOrderId: wo.id, clientId: wo.clientId || null, clientName: wo.clientName || null }, { transaction: t });
+      await InvoiceNumber.create({ invoiceNumber: num, workOrderId: wo.id, clientId: wo.clientId || null, clientName: wo.clientName || null, ...qbStamp }, { transaction: t });
     }
     // Typed number leaves the freed pool if it was there
     const freed = await readFreedPool(t);
@@ -193,22 +265,35 @@ async function releaseInvoiceNumber(workOrderId, { transaction, extraUpdates = {
     const { WorkOrder, InvoiceNumber, AppSettings } = models();
     const wo = await WorkOrder.findByPk(workOrderId, { transaction: t, lock: t.LOCK.UPDATE });
     if (!wo) { const e = new Error('Work order not found'); e.status = 404; throw e; }
-    const num = wo.invoiceNumber ? parseInt(wo.invoiceNumber, 10) : null;
+    // Plain numbers only: "5000-2" used to be read as 5000 and free #5000 (round 15, U17)
+    const num = wo.invoiceNumber && /^\d+$/.test(String(wo.invoiceNumber).trim()) ? parseInt(wo.invoiceNumber, 10) : null;
+    let pooled = false;   // V9: report "freed for reuse" only when it really was
     if (num && !isNaN(num)) {
-      // Only this order's tracking row — never another order that has since taken the number
-      await InvoiceNumber.destroy({ where: { invoiceNumber: num, workOrderId: wo.id }, transaction: t });
+      // A number that was ever entered in QuickBooks is never handed out again: its tracking row is
+      // voided (keeping the export stamp) instead of deleted, and the number stays out of the freed
+      // pool — before, unmark-entered + delete put an exported number back in circulation (U16)
+      const mine = await InvoiceNumber.findOne({ where: { invoiceNumber: num, workOrderId: wo.id }, transaction: t });
+      const wasExported = !!(wo.iifExportedAt || (mine && mine.iifExportedAt));
+      if (mine && wasExported) {
+        await mine.update({ status: 'void', voidedAt: new Date(), voidReason: 'Invoice cleared after export — not reused',
+          iifExportedAt: mine.iifExportedAt || wo.iifExportedAt }, { transaction: t });
+      } else {
+        // Only this order's tracking row — never another order that has since taken the number
+        await InvoiceNumber.destroy({ where: { invoiceNumber: num, workOrderId: wo.id }, transaction: t });
+      }
       const stillHeld = await InvoiceNumber.findOne({ where: { invoiceNumber: num, status: 'active' }, transaction: t });
-      if (!stillHeld) {
+      if (!stillHeld && !wasExported) {
         const freed = await readFreedPool(t);
         if (!freed.includes(num)) freed.push(num);
         await AppSettings.upsert({ key: 'freed_invoice_numbers', value: freed }, { transaction: t });
+        pooled = true;
       }
     } else {
       await InvoiceNumber.update({ status: 'void', voidedAt: new Date(), voidReason: 'Invoice cleared' },
         { where: { workOrderId: wo.id, status: 'active' }, transaction: t });
     }
     await wo.update({ invoiceNumber: null, invoiceDate: null, invoicedBy: null, reusedInvoiceNumber: false, ...extraUpdates }, { transaction: t });
-    return { freed: num && !isNaN(num) ? num : null, wo };
+    return { freed: pooled ? num : null, wo };
   });
 }
 
@@ -247,6 +332,9 @@ async function dropInvoiceConstraints(sequelize) {
 }
 
 module.exports = {
+  locked,
+  highestInvoiceNumber,
+  jumpProblem,
   dropInvoiceConstraints,
   InvoiceNumberConflict,
   previewNextInvoiceNumber,

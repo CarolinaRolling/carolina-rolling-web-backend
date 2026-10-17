@@ -7,7 +7,7 @@ const { verifySinglePermit, verifyBatch, debugChromeInfo } = require('../service
 let batchJob = null;
 
 // GET /api/verify-permits/debug — Show Chrome detection info
-router.get('/verify-permits/debug', async (req, res) => {
+router.get('/verify-permits/debug', require('./auth').requireAdmin, async (req, res) => {   // admin-only (round 9)
   try {
     const info = debugChromeInfo();
     res.json({ data: info });

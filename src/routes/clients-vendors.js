@@ -46,10 +46,14 @@ router.get('/clients/search', async (req, res, next) => {
       whereClause.name = { [Op.iLike]: `%${q}%` };
     }
 
+    // Tablets get only what their picker shows — not tax status, resale certificates, notes or AP
+    // e-mails (round 15, U40)
+    const isDevice = !!req.apiKey && require('../services/keyScope').keyKind(req.apiKey) === 'device';
     const clients = await Client.findAll({
       where: whereClause,
       limit: 20,
-      order: [['name', 'ASC']]
+      order: [['name', 'ASC']],
+      ...(isDevice ? { attributes: ['id', 'name', 'contactName', 'contactPhone', 'contactEmail', 'noTag'].filter(a => Client.rawAttributes[a]) } : {})
     });
 
     res.json({ data: clients });
@@ -576,7 +580,7 @@ router.get('/clients/:id/history', async (req, res, next) => {
         }
       }
 
-      woData.push({ ...j, total: total.toFixed(2), paid: paid.toFixed(2), balance: balance.toFixed(2), dueDate, daysOverdue });
+      woData.push({ ...j, total: total.toFixed(2), paid: paid.toFixed(2), returned: (bal.returned || 0).toFixed(2), balance: balance.toFixed(2), overpaid: (bal.overpaid || 0).toFixed(2), dueDate, daysOverdue });
     }
 
     // Client payments
@@ -607,8 +611,10 @@ router.get('/clients/:id/history', async (req, res, next) => {
     } catch(e) {}
 
     const openBalance = woData.filter(w => parseFloat(w.balance) > 0.01).reduce((s,w) => s + parseFloat(w.balance), 0);
+    // T4: money paid beyond an invoice's current total (it dropped after payment) is owed back / on account
+    const overpaidTotal = woData.reduce((s,w) => s + parseFloat(w.overpaid || 0), 0);
 
-    res.json({ data: { workOrders: woData, payments, creditMemos, refunds, openBalance: openBalance.toFixed(2), termDays, client: client.toJSON() } });
+    res.json({ data: { workOrders: woData, payments, creditMemos, refunds, openBalance: openBalance.toFixed(2), overpaidTotal: overpaidTotal.toFixed(2), termDays, client: client.toJSON() } });
   } catch(error) { next(error); }
 });
 
@@ -680,8 +686,14 @@ router.get('/clients/:id/statement-pdf', async (req, res, next) => {
       const j = wo.toJSON();
       const bal = balances.get(j.id) || { total: 0, paid: 0, balance: 0 };
       const total = bal.total;
-      const paid = bal.paid;
-      const balance = bal.balance;
+      // PAID is the money received; money given back from this invoice (refunded / held as credit) gets
+      // its own line under the row, so a voided payment no longer prints as a negative PAID (W4)
+      const paid = Math.round((bal.paid || 0) * 100) / 100;
+      const returned = Math.round((bal.returned || 0) * 100) / 100;
+      const overpaid = bal.overpaid || 0;
+      // T4: an invoice paid beyond its current total shows the excess as a credit, and the credit
+      // comes off the statement balance
+      const balance = overpaid > 0.005 ? -overpaid : bal.balance;
       grandBalance += balance;
 
       let dueDate = '';
@@ -707,19 +719,45 @@ router.get('/clients/:id/statement-pdf', async (req, res, next) => {
       if (isOverdue) {
         doc.font('Helvetica-Bold');
       }
-      doc.text('$' + balance.toFixed(2), cols.balance, y, { width: 62, align: 'right' });
+      doc.text(balance < 0 ? `($${(-balance).toFixed(2)}) CR` : '$' + balance.toFixed(2), cols.balance, y, { width: 62, align: 'right' });
       doc.font('Helvetica');
       y += 18;
+      if (returned > 0.005) {
+        doc.font('Helvetica').fontSize(8.5).fillColor('#777');
+        doc.text('Returned to client (refund / credit)', cols.inv, y - 4, { width: 240, lineBreak: false });
+        doc.text('-$' + returned.toFixed(2), cols.paid, y - 4, { width: 60, align: 'right' });
+        y += 12;
+      }
       doc.moveTo(50, y - 4).lineTo(562, y - 4).lineWidth(0.3).strokeColor('#eee').stroke();
     }
+
+    // Open client credit (credit memos with money left — e.g. a payment left unapplied, or an
+    // overpayment moved to credit) is listed and comes off the total (round 15, U13)
+    try {
+      const memos = await CreditMemo.findAll({ where: { [Op.or]: [{ clientId: client.id }, { clientId: null, clientName: { [Op.iLike]: client.name } }], voidedAt: null, remainingAmount: { [Op.gt]: 0 } }, order: [['date', 'ASC']] });
+      for (const m of memos) {
+        const left = Math.round((parseFloat(m.remainingAmount) || 0) * 100) / 100;
+        if (!(left > 0.005)) continue;
+        if (y > 700) { doc.addPage(); y = 50; }
+        doc.font('Helvetica').fontSize(9.5).fillColor('#2e7d32');
+        doc.text('Credit', cols.dr, y);
+        doc.text(String(m.reason || 'Credit memo').slice(0, 60), cols.inv, y, { width: 240, lineBreak: false });
+        doc.text(m.date ? new Date(String(m.date).slice(0, 10) + 'T12:00:00').toLocaleDateString() : '—', cols.total - 60 - 10, y, { width: 60, align: 'right' });
+        doc.text(`($${left.toFixed(2)}) CR`, cols.balance - 20, y, { width: 82, align: 'right' });
+        grandBalance -= left;
+        y += 18;
+        doc.moveTo(50, y - 4).lineTo(562, y - 4).lineWidth(0.3).strokeColor('#eee').stroke();
+      }
+    } catch (e) { console.warn('[statement] credit memos not listed:', e.message); }
 
     // Total row
     y += 6;
     doc.moveTo(50, y).lineTo(562, y).lineWidth(1.5).strokeColor('#1565c0').stroke();
     y += 10;
     doc.font('Helvetica-Bold').fontSize(12).fillColor('#1565c0');
-    doc.text('TOTAL OUTSTANDING', cols.dr, y);
-    doc.text('$' + grandBalance.toFixed(2), cols.balance, y, { width: 62, align: 'right' });
+    grandBalance = Math.round(grandBalance * 100) / 100;
+    doc.text(grandBalance < 0 ? 'CREDIT ON ACCOUNT' : 'TOTAL OUTSTANDING', cols.dr, y);
+    doc.text(grandBalance < 0 ? `($${(-grandBalance).toFixed(2)})` : '$' + grandBalance.toFixed(2), cols.balance - 20, y, { width: 82, align: 'right' });
 
     doc.end();
     await finished;

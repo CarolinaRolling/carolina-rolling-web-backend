@@ -1173,7 +1173,8 @@ router.get('/ai-usage', async (req, res, next) => {
 // PO or DR collide with existing ones. They have dedicated screens that check the value.
 const SYSTEM_KEYS = new Set([
   'next_dr_number', 'next_po_number', 'next_op_po_number', 'next_invoice_number', 'freed_invoice_numbers',
-  'last_backup_status', 'backup_history', 'last_auto_backup', 'scrap_log', 'approved_ips',
+  'last_backup_status', 'backup_history', 'last_auto_backup', 'scrap_log', 'approved_ips', 'bootstrap_admin_id',
+  'gmail_oauth_state',
 ]);
 const isSystemKey = (k) => SYSTEM_KEYS.has(k) || /^fix_.*_done$/.test(k);
 // Keys that change prices, tax or security — admins only
@@ -1185,7 +1186,13 @@ const isAdmin = (req) => (req.user && req.user.role === 'admin') || (req.apiKey 
 // Secrets: only an admin can read them through the generic route. The COD override password used to be
 // sent to every browser that opened a work order and compared there (round 7) — it is now checked on
 // the server (POST /api/workorders/:id/cod-override) and screens only ask whether one is configured.
-const SECRET_KEYS = new Set(['cod_override_password', 'email_settings']);
+// The backup keys hold download links to full-database backups (password hashes, API keys, Gmail
+// tokens) — admin-only, like /api/backup/info (audit R3).
+const SECRET_KEYS = new Set(['cod_override_password', 'email_settings', 'backup_history', 'last_auto_backup', 'last_backup_status', 'approved_ips', 'gmail_oauth_state']);
+// What a non-admin may write through the generic route: an allowlist (round 12, R25 / N10). Before it
+// was a denylist, so any user could set e.g. the payroll e-mail addresses. Everything else the office
+// changes from the admin Settings screens.
+const STAFF_WRITABLE = (k) => /^section_sizes_[a-z0-9_]+$/i.test(k);
 
 // GET /api/settings/cod-override-status — is a COD override password set? (never returns the password)
 router.get('/cod-override-status', async (req, res, next) => {
@@ -1226,7 +1233,7 @@ router.put('/:key', async (req, res, next) => {
     if (isSystemKey(key)) {
       return res.status(403).json({ error: { message: `"${key}" is managed by the system and can't be set here. Use its own screen (DR Numbers, PO Numbers or the Invoice Center).` } });
     }
-    if (ADMIN_KEYS.has(key) && !isAdmin(req)) {
+    if ((ADMIN_KEYS.has(key) || !STAFF_WRITABLE(key)) && !isAdmin(req)) {
       return res.status(403).json({ error: { message: 'Only an admin can change this setting.' } });
     }
 

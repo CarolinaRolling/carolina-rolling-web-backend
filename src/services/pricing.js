@@ -94,46 +94,14 @@ function partBreakdown(part) {
   return { matEach, labEach };
 }
 
-// Load labor minimums from settings
-async function loadLaborMinimums({ transaction } = {}) {
-  try {
-    const setting = await getAppSettings().findOne({ where: { key: 'labor_minimums' }, transaction });
-    if (setting?.value) return JSON.parse(setting.value);
-  } catch (e) {}
-  return [];
+// Labor minimums: one engine for the estimate, the invoice and QuickBooks (round 13, T1) —
+// see services/laborMinimum.js. These two names are kept for the existing callers.
+async function loadLaborMinimums(opts = {}) {
+  return require('./laborMinimum').loadLaborMinimums(opts);
 }
 
-// Calculate minimum labor adjustment for a set of parts
 function calculateMinimumAdjustment(parts, minimumOverride, laborMinimums) {
-  if (minimumOverride) return { applies: false, adjustment: 0, totalLabor: 0, minimum: 0 };
-  
-  let totalLabor = 0;
-  let highestMin = 0;
-  let highestRule = null;
-
-  for (const part of parts) {
-    if (['fab_service', 'shop_rate'].includes(part.partType)) continue;
-    totalLabor += basePartLaborEach(part);
-    
-    for (const rule of laborMinimums) {
-      if (rule.partTypes && rule.partTypes.includes(part.partType)) {
-        const min = parseFloat(rule.minimum) || 0;
-        if (min > highestMin) {
-          highestMin = min;
-          highestRule = rule;
-        }
-      }
-    }
-  }
-
-  const applies = highestMin > 0 && totalLabor < highestMin;
-  return {
-    applies,
-    adjustment: applies ? Math.round((highestMin - totalLabor) * 100) / 100 : 0,
-    totalLabor,
-    minimum: highestMin,
-    rule: highestRule
-  };
+  return require('./laborMinimum').minimumInfo(parts, minimumOverride, laborMinimums || []);
 }
 
 // Calculate full order totals (parts + minimum + discount + tax + trucking)
@@ -337,7 +305,17 @@ function buildWorkOrderPartFromEstimate(estimatePart) {
     }
     // Default markup to 20% if not set — matches frontend display behavior
     const matMarkupRaw = parseFloat(data.materialMarkupPercent);
-    const matMarkup = isNaN(matMarkupRaw) ? 20 : matMarkupRaw;
+    // No markup stored: use whichever default (20% or 0%) reproduces the price the estimate actually
+    // quoted, so converting never changes the price (round 13 review — a 0% estimate became +20%)
+    let matMarkup = isNaN(matMarkupRaw) ? 20 : matMarkupRaw;
+    if (isNaN(matMarkupRaw)) {
+      const quoted = parseFloat(estimatePart.partTotal) || 0;
+      const q = parseInt(data.quantity) || 1;
+      const lab = parseFloat(fd._baseLaborTotal) || parseFloat(data.laborTotal) || 0;
+      const mc = parseFloat(data.materialTotal) || parseFloat(data.materialUnitCost) || parseFloat(fd.materialUnitCost) || 0;
+      const at = (m) => Math.round((Math.round(mc * (1 + m / 100) * 100) / 100 + lab) * q * 100) / 100;
+      if (quoted > 0 && mc > 0 && Math.abs(at(0) - quoted) < 0.02 && Math.abs(at(20) - quoted) >= 0.02) matMarkup = 0;
+    }
     // Persist the markup we actually used. A null markup means the estimate priced at +0%
     // while every WO-side display defaults a null to +20%, so the same part silently gained
     // 20% on conversion. Writing it explicitly keeps both sides showing one number.

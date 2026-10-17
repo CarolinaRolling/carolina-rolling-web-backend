@@ -16,6 +16,25 @@ if (!JWT_SECRET) {
 }
 const JWT_SIGNING_KEY = JWT_SECRET || 'insecure-development-only-secret';
 
+// A token signed before the user's last password change is no longer valid (round 12, R34)
+// Tokens carry the password version they were issued under (pwv); older tokens fall back to their
+// issue time.
+const pwVersion = (user) => (user && user.passwordChangedAt ? new Date(user.passwordChangedAt).getTime() : 0);
+const tokenOutdated = (decoded, user) => {
+  const changed = pwVersion(user);
+  if (!changed) return false;
+  if (decoded.pwv !== undefined) return Number(decoded.pwv) < changed;
+  return !decoded.iat || decoded.iat * 1000 < changed;
+};
+
+// Password re-checks by a signed-in session (2FA setup / disable, change password): 5 wrong tries per
+// user per 10 minutes, shared across the three routes (V21)
+const passwordAttempts = require('../services/passwordAttempts');
+const pwKey = (req) => 'account:' + req.user.id;
+const pwTake = (req) => passwordAttempts.take(pwKey(req));
+const pwClear = (req) => passwordAttempts.clear(pwKey(req));
+const pwLimited = (res) => res.status(429).json({ error: { message: 'Too many wrong password attempts. Try again in a few minutes.', code: 'TOO_MANY_PASSWORD_ATTEMPTS' } });
+
 // Middleware to verify JWT token
 const authenticateToken = async (req, res, next) => {
   const authHeader = req.headers['authorization'];
@@ -32,6 +51,7 @@ const authenticateToken = async (req, res, next) => {
     if (!user || !user.isActive) {
       return res.status(401).json({ error: { message: 'Invalid or inactive user' } });
     }
+    if (tokenOutdated(decoded, user)) return res.status(401).json({ error: { message: 'Your password was changed — please sign in again.' } });
     
     req.user = user;
     next();
@@ -62,23 +82,35 @@ const authenticate = async (req, res, next) => {
   // headers. File downloads genuinely need them (an <img>/window.open cannot set a header),
   // so they stay allowed — but only on GET, so a leaked token cannot be used to write.
   const allowQueryCredentials = req.method === 'GET';
+  // Strings only: ?apikey[]=a&apikey[]=b used to try many keys at once, ?apikey[gt]= gave a 503 (U39)
+  const str = (v) => (typeof v === 'string' && v ? v : undefined);
   const jwtToken = (authHeader && authHeader.startsWith('Bearer '))
     ? authHeader.split(' ')[1]
-    : (allowQueryCredentials ? req.query.token : undefined);
+    : (allowQueryCredentials ? str(req.query.token) : undefined);
   if (jwtToken) {
+    let decoded;
+    try { decoded = jwt.verify(jwtToken, JWT_SIGNING_KEY); }
+    catch (e) { return res.status(401).json({ error: { message: 'Invalid or expired token' } }); }
     try {
-      const decoded = jwt.verify(jwtToken, JWT_SIGNING_KEY);
       const user = await User.findByPk(decoded.userId);
-      if (user && user.isActive) {
+      if (user && user.isActive && !tokenOutdated(decoded, user)) {
         req.user = user;
-        return next();
+        // Admin-only actions, from one list (round 12, audit N10)
+        const roleProblem = require('../services/staffRoles').adminProblem(req);
+        if (roleProblem) return res.status(403).json({ error: { message: roleProblem, code: 'ADMIN_ONLY' } });
+        return await require('../services/idempotency').idempotency(req, res, next);
       }
-    } catch (e) {}
+    } catch (e) {
+      // A database problem (e.g. no free connection) is not a bad sign-in: answer 503 so the app
+      // retries instead of signing the user out (audit T13)
+      if (!res.headersSent) return res.status(503).json({ error: { message: 'The server is busy — please try again.', code: 'DB_UNAVAILABLE' } });
+      return;
+    }
     return res.status(401).json({ error: { message: 'Invalid or expired token' } });
   }
 
   // Option 2: API Key (portal/external apps) - header or query param
-  const apiKeyValue = apiKeyHeader || (allowQueryCredentials ? req.query.apikey : undefined);
+  const apiKeyValue = str(apiKeyHeader) || (allowQueryCredentials ? str(req.query.apikey) : undefined);
   if (apiKeyValue) {
     try {
       const apiKey = await ApiKey.findOne({ where: { key: apiKeyValue } });
@@ -98,21 +130,32 @@ const authenticate = async (req, res, next) => {
       }
       
       // === IP ALLOWLIST CHECK ===
-      const clientIP = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || req.connection?.remoteAddress || '';
+      // req.ip honours 'trust proxy' (1 hop = Heroku's router), so it is the real caller. The first
+      // X-Forwarded-For entry is whatever the caller wrote there and can't be trusted (audit R5).
+      const clientIP = String(req.ip || req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
       
-      // Build combined allowlist: per-key IPs + global approved IPs (for tablet keys only)
-      // Keys WITHOUT a deviceName are treated as client portals — global IPs don't apply to them
+      // Build combined allowlist: per-key IPs + global approved IPs (for shop-device keys only).
+      // "Device" is keyScope's rule — also a key with only an operator name or only a name, which
+      // has full tablet access (V5). Portal / vendor / admin integration keys don't get the list.
       const perKeyIPs = apiKey.allowedIPs ? apiKey.allowedIPs.split(',').map(ip => ip.trim()).filter(Boolean) : [];
-      const isTabletKey = !!apiKey.deviceName; // Tablet keys have a device name set
+      // Shop devices: every key keyScope treats as a tablet (incl. one with only a Name, W5), except
+      // admin-permission keys without a device name, which were never IP-checked and would be revoked on
+      // their first off-site call (review of round 16). A device-named admin key stays checked.
+      const isTabletKey = require('../services/keyScope').keyKind(apiKey) === 'device'
+        && (apiKey.permissions !== 'admin' || !!apiKey.deviceName);
       let globalIPs = [];
       if (isTabletKey) {
         try {
           const { AppSettings } = require('../models');
           const globalSetting = await AppSettings.findOne({ where: { key: 'approved_ips' } });
-          if (globalSetting?.value?.ips) {
-            globalIPs = globalSetting.value.ips.map(ip => ip.trim()).filter(Boolean);
+          if (Array.isArray(globalSetting?.value?.ips)) {
+            // a malformed entry is ignored, not a reason to stop every tablet (review of round 15)
+            globalIPs = globalSetting.value.ips.filter(ip => typeof ip === 'string').map(ip => ip.trim()).filter(Boolean);
           }
-        } catch (e) { /* ignore */ }
+        } catch (e) {
+          // Can't read the approved list: refuse (try again) rather than let the key in unchecked (U38)
+          return res.status(503).json({ error: { message: 'The server is busy — please try again.', code: 'DB_UNAVAILABLE' } });
+        }
       }
       
       const allAllowed = [...perKeyIPs, ...globalIPs];
@@ -175,14 +218,21 @@ const authenticate = async (req, res, next) => {
       // Update last used timestamp and IP (fire and forget)
       apiKey.update({ lastUsedAt: new Date(), lastIP: clientIP, lastIPDate: new Date() }).catch(() => {});
       
+      // Each kind of key reaches only what it is for — denied by default (audit R1)
+      const scopeProblem = require('../services/keyScope').routeProblem(apiKey, req.method, req.originalUrl);
+      if (scopeProblem) return res.status(403).json({ error: { message: scopeProblem, code: 'KEY_SCOPE' } });
+
       // Enforce read-only permission — block write operations
       if (apiKey.permissions === 'read' && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
         return res.status(403).json({ error: { message: 'API key has read-only permission' } });
       }
+      const roleProblem = require('../services/staffRoles').adminProblem(req);
+      if (roleProblem) return res.status(403).json({ error: { message: roleProblem, code: 'ADMIN_ONLY' } });
       
-      return next();
+      return require('../services/idempotency').idempotency(req, res, next);
     } catch (e) {
-      return res.status(500).json({ error: { message: 'Auth error' } });
+      if (res.headersSent) return;
+      return res.status(503).json({ error: { message: 'The server is busy — please try again.', code: 'DB_UNAVAILABLE' } });
     }
   }
 
@@ -211,6 +261,11 @@ router.post('/login', async (req, res, next) => {
   try {
     const { username, password, totpCode } = req.body;
 
+    // Text only (N1): a username sent as a list was looked up as "any of these", and each made-up
+    // extra name got its own rate-limit bucket — unlimited password guessing
+    if (typeof username !== 'string' || typeof password !== 'string' || (totpCode != null && typeof totpCode !== 'string' && typeof totpCode !== 'number')) {
+      return res.status(400).json({ error: { message: 'Username and password required' } });
+    }
     if (!username || !password) {
       return res.status(400).json({ error: { message: 'Username and password required' } });
     }
@@ -259,7 +314,7 @@ router.post('/login', async (req, res, next) => {
     }
 
     const token = jwt.sign(
-      { userId: user.id, username: user.username, role: user.role },
+      { userId: user.id, username: user.username, role: user.role, pwv: pwVersion(user) },
       JWT_SIGNING_KEY,
       { expiresIn: '7d' }
     );
@@ -285,6 +340,17 @@ router.post('/login', async (req, res, next) => {
 // POST /api/auth/2fa/setup - Generate TOTP secret and QR code
 router.post('/2fa/setup', authenticateToken, async (req, res, next) => {
   try {
+    // A signed-in session alone can't (re)set 2FA: the password is required, and while 2FA is on it
+    // must be turned off first (which also needs the password) — a stolen session used to replace the
+    // secret and lock the owner out (round 15, U9)
+    if (req.user.totpEnabled) return res.status(409).json({ error: { message: 'Two-factor authentication is already on. Turn it off first (needs your password), then set it up again.' } });
+    const pw = req.body && req.body.password;
+    if (typeof pw !== 'string' || !pw) return res.status(400).json({ error: { message: 'Your password is required to set up 2FA.' } });
+    if (!pwTake(req)) return pwLimited(res);
+    // 403, not 401: the web app treats 401 as "signed out" and would log the user off (review of round 15)
+    if (!(await req.user.validatePassword(pw))) return res.status(403).json({ error: { message: 'Invalid password' } });
+    pwClear(req);
+
     const { TOTP, Secret } = require('otpauth');
     const QRCode = require('qrcode');
 
@@ -363,9 +429,11 @@ router.post('/2fa/disable', authenticateToken, async (req, res, next) => {
       return res.status(400).json({ error: { message: 'Password is required to disable 2FA' } });
     }
 
+    if (!pwTake(req)) return pwLimited(res);
     if (!(await req.user.validatePassword(password))) {
-      return res.status(401).json({ error: { message: 'Invalid password' } });
+      return res.status(403).json({ error: { message: 'Invalid password' } });
     }
+    pwClear(req);
 
     await req.user.update({ totpEnabled: false, totpSecret: null });
     await logActivity(req.user.id, req.user.username, '2FA_DISABLED', 'user', req.user.id, null, req.ip);
@@ -442,16 +510,21 @@ router.put('/change-password', authenticateToken, async (req, res, next) => {
       return res.status(400).json({ error: { message: 'Current and new password required' } });
     }
 
+    if (!pwTake(req)) return pwLimited(res);
     if (!(await req.user.validatePassword(currentPassword))) {
-      return res.status(401).json({ error: { message: 'Current password is incorrect' } });
+      return res.status(403).json({ error: { message: 'Current password is incorrect' } });   // 403: a 401 signs the web user out
     }
+    pwClear(req);
 
     req.user.password = newPassword;
     await req.user.save();
 
     await logActivity(req.user.id, req.user.username, 'PASSWORD_CHANGED', 'user', req.user.id, null, req.ip);
 
-    res.json({ message: 'Password changed successfully' });
+    // Older sign-ins (other browsers, a lost laptop) stop working; this browser gets a fresh token
+    await req.user.reload();
+    const token = jwt.sign({ userId: req.user.id, username: req.user.username, role: req.user.role, pwv: pwVersion(req.user) }, JWT_SIGNING_KEY, { expiresIn: '7d' });
+    res.json({ message: 'Password changed — you are signed out on other devices', data: { token } });
   } catch (error) {
     next(error);
   }
@@ -568,17 +641,29 @@ router.get('/logs', authenticateToken, requireAdmin, async (req, res, next) => {
   }
 });
 
-// Initialize default admin user
+// First admin (audit R4). Before: an "admin / admin123" account was created on EVERY boot when no
+// user called "admin" existed — deleting it brought it back the next day, and it was the account that
+// logged in after a disaster-recovery restore. Now a first admin is created only when there are no
+// users at all, with the password from FIRST_ADMIN_PASSWORD or a random one printed once to the log.
+// Its id is remembered so a backup restore can replace it with the backup's real users.
 const initializeAdmin = async () => {
   try {
-    const adminExists = await User.findOne({ where: { username: 'admin' } });
-    if (!adminExists) {
-      await User.create({
-        username: 'admin',
-        password: 'admin123',
-        role: 'admin'
-      });
-      console.log('Default admin user created (username: admin, password: admin123)');
+    const n = await User.count();
+    if (n === 0) {
+      const password = process.env.FIRST_ADMIN_PASSWORD || crypto.randomBytes(9).toString('base64url');
+      const user = await User.create({ username: 'admin', password, role: 'admin' });
+      try {
+        const { AppSettings } = require('../models');
+        await AppSettings.upsert({ key: 'bootstrap_admin_id', value: user.id });
+      } catch (_) { /* only used by restore */ }
+      console.log(`First admin user created — username: admin, password: ${process.env.FIRST_ADMIN_PASSWORD ? '(FIRST_ADMIN_PASSWORD)' : password}. Change it after signing in.`);
+    }
+    // Databases set up by older versions have an "admin" account with the old built-in password.
+    // Say so loudly at every boot until it is changed (it can't be changed automatically without
+    // possibly locking out the only admin).
+    const legacy = await User.findOne({ where: { username: 'admin', isActive: true } });
+    if (legacy && await legacy.validatePassword('admin123')) {
+      console.warn('[SECURITY] The "admin" account still has the old default password "admin123". Change it (Admin → Users) or deactivate the account.');
     }
   } catch (error) {
     console.error('Failed to initialize admin user:', error);

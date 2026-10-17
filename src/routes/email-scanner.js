@@ -14,7 +14,9 @@ router.get('/oauth/start', async (req, res, next) => {
       return res.status(400).json({ error: { message: 'Google OAuth not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET env vars.' } });
     }
     const oauth2 = getOAuth2Client();
+    const state = await require('../services/gmailOAuth').issueState(req.user?.username);
     const authUrl = oauth2.generateAuthUrl({
+      state,
       access_type: 'offline',
       prompt: 'consent select_account',
       scope: [
@@ -28,52 +30,9 @@ router.get('/oauth/start', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
-// GET /api/email-scanner/oauth/callback - OAuth callback (redirected from Google)
-router.get('/oauth/callback', async (req, res, next) => {
-  try {
-    const { code } = req.query;
-    if (!code) return res.status(400).send('No authorization code received');
-
-    const oauth2 = getOAuth2Client();
-    const { tokens } = await oauth2.getToken(code);
-    oauth2.setCredentials(tokens);
-
-    // Get user email
-    const oauth2Api = require('googleapis').google.oauth2({ version: 'v2', auth: oauth2 });
-    const userInfo = await oauth2Api.userinfo.get();
-    const email = userInfo.data.email;
-
-    // Upsert account
-    const [account, created] = await GmailAccount.findOrCreate({
-      where: { email },
-      defaults: {
-        accessToken: tokens.access_token,
-        refreshToken: tokens.refresh_token,
-        tokenExpiry: tokens.expiry_date ? new Date(tokens.expiry_date) : null,
-        isActive: true,
-        connectedBy: 'admin'
-      }
-    });
-
-    if (!created) {
-      await account.update({
-        accessToken: tokens.access_token,
-        refreshToken: tokens.refresh_token || account.refreshToken,
-        tokenExpiry: tokens.expiry_date ? new Date(tokens.expiry_date) : null,
-        isActive: true,
-        lastError: null
-      });
-    }
-
-    // Redirect back to admin page
-    const baseUrl = process.env.FRONTEND_URL || process.env.BASE_URL || 'http://localhost:3000';
-    res.redirect(`${baseUrl}/admin/shop-config?tab=emailScanner&connected=${email}`);
-  } catch (error) {
-    console.error('[EmailScanner] OAuth callback error:', error.message);
-    const baseUrl = process.env.FRONTEND_URL || process.env.BASE_URL || 'http://localhost:3000';
-    res.redirect(`${baseUrl}/admin/shop-config?tab=emailScanner&error=${encodeURIComponent(error.message)}`);
-  }
-});
+// GET /api/email-scanner/oauth/callback — handled before authentication in index.js (Google redirects
+// the browser there); this copy behind authentication only forwards to the same checked handler.
+router.get('/oauth/callback', (req, res) => require('../services/gmailOAuth').handleCallback(req, res));
 
 // ==================== ACCOUNT MANAGEMENT ====================
 
@@ -518,16 +477,22 @@ router.post('/retry/:id', async (req, res, next) => {
       res.json({ data: email, message: 'Retry successful — pending order created' });
     } else {
       // RFQ — create estimate
-      const estNumber = parsed.referenceNumber || await require('../services/docNumbers').nextDocNumber('EST');
-      const existingEst = await Estimate.findOne({ where: { estimateNumber: estNumber } });
+      // Our own number from the estimate counter; the customer's reference is kept on the estimate and
+      // a duplicate is the same client + reference — not a clash of estimate numbers across clients
+      // (round 13, R22)
+      const { findEstimateByCustomerRef, withCustomerRef } = require('../services/emailScanner');
+      const customerRef = parsed.referenceNumber ? String(parsed.referenceNumber).trim() : '';
+      const existingEst = customerRef ? await findEstimateByCustomerRef({ clientId: email.clientId, clientName }, customerRef) : null;
       if (existingEst) {
-        await email.update({ status: 'ignored', errorMessage: 'Duplicate estimate number' });
-        return res.json({ data: email, message: `Estimate ${estNumber} already exists` });
+        await email.update({ status: 'ignored', errorMessage: `Duplicate: estimate ${existingEst.estimateNumber} already has reference ${customerRef}` });
+        return res.json({ data: email, message: `Estimate ${existingEst.estimateNumber} already exists for reference ${customerRef}` });
       }
+      const estNumber = await require('../services/docNumbers').nextDocNumber('EST');
 
       const estimate = await Estimate.create({
         estimateNumber: estNumber, clientName, clientId: email.clientId,
-        status: 'draft', notes: parsed.notes || null, emailLink: email.gmailLink, scannedEmailId: email.id
+        status: 'draft', notes: parsed.notes || null, internalNotes: withCustomerRef(null, customerRef), customerReference: customerRef || null,
+        emailLink: email.gmailLink, scannedEmailId: email.id
       });
       const createdPartIds = [];
       for (let i = 0; i < (parsed.parts || []).length; i++) {

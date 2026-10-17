@@ -13,11 +13,15 @@
  *   rush       = first rush_service part with no stored price: expedite % of labor and/or
  *                emergency off-hours fee (rounded to cents)
  *   shipping   = Σ shipment charges (each rounded), or legacy truckingCost if there are none
+ *   opTransport= order-level outside-processing trips (opTransports): Σ cost × (1 + markup%),
+ *                billed as a taxable line, the same as the estimate (round 11, audit N4)
  *   minimum    = labor-minimum adjustment unless minimumOverride
- *   discount   = discountPercent of (parts + rush + shipping + minimum), or discountAmount
+ *   discount   = discountPercent of (parts + rush + opTransport + minimum), or discountAmount.
+ *                Shipping is never discounted — the same base as the estimate (round 11, audit N4;
+ *                before, the invoice discounted shipping too, so it disagreed with the quote)
  *   taxable    = everything except shipping, after discount   (0 when resale / tax exempt)
  *   tax        = round(taxable × taxRate%)
- *   preTax     = parts + rush + shipping + minimum − discount   (the IIF TRNS amount)
+ *   preTax     = parts + rush + opTransport + shipping + minimum − discount   (the IIF TRNS amount)
  *   grandTotal = preTax + tax
  *
  * Tax exempt = client taxStatus 'resale'/'exempt' OR the work order's taxExempt flag.
@@ -43,13 +47,26 @@ function chargeBilled(c) {
        + (parseFloat(c.materialsCost) || 0) * (1 + (parseFloat(c.materialsMarkup) || 0) / 100);
 }
 
+/** Billed amount of the order-level outside-processing trips (cost + markup), rounded per trip */
+function opTransportBilled(wo) {
+  const trips = Array.isArray(wo && wo.opTransports) ? wo.opTransports : [];
+  let total = 0;
+  for (const t of trips) {
+    if (!t || typeof t !== 'object') continue;
+    total += round2((parseFloat(t.cost) || 0) * (1 + (parseFloat(t.markup) || 0) / 100));
+  }
+  return round2(total);
+}
+
 function isTaxExempt(wo, client) {
   const s = (client?.taxStatus || '').toLowerCase();
   return s === 'resale' || s === 'exempt' || wo?.taxExempt === true || wo?.taxExempt === 'true';
 }
 
-/** Rush / emergency fee for a rush_service part whose price lives in formData. */
-function rushFee(rushPart, parts) {
+/** Rush / emergency fee for a rush_service part whose price lives in formData. The expedite % applies
+ * to the labor actually billed (plus the labor minimum when it applies) — the same base as the
+ * estimate (round 13, T2; before, it used the rolling base labor of outside-processed parts). */
+function rushFee(rushPart, parts, minInfo = null) {
   const fd = fdOf(rushPart);
   let amount = 0;
   const labels = [];
@@ -60,20 +77,8 @@ function rushFee(rushPart, parts) {
     } else {
       let pct = parseFloat(fd._expediteType) || 0;
       if (fd._expediteType === 'custom_pct') pct = parseFloat(fd._expediteCustomPct) || 0;
-      // Expedite applies to LABOR ONLY (not material)
-      let laborBase = 0;
-      for (const bp of parts) {
-        if (bp.partType === 'rush_service') continue;
-        if (bp.partType === 'fab_service' || bp.partType === 'shop_rate') {
-          laborBase += calculatePartTotal(bp);
-        } else {
-          try {
-            const bd = partBreakdown(bp);
-            laborBase += (parseFloat(bd.labEach) || 0) * (parseInt(bp.quantity) || 1);
-          } catch (e) { /* skip unreadable part */ }
-        }
-      }
-      amount += round2(laborBase * (pct / 100));
+      const base = require('./laborMinimum').expediteLaborBase(parts, minInfo, calculatePartTotal);
+      amount += round2(base * (pct / 100));
       labels.push(`Expedite Service (${pct}% of labor)`);
     }
   }
@@ -115,9 +120,12 @@ function computeInvoiceTotals({ wo, parts = [], client = null, shipmentCharges =
     if (linked || amt > 0) partsSubtotal += amt;
   }
 
+  // Labor minimum (computed first: the expedite % includes it)
+  const minInfo = calculateMinimumAdjustment(sorted, wo.minimumOverride, laborMinimums || []);
+
   // Rush fee — first rush_service part without a stored price
   const rushPart = sorted.find(p => p.partType === 'rush_service' && calculatePartTotal(p) <= 0) || null;
-  const rush = rushPart ? rushFee(rushPart, parts) : { amount: 0, label: '' };
+  const rush = rushPart ? rushFee(rushPart, parts, minInfo) : { amount: 0, label: '' };
 
   // Shipping & handling (never taxed)
   const activeCharges = (shipmentCharges || []).map(plain).filter(c => chargeBilled(c) > 0);
@@ -130,22 +138,21 @@ function computeInvoiceTotals({ wo, parts = [], client = null, shipmentCharges =
     usesLegacyTrucking = true;
   }
 
-  let running = partsSubtotal + rush.amount + shippingTotal;
+  const opTransportTotal = opTransportBilled(wo);
+  let running = partsSubtotal + rush.amount + opTransportTotal + shippingTotal;
 
   // Labor minimum
-  let minimumAdjustment = 0;
-  if (!wo.minimumOverride) {
-    const info = calculateMinimumAdjustment(sorted, wo.minimumOverride, laborMinimums || []);
-    if (info.applies) minimumAdjustment = info.adjustment;
-  }
+  const minimumAdjustment = minInfo.applies ? minInfo.adjustment : 0;
   running += minimumAdjustment;
 
   // Discount
   const discountPercent = parseFloat(wo.discountPercent) || 0;
   const discountAmountField = parseFloat(wo.discountAmount) || 0;
   let discountTotal = 0;
-  if (discountPercent > 0) discountTotal = round2(running * discountPercent / 100);
+  if (discountPercent > 0) discountTotal = round2((running - shippingTotal) * Math.min(100, discountPercent) / 100);
   else if (discountAmountField > 0) discountTotal = discountAmountField;
+  // never more than what it discounts — a negative invoice and negative tax (round 13, T7)
+  discountTotal = Math.min(discountTotal, Math.max(0, round2(running - shippingTotal)));
   running -= discountTotal;
 
   const exempt = isTaxExempt(wo, client);
@@ -160,6 +167,7 @@ function computeInvoiceTotals({ wo, parts = [], client = null, shipmentCharges =
     rushAmount: rush.amount,
     rushLabel: rush.label,
     rushPartId: rushPart ? rushPart.id : null,
+    opTransportTotal,
     minimumAdjustment: round2(minimumAdjustment),
     discountPercent,
     discountTotal: round2(discountTotal),
@@ -199,6 +207,36 @@ function invoiceAmount(totals, wo) {
   if (wo.totalsComputedAt) return stored;                                // stored already includes shipping
   if (stored > 0) return round2(stored + chargeShipping);
   return totals ? totals.shippingTotal : 0;
+}
+
+/**
+ * The totals to PRINT for an invoice. Once an invoice is in QuickBooks its total is frozen; if
+ * something outside the price lock changed since (the client's tax status, the labor-minimum
+ * settings) a regenerated PDF used to show a different total than QuickBooks and the ledger
+ * (audit R16). For a frozen invoice this returns the frozen tax and total, with the parts subtotal
+ * as the remainder, so the printed rows still add up.
+ */
+function printableTotals(totals, wo) {
+  const w = plain(wo) || {};
+  if (!totals || !w.iifExportedAt) return totals;
+  // Exported before totals were frozen (pre round 4): print what the ledger counts — the stored total
+  // plus shipping charges (invoiceAmount) — so the PDF, the ledger and QuickBooks agree (R16, round 14)
+  const legacy = !w.totalsComputedAt;
+  if (legacy && !(parseFloat(w.grandTotal) > 0)) return totals;
+  const grand = legacy ? invoiceAmount(totals, w) : round2(parseFloat(w.grandTotal) || 0);
+  const tax = round2(parseFloat(w.taxAmount) || 0);
+  if (Math.abs(grand - totals.grandTotal) < 0.005 && Math.abs(tax - totals.taxAmount) < 0.005) return totals;
+  const shipping = totals.shippingTotal;   // printed as its own row in both cases
+  return {
+    ...totals,
+    grandTotal: grand,
+    taxAmount: tax,
+    isTaxExempt: tax > 0 ? false : totals.isTaxExempt,
+    // the order's own rate next to the frozen tax, not today's 0% (round 16, V19)
+    taxRate: tax > 0 ? (parseFloat(w.taxRate) || totals.taxRate) : totals.taxRate,
+    partsAfterDiscount: round2(grand - tax - shipping),
+    frozenDiffers: true,
+  };
 }
 
 // ─────────────────────────── database helpers ───────────────────────────
@@ -267,6 +305,10 @@ async function refreshStoredTotals(woId, { transaction, force = false } = {}) {
     { grandTotal: grand, taxAmount: tax, totalsComputedAt: new Date() },
     { where: { id: woId }, hooks: false, silent: true, transaction }
   );
+  // The total changed: re-check the "paid" mark, so an invoice paid in full and then raised shows
+  // what's owed again (and reappears in aging) — audit R15
+  try { await require('./paymentLedger').syncPaidFlag(woId, { transaction }); }
+  catch (e) { console.warn('[invoiceTotals] paid-flag sync failed for', woId, e.message); }
   return totals;
 }
 
@@ -274,7 +316,13 @@ async function refreshStoredTotals(woId, { transaction, force = false } = {}) {
 async function snapshotTotalsForExport(woIds, { transaction } = {}) {
   let n = 0;
   for (const id of [...new Set(woIds || [])]) {
-    try { if (await refreshStoredTotals(id, { transaction, force: true })) n++; }
+    try {
+      // inside a transaction, each order in its own savepoint: one failure must not abort the
+      // whole transaction (Postgres refuses every later statement after an error)
+      const run = () => refreshStoredTotals(id, { transaction, force: true });
+      const done = transaction ? await require('../models').sequelize.transaction({ transaction }, run) : await run();
+      if (done) n++;
+    }
     catch (e) { console.warn('[invoiceTotals] export snapshot failed for', id, e.message); }
   }
   return n;
@@ -285,9 +333,13 @@ async function snapshotTotalsForExport(woIds, { transaction } = {}) {
 // bulk jobs such as a backup restore to pause the hooks entirely.
 const pending = new Map();   // woId -> timer
 const running = new Map();   // woId -> { again: boolean }
-let suspended = 0;
-function suspendTotalsHooks() { suspended++; }
-function resumeTotalsHooks() { suspended = Math.max(0, suspended - 1); }
+// Paused only for the request that asks (a backup restore); other users' saves still refresh totals
+// during it (round 12, N20). Outside a request it pauses globally.
+let globalSuspended = 0;
+const ctxStore = () => { try { return require('./undo').contextStore(); } catch (_) { return null; } };
+const totalsSuspended = () => globalSuspended > 0 || !!ctxStore()?.totalsSuspended;
+function suspendTotalsHooks() { const st = ctxStore(); if (st) st.totalsSuspended = (st.totalsSuspended || 0) + 1; else globalSuspended++; }
+function resumeTotalsHooks() { const st = ctxStore(); if (st && st.totalsSuspended) st.totalsSuspended--; else globalSuspended = Math.max(0, globalSuspended - 1); }
 
 function runRefresh(woId) {
   if (running.has(woId)) { running.get(woId).again = true; return; }
@@ -298,7 +350,7 @@ function runRefresh(woId) {
     .finally(() => { running.delete(woId); if (state.again) runRefresh(woId); });
 }
 function scheduleRefresh(woId, options) {
-  if (!woId || suspended) return;
+  if (!woId || totalsSuspended()) return;
   const run = () => {
     if (pending.has(woId)) return;
     pending.set(woId, setTimeout(() => { pending.delete(woId); runRefresh(woId); }, 250));
@@ -307,7 +359,7 @@ function scheduleRefresh(woId, options) {
   if (t && typeof t.afterCommit === 'function') t.afterCommit(run); else run();
 }
 
-const WO_PRICING_FIELDS = ['taxRate', 'taxExempt', 'discountPercent', 'discountAmount', 'minimumOverride', 'truckingCost', 'clientId', 'clientName'];
+const WO_PRICING_FIELDS = ['opTransports', 'taxRate', 'taxExempt', 'discountPercent', 'discountAmount', 'minimumOverride', 'truckingCost', 'clientId', 'clientName'];
 // Part columns that can change a price. Updates touching none of these (tablet progress, status,
 // heat numbers, notes…) skip the refresh.
 const PART_PRICING_FIELDS = ['partTotal', 'quantity', 'laborTotal', 'laborRate', 'laborHours', 'materialTotal', 'materialUnitCost',
@@ -347,14 +399,14 @@ function registerTotalsHooks(models) {
     });
     Model.addHook('afterDestroy', 'invoiceTotals', one);
     Model.addHook('afterBulkCreate', 'invoiceTotals', (insts, options) => insts.forEach(i => one(i, options)));
-    Model.addHook('beforeBulkDestroy', 'invoiceTotals', async (options) => { if (!suspended) options._totalsWoIds = await whereWoIds(Model, options); });
+    Model.addHook('beforeBulkDestroy', 'invoiceTotals', async (options) => { if (!totalsSuspended()) options._totalsWoIds = await whereWoIds(Model, options); });
     Model.addHook('afterBulkDestroy', 'invoiceTotals', (options) => (options._totalsWoIds || []).forEach(id => scheduleRefresh(id, options)));
     // Capture affected orders BEFORE the update too, in case it changes a column used in the where.
     Model.addHook('beforeBulkUpdate', 'invoiceTotals', async (options) => {
-      if (!suspended && touchesPrice(options)) options._totalsWoIds = await whereWoIds(Model, options);
+      if (!totalsSuspended() && touchesPrice(options)) options._totalsWoIds = await whereWoIds(Model, options);
     });
     Model.addHook('afterBulkUpdate', 'invoiceTotals', async (options) => {
-      if (suspended || !touchesPrice(options)) return;
+      if (totalsSuspended() || !touchesPrice(options)) return;
       const ids = new Set([...(options._totalsWoIds || []), ...(await whereWoIds(Model, options))]);
       ids.forEach(id => scheduleRefresh(id, options));
     });
@@ -363,9 +415,55 @@ function registerTotalsHooks(models) {
     const fields = options && options.fields ? options.fields : [];
     if (fields.some(f => WO_PRICING_FIELDS.includes(f))) scheduleRefresh(inst.id, options);
   });
+  // A client's tax-exempt status changed: its open orders' totals change with it (W2)
+  let clientRefreshQueue = Promise.resolve();
+  if (models.Client) models.Client.addHook('afterUpdate', 'invoiceTotals', (inst, options) => {
+    const prev = inst.previous ? inst.previous('taxStatus') : undefined;
+    if (prev === undefined || isTaxExempt(null, { taxStatus: prev }) === isTaxExempt(null, inst)) return;
+    // queued one client after another, so a batch permit check that flips many clients doesn't run all
+    // their refreshes at once (review of round 17)
+    const id = inst.id, name = inst.name;
+    const run = () => { clientRefreshQueue = clientRefreshQueue.then(() => refreshClientOpenOrders(id, name))
+      .catch(e => console.warn('[invoiceTotals] client totals refresh failed for', id, e.message)); };
+    const t = options && options.transaction;
+    if (t && typeof t.afterCommit === 'function') t.afterCommit(run); else run();
+  });
+}
+
+/**
+ * Re-store the totals of a client's open orders (not voided, not exported to QuickBooks — exported
+ * totals are frozen) after its tax status changed, and re-check their paid marks through the ledger
+ * (refreshStoredTotals → syncPaidFlag). Totals are computed in batches; only orders whose stored
+ * total actually moved are written (W2).
+ */
+async function refreshClientOpenOrders(clientId, clientName) {
+  if (!clientId || totalsSuspended()) return 0;
+  const { WorkOrder, sequelize } = require('../models');
+  const { Op } = require('sequelize');
+  const byName = clientName ? [{ clientId: null, [Op.and]: sequelize.where(sequelize.fn('lower', sequelize.col('clientName')), String(clientName).toLowerCase()) }] : [];
+  const rows = await WorkOrder.findAll({
+    where: { [Op.or]: [{ clientId }, ...byName], iifExportedAt: null, isVoided: { [Op.or]: [null, false] } },
+    attributes: ['id'], raw: true,
+  });
+  let n = 0;
+  for (let i = 0; i < rows.length; i += 200) {
+    const totals = await loadInvoiceTotals(rows.slice(i, i + 200).map(r => r.id));
+    for (const [id, { wo, totals: tt }] of totals) {
+      if (!hasPricedLines(tt) && !wo.totalsComputedAt) continue;   // legacy stored total: left as is
+      const grand = hasPricedLines(tt) ? tt.grandTotal : tt.shippingTotal;
+      const tax = hasPricedLines(tt) ? tt.taxAmount : 0;
+      if (Math.abs(round2(parseFloat(wo.grandTotal) || 0) - grand) < 0.005 && Math.abs(round2(parseFloat(wo.taxAmount) || 0) - tax) < 0.005) continue;
+      // one at a time (review of round 17): a batch permit check can flip many clients at once, and
+      // firing every refresh in parallel would starve the 10-connection pool
+      try { await refreshStoredTotals(id); } catch (e) { console.warn('[invoiceTotals] refresh failed for', id, e.message); }
+      n++;
+    }
+  }
+  return n;
 }
 
 module.exports = {
+  printableTotals,
   computeInvoiceTotals,
   invoiceAmount,
   hasPricedLines,
@@ -375,8 +473,10 @@ module.exports = {
   isTaxExempt,
   rushFee,
   chargeBilled,
+  opTransportBilled,
   loadInvoiceTotals,
   refreshStoredTotals,
+  refreshClientOpenOrders,
   registerTotalsHooks,
   round2,
 };

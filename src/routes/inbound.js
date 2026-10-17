@@ -75,7 +75,7 @@ router.put('/:id', async (req, res, next) => {
     if (error.message === 'Inbound order not found') {
       return res.status(404).json({ error: { message: error.message } });
     }
-    if (error.status && error.status < 500) return res.status(error.status).json({ error: { message: error.message } });
+    if (error.status && error.status < 500) return res.status(error.status).json({ error: { message: error.message, code: error.code } });
     next(error);
   }
 });
@@ -84,14 +84,17 @@ router.put('/:id', async (req, res, next) => {
 router.put('/:id/status', async (req, res, next) => {
   try {
     const { status } = req.body;
-    const order = await inboundService.updateStatus(req.params.id, status);
+    if (!status) return res.status(400).json({ error: { message: 'status is required' } });
+    // un-receiving is admin only (U8)
+    const { isAdminCaller } = require('../services/staffRoles');
+    const order = await inboundService.updateStatus(req.params.id, status, { isAdmin: isAdminCaller(req) });
     res.json({ data: order });
   } catch (error) {
     console.error('Error updating inbound order status:', error);
     if (error.message === 'Inbound order not found') {
       return res.status(404).json({ error: { message: error.message } });
     }
-    if (error.status && error.status < 500) return res.status(error.status).json({ error: { message: error.message } });
+    if (error.status && error.status < 500) return res.status(error.status).json({ error: { message: error.message, code: error.code } });
     next(error);
   }
 });
@@ -107,7 +110,7 @@ router.put('/:id/receive', async (req, res, next) => {
     if (error.message === 'Inbound order not found') {
       return res.status(404).json({ error: { message: error.message } });
     }
-    if (error.status && error.status < 500) return res.status(error.status).json({ error: { message: error.message } });
+    if (error.status && error.status < 500) return res.status(error.status).json({ error: { message: error.message, code: error.code } });
     next(error);
   }
 });
@@ -115,14 +118,36 @@ router.put('/:id/receive', async (req, res, next) => {
 // DELETE inbound order
 router.delete('/:id', async (req, res, next) => {
   try {
-    const result = await inboundService.delete(req.params.id);
+    // A received delivery is the receiving record its PO relies on — admin only (round 13, R21)
+    const { isAdminCaller } = require('../services/staffRoles');
+    const result = await inboundService.delete(req.params.id, { isAdmin: isAdminCaller(req) });
     res.json(result);
   } catch (error) {
     console.error('Error deleting inbound order:', error);
     if (error.message === 'Inbound order not found') {
       return res.status(404).json({ error: { message: error.message } });
     }
-    if (error.status && error.status < 500) return res.status(error.status).json({ error: { message: error.message } });
+    if (error.status && error.status < 500) return res.status(error.status).json({ error: { message: error.message, code: error.code } });
+    next(error);
+  }
+});
+
+// POST convert a delivery into a received shipment — one transaction on the server (round 13, R21);
+// the shipment goes on the delivery's work order when it has one. Replaces the web app's
+// create-shipment-then-delete-delivery pair of calls.
+router.post('/:id/convert-to-shipment', async (req, res, next) => {
+  try {
+    const { isAdminCaller } = require('../services/staffRoles');
+    const receivedBy = (req.body && req.body.receivedBy) || (req.user && (req.user.username || req.user.name)) || null;
+    // a received delivery converts again only for an admin who sends force: true (U36)
+    const shipment = await inboundService.convertToShipment(req.params.id, { isAdmin: isAdminCaller(req), receivedBy, force: !!(req.body && req.body.force === true) });
+    res.status(201).json({ data: shipment, message: 'Converted to shipment' });
+  } catch (error) {
+    console.error('Error converting inbound order to shipment:', error);
+    if (error.message === 'Inbound order not found') {
+      return res.status(404).json({ error: { message: error.message } });
+    }
+    if (error.status && error.status < 500) return res.status(error.status).json({ error: { message: error.message, code: error.code } });
     next(error);
   }
 });

@@ -122,7 +122,7 @@ async function dropDuplicateConstraints(sequelize) {
 }
 
 /** M14 — repair duplicate part numbers, then add the deferred unique rule. */
-async function ensurePartNumberRules(sequelize, cols) {
+async function ensurePartNumberRules(sequelize, cols, renumbered = []) {
   const out = [];
   for (const [table, fk, name] of PART_NUMBER_RULES) {
     if (!cols.has(`${table}.${fk}`)) continue;
@@ -147,6 +147,7 @@ async function ensurePartNumberRules(sequelize, cols) {
       }
       await ddl(sequelize, `ALTER TABLE ${table} ADD CONSTRAINT ${name} UNIQUE ("${fk}", "partNumber") DEFERRABLE INITIALLY IMMEDIATE`, t);
     });
+    for (const { id } of dupParents) renumbered.push({ table, parentColumn: fk, parentId: id });
     out.push(`${name} added${dupParents.length ? ` (renumbered ${dupParents.length} ${table === 'work_order_parts' ? 'work order(s)' : 'estimate(s)'} that had repeated part numbers: ${dupParents.map(d => d.id).join(', ')})` : ''}`);
   }
   return out;
@@ -186,8 +187,16 @@ async function ensureForeignKeys(sequelize, cols) {
   return { added, skipped, orphans };
 }
 
+/**
+ * Returns a report (round 13, T30 — the restore route shows it to the admin; boot only logs it):
+ *   errors, duplicates, partNumbers, unique, foreignKeys — as before
+ *   renumbered:    [{ table, parentColumn, parentId }] — orders / estimates whose repeated part numbers
+ *                  were renumbered 1..n to make the unique rule fit
+ *   guardsMissing: [{ name, kind: 'part-number'|'unique'|'foreign-key', table, reason }] — rules that
+ *                  should exist on this database but are not there after this run
+ */
 async function ensureIntegrityConstraints(sequelize) {
-  const report = { errors: [], duplicates: { dropped: 0, failed: [] }, partNumbers: [], unique: { added: [], blocked: [] }, foreignKeys: { added: [], skipped: [], orphans: [] } };
+  const report = { errors: [], duplicates: { dropped: 0, failed: [] }, partNumbers: [], unique: { added: [], blocked: [] }, foreignKeys: { added: [], skipped: [], orphans: [] }, renumbered: [], guardsMissing: [] };
   // Each step on its own: one failing (e.g. a duplicate inserted between the check and the ALTER, or a
   // lock wait timing out) must not skip the rest; it is retried next boot.
   const step = async (key, fn) => {
@@ -195,17 +204,66 @@ async function ensureIntegrityConstraints(sequelize) {
   };
   await step('duplicates', () => dropDuplicateConstraints(sequelize));
   const cols = await columnsOf(sequelize);
-  await step('partNumbers', () => ensurePartNumberRules(sequelize, cols));
+  await step('partNumbers', () => ensurePartNumberRules(sequelize, cols, report.renumbered));
   await step('unique', () => ensureUniqueIndexes(sequelize, cols));
   await step('foreignKeys', () => ensureForeignKeys(sequelize, cols));
+  try { report.guardsMissing = await missingGuards(sequelize, cols, report); }
+  catch (e) { report.errors.push(`guardsMissing: ${e.message}`); }
   return report;
 }
 
+/** Which of the rules this module manages should be here (their table / column exists) but aren't. */
+async function missingGuards(sequelize, cols, report) {
+  const [rows] = await sequelize.query(`
+    SELECT conname AS name FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace WHERE n.nspname = current_schema()
+    UNION SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()`);
+  const have = new Set(rows.map(r => r.name));
+  const blocked = new Map((report.unique.blocked || []).map(b => [b.name, b]));
+  const errorFor = (key) => (report.errors.find(e => e.startsWith(`${key}:`)) || '').slice(key.length + 2) || null;
+  const out = [];
+  for (const [table, fk, name] of PART_NUMBER_RULES) {
+    if (cols.has(`${table}.${fk}`) && !have.has(name)) out.push({ name, kind: 'part-number', table, reason: errorFor('partNumbers') || 'not re-added (see server log)' });
+  }
+  for (const u of UNIQUE_INDEXES) {
+    if (![...cols.keys()].some(k => k.startsWith(`${u.table}.`)) || have.has(u.name)) continue;
+    const b = blocked.get(u.name);
+    out.push({ name: u.name, kind: 'unique', table: u.table,
+      reason: b ? `${b.duplicates.length}${b.duplicates.length >= 20 ? '+' : ''} duplicate value(s) to fix first` : (errorFor('unique') || 'not re-added (see server log)'),
+      ...(b ? { duplicates: b.duplicates } : {}) });
+  }
+  for (const [table, col, ref, onDelete] of FKS) {
+    const type = cols.get(`${table}.${col}`);
+    // permanently skipped ones (missing column, type mismatch, NOT NULL + SET NULL) are listed in foreignKeys.skipped, not here
+    if (!type || type !== cols.get(`${ref}.id`) || (onDelete === 'SET NULL' && cols.notNull.has(`${table}.${col}`))) continue;
+    const name = fkName(table, col);
+    if (!have.has(name)) out.push({ name, kind: 'foreign-key', table, reason: errorFor('foreignKeys') || 'not re-added (see server log)' });
+  }
+  return out;
+}
+
+/** Human-readable lines for an admin (restore response). */
+function reportWarnings(r) {
+  const w = [];
+  if (!r) return w;
+  const byTable = new Map();
+  for (const x of r.renumbered || []) { if (!byTable.has(x.table)) byTable.set(x.table, []); byTable.get(x.table).push(x.parentId); }
+  for (const [table, ids] of byTable) {
+    const what = table === 'work_order_parts' ? 'work order(s)' : table === 'estimate_parts' ? 'estimate(s)' : `${table} parent(s)`;
+    w.push(`Part numbers were renumbered 1..n on ${ids.length} ${what} that had repeated part numbers: ${ids.slice(0, 20).join(', ')}${ids.length > 20 ? ' …' : ''}.`);
+  }
+  for (const g of r.guardsMissing || []) w.push(`Database rule ${g.name} (${g.kind} on ${g.table}) is NOT in place: ${g.reason}.`);
+  for (const o of r.foreignKeys?.orphans || []) w.push(`${o} (kept; new rows are checked).`);
+  for (const e of r.errors || []) w.push(`Integrity step failed (retried at next server start): ${e}`);
+  return w;
+}
+
 /** Remove the rules a backup restore would trip over; ensureIntegrityConstraints() puts them back. */
-async function dropRestorableConstraints(sequelize) {
-  for (const [table, col] of FKS) await sequelize.query(`ALTER TABLE IF EXISTS ${table} DROP CONSTRAINT IF EXISTS ${fkName(table, col)}`);
-  for (const [table, , name] of PART_NUMBER_RULES) await sequelize.query(`ALTER TABLE IF EXISTS ${table} DROP CONSTRAINT IF EXISTS ${name}`);
-  for (const u of UNIQUE_INDEXES) await sequelize.query(`DROP INDEX IF EXISTS ${u.name}`);
+// V27: with { transaction } all drops happen in the caller's transaction (all or none, under its lock_timeout)
+async function dropRestorableConstraints(sequelize, { transaction } = {}) {
+  const o = transaction ? { transaction } : {};
+  for (const [table, col] of FKS) await sequelize.query(`ALTER TABLE IF EXISTS ${table} DROP CONSTRAINT IF EXISTS ${fkName(table, col)}`, o);
+  for (const [table, , name] of PART_NUMBER_RULES) await sequelize.query(`ALTER TABLE IF EXISTS ${table} DROP CONSTRAINT IF EXISTS ${name}`, o);
+  for (const u of UNIQUE_INDEXES) await sequelize.query(`DROP INDEX IF EXISTS ${u.name}`, o);
 }
 
 function logReport(r) {
@@ -219,6 +277,38 @@ function logReport(r) {
   if (r.foreignKeys.added.length) console.log(`[integrity] added ${r.foreignKeys.added.length} foreign key(s)${r.foreignKeys.added.length <= 5 ? ': ' + r.foreignKeys.added.join(', ') : ''}`);
   for (const o of r.foreignKeys.orphans) console.warn(`[integrity] ${o} (kept; new rows are checked)`);
   for (const s of r.foreignKeys.skipped) console.log(`[integrity] skipped foreign key ${s}`);
+  for (const g of r.guardsMissing || []) if (g.kind !== 'unique' || !g.duplicates) console.warn(`[integrity] ${g.name} is not in place: ${g.reason}`);
 }
 
-module.exports = { ensureIntegrityConstraints, dropRestorableConstraints, dropDuplicateConstraints, logReport, FKS, UNIQUE_INDEXES, PART_NUMBER_RULES };
+module.exports = { ensureIntegrityConstraints, dropRestorableConstraints, dropDuplicateConstraints, logReport, reportWarnings, FKS, UNIQUE_INDEXES, PART_NUMBER_RULES };
+
+/**
+ * Add every ENUM value the models declare that the database type is missing (round 13, T28). The old
+ * boot steps used the type name unquoted, so Postgres lower-cased it, the query failed and the error
+ * was swallowed — new part types / roll types never reached a production database.
+ */
+async function ensureEnumValues(sequelize) {
+  const added = [];
+  for (const model of Object.values(sequelize.models)) {
+    const table = model.getTableName();
+    for (const [attr, def] of Object.entries(model.rawAttributes)) {
+      const values = def.type && def.type.values;
+      if (!values || !def.type.key || def.type.key !== 'ENUM') continue;
+      const col = def.field || attr;
+      const typeName = `enum_${typeof table === 'string' ? table : table.tableName}_${col}`;
+      try {
+        const [rows] = await sequelize.query(`SELECT e.enumlabel AS v FROM pg_type t JOIN pg_enum e ON e.enumtypid = t.oid WHERE t.typname = :n`, { replacements: { n: typeName } });
+        if (!rows.length) continue;   // the column isn't an enum in this database
+        const have = new Set(rows.map(r => r.v));
+        for (const v of values) {
+          if (have.has(v)) continue;
+          await sequelize.query(`ALTER TYPE "${typeName.replace(/"/g, '')}" ADD VALUE IF NOT EXISTS '${String(v).replace(/'/g, "''")}'`);
+          added.push(`${typeName}.${v}`);
+        }
+      } catch (e) { console.warn(`[enums] ${typeName}:`, e.message); }
+    }
+  }
+  if (added.length) console.log(`[enums] added ${added.length} value(s): ${added.join(', ')}`);
+  return added;
+}
+module.exports.ensureEnumValues = ensureEnumValues;

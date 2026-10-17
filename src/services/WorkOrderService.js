@@ -69,6 +69,8 @@ class WorkOrderService {
   // Create a new work order
   async create(data) {
     const { WorkOrder, DRNumber, sequelize } = this.models;
+    // Numbered before the DR lock is taken: the counter uses its own connection (audit T13)
+    const orderNumber = await require('./docNumbers').nextDocNumber('WO');
     const transaction = await sequelize.transaction();
 
     try {
@@ -85,7 +87,6 @@ class WorkOrderService {
       }, { transaction });
 
       // Create work order
-      const orderNumber = await require('./docNumbers').nextDocNumber('WO');
       // Caller data is spread FIRST so it can never clobber the identifiers we just
       // allocated. drNumber is not in NUMERIC_FIELDS, so a drNumber of null or a stray
       // string in the request body used to overwrite nextDRNumber and produce a work order

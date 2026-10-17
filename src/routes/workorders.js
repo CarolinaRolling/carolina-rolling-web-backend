@@ -20,6 +20,9 @@ function inch(v) {
 
 const express = require('express');
 const { allocateDRNumber, reserveCustomDRNumber } = require('../services/numberAllocator');
+// Who is calling (round 15): a shop tablet key, or an admin (user or admin key)
+const isDeviceCaller = (req) => { try { return !!req.apiKey && require('../services/keyScope').keyKind(req.apiKey) === 'device'; } catch (_) { return false; } };
+const isAdminCallerReq = (req) => { try { return require('../services/staffRoles').isAdminCaller(req); } catch (_) { return false; } };
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -54,6 +57,32 @@ function coneSpecLabel(measurePoint, measureType) {
 
 
 const router = express.Router();
+
+// Any /:id/parts/:partId/... request must name a part of THIS work order (round 9, R7): file and
+// part routes used to look the part up by its own id only, so any order's id in the URL worked.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+router.use('/:id/parts/:partId', async (req, res, next) => {
+  try {
+    // W16: bad ids are a 404 (not a 500); "reorder" is the one fixed route under /parts/
+    if (!UUID_RE.test(req.params.id)) return res.status(404).json({ error: { message: 'Work order not found' } });
+    if (!UUID_RE.test(req.params.partId)) return req.params.partId === 'reorder' ? next() : res.status(404).json({ error: { message: 'Part not found on this work order' } });
+    const { WorkOrderPart } = require('../models');
+    const n = await WorkOrderPart.count({ where: { id: req.params.partId, workOrderId: req.params.id } });
+    if (!n) return res.status(404).json({ error: { message: 'Part not found on this work order' } });
+    next();
+  } catch (e) { next(e); }
+});
+
+// W16: a document / file / charge / issue id that isn't a UUID (or a non-UUID order id beside
+// it) is a 404, not a Postgres "invalid input syntax for type uuid" 500.
+// (partId is checked by the /:id/parts/:partId middleware above — a param handler would also run for
+// that middleware and turn /parts/reorder into a 404)
+for (const name of ['documentId', 'fileId', 'chargeId', 'issueId']) {
+  router.param(name, (req, res, next, value) => {
+    if (UUID_RE.test(String(value)) && UUID_RE.test(String(req.params.id || ''))) return next();
+    return res.status(404).json({ error: { message: 'Not found' } });
+  });
+}
 
 // ─── Helper: generate pickup receipt PDF buffer ───────────────────────────────
 async function generatePickupReceiptBuffer(workOrder, entry, idx) {
@@ -1391,8 +1420,10 @@ router.get('/', async (req, res, next) => {
     }
 
     // API key client scoping — force filter to the key's allowed client
-    if (req.apiKey && req.apiKey.clientName) {
-      where.clientName = { [Op.iLike]: `%${req.apiKey.clientName}%` };
+    if (require('../services/keyScope').isPortalKey(req)) {
+      // exact client (by id or exact name) — never a partial name match (R25)
+      delete where.clientName; delete where.clientId;
+      where[Op.and] = [...(where[Op.and] || []), await require('../services/keyScope').scopeWhere(req, 'WorkOrder')];
       // Portal: if no explicit status/archived param, show all
       if (!status && !archived) {
         delete where.status;
@@ -1536,7 +1567,17 @@ router.get('/lookup-dr/:drNumber', async (req, res, next) => {
   }
 });
 
-// GET /api/workorders/invoicing/queue - WOs ready for invoicing (MUST be before /:id)
+// The invoice amount exactly as the PDF, ledger and QuickBooks compute it (tax, minimums, discounts,
+// shipping charges; the frozen figure once exported) — the Invoice Center used to add up line totals
+// itself and showed e.g. $48.19 for a $2,416.25 invoice (audit R13)
+async function withInvoiceAmounts(rows) {
+  const { loadInvoiceTotals } = require('../services/invoiceTotals');
+  let map = new Map();
+  try { map = await loadInvoiceTotals(rows.map(r => r.id)); } catch (e) { console.warn('[invoicing] totals failed:', e.message); }
+  return rows.map(r => { const j = r.toJSON(); const e = map.get(r.id); j.invoiceAmount = e ? e.amount : null; return j; });
+}
+
+// GET /api/workorders/invoicing/queue
 router.get('/invoicing/queue', async (req, res, next) => {
   try {
     const { Op } = require('sequelize');
@@ -1556,7 +1597,7 @@ router.get('/invoicing/queue', async (req, res, next) => {
       include: [{ model: WorkOrderPart, as: 'parts', attributes: ['id', 'partNumber', 'partType', 'partTotal', 'quantity'] }],
       order: [['completedAt', 'ASC'], ['createdAt', 'ASC']]
     });
-    res.json({ data: workOrders });
+    res.json({ data: await withInvoiceAmounts(workOrders) });
   } catch (error) { next(error); }
 });
 
@@ -1581,7 +1622,7 @@ router.get('/invoicing/history', async (req, res, next) => {
       if (ae !== be) return ae - be;           // not-entered (0) before entered (1)
       return bestDate(b) - bestDate(a);         // newest first
     });
-    res.json({ data: workOrders });
+    res.json({ data: await withInvoiceAmounts(workOrders) });
   } catch (error) { next(error); }
 });
 
@@ -1662,7 +1703,7 @@ router.get('/:id', async (req, res, next) => {
 
     // API key client scoping — deny access if key is scoped to a different client
     if (req.apiKey && req.apiKey.clientName) {
-      if (!workOrder.clientName || !workOrder.clientName.toLowerCase().includes(req.apiKey.clientName.toLowerCase())) {
+      if (!(await require('../services/keyScope').owns(req, workOrder))) {
         return res.status(403).json({ error: { message: 'Access denied — API key does not have access to this work order' } });
       }
     }
@@ -1844,6 +1885,7 @@ router.post('/', async (req, res, next) => {
 
     // Start transaction
     const transaction = await sequelize.transaction();
+    let drAssignedLog = false;
     
     try {
       // Create work order
@@ -1907,16 +1949,9 @@ router.post('/', async (req, res, next) => {
           assignedBy: req.user?.username || 'system'
         }, { transaction });
 
-        // Log activity
-        await logActivity(
-          'dr_assigned',
-          'work_order',
-          workOrder.id,
-          `DR-${drNumber}`,
-          clientName,
-          `DR number assigned to new work order`,
-          { orderNumber }
-        );
+        // (the activity log is written after commit — it uses its own connection, and doing it while
+        // this transaction holds the DR lock starved the pool under load, audit T13)
+        drAssignedLog = true;
       }
 
       // Link shipments if provided
@@ -1932,6 +1967,10 @@ router.post('/', async (req, res, next) => {
       }
 
       await transaction.commit();
+      if (drAssignedLog) {
+        logActivity('dr_assigned', 'work_order', workOrder.id, `DR-${drNumber}`, clientName,
+          `DR number assigned to new work order`, { orderNumber }).catch(() => {});
+      }
 
       // Reload with associations
       const createdOrder = await WorkOrder.findByPk(workOrder.id, {
@@ -1976,10 +2015,18 @@ router.put('/:id/status', async (req, res, next) => {
     // Same rules and side effects as the office edit (audit M4): known statuses only, not on a voided
     // order, completedAt set when a tablet marks it Stored, "In Machine" cleared when done.
     const { planStatusChange, applyDoneSideEffects } = require('../services/workOrderStatus');
-    const statusUpdates = planStatusChange(workOrder, status);
+    const statusUpdates = planStatusChange(workOrder, status, { isDevice: isDeviceCaller(req), isAdmin: isAdminCallerReq(req) });
+    if (statusUpdates.status === 'shipped' || (statusUpdates.status === 'archived' && !['shipped', 'archived'].includes(workOrder.status))) {   // V22: archiving an unshipped order releases it too
+      const codBlock = await require('../services/codGuard').codProblem(workOrder, req);   // U10
+      if (codBlock) return res.status(codBlock.status).json({ error: { message: codBlock.message, code: codBlock.code } });
+    }
     if (Object.keys(statusUpdates).length) {
       await workOrder.update(statusUpdates);
       await applyDoneSideEffects(workOrder, status);
+      // The tablet's Stored button: rush lines complete with the order, as in mark-complete (V32)
+      if (['stored', 'completed'].includes(status)) {
+        await WorkOrderPart.update({ status: 'completed', completedAt: new Date() }, { where: { workOrderId: workOrder.id, partType: 'rush_service', status: { [Op.ne]: 'completed' } } });
+      }
       if (status === 'shipped') await archiveLinkedShipments(workOrder.id);
     }
     // Job finished → refresh Ginger's list (free, no-AI) so it drops off and capacity recalcs
@@ -2073,30 +2120,53 @@ router.post('/:id/backfill-pricing', async (req, res, next) => {
 // POST /api/workorders/:id/record-payment - Record COD payment
 router.post('/:id/record-payment', async (req, res, next) => {
   try {
-    const workOrder = await WorkOrder.findByPk(req.params.id);
+    const workOrder = await WorkOrder.findByPk(req.params.id, { attributes: ['id'] });
     if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
 
-    const { paymentDate, paymentMethod, paymentReference } = req.body;
+    const { paymentDate, paymentMethod, paymentReference, amount } = req.body;
     if (!paymentMethod) return res.status(400).json({ error: { message: 'Payment method is required' } });
+    // W26: the card type the dialog sent (in_person / manual), as the ledger payment route takes it
+    const isCard = /credit|card/i.test(String(paymentMethod));
+    const ccProcessingType = isCard ? (req.body.ccProcessingType === 'manual' ? 'manual' : 'in_person') : null;
 
-    await workOrder.update({
-      codPaid: true,
-      paymentDate: paymentDate || new Date(),
-      paymentMethod,
-      paymentReference: paymentReference || null,
-      paymentRecordedBy: req.user?.username || 'Unknown'
-    });
-    
-    res.json({ data: workOrder, message: 'Payment recorded' });
+    // A real payment record for what's owed (R14) — it used to only set "paid", with no record of the money
+    const { recordFullPayment, PaymentValidationError } = require('../services/paymentLedger');
+    let result;
+    try {
+      result = await recordFullPayment(workOrder.id, { amount, paymentDate, paymentMethod, paymentReference, codPaid: true, ccProcessingType,
+        notes: 'Paid at pickup (COD)', recordedBy: req.user?.username || req.operatorName || 'Unknown' });
+    } catch (e) {
+      if (e instanceof PaymentValidationError || e.status === 400) return res.status(400).json({ error: { message: e.message } });
+      throw e;
+    }
+    // W26: a card payment of exactly the balance (no surcharge matched) still stores its card type and
+    // Square's fee — the ledger only set them when it split off a surcharge
+    if (ccProcessingType && result && result.id && !result.ccProcessingType && typeof result.update === 'function') {
+      const charged = (parseFloat(result.amount) || 0) + (parseFloat(result.cardSurcharge) || 0);
+      await result.update({ ccProcessingType, ccFeeAmount: (charged * (ccProcessingType === 'manual' ? 0.035 : 0.026) + 0.15).toFixed(2) });
+    }
+    try { const qb = require('./quickbooks'); if (qb.regenerateInvoicePDF) await qb.regenerateInvoicePDF(workOrder.id); } catch (_) { /* best effort */ }
+    const fresh = await WorkOrder.findByPk(workOrder.id);
+    const message = result?.markedOnly
+      ? 'Already paid in full — released for pickup'
+      : (fresh.codPaid ? 'Payment recorded' : 'Payment recorded — the order is not paid in full yet');
+    // (an unpriced order records the amount received and is released; the ledger settles it once priced)
+    res.json({ data: fresh, message });
   } catch (error) { next(error); }
 });
 
 // POST /api/workorders/:id/clear-payment - Clear payment record (admin)
 router.post('/:id/clear-payment', async (req, res, next) => {
   try {
+    if (req.user?.role !== 'admin') return res.status(403).json({ error: { message: 'Only an admin can clear a recorded payment.' } });
     const workOrder = await WorkOrder.findByPk(req.params.id);
     if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
-    
+
+    // Void the payment records made by the COD dialog (R14), then clear the mark
+    const { WorkOrderPayment } = require('../models');
+    const { voidInvoicePayment, syncPaidFlag } = require('../services/paymentLedger');
+    const cod = await WorkOrderPayment.findAll({ where: { workOrderId: workOrder.id, voidedAt: null, notes: 'Paid at pickup (COD)' } });
+    for (const p of cod) await voidInvoicePayment(p.id, { user: req.user?.username });
     await workOrder.update({
       codPaid: false,
       paymentDate: null,
@@ -2104,8 +2174,9 @@ router.post('/:id/clear-payment', async (req, res, next) => {
       paymentReference: null,
       paymentRecordedBy: null
     });
-    
-    res.json({ data: workOrder, message: 'Payment record cleared' });
+    await syncPaidFlag(workOrder.id);   // other real payments may still cover it
+    await workOrder.reload();
+    res.json({ data: workOrder, message: cod.length ? `Payment cleared (${cod.length} COD payment record(s) voided)` : 'Payment record cleared' });
   } catch (error) { next(error); }
 });
 
@@ -2117,17 +2188,18 @@ router.post('/:id/invoice', upload.single('invoicePdf'), async (req, res, next) 
     
     const { invoiceNumber, invoiceDate } = req.body;
     if (!invoiceNumber) return res.status(400).json({ error: { message: 'Invoice number is required' } });
+    if (invoiceDate && !require('../utils/shopTime').calendarInstant(invoiceDate)) return res.status(400).json({ error: { message: 'Invoice date is not a valid date' } });
     
     // Claim the typed number through the locked service (audit H4). It refuses a number another
     // live work order holds — the old code moved the tracking row and left two orders sharing it —
     // and records the tracking row in the same transaction.
     const invoiceNumbers = require('../services/invoiceNumbers');
     try {
-      await invoiceNumbers.claimInvoiceNumber(workOrder.id, invoiceNumber, {
-        extraUpdates: { invoiceDate: invoiceDate || new Date(), invoicedBy: req.user?.username || 'Unknown' } });
+      await invoiceNumbers.claimInvoiceNumber(workOrder.id, invoiceNumber, { guard: req,
+        extraUpdates: { invoiceDate: require('../utils/shopTime').calendarInstant(invoiceDate) || workOrder.invoiceDate || new Date(), invoicedBy: req.user?.username || 'Unknown' } });
     } catch (claimErr) {
       try { if (req.file) require('fs').unlinkSync(req.file.path); } catch (e) {}
-      if (claimErr.status === 409) return res.status(409).json({ error: { message: claimErr.message } });
+      if (claimErr.status === 409 || claimErr.status === 403) return res.status(claimErr.status).json({ error: { message: claimErr.message, code: claimErr.code || undefined } });
       throw claimErr;
     }
 
@@ -2135,12 +2207,12 @@ router.post('/:id/invoice', upload.single('invoicePdf'), async (req, res, next) 
     if (req.file) {
       const fileStorage = require('../utils/storage');
       const result = await fileStorage.uploadFile(req.file.path, {
-        filename: `invoice-${invoiceNumber}-${workOrder.drNumber || workOrder.id}.pdf`,
+        originalName: `invoice-${invoiceNumber}-${workOrder.drNumber || workOrder.id}.pdf`,
         folder: 'invoices',
-        contentType: 'application/pdf'
+        mimeType: 'application/pdf'
       });
       try { require('fs').unlinkSync(req.file.path); } catch(e) {}
-      await WorkOrder.update({ invoicePdfUrl: result.url, invoicePdfCloudinaryId: result.publicId }, { where: { id: workOrder.id } });
+      await WorkOrder.update({ invoicePdfUrl: result.url, invoicePdfCloudinaryId: result.storageId }, { where: { id: workOrder.id } });
     }
     
     const updated = await WorkOrder.findByPk(req.params.id, {
@@ -2157,23 +2229,18 @@ router.post('/:id/invoice-pdf', upload.single('invoicePdf'), async (req, res, ne
     if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
     if (!req.file) return res.status(400).json({ error: { message: 'No PDF file provided' } });
 
-    // Delete old PDF if exists
-    if (workOrder.invoicePdfCloudinaryId) {
-      try {
-        const fileStorage = require('../utils/storage');
-        await fileStorage.destroy(workOrder.invoicePdfCloudinaryId);
-      } catch (e) { console.warn('Could not delete old invoice PDF:', e.message); }
-    }
+    const previousPdfId = workOrder.invoicePdfCloudinaryId;   // removed after the new one is saved (R28)
 
     const fileStorage = require('../utils/storage');
     const result = await fileStorage.uploadFile(req.file.path, {
-      filename: `invoice-${workOrder.invoiceNumber || 'draft'}-${workOrder.drNumber || workOrder.id}.pdf`,
+      originalName: `invoice-${workOrder.invoiceNumber || 'draft'}-${workOrder.drNumber || workOrder.id}.pdf`,
       folder: 'invoices',
-      contentType: 'application/pdf'
+      mimeType: 'application/pdf'
     });
     try { require('fs').unlinkSync(req.file.path); } catch(e) {}
 
-    await workOrder.update({ invoicePdfUrl: result.url, invoicePdfCloudinaryId: result.publicId });
+    await workOrder.update({ invoicePdfUrl: result.url, invoicePdfCloudinaryId: result.storageId });
+    if (previousPdfId && previousPdfId !== result.storageId) require('../services/fileRefs').deleteStoredFileIfUnused(previousPdfId).catch(() => {});
     res.json({ data: workOrder, message: 'Invoice PDF uploaded' });
   } catch (error) { next(error); }
 });
@@ -2192,6 +2259,10 @@ router.delete('/:id/invoice', async (req, res, next) => {
 
     const workOrder = await WorkOrder.findByPk(req.params.id);
     if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
+    // Same rule as voiding or replacing the number (N3 / T8): not once it is in QuickBooks or has payments
+    if (workOrder.iifExportedAt) return res.status(409).json({ error: { message: `Invoice #${workOrder.invoiceNumber} is in QuickBooks. Void it there and reopen it in the Invoice Center first.` } });
+    const acctState = await require('../services/drGuard').accountingState(require('../models'), workOrder);
+    if (acctState.payments) return res.status(409).json({ error: { message: `Invoice #${workOrder.invoiceNumber} has payments. Void or move them first.` } });
     console.log(`[clear-invoice] #${workOrder.invoiceNumber} on DR-${workOrder.drNumber} deleted+reclaimed by admin ${req.user.username}`);
     
     // Free the invoice number so it can be reused on the next invoice (fills the gap instead of wasting it).
@@ -2206,8 +2277,7 @@ router.delete('/:id/invoice', async (req, res, next) => {
     // Delete the PDF only after the database change is committed
     if (oldPdfId) {
       try {
-        const fileStorage = require('../utils/storage');
-        await fileStorage.destroy(oldPdfId);
+        await require('../services/fileRefs').deleteStoredFileIfUnused(oldPdfId);
       } catch (e) { console.warn('Could not delete invoice PDF:', e.message); }
     }
     res.json({ data: workOrder, message: freedNum ? `Invoice cleared \u2014 #${freedNum} freed for reuse` : 'Invoice cleared' });
@@ -2252,24 +2322,27 @@ router.post('/:id/mark-invoice-sent', upload.single('invoicePdf'), async (req, r
     const workOrder = await WorkOrder.findByPk(req.params.id);
     if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
     
+    if (req.body.invoiceDate && !require('../utils/shopTime').calendarInstant(req.body.invoiceDate)) return res.status(400).json({ error: { message: 'Invoice date is not a valid date' } });
     const updates = {
-      invoiceDate: req.body.invoiceDate ? new Date(req.body.invoiceDate + 'T12:00:00') : new Date(),
+      invoiceDate: require('../utils/shopTime').calendarInstant(req.body.invoiceDate) || new Date(),   // noon Pacific (N8)
       invoicedBy: req.user?.username || 'Unknown'
     };
     
     if (req.file) {
       const fileStorage = require('../utils/storage');
       const result = await fileStorage.uploadFile(req.file.path, {
-        filename: `invoice-${workOrder.invoiceNumber || 'draft'}-${workOrder.drNumber || workOrder.id}.pdf`,
+        originalName: `invoice-${workOrder.invoiceNumber || 'draft'}-${workOrder.drNumber || workOrder.id}.pdf`,
         folder: 'invoices',
-        contentType: 'application/pdf'
+        mimeType: 'application/pdf'
       });
       updates.invoicePdfUrl = result.url;
-      updates.invoicePdfCloudinaryId = result.publicId;
+      updates.invoicePdfCloudinaryId = result.storageId;
       try { require('fs').unlinkSync(req.file.path); } catch(e) {}
     }
-    
+    const replacedPdfId = req.file ? workOrder.invoicePdfCloudinaryId : null;
+
     await workOrder.update(updates);
+    if (replacedPdfId && replacedPdfId !== updates.invoicePdfCloudinaryId) require('../services/fileRefs').deleteStoredFileIfUnused(replacedPdfId).catch(() => {});
     res.json({ data: workOrder, message: 'Invoice marked as sent' });
   } catch (error) { next(error); }
 });
@@ -2292,7 +2365,7 @@ router.post('/:id/email-invoice', async (req, res, next) => {
 
     const drLabel = workOrder.drNumber ? 'DR-' + workOrder.drNumber : (workOrder.orderNumber || 'N/A');
     const shopName = 'Carolina Rolling Co. Inc.';
-    const invoiceDate = workOrder.invoiceDate ? new Date(workOrder.invoiceDate).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : 'N/A';
+    const invoiceDate = workOrder.invoiceDate ? new Date(require('../utils/shopTime').calendarDay(workOrder.invoiceDate) + 'T12:00:00Z').toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' }) : 'N/A';
     
     // Invoice total — same calculation as the invoice PDF and QuickBooks (services/invoiceTotals).
     // The old email added parts + trucking + the stored tax and could disagree with the attached PDF.
@@ -2332,12 +2405,15 @@ router.post('/:id/email-invoice', async (req, res, next) => {
     };
 
     // Attach PDF if available
+    let attachFailed = false;
     if (workOrder.invoicePdfUrl) {
       try {
         const pdfUrl = workOrder.invoicePdfUrl;
         const isHttps = pdfUrl.startsWith('https');
         const httpMod = isHttps ? require('https') : require('http');
-        const pdfBuffer = await new Promise((resolve, reject) => {
+        // S3 files are read with the storage credentials (works with a private bucket — R7)
+        const s3Id = fileStorage.s3IdFor(workOrder.invoicePdfCloudinaryId, pdfUrl);
+        const pdfBuffer = s3Id ? await fileStorage.downloadToBuffer(s3Id) : await new Promise((resolve, reject) => {
           const fetchUrl = (url, redirects = 0) => {
             if (redirects > 5) { reject(new Error('Too many redirects')); return; }
             httpMod.get(url, (resp) => {
@@ -2354,6 +2430,8 @@ router.post('/:id/email-invoice', async (req, res, next) => {
           };
           fetchUrl(pdfUrl);
         });
+        // never attach an error page as the invoice (R28)
+        if (!pdfBuffer || pdfBuffer.slice(0, 5).toString() !== '%PDF-') throw new Error('stored invoice PDF could not be read');
         mailOptions.attachments.push({
           filename: `Invoice-${workOrder.invoiceNumber}.pdf`,
           content: pdfBuffer,
@@ -2361,12 +2439,16 @@ router.post('/:id/email-invoice', async (req, res, next) => {
         });
       } catch (e) {
         console.warn('[email-invoice] Could not attach PDF:', e.message);
+        attachFailed = true;
+        if (typeof mailOptions.html === 'string') mailOptions.html = mailOptions.html.replace('<p style="color:#666">Invoice PDF is attached.</p>', '<p style="color:#999">The invoice PDF will follow separately.</p>');
       }
     }
 
     await transporter.sendMail(mailOptions);
     console.log(`[email-invoice] Invoice ${workOrder.invoiceNumber} sent to ${recipientEmail}`);
-    res.json({ data: { sentTo: recipientEmail }, message: `Invoice emailed to ${recipientEmail}` });
+    res.json({ data: { sentTo: recipientEmail, pdfAttached: !attachFailed }, message: attachFailed
+      ? `Invoice emailed to ${recipientEmail}, but the stored PDF couldn't be read, so it was NOT attached — send it separately.`
+      : `Invoice emailed to ${recipientEmail}` });
   } catch (error) {
     console.error('[email-invoice] Failed:', error.message);
     next(error);
@@ -2408,7 +2490,8 @@ router.post('/:id/cod-override', async (req, res, next) => {
     if (ok) passwordAttempts.clear('cod:' + who);
     await auditWorkOrder(req, ok ? 'cod_override_used' : 'cod_override_failed', workOrder, { action: req.body?.action || null });
     if (!ok) return res.status(403).json({ error: { message: 'Incorrect override password.' } });
-    res.json({ data: { ok: true } });
+    // The release itself is checked on the server now (U10): this token lets the pickup / ship go through
+    res.json({ data: { ok: true, codOverrideToken: require('../services/codGuard').issueToken(workOrder.id) } });
   } catch (error) { next(error); }
 });
 
@@ -2422,8 +2505,18 @@ router.post('/:id/mark-complete', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Work order not found' } });
     }
     
-    // Verify all parts are completed
-    const incompleteParts = workOrder.parts.filter(p => p.status !== 'completed');
+    // Only an order still in the shop can be completed here. A stored order is already done (no-op);
+    // a shipped, archived or picked-up one must never be moved back to Stored (round 13, T35 — the
+    // tablet's button did that, even to orders already in QuickBooks)
+    const { IN_SHOP } = require('../services/workOrderStatus');
+    if (workOrder.status === 'stored') return res.json({ data: workOrder, message: 'Already complete (in Stored)' });
+    if (!IN_SHOP.includes(workOrder.status) && workOrder.status !== 'completed') {
+      return res.status(409).json({ error: { message: `This order is already ${String(workOrder.status || '').replace(/_/g, ' ')} — it can't be marked complete again.` } });
+    }
+
+    // Verify all parts are completed. Rush / expedite lines aren't shop work (no toggle on the tablet):
+    // they complete with the order instead of blocking it (round 15, U28)
+    const incompleteParts = workOrder.parts.filter(p => p.status !== 'completed' && p.partType !== 'rush_service');
     if (incompleteParts.length > 0) {
       return res.status(400).json({ 
         error: { message: `${incompleteParts.length} part(s) not yet completed` }
@@ -2433,12 +2526,11 @@ router.post('/:id/mark-complete', async (req, res, next) => {
     // Mark complete. Completion time is recorded on the order (completedAt) and per part —
     // no longer appended to notes (keeps the notes field for real notes).
     const now = new Date();
-    require('../services/workOrderStatus').planStatusChange(workOrder, 'stored');   // refuses a voided order (M4)
+    const plan = require('../services/workOrderStatus').planStatusChange(workOrder, 'stored');   // refuses a voided order (M4)
 
-    await workOrder.update({ 
-      status: 'stored',
-      completedAt: now
-    });
+    await workOrder.update({ status: 'stored', completedAt: now, ...(plan && typeof plan === 'object' ? plan : {}) });
+    const openRush = workOrder.parts.filter(p => p.partType === 'rush_service' && p.status !== 'completed').map(p => p.id);
+    if (openRush.length) await WorkOrderPart.update({ status: 'completed', completedAt: now }, { where: { id: openRush } });
     // Job is done — clear its "in machine" marker(s) so it stops showing as being worked.
     try { await WorkOrderPresence.destroy({ where: { workOrderId: workOrder.id } }); } catch {}
     
@@ -2516,6 +2608,9 @@ router.post('/:id/pickup', async (req, res, next) => {
       await t.rollback();
       return res.status(404).json({ error: { message: 'Work order not found' } });
     }
+    // A COD order that still owes money isn't released without payment or the override (U10)
+    const codBlock = await require('../services/codGuard').codProblem(workOrder, req, { transaction: t });
+    if (codBlock) { await t.rollback(); return res.status(codBlock.status).json({ error: { message: codBlock.message, code: codBlock.code } }); }
 
     const now = new Date().toISOString();
     const history = workOrder.pickupHistory || [];
@@ -2903,6 +2998,9 @@ router.put('/:id/pickup/:index', async (req, res, next) => {
       return picked >= (p.quantity || 1);
     });
     if (allPickedUp && workOrder.status !== 'shipped') {
+      // editing an entry up to "everything picked up" ships it: same COD rule as a pickup (review of round 15)
+      const codBlock = await require('../services/codGuard').codProblem(workOrder, req, { transaction: t });
+      if (codBlock) { await t.rollback(); return res.status(codBlock.status).json({ error: { message: codBlock.message, code: codBlock.code } }); }
       workOrder.status = 'shipped';
     } else if (!allPickedUp && workOrder.status === 'shipped') {
       workOrder.status = 'stored';
@@ -2942,14 +3040,22 @@ router.put('/:id/dr-number', async (req, res, next) => {
       return res.json({ data: workOrder.toJSON(), message: 'No change' });
     }
 
-    // Check uniqueness across WorkOrders and DRNumbers
-    const existingWO = await WorkOrder.findOne({ where: { drNumber: newDR } });
-    if (existingWO && existingWO.id !== workOrder.id) {
-      return res.status(409).json({ error: { message: `DR-${newDR} is already assigned to another work order` } });
-    }
-
     const transaction = await sequelize.transaction();
     try {
+      const guard = require('../services/drGuard');
+      const models = require('../models');
+      await guard.lockDR(sequelize, transaction);   // one DR writer at a time (R17)
+      await workOrder.reload({ transaction, lock: transaction.LOCK.UPDATE });
+      const problem = (await guard.drActionProblem(models, req, workOrder, 'change', { transaction }))
+        || (await guard.jumpProblem(models, newDR, { transaction }));
+      if (problem) { await transaction.rollback(); return res.status(problem.status).json({ error: { message: problem.message } }); }
+      // Check uniqueness across WorkOrders and DRNumbers (under the lock)
+      const existingWO = await WorkOrder.findOne({ where: { drNumber: newDR }, transaction });
+      const existingDR = await DRNumber.findOne({ where: { drNumber: newDR }, transaction });
+      if ((existingWO && existingWO.id !== workOrder.id) || (existingDR && existingDR.workOrderId !== workOrder.id)) {
+        await transaction.rollback();
+        return res.status(409).json({ error: { message: `DR-${newDR} is already used (by another work order or in the DR log)` } });
+      }
       const oldDR = workOrder.drNumber;
 
       // Update work order
@@ -2969,6 +3075,13 @@ router.put('/:id/dr-number', async (req, res, next) => {
           assignedAt: new Date(),
           assignedBy: req.user?.username || 'system'
         }, { transaction });
+      }
+
+      // Everything that carries the DR: the estimate it came from and the parts' lot numbers (<DR>-<line>)
+      await models.Estimate.update({ drNumber: newDR }, { where: { workOrderId: workOrder.id }, transaction });
+      if (oldDR) {
+        await sequelize.query(`UPDATE work_order_parts SET "lotNumber" = :n || substr("lotNumber", length(:o) + 1)
+          WHERE "workOrderId" = :id AND "lotNumber" LIKE :o || '-%'`, { replacements: { n: String(newDR), o: String(oldDR), id: workOrder.id }, transaction });
       }
 
       await transaction.commit();
@@ -3082,8 +3195,30 @@ router.put('/:id', async (req, res, next) => {
     // Order-level OP transports
     if (req.body.opTransports !== undefined) updates.opTransports = req.body.opTransports;
 
+    // Void / restore through the work-order edit follows the same rules as the DR tools (round 12,
+    // audit N14): voiding an invoiced order is admin-only and refused with payments; restoring is
+    // admin-only and refused if its invoice number went to another order meanwhile. The DR log is
+    // kept in step below (it used to stay "active" on a voided order, or "void" on a restored one).
+    // Strict booleans only: 1 / 0 / "yes" used to skip both checks below and still be written (T10)
+    if (isVoided !== undefined && isVoided !== null && ![true, false, 'true', 'false'].includes(isVoided)) {
+      return res.status(400).json({ error: { message: 'isVoided must be true or false' } });
+    }
+    const voidFlag = isVoided === true || isVoided === 'true' ? true : (isVoided === false || isVoided === 'false' ? false : undefined);
+    if (voidFlag === true && !workOrder.isVoided) {
+      const problem = await require('../services/drGuard').drActionProblem(require('../models'), req, workOrder, 'void');
+      if (problem) return res.status(problem.status).json({ error: { message: problem.message } });
+    }
+    if (voidFlag === false && workOrder.isVoided) {
+      if (!require('../services/staffRoles').isAdminCaller(req)) return res.status(403).json({ error: { message: 'Only an admin can restore a voided order.' } });
+      if (workOrder.invoiceNumber) {
+        const holder = await WorkOrder.findOne({ where: { invoiceNumber: workOrder.invoiceNumber, id: { [Op.ne]: workOrder.id },
+          [Op.or]: [{ isVoided: null }, { isVoided: false }] } });
+        if (holder) return res.status(409).json({ error: { message: `Can't restore: its invoice #${workOrder.invoiceNumber} is now used by ${holder.drNumber ? 'DR-' + holder.drNumber : holder.orderNumber}. Clear or change one of the invoice numbers first.` } });
+      }
+    }
+
     // Void fields
-    if (isVoided !== undefined) updates.isVoided = isVoided;
+    if (voidFlag !== undefined) updates.isVoided = voidFlag;
     if (voidedAt !== undefined) updates.voidedAt = voidedAt || null;
     if (voidedBy !== undefined) updates.voidedBy = voidedBy || null;
     if (voidReason !== undefined) updates.voidReason = voidReason || null;
@@ -3093,7 +3228,11 @@ router.put('/:id', async (req, res, next) => {
     const { planStatusChange, applyDoneSideEffects } = require('../services/workOrderStatus');
     const statusChange = planStatusChange(
       { ...workOrder.get({ plain: true }), isVoided: updates.isVoided === false ? false : workOrder.isVoided },
-      status, { pickedUpBy, signatureData });
+      status, { pickedUpBy, signatureData, isDevice: isDeviceCaller(req), isAdmin: isAdminCallerReq(req) });
+    if (statusChange.status === 'shipped' || (statusChange.status === 'archived' && !['shipped', 'archived'].includes(workOrder.status))) {   // V22
+      const codBlock = await require('../services/codGuard').codProblem(workOrder, req);   // U10
+      if (codBlock) return res.status(codBlock.status).json({ error: { message: codBlock.message, code: codBlock.code } });
+    }
     Object.assign(updates, statusChange);
 
     const wasVoided = workOrder.isVoided;
@@ -3102,6 +3241,18 @@ router.put('/:id', async (req, res, next) => {
     // Audit a void (isVoided flipped to true in this update).
     if (updates.isVoided === true && !wasVoided) {
       auditWorkOrder(req, 'workorder_voided', workOrder, { voidReason: updates.voidReason || null });
+    }
+    // Keep the DR log in step with the order (N14)
+    if (updates.isVoided !== undefined && !!updates.isVoided !== !!wasVoided) {
+      try {
+        if (updates.isVoided) {
+          await DRNumber.update({ status: 'void', voidedAt: new Date(), voidedBy: req.user?.username || 'admin', voidReason: updates.voidReason || 'Voided from the work order' },
+            { where: { workOrderId: workOrder.id, status: 'active' } });
+        } else {
+          await DRNumber.update({ status: 'active', voidedAt: null, voidedBy: null, voidReason: null },
+            { where: { workOrderId: workOrder.id, status: 'void' } });
+        }
+      } catch (e) { console.warn('[workorders] DR log sync after void/restore failed:', e.message); }
     }
 
     // Job finished → refresh Ginger's list (free, no-AI)
@@ -3214,6 +3365,17 @@ router.delete('/:id', async (req, res, next) => {
     // Every row this delete removes (the order, parts, files, documents, deliveries, messages…) is
     // snapshotted automatically by the undo hooks, as one group — Admin → Deleted Items → Undo.
 
+    // Links cleared by hand below, recorded so Undo puts them back (U20; applied by services/undo.js)
+    const undoRelink = [];
+    const relinkRows = async (Model, col, value, where, extra = {}) => {
+      const rows = await Model.findAll({ where, attributes: ['id', ...Object.keys(extra)], transaction });
+      if (rows.length) undoRelink.push({ table: Model.getTableName(), col, value, ids: rows.map(r => r.id) });
+      return rows;
+    };
+    await relinkRows(DRNumber, 'workOrderId', workOrder.id, { workOrderId: workOrder.id });
+    await relinkRows(PONumber, 'workOrderId', workOrder.id, { workOrderId: workOrder.id });
+    const ests = await relinkRows(Estimate, 'workOrderId', workOrder.id, { workOrderId: workOrder.id }, { status: true });
+    for (const e of ests) if (e.status && e.status !== 'accepted') undoRelink.push({ table: 'estimates', col: 'status', value: e.status, when: 'accepted', ids: [e.id] });
     await DRNumber.update({ workOrderId: null }, { where: { workOrderId: workOrder.id }, transaction });
     await PONumber.update({ workOrderId: null }, { where: { workOrderId: workOrder.id }, transaction });
     await Estimate.update({ workOrderId: null, status: 'accepted' }, { where: { workOrderId: workOrder.id }, transaction });
@@ -3245,6 +3407,25 @@ router.delete('/:id', async (req, res, next) => {
       console.error('[delete WO] Failed to fetch orphan inbound orders:', e.message);
     }
 
+    // U20: received deliveries can't go with the order unless an admin deletes it (and then they are
+    // kept, detached); deliveries for an estimate's PO are always kept for the estimate
+    const inboundRows = inboundOrderIds.length ? await InboundOrder.findAll({ where: { id: inboundOrderIds },
+      attributes: ['id', 'status', 'receivedAt', 'estimateId', 'purchaseOrderNumber', 'workOrderId'], transaction }) : [];
+    const estPoInbound = new Set(inboundOrderIds.length ? (await PONumber.findAll({ where: { inboundOrderId: inboundOrderIds, estimateId: { [Op.ne]: null } }, attributes: ['inboundOrderId'], transaction })).map(p => p.inboundOrderId) : []);
+    const receivedInbound = inboundRows.filter(i => i.status === 'received' || i.receivedAt);
+    if (receivedInbound.length && !require('../services/staffRoles').isAdminCaller(req)) {
+      await transaction.rollback();
+      const label = workOrder.drNumber ? `DR-${workOrder.drNumber}` : (workOrder.orderNumber || 'This order');
+      return res.status(409).json({ error: { code: 'DELIVERY_RECEIVED', message:
+        `${label} has material already received (${receivedInbound.map(i => i.purchaseOrderNumber).join(', ')}) — that delivery is the PO's receiving record, so only an admin can delete this order.` } });
+    }
+    const keepInbound = inboundRows.filter(i => receivedInbound.includes(i) || i.estimateId || estPoInbound.has(i.id)).map(i => i.id);
+    const destroyInbound = inboundOrderIds.filter(id => !keepInbound.includes(id));
+    if (destroyInbound.length) {
+      const pos = await PONumber.findAll({ where: { inboundOrderId: destroyInbound }, attributes: ['id', 'inboundOrderId'], transaction });
+      for (const p of pos) undoRelink.push({ table: 'po_numbers', col: 'inboundOrderId', value: p.inboundOrderId, ids: [p.id] });
+    }
+
     // Delete any vendor issues tied to this WO (cascades from FK but be explicit)
     try {
       const { VendorIssue } = require('../models');
@@ -3268,13 +3449,19 @@ router.delete('/:id', async (req, res, next) => {
     await WorkOrderPart.destroy({ where: { workOrderId: workOrder.id }, transaction });
 
     if (inboundOrderIds.length > 0) {
-      await PONumber.update({ inboundOrderId: null }, { where: { inboundOrderId: inboundOrderIds }, transaction });
-      await InboundOrder.destroy({ where: { id: inboundOrderIds }, transaction });
+      // U20: a RECEIVED delivery is its PO's receiving record, and an estimate's PO delivery belongs to
+      // the estimate — those are kept (taken off this order), not destroyed; Undo puts the order back on them
+      await PONumber.update({ inboundOrderId: null }, { where: { inboundOrderId: destroyInbound }, transaction });
+      if (keepInbound.length) {
+        undoRelink.push({ table: 'inbound_orders', col: 'workOrderId', value: workOrder.id, ids: keepInbound.filter(id => inboundRows.find(i => i.id === id)?.workOrderId === workOrder.id) });
+        await InboundOrder.update({ workOrderId: null }, { where: { id: keepInbound, workOrderId: workOrder.id }, transaction });
+      }
+      if (destroyInbound.length) await InboundOrder.destroy({ where: { id: destroyInbound }, transaction });
     }
 
     // Capture audit details before the row is gone.
     const auditSnapshot = { id: workOrder.id, drNumber: workOrder.drNumber, orderNumber: workOrder.orderNumber, clientName: workOrder.clientName, invoiceNumber: workOrder.invoiceNumber };
-    await workOrder.destroy({ transaction, archiveReason: req.body?.reason || (workOrder.drNumber ? 'force-delete override' : null) });
+    await workOrder.destroy({ transaction, archiveReason: req.body?.reason || (workOrder.drNumber ? 'force-delete override' : null), undoRelink });
     await transaction.commit();
     require('../services/fileRefs').deleteStoredFilesIfUnused(storedFiles).catch(() => {});
 
@@ -3366,9 +3553,14 @@ router.post('/:id/parts', async (req, res, next) => {
       cleanLotNum = display['__new__'] || partNumber;
     } catch (e) { cleanLotNum = partNumber; }
 
-    const autoLotNumber = (req.body.lotNumber && String(req.body.lotNumber).trim())
+    // V6: never a <DR>-n another part on this order already has (lines get renumbered).
+    // W6/W17: chosen under a row lock on the order and above its high-water mark (own short transaction).
+    const lotSvc = require('../services/lotNumbers');
+    const typedLot = req.body.lotNumber && String(req.body.lotNumber).trim();
+    if (typedLot) await lotSvc.noteLotNumber(workOrder.id, typedLot);
+    const autoLotNumber = typedLot
       ? req.body.lotNumber
-      : (workOrder.drNumber ? `${workOrder.drNumber}-${cleanLotNum}` : (req.body.lotNumber || null));
+      : (workOrder.drNumber ? await lotSvc.nextLotNumber(workOrder.id, workOrder.drNumber, cleanLotNum) : (req.body.lotNumber || null));
 
     // (retried with the next number if another add took this one a moment ago)
     const part = await require('../services/partNumbers').createWithNextPartNumber(WorkOrderPart, 'workOrderId', {
@@ -3454,7 +3646,29 @@ router.put('/:id/parts/reorder', async (req, res, next) => {
 });
 
 // PUT /api/workorders/:id/parts/:partId - Update a part
+// What a shop tablet / phone key may change on a part: the shop-floor fields the Android app sends
+// (status, progress, operator notes, heats, its milestone interval). Before, a device key reached the
+// whole update and could re-price an order or credit a completion to another operator (round 11, N6).
+const DEVICE_PART_FIELDS = new Set(['status', 'progressCount', 'operatorNotes', 'heatNumber', 'heatBreakdown', 'heatCountry',
+  'actualRunTimeMin', '_milestoneInterval']);
+const PART_PRICE_FIELDS = new Set(['laborRate', 'laborHours', 'laborTotal', 'materialUnitCost', 'materialMarkupPercent', 'materialTotal',
+  'setupCharge', 'otherCharges', 'partTotal', 'quantity', 'partType', 'outsideProcessing']);
+function devicePartBody(req) {
+  const ks = require('../services/keyScope');
+  if (!req.apiKey || ks.keyKind(req.apiKey) !== 'device' || !req.body || typeof req.body !== 'object') return null;
+  const priced = Object.keys(req.body).filter(k => PART_PRICE_FIELDS.has(k) || (k.startsWith('_') && /price|cost|markup|total|rate|labor|expedite|emergency/i.test(k)));
+  if (priced.length) return { error: `A shop device can't change pricing (${priced.join(', ')}). Use the office app.` };
+  const dropped = Object.keys(req.body).filter(k => !DEVICE_PART_FIELDS.has(k));
+  if (dropped.length) console.warn(`[parts] device key ${req.apiKey.deviceName || req.apiKey.id}: ignored fields ${dropped.join(', ')}`);
+  const body = {};
+  for (const k of Object.keys(req.body)) if (DEVICE_PART_FIELDS.has(k)) body[k] = req.body[k];
+  req.body = body;
+  return { ok: true };
+}
+
 router.put('/:id/parts/:partId', async (req, res, next) => {
+  const dev = devicePartBody(req);
+  if (dev && dev.error) return res.status(403).json({ error: { code: 'DEVICE_PRICE_LOCKED', message: dev.error } });
   // The part row is locked while the update is worked out, so two tablets (or a tablet and the office)
   // saving at once can't overwrite each other's progress-log entries, formData or OP lines (audit H15).
   const t = await sequelize.transaction();
@@ -3524,6 +3738,14 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
       progressCount
     } = req.body;
 
+    // Shapes the tablets parse strictly — one bad value broke every tablet's order list (audit T39)
+    {
+      const pf = require('../utils/partFields');
+      const bad = (heatBreakdown !== undefined && pf.heatBreakdownProblem(heatBreakdown))
+        || (progressCount !== undefined && pf.progressCountProblem(progressCount));
+      if (bad) { await t.rollback(); committed = true; return res.status(400).json({ error: { message: bad } }); }
+    }
+
     const updates = {};
     if (partType !== undefined) updates.partType = partType;
     if (clientPartNumber !== undefined) updates.clientPartNumber = clientPartNumber;
@@ -3534,8 +3756,13 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
       // stored for the same heat number (audit H1). Sending country: '' still clears it.
       const key = (h) => String(h || '').trim().toUpperCase();
       const stored = new Map((Array.isArray(part.heatBreakdown) ? part.heatBreakdown : []).filter(r => r && r.country).map(r => [key(r.heat), r.country]));
+      // A single-heat part keeps its country in heatNumber / heatCountry with no breakdown yet; the
+      // tablet's notes save turns it into a one-row breakdown without the country (audit R29)
+      const effHeat = heatNumber !== undefined ? heatNumber : part.heatNumber;
+      const effCountry = req.body.heatCountry !== undefined ? req.body.heatCountry : part.heatCountry;
+      if (effHeat && effCountry && !stored.has(key(effHeat))) stored.set(key(effHeat), effCountry);
       updates.heatBreakdown = Array.isArray(heatBreakdown)
-        ? heatBreakdown.map(r => (r && typeof r === 'object' && !('country' in r) && stored.has(key(r.heat)) ? { ...r, country: stored.get(key(r.heat)) } : r))
+        ? require('../utils/partFields').normalizeHeatBreakdown(heatBreakdown).map(r => (r && typeof r === 'object' && !('country' in r) && stored.has(key(r.heat)) ? { ...r, country: stored.get(key(r.heat)) } : r))
         : heatBreakdown;
     }
     if (req.body.heatCountry !== undefined) updates.heatCountry = req.body.heatCountry;
@@ -3613,6 +3840,8 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     
     if (status !== undefined) {
       updates.status = status;
+      // Un-completing a part clears who/when, so a re-completion is credited to whoever does it (R30)
+      if (status !== 'completed' && part.status === 'completed') { updates.completedAt = null; updates.completedBy = null; }
       if (status === 'completed' && !part.completedAt) {
         updates.completedAt = new Date();
         // Use explicitly sent completedBy, or fall back to API key operator/device
@@ -3625,8 +3854,11 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     }
 
     // Progress milestones — only update if explicitly sent as a real number (guards against old clients sending null)
-    if (progressCount !== undefined && progressCount !== null && !isNaN(parseInt(progressCount))) {
-      updates.progressCount = progressCount;
+    // ...and only when it actually changes: the office part dialog sends the part back whole, which used
+    // to add a fake "(web)" progress entry on every price edit (R11)
+    if (progressCount !== undefined && progressCount !== null && !isNaN(parseInt(progressCount))
+        && parseInt(progressCount) !== (parseInt(part.progressCount) || 0)) {
+      updates.progressCount = parseInt(progressCount);
       updates.progressLastUpdatedAt = new Date();
       if (progressCount > 0 && part.status === 'pending') {
         updates.status = 'in_progress';
@@ -3645,6 +3877,10 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
 
     // Auto-fill lot number (<DR>-<line>) if it would still be empty after this update
     const effLot = updates.lotNumber !== undefined ? updates.lotNumber : part.lotNumber;
+    // W6: a lot typed here raises the order's high-water mark
+    if (updates.lotNumber && String(updates.lotNumber).trim() && updates.lotNumber !== part.lotNumber) {
+      await require('../services/lotNumbers').noteLotNumber(req.params.id, updates.lotNumber, { transaction: t });
+    }
     if (!effLot || !String(effLot).trim()) {
       const woForLot = await WorkOrder.findByPk(req.params.id, { transaction: t });
       if (woForLot?.drNumber) {
@@ -3654,7 +3890,8 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
           const { display } = computeDisplayNumbers(allForLot.map(p => ({ id: p.id, partNumber: p.partNumber, partType: p.partType, formData: p.formData })));
           cleanNum = display[part.id] || part.partNumber;
         } catch (e) { cleanNum = part.partNumber; }
-        updates.lotNumber = `${woForLot.drNumber}-${cleanNum}`;
+        // V6: skip a lot another part on this order already carries
+        updates.lotNumber = await require('../services/lotNumbers').nextLotNumber(req.params.id, woForLot.drNumber, cleanNum, { transaction: t, excludePartId: part.id });
       }
     }
 
@@ -3669,7 +3906,8 @@ router.put('/:id/parts/:partId', async (req, res, next) => {
     if (status === 'completed') {
       try {
         const workOrder = await WorkOrder.findByPk(req.params.id, { attributes: ['id', 'status'] });
-        if (workOrder && ['processing', 'in_progress', 'received'].includes(workOrder.status)) {
+        // every in-shop status, waiting_for_materials included (round 15, U28)
+        if (workOrder && require('../services/workOrderStatus').IN_SHOP.includes(workOrder.status)) {
         const allParts = await WorkOrderPart.findAll({ where: { workOrderId: req.params.id } });
         
         // 1. Auto-complete fab_service/shop_rate parts linked to this part
@@ -3969,26 +4207,29 @@ router.post('/:id/parts/:partId/files', upload.array('files', 10), async (req, r
   }
 });
 
+// A part file of THIS work order (the part must belong to :id), visible to the caller (audit R7)
+async function findOrderPartFile(req) {
+  const part = await WorkOrderPart.findOne({ where: { id: req.params.partId, workOrderId: req.params.id }, attributes: ['id'] });
+  if (!part) return null;
+  if (require('../services/keyScope').isPortalKey(req)) {
+    const wo = await WorkOrder.findByPk(req.params.id, { attributes: ['clientId', 'clientName'] });
+    if (!(await require('../services/keyScope').owns(req, wo))) return null;
+  }
+  return WorkOrderPartFile.findOne({ where: { id: req.params.fileId, workOrderPartId: part.id } });
+}
+
 // GET /api/workorders/:id/parts/:partId/files/:fileId/signed-url - Get working URL for file
 router.get('/:id/parts/:partId/files/:fileId/signed-url', async (req, res, next) => {
   try {
-    const file = await WorkOrderPartFile.findOne({
-      where: { id: req.params.fileId, workOrderPartId: req.params.partId }
-    });
-
+    const file = await findOrderPartFile(req);
     if (!file) {
       return res.status(404).json({ error: { message: 'File not found' } });
     }
-
-    // S3 files: return direct URL
-    const isS3 = (file.cloudinaryId && file.cloudinaryId.startsWith('s3:')) || (file.url && file.url.includes('amazonaws.com'));
-    if (isS3) {
-      return res.json({ data: { url: file.url, expiresIn: null, originalName: file.originalName || file.filename } });
-    }
-
-    // Cloudinary files: return direct URL (publicly accessible)
-    if (file.url && file.url.includes('cloudinary.com')) {
-      return res.json({ data: { url: file.url, expiresIn: null, originalName: file.originalName || file.filename } });
+    // S3: a link that expires in an hour; legacy Cloudinary: the stored URL (R7)
+    if (fileStorage.s3IdFor(file.cloudinaryId, file.url) || (file.url && file.url.includes('cloudinary.com'))) {
+      const url = await fileStorage.accessUrl(file.cloudinaryId, file.url);
+      const signed = !!fileStorage.s3IdFor(file.cloudinaryId, file.url) && url !== file.url;
+      return res.json({ data: { url, expiresIn: signed ? 3600 : null, originalName: file.originalName || file.filename } });
     }
     // Fallback to download proxy for other cases
     const baseUrl = `${req.protocol}://${req.get('host')}`;
@@ -4001,94 +4242,20 @@ router.get('/:id/parts/:partId/files/:fileId/signed-url', async (req, res, next)
 
 // DELETE /api/workorders/:id/parts/:partId/files/:fileId - Delete a file
 
-// GET /api/workorders/:id/parts/:partId/files/:fileId/debug - Debug file URL resolution
-router.get('/:id/parts/:partId/files/:fileId/debug', async (req, res, next) => {
-  try {
-    const file = await WorkOrderPartFile.findOne({
-      where: { id: req.params.fileId, workOrderPartId: req.params.partId }
-    });
-    if (!file) return res.status(404).json({ error: 'File not found in DB' });
-
-    const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
-    const pubId = file.cloudinaryId;
-    const ext = path.extname(file.originalName || file.filename || '').toLowerCase() || '.pdf';
-    const versionMatch = file.url?.match(/\/v(\d+)\//);
-    const version = versionMatch ? `/v${versionMatch[1]}` : '';
-
-    const urlsToTest = [];
-    
-    // Signed URLs for private files
-    if (pubId && cloudName) {
-      try {
-        const signedUrl = cloudinary.url(pubId, { resource_type: 'raw', type: 'private', sign_url: true, secure: true });
-        urlsToTest.push({ label: 'signed-private', url: signedUrl });
-      } catch (e) { urlsToTest.push({ label: 'signed-private', url: 'GENERATION_FAILED: ' + e.message }); }
-      
-      try {
-        const hasExt = pubId.match(/\.\w+$/);
-        const format = hasExt ? hasExt[0].replace('.', '') : ext.replace('.', '');
-        const dlUrl = cloudinary.utils.private_download_url(pubId, format, { resource_type: 'raw', expires_at: Math.floor(Date.now() / 1000) + 3600 });
-        urlsToTest.push({ label: 'private-download', url: dlUrl });
-      } catch (e) { urlsToTest.push({ label: 'private-download', url: 'GENERATION_FAILED: ' + e.message }); }
-    }
-    
-    if (file.url) urlsToTest.push({ label: 'stored', url: file.url });
-    if (pubId && cloudName) {
-      urlsToTest.push({ label: 'raw+ver+ext', url: `https://res.cloudinary.com/${cloudName}/raw/upload${version}/${pubId}${ext}` });
-      urlsToTest.push({ label: 'raw+ver', url: `https://res.cloudinary.com/${cloudName}/raw/upload${version}/${pubId}` });
-      urlsToTest.push({ label: 'image+ver+ext', url: `https://res.cloudinary.com/${cloudName}/image/upload${version}/${pubId}${ext}` });
-      urlsToTest.push({ label: 'image+ver', url: `https://res.cloudinary.com/${cloudName}/image/upload${version}/${pubId}` });
-    }
-
-    // Test each URL with HEAD request
-    const results = [];
-    for (const { label, url } of urlsToTest) {
-      if (url.startsWith('GENERATION_FAILED')) {
-        results.push({ label, url, status: 'n/a' });
-        continue;
-      }
-      const status = await new Promise(resolve => {
-        const lib = url.startsWith('https') ? https : http;
-        const request = lib.request(url, { method: 'HEAD' }, resp => {
-          resp.resume();
-          resolve(resp.statusCode);
-        });
-        request.on('error', (e) => resolve('error: ' + e.message));
-        request.setTimeout(5000, () => { request.destroy(); resolve('timeout'); });
-        request.end();
-      });
-      results.push({ label, url: url.substring(0, 150), status });
-    }
-
-    res.json({
-      file: { id: file.id, cloudinaryId: pubId, storedUrl: file.url, originalName: file.originalName, mimeType: file.mimeType },
-      cloudName,
-      ext,
-      version,
-      results
-    });
-  } catch (error) {
-    next(error);
-  }
-});
+// (Removed in round 9: a debug route that made outbound requests and returned private download links.)
 
 // GET /api/workorders/:id/parts/:partId/files/:fileId/download - Stream file from Cloudinary
 router.get('/:id/parts/:partId/files/:fileId/download', async (req, res, next) => {
   try {
-    const file = await WorkOrderPartFile.findOne({
-      where: { id: req.params.fileId, workOrderPartId: req.params.partId }
-    });
+    const file = await findOrderPartFile(req);
 
     if (!file) {
       return res.status(404).json({ error: { message: 'File not found' } });
     }
 
-    // S3 files: redirect directly — URLs are permanent and public
-    if (file.cloudinaryId && file.cloudinaryId.startsWith('s3:')) {
-      return res.redirect(file.url);
-    }
-    if (file.url && file.url.includes('.s3.') && file.url.includes('amazonaws.com')) {
-      return res.redirect(file.url);
+    // S3 files: redirect to a link that expires in an hour (R7 — no permanent public links)
+    if (fileStorage.s3IdFor(file.cloudinaryId, file.url)) {
+      return res.redirect(302, await fileStorage.accessUrl(file.cloudinaryId, file.url));
     }
 
     // Cloudinary files: redirect directly (publicly accessible)
@@ -4227,6 +4394,10 @@ router.post('/:id/ship', async (req, res, next) => {
     }
 
     const { shippedBy, notes } = req.body;
+    const codBlock = await require('../services/codGuard').codProblem(workOrder, req);   // U10
+    if (codBlock) return res.status(codBlock.status).json({ error: { message: codBlock.message, code: codBlock.code } });
+    const { planStatusChange } = require('../services/workOrderStatus');
+    planStatusChange(workOrder, 'shipped', { isDevice: isDeviceCaller(req), isAdmin: isAdminCallerReq(req) });   // voided etc. (throws 4xx)
 
     await workOrder.update({
       status: 'shipped',
@@ -4273,6 +4444,12 @@ router.post('/:id/archive', async (req, res, next) => {
 
     if (!workOrder) {
       return res.status(404).json({ error: { message: 'Work order not found' } });
+    }
+
+    // An unshipped COD order that still owes money isn't archived (released) without the override (review of round 16)
+    if (!['shipped', 'archived'].includes(workOrder.status)) {
+      const codBlock = await require('../services/codGuard').codProblem(workOrder, req);
+      if (codBlock) return res.status(codBlock.status).json({ error: { message: codBlock.message, code: codBlock.code } });
     }
 
     await workOrder.update({
@@ -4385,90 +4562,96 @@ router.post('/:id/duplicate-to-estimate', async (req, res, next) => {
       }
     }
 
-    // Header: prefer estimate contact info, fall back to the work order.
-    const newEstimate = await Estimate.create({
-      estimateNumber,
-      clientName: (sourceEstimate && sourceEstimate.clientName) || workOrder.clientName,
-      contactName: (sourceEstimate && sourceEstimate.contactName) || workOrder.contactName,
-      contactEmail: (sourceEstimate && sourceEstimate.contactEmail) || workOrder.contactEmail,
-      contactPhone: (sourceEstimate && sourceEstimate.contactPhone) || workOrder.contactPhone,
-      clientPurchaseOrderNumber: '',
-      projectDescription: (sourceEstimate && sourceEstimate.projectDescription) || workOrder.notes || '',
-      notes: (sourceEstimate && sourceEstimate.notes) || '',
-      internalNotes: `Reorder from ${drLabel}${sourceEstimate ? ` (based on WO parts; header from ${sourceEstimate.estimateNumber})` : ' (based on WO parts)'}`,
-      taxRate: (sourceEstimate && sourceEstimate.taxRate) != null ? sourceEstimate.taxRate : workOrder.taxRate,
-      taxExempt: (sourceEstimate && sourceEstimate.taxExempt) != null ? sourceEstimate.taxExempt : workOrder.taxExempt,
-      truckingDescription: sourceEstimate ? sourceEstimate.truckingDescription : null,
-      truckingCost: sourceEstimate ? sourceEstimate.truckingCost : null,
-      discountPercent: sourceEstimate ? sourceEstimate.discountPercent : null,
-      discountReason: sourceEstimate ? sourceEstimate.discountReason : null,
-      status: 'draft'
+    // Header: prefer estimate contact info, fall back to the work order. Pricing settings come from the
+    // WORK ORDER (it is what was billed): trips, discount, minimum override, tax, client id; shipping
+    // charges and outside processing are copied too (audit T20 — they were dropped and repeat orders
+    // were quoted low). Service lines are re-pointed at the copied parts.
+    const copy = require('../services/duplicateCopy');
+    const models = require('../models');
+    const w = workOrder.toJSON();
+    const normName = (x) => String(x || '').trim().toLowerCase();
+    const sameClientEst = sourceEstimate && ((w.clientId && sourceEstimate.clientId === w.clientId) || normName(sourceEstimate.clientName) === normName(w.clientName)) ? sourceEstimate : null;
+    let copied = 0;
+    const newEstimate = await sequelize.transaction(async (t) => {
+      const est = await Estimate.create({
+        estimateNumber,
+        // The client (name AND id) comes from the work order — what was billed. Taking the name from the
+        // old estimate and the id from the order billed one client under another's name (round 15, U5).
+        // The estimate's contacts are used only when it is for the same client.
+        clientId: w.clientId || null,
+        clientName: workOrder.clientName,
+        contactName: workOrder.contactName || (sameClientEst && sameClientEst.contactName) || null,
+        contactEmail: workOrder.contactEmail || (sameClientEst && sameClientEst.contactEmail) || null,
+        contactPhone: workOrder.contactPhone || (sameClientEst && sameClientEst.contactPhone) || null,
+        contactExtension: w.contactExtension || (sameClientEst && sameClientEst.contactExtension) || null,
+        projectDescription: (sourceEstimate && sourceEstimate.projectDescription) || workOrder.notes || '',
+        notes: (sourceEstimate && sourceEstimate.notes) || '',
+        internalNotes: `Reorder from ${drLabel}${sourceEstimate ? ` (based on WO parts; header from ${sourceEstimate.estimateNumber})` : ' (based on WO parts)'}`,
+        taxRate: w.taxRate != null ? w.taxRate : (sourceEstimate ? sourceEstimate.taxRate : null),
+        taxExempt: w.taxExempt != null ? w.taxExempt : (sourceEstimate ? sourceEstimate.taxExempt : null),
+        taxExemptReason: w.taxExemptReason || null,
+        taxExemptCertNumber: w.taxExemptCertNumber || null,
+        truckingDescription: w.truckingDescription != null ? w.truckingDescription : (sourceEstimate ? sourceEstimate.truckingDescription : null),
+        truckingCost: w.truckingCost != null ? w.truckingCost : (sourceEstimate ? sourceEstimate.truckingCost : null),
+        opTransports: copy.freshEntries(w.opTransports != null ? w.opTransports : (sourceEstimate ? sourceEstimate.opTransports : [])),
+        discountPercent: w.discountPercent != null ? w.discountPercent : (sourceEstimate ? sourceEstimate.discountPercent : null),
+        discountAmount: w.discountAmount != null ? w.discountAmount : (sourceEstimate ? sourceEstimate.discountAmount : null),
+        discountReason: w.discountReason != null ? w.discountReason : (sourceEstimate ? sourceEstimate.discountReason : null),
+        minimumOverride: w.minimumOverride != null ? w.minimumOverride : (sourceEstimate ? sourceEstimate.minimumOverride : false),
+        minimumOverrideReason: w.minimumOverrideReason || (sourceEstimate ? sourceEstimate.minimumOverrideReason : null),
+        showDualPricing: w.showDualPricing != null ? w.showDualPricing : undefined,
+        status: 'draft'
+      }, { transaction: t });
+
+      // Copy EVERY work-order part (the full, current set).
+      const idMap = {};
+      for (const wp of (workOrder.parts || [])) {
+        const wj = typeof wp.toJSON === 'function' ? wp.toJSON() : wp;
+        const ep = wj.partNumber != null ? estPartByNumber[String(wj.partNumber)] : null; // matching estimate part, if any
+        const pick = (woVal, epField) => (woVal !== undefined && woVal !== null && woVal !== '' ? woVal : (ep ? ep[epField] : undefined));
+        const data = copy.partForCopy(wj, EstimatePart, {
+          estimateId: est.id,
+          // Pricing: prefer the WO part's values; fall back to the matching estimate part's breakdown.
+          materialUnitCost: pick(wj.materialUnitCost, 'materialUnitCost') || 0,
+          materialMarkupPercent: pick(wj.materialMarkupPercent, 'materialMarkupPercent') || 0,
+          materialTotal: pick(wj.materialTotal, 'materialTotal') || 0,
+          rollingCost: pick(wj.rollingCost, 'rollingCost') || 0,
+          otherServicesCost: ep ? ep.otherServicesCost : 0,
+          otherServicesMarkupPercent: ep ? ep.otherServicesMarkupPercent : 0,
+          laborTotal: pick(wj.laborTotal, 'laborTotal') || 0,
+          partTotal: pick(wj.partTotal, 'partTotal') || 0,
+        });
+        const newPart = await EstimatePart.create(data, { transaction: t });
+        idMap[wj.id] = newPart.id;
+        copied++;
+
+        // Copy part files: prefer the WO part's files; else the matching estimate part's files.
+        const files = (wj.files && wj.files.length) ? wj.files : (ep && ep.files ? ep.files : []);
+        for (const f of files) {
+          await EstimatePartFile.create({
+            partId: newPart.id,
+            filename: f.filename,
+            originalName: f.originalName,
+            mimeType: f.mimeType,
+            size: f.size,
+            url: f.url,
+            cloudinaryId: f.cloudinaryId,
+            fileType: f.fileType,
+            fileLastModified: f.fileLastModified,
+            portalVisible: false
+          }, { transaction: t });
+        }
+      }
+      await copy.remapServiceLinks(EstimatePart, workOrder.parts || [], idMap, { transaction: t });
+      await copy.copyChargesToEstimate(models, { workOrderId: workOrder.id }, est.id, { transaction: t });
+      return est;
     });
 
-    // Copy EVERY work-order part (the full, current set).
-    let copied = 0;
-    for (const wp of (workOrder.parts || [])) {
-      const wj = typeof wp.toJSON === 'function' ? wp.toJSON() : wp;
-      let formData = wj.formData || {};
-      if (typeof formData === 'string') { try { formData = JSON.parse(formData); } catch { formData = {}; } }
-      const ep = wj.partNumber != null ? estPartByNumber[String(wj.partNumber)] : null; // matching estimate part, if any
-
-      const pick = (woVal, epField) => (woVal !== undefined && woVal !== null && woVal !== '' ? woVal : (ep ? ep[epField] : undefined));
-
-      const newPart = await EstimatePart.create({
-        estimateId: newEstimate.id,
-        partNumber: wj.partNumber,
-        partType: wj.partType,
-        clientPartNumber: wj.clientPartNumber,
-        quantity: wj.quantity,
-        material: wj.material,
-        thickness: wj.thickness,
-        width: wj.width,
-        length: wj.length,
-        outerDiameter: wj.outerDiameter,
-        wallThickness: wj.wallThickness,
-        sectionSize: wj.sectionSize,
-        rollType: wj.rollType,
-        radius: wj.radius,
-        diameter: wj.diameter,
-        arcDegrees: wj.arcDegrees,
-        flangeOut: wj.flangeOut,
-        specialInstructions: wj.specialInstructions,
-        materialDescription: wj.materialDescription,
-        materialSource: wj.materialSource,
-        supplierName: wj.supplierName,
-        vendorEstimateNumber: wj.vendorEstimateNumber,
-        // Pricing: prefer the WO part's values; fall back to the matching estimate part's breakdown.
-        materialUnitCost: pick(wj.materialUnitCost, 'materialUnitCost') || 0,
-        materialMarkupPercent: pick(wj.materialMarkupPercent, 'materialMarkupPercent') || 0,
-        materialTotal: pick(wj.materialTotal, 'materialTotal') || 0,
-        rollingCost: pick(wj.rollingCost, 'rollingCost') || 0,
-        otherServicesCost: ep ? ep.otherServicesCost : 0,
-        otherServicesMarkupPercent: ep ? ep.otherServicesMarkupPercent : 0,
-        laborTotal: pick(wj.laborTotal, 'laborTotal') || 0,
-        partTotal: pick(wj.partTotal, 'partTotal') || 0,
-        cutFileReference: wj.cutFileReference,
-        formData
-      });
-      copied++;
-
-      // Copy part files: prefer the WO part's files; else the matching estimate part's files.
-      const files = (wj.files && wj.files.length) ? wj.files : (ep && ep.files ? ep.files : []);
-      for (const f of files) {
-        await EstimatePartFile.create({
-          partId: newPart.id,
-          filename: f.filename,
-          originalName: f.originalName,
-          mimeType: f.mimeType,
-          size: f.size,
-          url: f.url,
-          cloudinaryId: f.cloudinaryId,
-          fileType: f.fileType,
-          fileLastModified: f.fileLastModified,
-          portalVisible: false
-        });
-      }
-    }
+    // Totals as the estimate screen computes them
+    try {
+      const estRoutes = require('./estimates');
+      if (typeof estRoutes.recalcEstimateTotals === 'function') await estRoutes.recalcEstimateTotals(newEstimate.id);
+    } catch (e) { console.warn('[reorder] totals refresh skipped:', e.message); }
 
     const createdEstimate = await Estimate.findByPk(newEstimate.id, {
       include: [{ model: EstimatePart, as: 'parts' }]
@@ -4579,11 +4762,15 @@ router.get('/:id/documents/:documentId/signed-url', async (req, res, next) => {
     if (!document) {
       return res.status(404).json({ error: { message: 'Document not found' } });
     }
+    // Shop tablets don't open invoices (round 13, T36) or vendor POs (W15 — checked here too, not only in deviceView)
+    if (req.apiKey && require('../services/keyScope').keyKind(req.apiKey) === 'device' && require('../services/deviceView').isHiddenDocType(document.documentType)) {
+      const inv = /invoice/i.test(String(document.documentType || ''));
+      return res.status(403).json({ error: { message: inv ? 'Invoices are not available on shop devices.' : 'Purchase orders are not available on shop devices.' } });
+    }
 
-    // S3 files: return direct URL
-    const isS3 = (document.cloudinaryId && document.cloudinaryId.startsWith('s3:')) || (document.url && document.url.includes('amazonaws.com'));
-    if (isS3) {
-      return res.json({ data: { url: document.url, originalName: document.originalName || document.filename } });
+    // S3 files: a link that expires in an hour (R7)
+    if (fileStorage.s3IdFor(document.cloudinaryId, document.url)) {
+      return res.json({ data: { url: await fileStorage.accessUrl(document.cloudinaryId, document.url), expiresIn: 3600, originalName: document.originalName || document.filename } });
     }
 
     // Return the download proxy URL (same pattern as part files)
@@ -4609,11 +4796,17 @@ router.get('/:id/documents/:documentId/download', async (req, res, next) => {
     if (!document) {
       return res.status(404).json({ error: { message: 'Document not found' } });
     }
+    // Shop tablets don't open invoices (round 13, T36) or vendor POs (W15 — checked here too, not only in deviceView)
+    if (req.apiKey && require('../services/keyScope').keyKind(req.apiKey) === 'device' && require('../services/deviceView').isHiddenDocType(document.documentType)) {
+      const inv = /invoice/i.test(String(document.documentType || ''));
+      return res.status(403).json({ error: { message: inv ? 'Invoices are not available on shop devices.' : 'Purchase orders are not available on shop devices.' } });
+    }
 
-    // API key client scoping
-    if (req.apiKey && req.apiKey.clientName) {
-      const wo = await WorkOrder.findByPk(req.params.id, { attributes: ['clientName'] });
-      if (!wo || !wo.clientName || !wo.clientName.toLowerCase().includes(req.apiKey.clientName.toLowerCase())) {
+    // API key client scoping: a portal key gets only its own client's documents, and only those
+    // marked visible on the portal (as /api/portal does)
+    if (require('../services/keyScope').isPortalKey(req)) {
+      const wo = await WorkOrder.findByPk(req.params.id, { attributes: ['clientId', 'clientName'] });
+      if (!(await require('../services/keyScope').owns(req, wo)) || !document.portalVisible) {
         return res.status(403).json({ error: { message: 'Access denied' } });
       }
     }
@@ -5188,6 +5381,17 @@ router.post('/:id/transport-po', async (req, res, next) => {
   try {
     const { tripId } = req.body;
     if (!tripId) return res.status(400).json({ error: { message: 'tripId required' } });
+    // One PO at a time per order; a trip that already has a PO isn't given another (round 12, N15)
+    return await require('../services/poNumbers').withOrderPOLock(req.params.id, () => createTransportPO(req, res, tripId));
+  } catch (error) {
+    if (error.status === 409) return res.status(409).json({ error: { message: error.message } });
+    console.error('[TransportPO] Error:', error);
+    next(error);
+  }
+});
+
+async function createTransportPO(req, res, tripId) {
+  {
 
     const workOrder = await WorkOrder.findByPk(req.params.id, {
       include: [{ model: WorkOrderPart, as: 'parts' }]
@@ -5198,6 +5402,9 @@ router.post('/:id/transport-po', async (req, res, next) => {
     const trip = trips.find(t => t.id === tripId);
     if (!trip) return res.status(404).json({ error: { message: 'Trip not found' } });
 
+    if (trip.poNumber) {
+      return res.status(409).json({ error: { message: `This trip already has PO ${trip.poNumber}. Release that PO first to issue a new one.` } });
+    }
     if (!trip.truckingVendorId) {
       return res.status(400).json({ error: { message: 'No trucking vendor on this trip' } });
     }
@@ -5239,26 +5446,34 @@ router.post('/:id/transport-po', async (req, res, next) => {
       documentType: 'transport_po'
     });
 
-    // Mark trip as having PO
-    const updatedTrips = trips.map(t => t.id === tripId ? { ...t, poNumber, poSentAt: new Date() } : t);
+    // Mark trip as having PO — on the CURRENT list, so trip edits made meanwhile aren't overwritten
+    await workOrder.reload({ attributes: ['id', 'opTransports'] });
+    const updatedTrips = (workOrder.opTransports || []).map(t => t.id === tripId ? { ...t, poNumber, poSentAt: new Date() } : t);
     await workOrder.update({ opTransports: updatedTrips });
 
     console.log(`[TransportPO] Created ${poNumber} for ${vendor.name} (${trip.leg})`);
-    res.json({
+    return res.json({
       data: { poNumber, vendorName: vendor.name },
       message: `Trucking PO ${poNumber} created for ${vendor.name}`
     });
-  } catch (error) {
-    console.error('[TransportPO] Error:', error);
-    next(error);
   }
-});
+}
 
 // POST /api/workorders/:id/outside-processing/auto-bulk
 // Auto-generate outside processing POs from the part.outsideProcessing JSONB array
 // Groups by vendor + service type, creates one PO per group, mirrors material PO pattern
 router.post('/:id/outside-processing/auto-bulk', async (req, res, next) => {
   try {
+    return await require('../services/poNumbers').withOrderPOLock(req.params.id, () => autoBulkOPPOs(req, res));
+  } catch (error) {
+    if (error.status === 409) return res.status(409).json({ error: { message: error.message } });
+    console.error('[OP auto-bulk] Error:', error);
+    next(error);
+  }
+});
+
+async function autoBulkOPPOs(req, res) {
+  {
     const workOrder = await WorkOrder.findByPk(req.params.id, {
       include: [{ model: WorkOrderPart, as: 'parts' }]
     });
@@ -5396,84 +5611,24 @@ router.post('/:id/outside-processing/auto-bulk', async (req, res, next) => {
       }
     }
 
-    res.json({
+    return res.json({
       data: { created, errors },
       message: created.length === 1
         ? `Created 1 outside processing PO`
         : `Created ${created.length} outside processing POs${errors.length ? ` (${errors.length} failed)` : ''}`
     });
-  } catch (error) {
-    console.error('[OP auto-bulk] Error:', error);
-    next(error);
   }
-});
+}
 
 // POST /api/workorders/:id/outside-processing - Bulk create outside processing PO for selected parts
 // POST /api/workorders/:id/transport-po/:tripId — Generate trucking PO PDF for a transport trip
 router.post('/:id/transport-po/:tripId', async (req, res, next) => {
+  // Same checked path as POST /:id/transport-po (round 12, N15): one PO at a time per order, never a
+  // second PO for a trip that has one, written onto the current trip list
   try {
-    const workOrder = await WorkOrder.findByPk(req.params.id, {
-      include: [{ model: WorkOrderPart, as: 'parts' }]
-    });
-    if (!workOrder) return res.status(404).json({ error: { message: 'Work order not found' } });
-
-    const trips = workOrder.opTransports || [];
-    const tripIdx = trips.findIndex(t => t.id === req.params.tripId);
-    if (tripIdx === -1) return res.status(404).json({ error: { message: 'Trip not found' } });
-
-    const trip = trips[tripIdx];
-    if (!trip.truckingVendorId) return res.status(400).json({ error: { message: 'Trip has no trucking vendor' } });
-
-    const vendor = await Vendor.findByPk(trip.truckingVendorId);
-    if (!vendor) return res.status(404).json({ error: { message: 'Trucking vendor not found' } });
-
-    // Determine which parts are being transported
-    let allocatedParts = [];
-    if (trip.allocationMode === 'manual') {
-      allocatedParts = (workOrder.parts || []).filter(p => (trip.partIds || []).includes(p.id));
-    } else {
-      // Auto modes: any part with outside processing
-      allocatedParts = (workOrder.parts || []).filter(p => (p.outsideProcessing || []).length > 0);
-    }
-
-    // Reserve the PO number from the shared, locked PO sequence (audit H11). OP/TR keep their
-    // prefix but no longer have their own unlocked counter that could repeat material PO numbers.
-    const poNumber = await require('../services/poNumbers').reserveStandalone('TR', {
-      workOrderId: req.params.id, supplier: (typeof vendor !== 'undefined' && vendor) ? vendor.name : null,
-      vendorId: (typeof vendor !== 'undefined' && vendor) ? vendor.id : null });
-
-    // Generate PDF
-    const pdfBuffer = await generateTruckingPO(poNumber, vendor, trip, workOrder, allocatedParts);
-
-    // Upload PDF
-    const uploadResult = await fileStorage.uploadBuffer(pdfBuffer, {
-      folder: 'trucking-pos',
-      filename: `${poNumber}-${workOrder.drNumber}.pdf`,
-      mimeType: 'application/pdf'
-    });
-
-    await WorkOrderDocument.create({
-      workOrderId: workOrder.id,
-      originalName: `${poNumber} - ${vendor.name} (${trip.leg} Trucking).pdf`,
-      mimeType: 'application/pdf',
-      size: pdfBuffer.length,
-      url: uploadResult.url,
-      cloudinaryId: uploadResult.storageId,
-      documentType: 'trucking_po'
-    });
-
-    // Update trip with PO number
-    const updatedTrips = [...trips];
-    updatedTrips[tripIdx] = { ...trip, poNumber, poSentAt: new Date() };
-    await workOrder.update({ opTransports: updatedTrips });
-
-    console.log(`[TruckingPO] Created ${poNumber} for ${vendor.name} - ${trip.leg}`);
-
-    res.json({
-      data: { poNumber, vendorName: vendor.name },
-      message: `Trucking PO ${poNumber} created for ${vendor.name}`
-    });
+    return await require('../services/poNumbers').withOrderPOLock(req.params.id, () => createTransportPO(req, res, req.params.tripId));
   } catch (error) {
+    if (error.status === 409) return res.status(409).json({ error: { message: error.message } });
     console.error('[TruckingPO] Error:', error);
     next(error);
   }
@@ -5777,6 +5932,16 @@ router.delete('/:id/outside-processing/:poNumber', async (req, res, next) => {
 
 router.post('/:id/outside-processing', async (req, res, next) => {
   try {
+    return await require('../services/poNumbers').withOrderPOLock(req.params.id, () => createManualOPPO(req, res));
+  } catch (error) {
+    if (error.status === 409) return res.status(409).json({ error: { message: error.message } });
+    console.error('[OutsideProcessing] Error:', error);
+    next(error);
+  }
+});
+
+async function createManualOPPO(req, res) {
+  {
     const { partIds, vendorId, serviceType, costPerPart, totalCost, expectedReturn, notes, transportCost, expediteCost } = req.body;
     
     if (!partIds || !Array.isArray(partIds) || partIds.length === 0) {
@@ -5796,6 +5961,11 @@ router.post('/:id/outside-processing', async (req, res, next) => {
     const selectedParts = workOrder.parts.filter(p => partIds.includes(p.id));
     if (selectedParts.length === 0) {
       return res.status(400).json({ error: { message: 'No matching parts found' } });
+    }
+    // A double-click must not issue a second PO for the same parts (round 12, N15)
+    const already = selectedParts.filter(p => p.outsideProcessingPONumber && p.outsideProcessingStatus !== 'returned');
+    if (already.length && !req.body.allowAdditional) {
+      return res.status(409).json({ error: { message: `${already.length} of the selected part(s) already have outside-processing PO ${already[0].outsideProcessingPONumber}.` } });
     }
 
     // Reserve the PO number from the shared, locked PO sequence (audit H11). OP/TR keep their
@@ -5851,15 +6021,12 @@ router.post('/:id/outside-processing', async (req, res, next) => {
 
     console.log(`[OutsideProcessing] Created ${poNumber} for ${vendor.name} - ${selectedParts.length} parts (${serviceType})`);
 
-    res.json({
+    return res.json({
       data: { poNumber, partsCount: selectedParts.length, vendorName: vendor.name, totalCost: perPartCost * selectedParts.reduce((s, p) => s + (p.quantity || 1), 0) },
       message: `Outside processing PO ${poNumber} created for ${vendor.name}`
     });
-  } catch (error) {
-    console.error('[OutsideProcessing] Error:', error);
-    next(error);
   }
-});
+}
 
 // PUT /api/workorders/:id/parts/:partId/outside-processing-status - Mark part returned from outside vendor
 router.put('/:id/parts/:partId/outside-processing-status', async (req, res, next) => {
@@ -5975,7 +6142,7 @@ router.post('/wps/render-pdf', async (req, res, next) => {
 
     const browser = await puppeteer.launch({ executablePath: chromePath, headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'] });
     try {
-      const page = await browser.newPage();
+      const page = await require('../utils/safeRender').safePage(browser);   // JS off, no outside requests (N9)
       await page.setContent(html, { waitUntil: 'load', timeout: 15000 });
       const pdf = await page.pdf({ format: 'Letter', margin: { top: '0.4in', bottom: '0.4in', left: '0.4in', right: '0.4in' }, printBackground: true });
       res.set({ 'Content-Type': 'application/pdf', 'Content-Disposition': `inline; filename="${filename}.pdf"` });
@@ -6075,7 +6242,7 @@ router.post('/:id/print-package', async (req, res, next) => {
             headless: 'new',
             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
           });
-          const page = await browser.newPage();
+          const page = await require('../utils/safeRender').safePage(browser);   // JS off, no outside requests (N9)
           await page.setContent(processedHtml, { waitUntil: 'load', timeout: 15000 });
           woPagesPdf = await page.pdf({
             format: 'Letter',
@@ -6288,12 +6455,19 @@ router.post('/:id/order-material', async (req, res, next) => {
       return res.status(400).json({ error: { message: 'At least one part must be selected' } });
     }
 
-    // Get selected parts
-    const selectedParts = workOrder.parts.filter(p => partIds.includes(p.id));
-    
+    // Lock the selected parts and re-read them inside the transaction, so ordering the same material
+    // twice at once (two tabs, a stale page) can't create two POs for it (audit R19)
+    const selectedParts = await WorkOrderPart.findAll({
+      where: { id: partIds, workOrderId: workOrder.id }, order: [['id', 'ASC']], transaction, lock: transaction.LOCK.UPDATE });
+
     if (selectedParts.length === 0) {
       await transaction.rollback();
       return res.status(400).json({ error: { message: 'No valid parts selected' } });
+    }
+    const alreadyOrdered = selectedParts.filter(p => p.materialOrdered || p.materialPurchaseOrderNumber);
+    if (alreadyOrdered.length) {
+      await transaction.rollback();
+      return res.status(409).json({ error: { code: 'ALREADY_ORDERED', message: alreadyOrdered.map(p => `Part ${p.partNumber} was already ordered${p.materialPurchaseOrderNumber ? ` on ${p.materialPurchaseOrderNumber}` : ''}`).join('; ') + '. Refresh the page.' } });
     }
 
     // Group parts by vendorId (fall back to supplierName for legacy data)
@@ -6451,6 +6625,9 @@ router.post('/:id/order-material', async (req, res, next) => {
 router.post('/:id/services/auto-bulk', async (req, res, next) => {
   const transaction = await sequelize.transaction();
   try {
+    // One auto-order per work order at a time: a second request waits, then sees the POs the first
+    // stamped on the outside-processing lines and skips them (R19)
+    await WorkOrder.findByPk(req.params.id, { attributes: ['id'], transaction, lock: transaction.LOCK.UPDATE });
     const workOrder = await WorkOrder.findByPk(req.params.id, {
       include: [{ model: WorkOrderPart, as: 'parts' }],
       transaction
@@ -6910,6 +7087,10 @@ router.post('/:id/unlink-estimate', async (req, res, next) => {
     if (error.message.includes('No estimate linked')) {
       return res.status(400).json({ error: { message: error.message } });
     }
+    if (error.message.includes('already in QuickBooks')) {
+      return res.status(409).json({ error: { code: 'INVOICE_LOCKED', message: error.message } });
+    }
+    if (error.status === 409) return res.status(409).json({ error: { code: error.code, message: error.message } });
     next(error);
   }
 });

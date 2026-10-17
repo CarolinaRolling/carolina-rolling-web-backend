@@ -24,11 +24,20 @@ const label = (wo) => (wo.drNumber ? `DR-${wo.drNumber}` : (wo.orderNumber || 'T
  * Validate a change and return the fields to write with it. Throws a 4xx error when not allowed.
  * @returns {object} updates (always includes `status`), or {} when the status doesn't change
  */
-function planStatusChange(wo, next, { pickedUpBy, signatureData, now = new Date() } = {}) {
+function planStatusChange(wo, next, { pickedUpBy, signatureData, now = new Date(), isDevice = false, isAdmin = false } = {}) {
   if (next === undefined || next === null || next === '') return {};
   if (!STATUSES.includes(next)) throw fail(400, `"${next}" isn't a work-order status. Use one of: ${STATUSES.join(', ')}.`);
   if (next === wo.status) return {};
   if (wo.isVoided) throw fail(409, `${label(wo)} is voided, so its status can't change. Un-void it first.`);
+  // A finished order (shipped / archived / picked up) only moves between those on a tablet — the
+  // tablet's Received / Processing / Stored buttons used to put shipped and invoiced orders back in the
+  // shop (round 15, U2). Once in QuickBooks, a shipped order stays shipped/archived for everyone but an admin.
+  // by status only: an order the office moved back from shipped keeps its old pickedUpAt (review of round 15)
+  const finished = ['shipped', 'archived'].includes(wo.status);
+  if (finished && !['shipped', 'archived'].includes(next)) {
+    if (isDevice) throw fail(409, `${label(wo)} has already been ${wo.status === 'archived' ? 'archived' : 'shipped / picked up'}, so its status can't be changed from a tablet. Ask the office.`);
+    if (wo.iifExportedAt && !isAdmin) throw fail(409, `${label(wo)} has shipped and is in QuickBooks — only an admin can change its status.`);
+  }
   if (wo.iifExportedAt && IN_SHOP.includes(next)) {
     throw fail(409, `${label(wo)} has been invoiced in QuickBooks, so it can't go back to "${next.replace(/_/g, ' ')}". ` +
       `If the work really isn't finished, un-mark it in the Invoice Center first.`);

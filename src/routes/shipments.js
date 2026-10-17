@@ -369,9 +369,27 @@ router.post('/', async (req, res, next) => {
     }
 
     const { WorkOrder, WorkOrderPart, DRNumber, InboundOrder, sequelize } = require('../models');
+    // The WO number is taken before the transaction (U43: nextDocNumber uses its own connection, so
+    // asking for it inside an open transaction starved the pool under load — the T13 pattern)
+    const newOrderNumber = (!linkToWorkOrderId && createWorkOrder) ? await require('../services/docNumbers').nextDocNumber('WO') : null;
     const transaction = await sequelize.transaction();
 
     try {
+      // Linking at creation runs the link route's checks first (W11): the order must exist, be open,
+      // and be for this client
+      if (linkToWorkOrderId) {
+        const target = await WorkOrder.findByPk(linkToWorkOrderId, { transaction });
+        if (!target) {
+          await transaction.rollback();
+          return res.status(404).json({ error: { message: 'Work order not found' } });
+        }
+        const problem = workOrderLinkProblem({ clientName }, target);
+        if (problem) {
+          await transaction.rollback();
+          return res.status(409).json({ error: problem });
+        }
+      }
+
       const qrCode = generateQRCode();
 
       // Create shipment
@@ -420,7 +438,7 @@ router.post('/', async (req, res, next) => {
         const year = date.getFullYear().toString().slice(-2);
         const month = (date.getMonth() + 1).toString().padStart(2, '0');
         const day = date.getDate().toString().padStart(2, '0');
-        const orderNumber = await require('../services/docNumbers').nextDocNumber('WO');
+        const orderNumber = newOrderNumber;
 
         workOrder = await WorkOrder.create({
           orderNumber,
@@ -479,13 +497,6 @@ router.post('/', async (req, res, next) => {
         ]
       });
 
-      // Send email notification
-      try {
-        await sendNewShipmentEmail(createdShipment, workOrder);
-      } catch (emailError) {
-        console.error('Failed to send email notification:', emailError);
-      }
-
       res.status(201).json({ 
         data: {
           shipment: transformShipment(createdShipment),
@@ -494,6 +505,12 @@ router.post('/', async (req, res, next) => {
         message: workOrder 
           ? `Shipment linked to DR-${workOrder.drNumber || 'pending'}`
           : 'Shipment created — waiting for instructions'
+      });
+
+      // E-mail AFTER answering (round 12, audit N23): a slow mail server used to hold the reply past
+      // the tablet's 30-second timeout, so the operator tapped again and got a second shipment.
+      setImmediate(() => {
+        sendNewShipmentEmail(createdShipment, workOrder).catch(emailError => console.error('Failed to send email notification:', emailError));
       });
     } catch (err) {
       await transaction.rollback();
@@ -535,6 +552,8 @@ async function sendNewShipmentEmail(shipment, workOrder = null) {
         <td style="padding: 8px; border: 1px solid #ddd; font-weight: bold; color: #1976d2; background: #e3f2fd;">DR-${workOrder.drNumber}</td>
       </tr>` : '';
   
+  // tablet-entered text is escaped (V24)
+  const escMail = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const emailHtml = `
     <h2>New Material Received</h2>
     <p>New material has been received and logged in the inventory system.</p>
@@ -542,56 +561,56 @@ async function sendNewShipmentEmail(shipment, workOrder = null) {
       ${drNumberHtml}
       <tr>
         <td style="padding: 8px; border: 1px solid #ddd; font-weight: bold;">QR Code</td>
-        <td style="padding: 8px; border: 1px solid #ddd;">${shipment.qrCode}</td>
+        <td style="padding: 8px; border: 1px solid #ddd;">${escMail(shipment.qrCode)}</td>
       </tr>
       <tr>
         <td style="padding: 8px; border: 1px solid #ddd; font-weight: bold;">Client</td>
-        <td style="padding: 8px; border: 1px solid #ddd;">${shipment.clientName}</td>
+        <td style="padding: 8px; border: 1px solid #ddd;">${escMail(shipment.clientName)}</td>
       </tr>
       ${shipment.jobNumber ? `
       <tr>
         <td style="padding: 8px; border: 1px solid #ddd; font-weight: bold;">Job Number</td>
-        <td style="padding: 8px; border: 1px solid #ddd;">${shipment.jobNumber}</td>
+        <td style="padding: 8px; border: 1px solid #ddd;">${escMail(shipment.jobNumber)}</td>
       </tr>
       ` : ''}
       ${shipment.clientPurchaseOrderNumber ? `
       <tr>
         <td style="padding: 8px; border: 1px solid #ddd; font-weight: bold;">Client PO#</td>
-        <td style="padding: 8px; border: 1px solid #ddd;">${shipment.clientPurchaseOrderNumber}</td>
+        <td style="padding: 8px; border: 1px solid #ddd;">${escMail(shipment.clientPurchaseOrderNumber)}</td>
       </tr>
       ` : ''}
       ${shipment.description ? `
       <tr>
         <td style="padding: 8px; border: 1px solid #ddd; font-weight: bold;">Description</td>
-        <td style="padding: 8px; border: 1px solid #ddd;">${shipment.description}</td>
+        <td style="padding: 8px; border: 1px solid #ddd;">${escMail(shipment.description)}</td>
       </tr>
       ` : ''}
       <tr>
         <td style="padding: 8px; border: 1px solid #ddd; font-weight: bold;">Quantity</td>
-        <td style="padding: 8px; border: 1px solid #ddd;">${shipment.quantity}</td>
+        <td style="padding: 8px; border: 1px solid #ddd;">${escMail(shipment.quantity)}</td>
       </tr>
       ${shipment.location ? `
       <tr>
         <td style="padding: 8px; border: 1px solid #ddd; font-weight: bold;">Location</td>
-        <td style="padding: 8px; border: 1px solid #ddd;">${shipment.location}</td>
+        <td style="padding: 8px; border: 1px solid #ddd;">${escMail(shipment.location)}</td>
       </tr>
       ` : ''}
       ${shipment.requestedDueDate ? `
       <tr>
         <td style="padding: 8px; border: 1px solid #ddd; font-weight: bold;">Requested Due Date</td>
-        <td style="padding: 8px; border: 1px solid #ddd;">${shipment.requestedDueDate}</td>
+        <td style="padding: 8px; border: 1px solid #ddd;">${escMail(shipment.requestedDueDate)}</td>
       </tr>
       ` : ''}
       ${shipment.promisedDate ? `
       <tr>
         <td style="padding: 8px; border: 1px solid #ddd; font-weight: bold;">Promised Date</td>
-        <td style="padding: 8px; border: 1px solid #ddd;">${shipment.promisedDate}</td>
+        <td style="padding: 8px; border: 1px solid #ddd;">${escMail(shipment.promisedDate)}</td>
       </tr>
       ` : ''}
       ${shipment.receivedBy ? `
       <tr>
         <td style="padding: 8px; border: 1px solid #ddd; font-weight: bold;">Received By</td>
-        <td style="padding: 8px; border: 1px solid #ddd;">${shipment.receivedBy}</td>
+        <td style="padding: 8px; border: 1px solid #ddd;">${escMail(shipment.receivedBy)}</td>
       </tr>
       ` : ''}
       <tr>
@@ -661,6 +680,22 @@ router.post('/bulk-delete', async (req, res, next) => {
   }
 });
 
+// Shared by POST / (linkToWorkOrderId, W11) and /:id/link-workorder (U47): only an open order of the
+// same client. Returns { code, message } for a 409, or null.
+function workOrderLinkProblem(shipment, workOrder) {
+  const label = workOrder.drNumber ? `DR-${workOrder.drNumber}` : (workOrder.orderNumber || 'That work order');
+  if (workOrder.isVoided || ['shipped', 'archived', 'voided'].includes(workOrder.status)) {
+    return { code: 'WORK_ORDER_CLOSED', message: `${label} is ${workOrder.isVoided ? 'voided' : workOrder.status}, so a shipment can't be linked to it.` };
+  }
+  const nm = (x) => String(x || '').trim().toLowerCase();
+  const idMismatch = shipment.clientId && workOrder.clientId && shipment.clientId !== workOrder.clientId;
+  const nameMismatch = nm(shipment.clientName) && nm(workOrder.clientName) && nm(shipment.clientName) !== nm(workOrder.clientName);
+  if (idMismatch || nameMismatch) {
+    return { code: 'CLIENT_MISMATCH', message: `This shipment is for ${shipment.clientName || 'another client'}, but ${label} is for ${workOrder.clientName || 'another client'}. Fix the client first.` };
+  }
+  return null;
+}
+
 // POST /api/shipments/:id/link-workorder - Create WO and link to shipment
 router.post('/:id/link-workorder', async (req, res, next) => {
   try {
@@ -672,6 +707,8 @@ router.post('/:id/link-workorder', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'Shipment not found' } });
     }
 
+    // WO number before the transaction (U43)
+    const newOrderNumber = workOrderId ? null : await require('../services/docNumbers').nextDocNumber('WO');
     const transaction = await sequelize.transaction();
     try {
       let workOrder;
@@ -683,13 +720,19 @@ router.post('/:id/link-workorder', async (req, res, next) => {
           await transaction.rollback();
           return res.status(404).json({ error: { message: 'Work order not found' } });
         }
+        // Only an open order of the same client (U47)
+        const problem = workOrderLinkProblem(shipment, workOrder);
+        if (problem) {
+          await transaction.rollback();
+          return res.status(409).json({ error: problem });
+        }
       } else {
         // Create new work order
         const date = new Date();
         const year = date.getFullYear().toString().slice(-2);
         const month = (date.getMonth() + 1).toString().padStart(2, '0');
         const day = date.getDate().toString().padStart(2, '0');
-        const orderNumber = await require('../services/docNumbers').nextDocNumber('WO');
+        const orderNumber = newOrderNumber;
 
         workOrder = await WorkOrder.create({
           orderNumber,
@@ -770,6 +813,24 @@ router.put('/:id', async (req, res, next) => {
       'status', 'location', 'notes', 'receivedBy', 'requestedDueDate', 'promisedDate', 'pickedUpBy', 'workOrderId'
     ];
 
+    // A shop device (tablet / phone key) may only edit what the app's shipment screen sends
+    // (UpdateShipmentRequest) — never relink the shipment to another work order. The dedicated
+    // link / unlink routes are refused for devices; a plain PUT {workOrderId} used to slip past that
+    // (round 13, T38). The client name may be corrected only while the shipment isn't on a work order
+    // (on a linked one it would no longer match the order it belongs to).
+    if (req.apiKey && require('../services/keyScope').keyKind(req.apiKey) === 'device') {
+      const DEVICE_FIELDS = ['clientName', 'jobNumber', 'clientPurchaseOrderNumber', 'description', 'quantity',
+        'status', 'location', 'notes', 'receivedBy', 'requestedDueDate', 'promisedDate'];
+      const extra = allowedFields.filter(f => req.body[f] !== undefined && !DEVICE_FIELDS.includes(f));
+      if (extra.length) {
+        return res.status(403).json({ error: { message: `A shop device can't change ${extra.join(', ')} on a shipment. Link or unlink work orders from the office.`, code: 'DEVICE_FIELD_NOT_ALLOWED' } });
+      }
+      const norm = (v) => String(v == null ? '' : v).trim().toLowerCase();
+      if (req.body.clientName !== undefined && shipment.workOrderId && norm(req.body.clientName) !== norm(shipment.clientName)) {
+        return res.status(403).json({ error: { message: 'This shipment is on a work order, so its client can\'t be changed from a device. Change it from the office.', code: 'DEVICE_FIELD_NOT_ALLOWED' } });
+      }
+    }
+
     const updates = {};
     allowedFields.forEach(field => {
       if (req.body[field] !== undefined) {
@@ -790,6 +851,15 @@ router.put('/:id', async (req, res, next) => {
       else if (allowed.length && !allowed.includes(updates.status)) {
         return res.status(400).json({ error: { message: `"${updates.status}" isn't a shipment status. Choose one of: ${allowed.join(', ')}.` } });
       }
+    }
+
+    // A shipment on an unpaid COD order doesn't leave as "shipped" without payment or the override —
+    // the tablet's Mark as Shipped used to skip the COD check (round 16, V14)
+    if (updates.status === 'shipped' && shipment.status !== 'shipped' && shipment.workOrderId) {
+      const wo = await require('../models').WorkOrder.findByPk(shipment.workOrderId);
+      // an order already shipped / archived (e.g. released with the override) isn't checked again
+      const codBlock = wo && !['shipped', 'archived'].includes(wo.status) ? await require('../services/codGuard').codProblem(wo, req) : null;
+      if (codBlock) return res.status(codBlock.status).json({ error: { message: codBlock.message, code: codBlock.code } });
     }
 
     // Handle shippedAt timestamp
@@ -1057,8 +1127,8 @@ router.get('/:shipmentId/documents/:documentId/signed-url', async (req, res, nex
       if (doc.cloudinaryId.startsWith('s3:') || (doc.url && doc.url.includes('.s3.') && doc.url.includes('amazonaws.com'))) {
         return res.json({
           data: {
-            url: doc.url,
-            expiresIn: null,
+            url: await require('../utils/storage').accessUrl(doc.cloudinaryId, doc.url),   // expires in an hour (R7)
+            expiresIn: 3600,
             originalName: doc.originalName || doc.filename
           }
         });

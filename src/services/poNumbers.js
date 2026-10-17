@@ -128,4 +128,26 @@ async function reserveStandalone(prefix, row = {}) {
   });
 }
 
-module.exports = { reservePONumbers, previewNextPONumber, setNextPONumber, reserveStandalone, STARTING };
+/**
+ * Run `fn` while holding a per-work-order claim for PO creation (round 12, audit N15). Trucking and
+ * outside-processing POs reserve a number, build and upload a PDF, then write the PO back — three
+ * simultaneous clicks used to make three POs. A second request while one is running gets a 409.
+ * The claim is a row (works across dynos, holds no database connection while the PDF is built); a
+ * claim older than 10 minutes (a crashed request) is taken over.
+ */
+async function withOrderPOLock(workOrderId, fn) {
+  const { sequelize } = models();
+  const { QueryTypes } = require('sequelize');
+  const key = 'po-lock:' + String(workOrderId);
+  await sequelize.query(`DELETE FROM idempotency_keys WHERE "key" = :key AND "createdAt" < now() - interval '10 minutes'`, { replacements: { key } });
+  const got = await sequelize.query(`INSERT INTO idempotency_keys ("key", "method", "path") VALUES (:key, 'LOCK', 'po') ON CONFLICT ("key") DO NOTHING RETURNING "key"`,
+    { replacements: { key }, type: QueryTypes.SELECT });
+  if (!got.length) {
+    const e = new Error('A purchase order is already being created for this work order. Wait a moment and refresh.');
+    e.status = 409; throw e;
+  }
+  try { return await fn(); }
+  finally { await sequelize.query(`DELETE FROM idempotency_keys WHERE "key" = :key`, { replacements: { key } }).catch(() => {}); }
+}
+
+module.exports = { reservePONumbers, previewNextPONumber, setNextPONumber, reserveStandalone, withOrderPOLock, STARTING };

@@ -7,6 +7,7 @@ const fs = require('fs');
 const { Liability, Employee, PayrollWeek, PayrollEntry, WorkOrder, WorkOrderPart, WorkOrderPayment, Vendor, PONumber, InboundOrder, Client, ShipmentCharge, ClientPayment, PaymentApplication, CreditMemo, CreditMemoApplication, Refund, sequelize } = require('../models');
 // Shared invoice totals + payment math (audit C2/C4) — every balance on every screen comes from these.
 const { loadInvoiceTotals } = require('../services/invoiceTotals');
+const { splitCardSurcharge } = require('../services/paymentLedger');
 const { loadBalances, loadBalance, syncPaidFlag, validatePaymentApplications, voidClientPayment, voidInvoicePayment, voidCreditMemo, applyCreditMemo } = require('../services/paymentLedger');
 const sendLedgerError = (res, next, e) => (e.status === 400 || e.status === 404) ? res.status(e.status).json({ error: { message: e.message } }) : next(e);
 const regenPdfs = (woIds) => { try { const qb = require('./quickbooks'); if (qb.regenerateInvoicePDF) (async () => { for (const id of woIds) { try { await qb.regenerateInvoicePDF(id); } catch (e) { /* non-fatal */ } } })(); } catch (e) { /* non-fatal */ } };
@@ -30,10 +31,19 @@ router.get('/payments/outstanding', async (req, res, next) => {
     const wos = await WorkOrder.findAll({
       where: {
         invoiceNumber: { [Op.ne]: null },
-        paymentDate: null,
-        isVoided: { [Op.or]: [null, false] }
+        isVoided: { [Op.or]: [null, false] },
+        // The ledger balance decides (W2); "paymentDate" only narrows the list. A paid mark still
+        // counts as a candidate when its stored total is above the live payments net of money given
+        // back (total raised since, payment voided, refund / credit) — the balance below filters.
+        [Op.or]: [
+          { paymentDate: null },
+          sequelize.literal(`"WorkOrder"."grandTotal" > COALESCE((SELECT SUM(p.amount) FROM work_order_payments p WHERE p."workOrderId" = "WorkOrder".id AND p."voidedAt" IS NULL), 0)
+            - COALESCE((SELECT SUM(r.amount) FROM refunds r WHERE r."sourceWorkOrderId" = "WorkOrder".id AND r."voidedAt" IS NULL), 0)
+            - COALESCE((SELECT SUM(m.amount) FROM credit_memos m WHERE m."sourceWorkOrderId" = "WorkOrder".id AND m."voidedAt" IS NULL), 0) + 0.01
+            AND EXISTS (SELECT 1 FROM work_order_payments p2 WHERE p2."workOrderId" = "WorkOrder".id)`),
+        ],
       },
-      attributes: ['id', 'orderNumber', 'drNumber', 'clientName', 'invoiceNumber', 'invoiceDate', 'grandTotal', 'clientPurchaseOrderNumber', 'createdAt'],
+      attributes: ['id', 'orderNumber', 'drNumber', 'clientName', 'invoiceNumber', 'invoiceDate', 'grandTotal', 'paymentDate', 'clientPurchaseOrderNumber', 'createdAt'],
       order: [['invoiceDate', 'ASC']]
     });
     
@@ -53,6 +63,50 @@ router.get('/payments/outstanding', async (req, res, next) => {
     const over90 = data.filter(w => w.daysOutstanding > 90);
     
     res.json({ data: { invoices: data, totalOutstanding, count: data.length, over30: over30.length, over60: over60.length, over90: over90.length } });
+  } catch (error) { next(error); }
+});
+
+// GET /api/business/payments/card-surcharges?from=YYYY-MM-DD&to=YYYY-MM-DD — card surcharges collected
+// on top of invoices (income to book; they are not on the invoice or the QuickBooks invoice) — audit T6
+router.get('/payments/card-surcharges', async (req, res, next) => {
+  try {
+    const { from, to } = req.query;
+    const range = {};
+    if (from) range[Op.gte] = from;
+    if (to) range[Op.lte] = to;
+    const dateWhere = Object.keys(range).length || Object.getOwnPropertySymbols(range).length ? { paymentDate: range } : {};
+    const WOP = sequelize.models.WorkOrderPayment;
+    const rows = await WOP.findAll({ where: { ...dateWhere, voidedAt: null, cardSurcharge: { [Op.gt]: 0 } }, order: [['paymentDate', 'ASC']] });
+    const cps = await ClientPayment.findAll({ where: { ...dateWhere, voidedAt: null, cardSurcharge: { [Op.gt]: 0 } }, order: [['paymentDate', 'ASC']] });
+    const items = [
+      ...rows.map(r => ({ source: 'invoice', id: r.id, workOrderId: r.workOrderId, paymentDate: r.paymentDate, amount: parseFloat(r.amount), cardSurcharge: parseFloat(r.cardSurcharge), reference: r.paymentReference })),
+      ...cps.map(r => ({ source: 'client_payment', id: r.id, clientName: r.clientName, paymentDate: r.paymentDate, amount: parseFloat(r.amount), cardSurcharge: parseFloat(r.cardSurcharge), reference: r.reference })),
+    ].sort((a, b) => String(a.paymentDate).localeCompare(String(b.paymentDate)));
+    const total = Math.round(items.reduce((s, i) => s + i.cardSurcharge, 0) * 100) / 100;
+    res.json({ data: { items, total, count: items.length } });
+  } catch (error) { next(error); }
+});
+
+// POST /api/business/ledger/:woId/overpayment-to-credit — the invoice was paid more than it now comes
+// to: hold the excess as client credit (a credit memo tied to this invoice), so it can be applied to
+// another invoice or refunded; the invoice then no longer shows as overpaid (T4)
+router.post('/ledger/:woId/overpayment-to-credit', async (req, res, next) => {
+  try {
+    const result = await sequelize.transaction(async (t) => {
+      const wo = await WorkOrder.findByPk(req.params.woId, { transaction: t, lock: t.LOCK.UPDATE });
+      if (!wo) return { status: 404, body: { error: { message: 'Work order not found' } } };
+      const b = await loadBalance(wo.id, { transaction: t });
+      const amt = b ? b.overpaid : 0;
+      if (!(amt > 0.005)) return { status: 409, body: { error: { message: 'This invoice is not overpaid.' } } };
+      const memo = await CreditMemo.create({
+        clientId: wo.clientId || null, clientName: wo.clientName,
+        date: require('../utils/shopTime').shopDate(), amount: amt, remainingAmount: amt,
+        reason: `Overpayment on invoice ${wo.invoiceNumber || wo.drNumber || wo.orderNumber} (its total dropped after payment)`,
+        sourceWorkOrderId: wo.id,
+      }, { transaction: t });
+      return { status: 200, body: { data: memo, message: `$${amt.toFixed(2)} moved to client credit` } };
+    });
+    res.status(result.status).json(result.body);
   } catch (error) { next(error); }
 });
 
@@ -79,24 +133,34 @@ router.get('/payments/history', async (req, res, next) => {
 // POST /api/business/payments/:woId/record - Record payment on a WO
 router.post('/payments/:woId/record', async (req, res, next) => {
   try {
-    const wo = await WorkOrder.findByPk(req.params.woId);
+    const wo = await WorkOrder.findByPk(req.params.woId, { attributes: ['id', 'invoiceNumber'] });
     if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
-    await wo.update({
-      paymentDate: req.body.paymentDate || new Date(),
-      paymentMethod: req.body.paymentMethod || '',
-      paymentReference: req.body.paymentReference || '',
-      paymentRecordedBy: req.body.recordedBy || 'admin'
-    });
-    res.json({ data: wo, message: `Payment recorded for ${wo.invoiceNumber}` });
+    // A real payment record for the balance (R14), not just a "paid" mark
+    const { recordFullPayment, PaymentValidationError } = require('../services/paymentLedger');
+    try {
+      await recordFullPayment(wo.id, { amount: req.body.amount, paymentDate: req.body.paymentDate, paymentMethod: req.body.paymentMethod || null,
+        paymentReference: req.body.paymentReference || null, recordedBy: req.user?.username || req.body.recordedBy || 'admin' });
+    } catch (e) {
+      if (e instanceof PaymentValidationError || e.status === 400) return res.status(400).json({ error: { message: e.message } });
+      throw e;
+    }
+    regenPdfs([wo.id]);
+    res.json({ data: await WorkOrder.findByPk(wo.id), message: `Payment recorded for ${wo.invoiceNumber}` });
   } catch (error) { next(error); }
 });
 
 // POST /api/business/payments/:woId/clear - Clear payment (undo)
 router.post('/payments/:woId/clear', async (req, res, next) => {
   try {
+    if (req.user?.role !== 'admin') return res.status(403).json({ error: { message: 'Only an admin can clear a recorded payment.' } });
     const wo = await WorkOrder.findByPk(req.params.woId);
     if (!wo) return res.status(404).json({ error: { message: 'Work order not found' } });
-    await wo.update({ paymentDate: null, paymentMethod: null, paymentReference: null, paymentRecordedBy: null });
+    // Real payment records are voided one by one in the ledger (each is accounted for); this only
+    // clears an old "marked paid" with no record behind it (R14)
+    const WOP = sequelize.models.WorkOrderPayment;
+    const active = WOP ? await WOP.count({ where: { workOrderId: wo.id, voidedAt: null } }) : 0;
+    if (active) return res.status(409).json({ error: { message: 'This invoice has payment records. Void the payment in the ledger instead.' } });
+    await wo.update({ paymentDate: null, paymentMethod: null, paymentReference: null, paymentRecordedBy: null, codPaid: false });
     res.json({ data: wo, message: 'Payment cleared' });
   } catch (error) { next(error); }
 });
@@ -109,7 +173,8 @@ router.get('/ledger', async (req, res, next) => {
   try {
     const { Op } = require('sequelize');
     const { status, clientName, search } = req.query;
-    const where = { invoiceNumber: { [Op.ne]: null } };
+    // voided orders aren't owed (R17)
+    const where = { invoiceNumber: { [Op.ne]: null }, [Op.and]: [{ [Op.or]: [{ isVoided: null }, { isVoided: false }] }] };
     if (clientName) where.clientName = { [Op.iLike]: `%${clientName}%` };
     if (search) where[Op.or] = [
       { clientName: { [Op.iLike]: `%${search}%` } },
@@ -136,6 +201,7 @@ router.get('/ledger', async (req, res, next) => {
         grandTotal: b.total.toFixed(2),
         totalPaid: b.paid.toFixed(2),
         balance: b.balance.toFixed(2),
+        overpaid: (b.overpaid || 0).toFixed(2),   // T4: paid more than the current total — a credit owed
         isPaid: b.isPaid,
         needsPricing: b.total === 0,
         daysOutstanding: daysOut,
@@ -145,6 +211,7 @@ router.get('/ledger', async (req, res, next) => {
     });
 
     const filtered = status === 'paid' ? data.filter(d => d.isPaid)
+      : status === 'overpaid' ? data.filter(d => parseFloat(d.overpaid) > 0.01)
       : status === 'outstanding' ? data.filter(d => !d.isPaid)
       : status === 'needs_pricing' ? data.filter(d => d.needsPricing)
       : data;
@@ -153,7 +220,9 @@ router.get('/ledger', async (req, res, next) => {
     const totalCollected = data.filter(d => d.isPaid).reduce((s,d) => s + parseFloat(d.grandTotal||0), 0);
     const needsPricingCount = data.filter(d => d.needsPricing).length;
 
-    res.json({ data: { invoices: filtered, totalOutstanding, totalCollected, needsPricingCount, count: filtered.length } });
+    const overpaidCount = data.filter(d => parseFloat(d.overpaid) > 0.01).length;
+    const totalOverpaid = data.reduce((s,d) => s + parseFloat(d.overpaid || 0), 0);
+    res.json({ data: { invoices: filtered, totalOutstanding, totalCollected, needsPricingCount, overpaidCount, totalOverpaid: Math.round(totalOverpaid * 100) / 100, count: filtered.length } });
   } catch (error) { next(error); }
 });
 
@@ -199,12 +268,26 @@ router.post('/ledger/:woId/payments', async (req, res, next) => {
     let payment;
     try {
       payment = await sequelize.transaction(async (t) => {
-        await validatePaymentApplications({ applications: [{ workOrderId: wo.id, amount }], transaction: t });
+        // A card payment of exactly "Total with Credit Card Fees" (printed on the invoice) pays the
+        // invoice in full; the extra is the card surcharge, recorded on its own (audit T6)
+        let applied = parseFloat(amount), surcharge = null;
+        if (paymentMethod === 'credit_card') {
+          await WorkOrder.findByPk(wo.id, { transaction: t, lock: t.LOCK.UPDATE, attributes: ['id'] });
+          const b = await loadBalance(wo.id, { transaction: t });
+          const split = b ? splitCardSurcharge(applied, b.balance, ccType) : null;
+          if (split) {
+            applied = split.applied; surcharge = split.surcharge;
+            ccType = split.ccType;   // the rate the amount actually matched (V7)
+            ccFeeAmount = (parseFloat(amount) * (ccType === 'manual' ? 0.035 : 0.026) + 0.15).toFixed(2);   // Square's fee on what was charged
+          }
+        }
+        await validatePaymentApplications({ applications: [{ workOrderId: wo.id, amount: applied }], transaction: t });
         const p = await WOP.create({
           workOrderId: wo.id,
-          paymentType: paymentType || 'partial',
-          amount: parseFloat(amount).toFixed(2),
-          paymentDate: paymentDate || new Date().toISOString().split('T')[0],
+          paymentType: paymentType || (surcharge ? 'full' : 'partial'),
+          amount: applied.toFixed(2),
+          cardSurcharge: surcharge,
+          paymentDate: paymentDate || require('../utils/shopTime').shopDate(),   // the shop's date, not UTC's (R31)
           paymentMethod: paymentMethod || null,
           paymentReference: paymentReference || null,
           ccProcessingType: ccType,
@@ -297,42 +380,70 @@ router.put('/liabilities/:id', async (req, res, next) => {
 });
 
 // POST /api/business/liabilities/:id/pay - Mark as paid
+// Next due date for a recurring bill, as YYYY-MM-DD with no time-zone shift. Months are clamped to
+// the month's end (Jan 31 → Feb 28/29, not Mar 3), and a bill due on a month's last day stays on the
+// last day (Feb 28 → Mar 31) — audit T45.
+function nextRecurringDue(ymd, interval) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(ymd || ''));
+  if (!m) return null;
+  let y = +m[1], mo = +m[2], d = +m[3];
+  const dim = (yy, mm) => new Date(Date.UTC(yy, mm, 0)).getUTCDate();   // days in month mm (1-12)
+  const fmt = (yy, mm, dd) => `${yy}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+  if (interval === 'weekly') {
+    const t = new Date(Date.UTC(y, mo - 1, d + 7));
+    return fmt(t.getUTCFullYear(), t.getUTCMonth() + 1, t.getUTCDate());
+  }
+  const add = interval === 'monthly' ? 1 : interval === 'quarterly' ? 3 : interval === 'yearly' ? 12 : 0;
+  if (!add) return null;
+  const wasLastDay = d === dim(y, mo);
+  mo += add; while (mo > 12) { mo -= 12; y += 1; }
+  const last = dim(y, mo);
+  return fmt(y, mo, wasLastDay ? last : Math.min(d, last));
+}
+
 router.post('/liabilities/:id/pay', async (req, res, next) => {
   try {
-    const liability = await Liability.findByPk(req.params.id);
-    if (!liability) return res.status(404).json({ error: { message: 'Not found' } });
-    await liability.update({
-      status: 'paid',
-      paidAt: new Date(),
-      paidAmount: req.body.paidAmount || liability.amount
-    });
-
-    // If recurring, create next occurrence
-    if (liability.recurring && liability.recurringInterval && liability.dueDate) {
-      const nextDate = new Date(liability.dueDate);
-      switch (liability.recurringInterval) {
-        case 'weekly': nextDate.setDate(nextDate.getDate() + 7); break;
-        case 'monthly': nextDate.setMonth(nextDate.getMonth() + 1); break;
-        case 'quarterly': nextDate.setMonth(nextDate.getMonth() + 3); break;
-        case 'yearly': nextDate.setFullYear(nextDate.getFullYear() + 1); break;
+    // One payment per bill: locked, and a bill already paid is refused — a double click (or two
+    // people) used to mark it paid twice and create two "next" bills (audit T45)
+    const result = await sequelize.transaction(async (t) => {
+      const liability = await Liability.findByPk(req.params.id, { transaction: t, lock: t.LOCK.UPDATE });
+      if (!liability) return { status: 404, body: { error: { message: 'Not found' } } };
+      if (liability.status === 'paid') {
+        return { status: 409, body: { error: { code: 'ALREADY_PAID', message: `${liability.name} is already marked paid${liability.paidAt ? ' (' + require('../utils/shopTime').shopDate(liability.paidAt) + ')' : ''}.` } } };
       }
-      await Liability.create({
-        name: liability.name,
-        category: liability.category,
-        amount: liability.amount,
-        dueDate: nextDate.toISOString().split('T')[0],
-        recurring: true,
-        recurringInterval: liability.recurringInterval,
-        vendor: liability.vendor,
-        notes: liability.notes,
-        referenceNumber: liability.referenceNumber,
-        status: 'unpaid'
-      });
-    }
+      await liability.update({
+        status: 'paid',
+        paidAt: new Date(),
+        paidAmount: req.body.paidAmount || liability.amount
+      }, { transaction: t });
 
-    res.json({ data: liability, message: 'Marked as paid' });
+      // If recurring, create next occurrence (once)
+      let next = null;
+      const nextDue = liability.recurring && liability.recurringInterval && liability.dueDate
+        ? nextRecurringDue(liability.dueDate, liability.recurringInterval) : null;
+      if (nextDue) {
+        const exists = await Liability.findOne({ where: { name: liability.name, dueDate: nextDue, recurring: true, status: { [Op.ne]: 'paid' } }, transaction: t });
+        if (!exists) {
+          next = await Liability.create({
+            name: liability.name,
+            category: liability.category,
+            amount: liability.amount,
+            dueDate: nextDue,
+            recurring: true,
+            recurringInterval: liability.recurringInterval,
+            vendor: liability.vendor,
+            notes: liability.notes,
+            referenceNumber: liability.referenceNumber,
+            status: 'unpaid'
+          }, { transaction: t });
+        }
+      }
+      return { status: 200, body: { data: liability, next, message: 'Marked as paid' } };
+    });
+    res.status(result.status).json(result.body);
   } catch (error) { next(error); }
 });
+router.nextRecurringDue = nextRecurringDue;
 
 // DELETE /api/business/liabilities/:id
 router.delete('/liabilities/:id', async (req, res, next) => {
@@ -811,18 +922,13 @@ router.post('/calendar/:id/complete', async (req, res, next) => {
     if (!event) return res.status(404).json({ error: { message: 'Not found' } });
     await event.update({ status: 'completed', completedAt: new Date() });
 
-    if (event.recurring && event.recurringInterval) {
-      const nextDate = new Date(event.eventDate);
-      switch (event.recurringInterval) {
-        case 'monthly': nextDate.setMonth(nextDate.getMonth() + 1); break;
-        case 'quarterly': nextDate.setMonth(nextDate.getMonth() + 3); break;
-        case 'yearly': nextDate.setFullYear(nextDate.getFullYear() + 1); break;
-      }
+    const nextYmd = event.recurring && event.recurringInterval ? nextRecurringDue(event.eventDate instanceof Date ? event.eventDate.toISOString() : event.eventDate, event.recurringInterval) : null;
+    if (nextYmd) {
       await BusinessEvent.create({
         title: event.title,
         description: event.description,
         category: event.category,
-        eventDate: nextDate.toISOString().split('T')[0],
+        eventDate: nextYmd,   // month-end clamped, no time-zone shift (T45 / R31)
         reminderDays: event.reminderDays,
         recurring: true,
         recurringInterval: event.recurringInterval,
@@ -1232,7 +1338,7 @@ router.get('/client-payments', async (req, res, next) => {
 router.get('/client-open-invoices/:clientId', async (req, res, next) => {
   try {
     const wos = await WorkOrder.findAll({
-      where: { clientId: req.params.clientId, invoiceNumber: { [Op.ne]: null } },
+      where: { clientId: req.params.clientId, invoiceNumber: { [Op.ne]: null }, [Op.or]: [{ isVoided: null }, { isVoided: false }] },   // voided orders aren't owed (R17)
       attributes: ['id','drNumber','orderNumber','clientName','invoiceNumber','grandTotal','truckingCost','invoiceDate'],
       include: [{ model: WorkOrderPart, as: 'parts', attributes: ['partTotal'] }],
       order: [['invoiceDate','ASC NULLS LAST']]
@@ -1251,8 +1357,8 @@ router.get('/client-open-invoices/:clientId', async (req, res, next) => {
 router.post('/client-payments', async (req, res, next) => {
   const t = await sequelize.transaction();
   try {
-    const { clientId, clientName, paymentDate, amount, method, reference, notes, recordedBy, applications, creditMemoRemainder } = req.body;
-    const totalAmount = parseFloat(amount);
+    const { clientId, clientName, paymentDate, amount, method, reference, notes, recordedBy, applications, creditMemoRemainder, ccProcessingType } = req.body;
+    let totalAmount = parseFloat(amount);
     if (!totalAmount || totalAmount <= 0) {
       await t.rollback();
       return res.status(400).json({ error: { message: 'Enter a payment amount greater than zero.' } });
@@ -1267,10 +1373,19 @@ router.post('/client-payments', async (req, res, next) => {
       return next(valErr);
     }
 
+    // A card payment of "Total with Credit Card Fees" for the invoices paid: the extra over what is
+    // applied is the card surcharge (income), not client credit (audit T6)
+    let cardSurcharge = null;
+    if (method === 'credit_card') {
+      const appliedList = (applications || []).map(a => parseFloat(a.amount)).filter(x => x > 0);
+      const split = splitCardSurcharge(totalAmount, appliedList, ccProcessingType);
+      if (split) { cardSurcharge = split.surcharge; totalAmount = split.applied; }
+    }
+
     // Create the parent payment
     const payment = await ClientPayment.create({
-      clientId: clientId || null, clientName, paymentDate: paymentDate || new Date(),
-      amount: totalAmount, method: method || 'check', reference: reference || null,
+      clientId: clientId || null, clientName, paymentDate: paymentDate || require('../utils/shopTime').shopDate(),
+      amount: totalAmount, cardSurcharge, method: method || 'check', reference: reference || null,
       notes: notes || null, recordedBy: recordedBy || 'admin'
     }, { transaction: t });
 
@@ -1294,7 +1409,7 @@ router.post('/client-payments', async (req, res, next) => {
       // paymentApplicationId marks it as the same money as the application, so it counts once.
       await WorkOrderPayment.create({
         workOrderId: app.workOrderId, amount: appAmt,
-        paymentDate: paymentDate || new Date(), paymentMethod: method || 'check',
+        paymentDate: paymentDate || require('../utils/shopTime').shopDate(), paymentMethod: method || 'check',
         paymentReference: reference || null, paymentType: 'partial', recordedBy: recordedBy || 'admin',
         paymentApplicationId: application.id
       }, { transaction: t });
@@ -1309,13 +1424,15 @@ router.post('/client-payments', async (req, res, next) => {
       } catch (e) { console.warn('[client-payment] paid-flag update skipped for', woId, e.message); }
     }
 
-    // If remainder and creditMemoRemainder flag, create credit memo
-    const remainder = totalAmount - totalApplied;
+    // Whatever isn't applied to an invoice is ALWAYS held as client credit (R18). It used to depend
+    // on an unticked-by-default box, and otherwise the money was in the books but nowhere in AR.
+    const remainder = Math.round((totalAmount - totalApplied) * 100) / 100;
     let creditMemo = null;
-    if (creditMemoRemainder && remainder > 0.01) {
+    void creditMemoRemainder;
+    if (remainder > 0.005) {
       creditMemo = await CreditMemo.create({
         clientId: clientId || null, clientName,
-        date: paymentDate || new Date(),
+        date: paymentDate || require('../utils/shopTime').shopDate(),
         amount: remainder, remainingAmount: remainder,
         reason: `Overpayment credit from payment of ${totalAmount.toFixed(2)}`,
         sourceClientPaymentId: payment.id
@@ -1358,7 +1475,7 @@ router.post('/credit-memos', async (req, res, next) => {
     if (!parseFloat(amount) || !clientName) return res.status(400).json({ error: { message: 'clientName and amount required' } });
     const memo = await CreditMemo.create({
       clientId: clientId || null, clientName,
-      date: date || new Date(), amount: parseFloat(amount),
+      date: date || require('../utils/shopTime').shopDate(), amount: parseFloat(amount),
       remainingAmount: parseFloat(amount), reason: reason || null
     });
     res.json({ data: memo, message: 'Credit memo created' });
@@ -1402,29 +1519,28 @@ router.get('/refunds', async (req, res, next) => {
 // POST /api/business/refunds — record a refund
 router.post('/refunds', async (req, res, next) => {
   try {
-    const { clientId, clientName, date, amount, method, reference, reason, sourceWorkOrderId, sourceClientPaymentId, recordedBy } = req.body;
-    if (!parseFloat(amount) || !clientName) return res.status(400).json({ error: { message: 'clientName and amount required' } });
-    const refund = await Refund.create({
-      clientId: clientId || null, clientName,
-      date: date || new Date(), amount: parseFloat(amount),
-      method: method || 'check', reference: reference || null,
-      reason: reason || null,
-      sourceWorkOrderId: sourceWorkOrderId || null,
-      sourceClientPaymentId: sourceClientPaymentId || null,
-      recordedBy: recordedBy || 'admin'
-    });
+    const b = req.body || {};
+    if (!parseFloat(b.amount) || (!b.clientName && !b.creditMemoId && !b.sourceWorkOrderId)) return res.status(400).json({ error: { message: 'clientName and amount required' } });
+    // Tied to the invoice / credit memo it pays back, so the credit can't be spent or refunded twice (V1)
+    const refund = await require('../services/paymentLedger').recordRefund({ ...b, recordedBy: req.user?.username || b.recordedBy || 'admin' });
     res.json({ data: refund, message: 'Refund recorded' });
-  } catch(error) { next(error); }
+  } catch(error) {
+    if (error.status === 400 || error.name === 'PaymentValidationError') return res.status(400).json({ error: { message: error.message, code: error.code } });
+    next(error);
+  }
 });
 
 // DELETE /api/business/refunds/:id — void
 router.delete('/refunds/:id', async (req, res, next) => {
   try {
-    const refund = await Refund.findByPk(req.params.id);
-    if (!refund) return res.status(404).json({ error: { message: 'Not found' } });
-    await refund.update({ voidedAt: new Date() });
+    // W13: voiding brings credit back, so admins only (the office button is admin-only too)
+    if (!require('../services/staffRoles').isAdminCaller(req)) return res.status(403).json({ error: { message: 'Only an admin can void a refund.' } });
+    const refund = await require('../services/paymentLedger').voidRefund(req.params.id, { reason: req.body?.reason, user: req.user?.username });
     res.json({ data: refund, message: 'Refund voided' });
-  } catch(error) { next(error); }
+  } catch(error) {
+    if (error.status === 404) return res.status(404).json({ error: { message: 'Not found' } });
+    next(error);
+  }
 });
 
 // GET /api/business/general-ledger — unified chronological ledger of all transactions
@@ -1472,6 +1588,23 @@ router.get('/general-ledger', async (req, res, next) => {
       });
     } catch(e) {}
 
+    // ── Revenue: card surcharges collected on top of invoices (kept apart from the invoice payment) — U41
+    try {
+      const dateWhere = { ...(startDate && { paymentDate: { [Op.gte]: startDate } }), ...(endDate && { paymentDate: { [Op.lte]: endDate } }) };
+      if (startDate && endDate) dateWhere.paymentDate = { [Op.gte]: startDate, [Op.lte]: endDate };
+      const surWop = await WorkOrderPayment.findAll({ where: { voidedAt: null, cardSurcharge: { [Op.gt]: 0 }, ...dateWhere } });
+      const surCp = await ClientPayment.findAll({ where: { voidedAt: null, cardSurcharge: { [Op.gt]: 0 }, ...dateWhere } });
+      for (const p of [...surWop, ...surCp]) {
+        entries.push({
+          id: p.id + ':surcharge', date: p.paymentDate, type: 'payment',
+          category: 'Revenue', description: `Card surcharge${p.clientName ? ' — ' + p.clientName : ''}`,
+          detail: 'Credit card fee paid by the customer',
+          credit: parseFloat(p.cardSurcharge), debit: 0,
+          clientName: p.clientName || undefined, source: 'card_surcharge'
+        });
+      }
+    } catch(e) {}
+
     // ── Expense: Paid Liabilities ──
     try {
       const liabs = await Liability.findAll({
@@ -1511,8 +1644,14 @@ router.get('/general-ledger', async (req, res, next) => {
 
     // ── Expense: Contracted Shipping ──
     try {
+      // Work-order charges only (an estimate's charges are a quote; convert copies them onto the order),
+      // in the period asked for (round 16, V4)
+      const created = {};
+      if (startDate) created[Op.gte] = new Date(startDate + 'T00:00:00-08:00');
+      if (endDate) created[Op.lte] = new Date(endDate + 'T23:59:59-08:00');
       const charges = await ShipmentCharge.findAll({
-        where: { carrierType: 'contracted' },
+        where: { carrierType: 'contracted', workOrderId: { [Op.ne]: null },
+          ...((startDate || endDate) ? { createdAt: created } : {}) },
         order: [['createdAt', 'DESC']]
       });
       charges.forEach(c => {

@@ -43,6 +43,19 @@ function inch(v) {
 
 const router = express.Router();
 
+// Any /:id/parts/:partId/... request must name a part of THIS estimate (round 9, R7): file and
+// part routes used to look the part up by its own id only, so any order's id in the URL worked.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+router.use('/:id/parts/:partId', async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.params.partId) || !UUID_RE.test(req.params.id)) return next();
+    const { EstimatePart } = require('../models');
+    const n = await EstimatePart.count({ where: { id: req.params.partId, estimateId: req.params.id } });
+    if (!n) return res.status(404).json({ error: { message: 'Part not found on this estimate' } });
+    next();
+  } catch (e) { next(e); }
+});
+
 // Fetch a URL following redirects (up to 5 hops), returns response stream or null
 function fetchWithRedirects(url, maxRedirects = 5, timeoutMs = 15000) {
   return new Promise((resolve) => {
@@ -186,6 +199,14 @@ function sanitizePartInput(body) {
 
 // Helper to log activity for daily email
 
+// A portal key sees its own client's estimates once they've been sent — never drafts or trashed ones (N2)
+async function portalCanSee(req, estimate) {
+  const scope = require('../services/keyScope');
+  if (!(await scope.owns(req, estimate))) return false;
+  if (scope.isPortalKey(req) && (!estimate || estimate.status === 'draft' || estimate.trashedAt)) return false;
+  return true;
+}
+
 // Whitelist — only expose what the portal needs from estimates
 function stripEstimatePricing(estimate) {
   const e = estimate.toJSON ? estimate.toJSON() : { ...estimate };
@@ -193,7 +214,7 @@ function stripEstimatePricing(estimate) {
   const ESTIMATE_ALLOWED = ['id', 'estimateNumber', 'status', 'clientName',
     'clientPurchaseOrderNumber', 'grandTotal', 'subtotal', 'taxAmount', 'taxRate',
     'truckingCost', 'discount', 'sentAt', 'acceptedAt', 'validUntil', 'createdAt',
-    'updatedAt', 'notes', 'internalNotes'];
+    'updatedAt', 'notes'];   // never internalNotes — the shop's own remarks (N2)
   const safe = {};
   ESTIMATE_ALLOWED.forEach(f => { if (e[f] !== undefined) safe[f] = e[f]; });
   // Parts: only descriptive fields, no pricing
@@ -208,8 +229,8 @@ function stripEstimatePricing(estimate) {
       status: p.status
     }));
   }
-  // Files: keep all (PDFs, COCs etc.)
-  if (e.files) safe.files = e.files;
+  // Files: only those marked visible on the portal (N2)
+  if (e.files) safe.files = e.files.filter(f => f.portalVisible === true);
   return safe;
 }
 
@@ -314,214 +335,73 @@ function calculatePartTotals(part) {
   };
 }
 
-// Calculate estimate totals
-const EA_PRICED_TYPES = ['plate_roll', 'shaped_plate', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'];
-
-// Parse dimension string: "3/8"" → 0.375, "1-1/2"" → 1.5, "2.5" → 2.5, "24 ga" → 0.025
-function parseDimension(val) {
-  if (!val) return 0;
-  const s = String(val).trim().replace(/["\u2033]/g, '');
-  if (!isNaN(s) && s !== '') return parseFloat(s);
-  const gaugeMatch = s.match(/^(\d+)\s*ga/i);
-  if (gaugeMatch) {
-    const gaugeMap = { 24: 0.025, 22: 0.030, 20: 0.036, 18: 0.048, 16: 0.060, 14: 0.075, 12: 0.105, 11: 0.120, 10: 0.135 };
-    return gaugeMap[parseInt(gaugeMatch[1])] || 0;
-  }
-  const mixedMatch = s.match(/^(\d+)\s*[-\u2013]\s*(\d+)\s*\/\s*(\d+)/);
-  if (mixedMatch) return parseInt(mixedMatch[1]) + parseInt(mixedMatch[2]) / parseInt(mixedMatch[3]);
-  const fracMatch = s.match(/^(\d+)\s*\/\s*(\d+)/);
-  if (fracMatch) return parseInt(fracMatch[1]) / parseInt(fracMatch[2]);
-  const leadMatch = s.match(/^([\d.]+)/);
-  if (leadMatch) return parseFloat(leadMatch[1]);
-  return 0;
-}
-
-function getPartSize(part) {
-  // Handle Sequelize model instances - use dataValues for plain object spread
-  const raw = part.dataValues ? part.dataValues : part;
-  const fd = (raw.formData && typeof raw.formData === 'object') ? raw.formData : {};
-  const merged = { ...raw, ...fd };
-  if (merged.partType === 'plate_roll' || merged.partType === 'flat_stock') return parseDimension(merged.thickness);
-  if (merged.partType === 'angle_roll') return parseDimension(merged._angleSize || merged.sectionSize || '');
-  if (merged.partType === 'pipe_roll') return parseDimension(merged.outerDiameter);
-  if (merged.partType === 'tube_roll') return parseDimension(merged._tubeSize || merged.sectionSize || '');
-  if (merged.partType === 'flat_bar') return parseDimension(merged._barSize || merged.sectionSize || '');
-  if (merged.partType === 'channel_roll') return parseDimension(merged._channelSize || merged.sectionSize || '');
-  if (merged.partType === 'beam_roll') return parseDimension(merged._beamSize || merged.sectionSize || '');
-  if (merged.partType === 'tee_bar') return parseDimension(merged._teeSize || merged.sectionSize || '');
-  if (merged.partType === 'cone_roll') return (parseFloat(merged._coneLargeDia) * (merged._coneLargeDiaMeasure === 'radius' ? 2 : 1)) || parseDimension(merged.sectionSize || '');
-  return parseDimension(merged.sectionSize || merged.thickness || '');
-}
-
-function getPartWidth(part) {
-  const raw = part.dataValues ? part.dataValues : part;
-  const fd = (raw.formData && typeof raw.formData === 'object') ? raw.formData : {};
-  return parseDimension(fd.width || raw.width);
-}
-
-function getLaborMinimum(part, laborMinimums) {
-  if (!laborMinimums || !laborMinimums.length) return null;
-  const partSize = getPartSize(part);
-  const partWidth = getPartWidth(part);
-  let bestSpecificRule = null, bestGeneralRule = null;
-
-  for (const rule of laborMinimums) {
-    if (rule.partType !== part.partType) continue;
-
-    const hasMinSize = rule.minSize != null && rule.minSize !== '' && parseFloat(rule.minSize) > 0;
-    const hasMaxSize = rule.maxSize != null && rule.maxSize !== '' && parseFloat(rule.maxSize) > 0;
-    const hasMinWidth = rule.minWidth != null && rule.minWidth !== '' && parseFloat(rule.minWidth) > 0;
-    const hasMaxWidth = rule.maxWidth != null && rule.maxWidth !== '' && parseFloat(rule.maxWidth) > 0;
-    const hasSizeConstraints = hasMinSize || hasMaxSize;
-    const hasWidthConstraints = hasMinWidth || hasMaxWidth;
-
-    if (!hasSizeConstraints && !hasWidthConstraints) {
-      if (!bestGeneralRule || parseFloat(rule.minimum) > parseFloat(bestGeneralRule.minimum)) bestGeneralRule = rule;
-      continue;
-    }
-
-    let sizeOk = true;
-    if (hasSizeConstraints) {
-      if (partSize <= 0) sizeOk = false;
-      else {
-        if (hasMinSize && partSize < parseFloat(rule.minSize)) sizeOk = false;
-        if (hasMaxSize && partSize > parseFloat(rule.maxSize)) sizeOk = false;
-      }
-    }
-    let widthOk = true;
-    if (hasWidthConstraints) {
-      if (partWidth <= 0) widthOk = false;
-      else {
-        if (hasMinWidth && partWidth < parseFloat(rule.minWidth)) widthOk = false;
-        if (hasMaxWidth && partWidth > parseFloat(rule.maxWidth)) widthOk = false;
-      }
-    }
-    if (sizeOk && widthOk) {
-      if (!bestSpecificRule || parseFloat(rule.minimum) > parseFloat(bestSpecificRule.minimum)) bestSpecificRule = rule;
-    }
-  }
-  // Only return a specific match or a general (no-constraints) match
-  // Never fall back to a constrained rule that didn't match - that causes wrong minimums
-  return bestSpecificRule || bestGeneralRule || null;
-}
-
+// Labor minimum and expedite: one engine shared with the invoice and QuickBooks (round 13, T1/T2)
+const { EA_PRICED_TYPES, parseDimension, getPartSize, getPartWidth, getLaborMinimum, loadLaborMinimums,
+  minimumInfo: sharedMinimumInfo, expediteLaborBase: sharedExpediteBase } = require('../services/laborMinimum');
 function roundUpMaterial(amount, rounding) {
   if (!amount || amount <= 0) return amount;
   if (rounding === 'dollar') return Math.ceil(amount);
   if (rounding === 'five') return Math.ceil(amount / 5) * 5;
   return amount;
 }
-
 function getMinimumInfo(parts, minimumOverride, laborMinimums) {
-  let totalLabor = 0, totalMaterial = 0, highestMinimum = 0, highestMinRule = null;
-  parts.forEach(part => {
-    if (!EA_PRICED_TYPES.includes(part.partType)) return;
+  const info = sharedMinimumInfo(parts, minimumOverride, laborMinimums);
+  // material total (shown on the estimate PDF's minimum note)
+  let totalMaterial = 0;
+  for (const part of parts || []) {
+    if (!EA_PRICED_TYPES.includes(part.partType)) continue;
     const fd = (part.formData && typeof part.formData === 'object') ? part.formData : {};
-    const laborEach = parseFloat(part.laborTotal) || 0;
     const materialCost = parseFloat(part.materialTotal) || 0;
     const materialMarkup = parseFloat(part.materialMarkupPercent) || parseFloat(fd.materialMarkupPercent) || 0;
-    const materialEachRaw = materialCost * (1 + materialMarkup / 100);
-    const materialEach = roundUpMaterial(materialEachRaw, fd._materialRounding || part._materialRounding);
-    const qty = parseInt(part.quantity) || 1;
-    totalLabor += laborEach * qty;
-    totalMaterial += materialEach * qty;
-
-    const rule = getLaborMinimum(part, laborMinimums);
-    if (rule && parseFloat(rule.minimum) > highestMinimum) {
-      highestMinimum = parseFloat(rule.minimum);
-      highestMinRule = rule;
-    }
-  });
-
-  const minimumApplies = !minimumOverride && highestMinimum > 0 && totalLabor > 0 && totalLabor < highestMinimum;
-  const adjustedLabor = minimumApplies ? highestMinimum : totalLabor;
-  const laborDifference = minimumApplies ? (highestMinimum - totalLabor) : 0;
-  return { totalLabor, totalMaterial, highestMinimum, highestMinRule, minimumApplies, adjustedLabor, laborDifference };
+    totalMaterial += roundUpMaterial(materialCost * (1 + materialMarkup / 100), fd._materialRounding || part._materialRounding) * (parseInt(part.quantity) || 1);
+  }
+  return { ...info, totalMaterial };
 }
 
-async function loadLaborMinimums() {
-  const defaults = [
-    { partType: 'plate_roll', label: 'Plate \u2264 3/8"', sizeField: 'thickness', maxSize: 0.375, minWidth: '', maxWidth: '', minimum: 125 },
-    { partType: 'plate_roll', label: 'Plate \u2264 3/8" (24-60" wide)', sizeField: 'thickness', maxSize: 0.375, minWidth: 24, maxWidth: 60, minimum: 150 },
-    { partType: 'plate_roll', label: 'Plate > 3/8"', sizeField: 'thickness', minSize: 0.376, minWidth: '', maxWidth: '', minimum: 200 },
-    { partType: 'angle_roll', label: 'Angle \u2264 2x2', sizeField: 'angleSize', maxSize: 2, minWidth: '', maxWidth: '', minimum: 150 },
-    { partType: 'angle_roll', label: 'Angle > 2x2', sizeField: 'angleSize', minSize: 2.01, minWidth: '', maxWidth: '', minimum: 250 },
-  ];
+// Is the client tax exempt? The same rule as the invoice (services/invoiceTotals isTaxExempt): the
+// client's tax status is resale / exempt. A certificate on file with an active permit is information,
+// not an exemption (T47, round 14 — the estimate used to count it and the invoice didn't).
+async function isClientTaxExempt(clientName, clientId = null) {
+  if (!clientName && !clientId) return false;
   try {
-    const setting = await AppSettings.findOne({ where: { key: 'labor_minimums' } });
-    if (setting && setting.value) {
-      const parsed = typeof setting.value === 'string' ? JSON.parse(setting.value) : setting.value;
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-    }
-  } catch (e) { /* use defaults */ }
-  return defaults;
-}
-
-// Check if a client is tax exempt by looking up the Client record directly
-async function isClientTaxExempt(clientName) {
-  if (!clientName) return false;
-  try {
-    const client = await Client.findOne({ where: { name: clientName } });
+    let client = clientId ? await Client.findByPk(clientId, { attributes: ['id', 'taxStatus'] }) : null;
+    if (!client && clientName) client = await Client.findOne({ where: sequelize.where(sequelize.fn('lower', sequelize.fn('trim', sequelize.col('name'))), String(clientName).trim().toLowerCase()), attributes: ['id', 'taxStatus'] });
     if (!client) return false;
-    return client.taxStatus === 'resale' || client.taxStatus === 'exempt' ||
-      (!!client.resaleCertificate && client.permitStatus === 'active');
+    const ts = String(client.taxStatus || '').trim().toLowerCase();   // V17: "Resale" from an import counts too
+    return ts === 'resale' || ts === 'exempt';
   } catch (e) { return false; }
 }
 
-function calculateEstimateTotals(parts, truckingCost, taxRate, taxExempt = false, discountPercent = 0, discountAmount = 0, minInfo = null, opTransports = []) {
+function calculateEstimateTotals(parts, truckingCost, taxRate, taxExempt = false, discountPercent = 0, discountAmount = 0, minInfo = null, opTransports = [], shipmentCharges = null) {
   // Ensure taxExempt is boolean (SQLite may store as 0/1)
   const isExempt = taxExempt === true || taxExempt === 1 || taxExempt === '1' || taxExempt === 'true';
+  // Parts at their line prices, plus the labor-minimum adjustment as its own amount — the same way the
+  // invoice and QuickBooks bill it (round 13, T1; before, the estimate replaced the each-priced lines
+  // with material + minimum labor, dropping outside-processing and setup charges)
   let partsSubtotal = 0;
-
-  if (minInfo && minInfo.minimumApplies) {
-    // When minimum applies: sum ea-priced material + adjusted labor, plus non-ea parts
-    let nonEaTotal = 0;
-    parts.forEach(part => {
-      if (EA_PRICED_TYPES.includes(part.partType) || part.partType === 'rush_service') return;
-      nonEaTotal += parseFloat(part.partTotal) || 0;
-    });
-    partsSubtotal = nonEaTotal + minInfo.totalMaterial + minInfo.adjustedLabor;
-  } else {
-    parts.forEach(part => {
-      if (part.partType === 'rush_service') return; // rush calculated separately below
-      partsSubtotal += parseFloat(part.partTotal) || 0;
-    });
-  }
+  parts.forEach(part => {
+    // a rush line with its own price is billed like any line; the fee is computed only for one without
+    if (part.partType === 'rush_service' && !(parseFloat(part.partTotal) > 0)) return;
+    partsSubtotal += parseFloat(part.partTotal) || 0;
+  });
+  if (minInfo && minInfo.minimumApplies) partsSubtotal += parseFloat(minInfo.laborDifference) || 0;
 
   // Order-level outside processing transport (billed amount, hidden in customer total)
   let opTransportBilled = 0;
   (opTransports || []).forEach(trip => {
     const cost = parseFloat(trip.cost) || 0;
     const markup = parseFloat(trip.markup) || 0;
-    opTransportBilled += cost * (1 + markup / 100);
+    opTransportBilled += Math.round(cost * (1 + markup / 100) * 100) / 100;   // per trip, like the invoice
   });
   partsSubtotal += opTransportBilled;
 
-  // Expedite applies to LABOR ONLY (not material). Build the labor base the same way partsSubtotal
-  // is built (honoring the minimum-labor bump) so the percentage lands on charged labor only.
-  let expediteLaborBase = 0;
-  if (minInfo && minInfo.minimumApplies) {
-    parts.forEach(part => {
-      if (EA_PRICED_TYPES.includes(part.partType) || part.partType === 'rush_service') return;
-      const q = parseInt(part.quantity) || 1;
-      expediteLaborBase += (parseFloat(part.laborTotal) || parseFloat((part.formData || {}).laborTotal) || 0) * q;
-    });
-    expediteLaborBase += parseFloat(minInfo.adjustedLabor) || 0;
-  } else {
-    parts.forEach(part => {
-      if (part.partType === 'rush_service') return;
-      if (['fab_service', 'shop_rate'].includes(part.partType)) {
-        expediteLaborBase += parseFloat(part.partTotal) || 0;
-      } else {
-        const q = parseInt(part.quantity) || 1;
-        expediteLaborBase += (parseFloat(part.laborTotal) || parseFloat((part.formData || {}).laborTotal) || 0) * q;
-      }
-    });
-  }
+  // Expedite applies to the labor actually billed (plus the minimum) — shared with the invoice (T2)
+  const expediteLaborBase = sharedExpediteBase(parts, minInfo && minInfo.minimumApplies ? { applies: true, adjustment: parseFloat(minInfo.laborDifference) || 0 } : null,
+    (p) => parseFloat(p.partTotal) || 0);
 
   // Rush service amounts
   let expediteAmount = 0, emergencyAmount = 0;
-  const rushPart = parts.find(p => p.partType === 'rush_service');
+  const rushPart = parts.find(p => p.partType === 'rush_service' && !(parseFloat(p.partTotal) > 0));
   if (rushPart) {
     const fd = (rushPart.formData && typeof rushPart.formData === 'object') ? rushPart.formData : rushPart;
     if (fd._expediteEnabled) {
@@ -530,7 +410,7 @@ function calculateEstimateTotals(parts, truckingCost, taxRate, taxExempt = false
       } else {
         let pct = parseFloat(fd._expediteType) || 0;
         if (fd._expediteType === 'custom_pct') pct = parseFloat(fd._expediteCustomPct) || 0;
-        expediteAmount = expediteLaborBase * (pct / 100);
+        expediteAmount = Math.round(expediteLaborBase * (pct / 100) * 100) / 100;
       }
     }
     if (fd._emergencyEnabled) {
@@ -541,34 +421,78 @@ function calculateEstimateTotals(parts, truckingCost, taxRate, taxExempt = false
   partsSubtotal += expediteAmount + emergencyAmount;
 
   // Apply discount
+  // Rounded and capped like the invoice: never more than the parts it applies to (round 13, T7)
+  const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
   let discountAmt = 0;
   if (parseFloat(discountPercent) > 0) {
-    discountAmt = partsSubtotal * (parseFloat(discountPercent) / 100);
+    discountAmt = r2(partsSubtotal * (Math.min(100, parseFloat(discountPercent)) / 100));
   } else if (parseFloat(discountAmount) > 0) {
     discountAmt = parseFloat(discountAmount);
   }
-  const afterDiscount = partsSubtotal - discountAmt;
+  discountAmt = Math.min(discountAmt, Math.max(0, r2(partsSubtotal)));
+  const afterDiscount = r2(partsSubtotal - discountAmt);
 
-  const trucking = parseFloat(truckingCost) || 0;
-  const taxAmount = isExempt ? 0 : afterDiscount * (parseFloat(taxRate) / 100);
-  const grandTotal = afterDiscount + taxAmount + trucking;
+  // Shipping & handling (never taxed), as the invoice bills it: the shipping charges, each rounded; the
+  // old single trucking amount only when there are none (round 15, U11 — the stored total left the
+  // charges out, and the PDF counted both)
+  const { chargeBilled } = require('../services/invoiceTotals');
+  const active = (shipmentCharges || []).map(c => (c && c.get ? c.get({ plain: true }) : c)).filter(c => chargeBilled(c) > 0);
+  const shippingTotal = active.length ? r2(active.reduce((s2, c) => s2 + r2(chargeBilled(c)), 0)) : (parseFloat(truckingCost) || 0);
+  const taxAmount = isExempt ? 0 : r2(afterDiscount * ((parseFloat(taxRate) || 0) / 100));
+  const grandTotal = r2(afterDiscount + taxAmount + shippingTotal);
 
-  return {
+  const out = {
     partsSubtotal: partsSubtotal.toFixed(2),
     taxAmount: taxAmount.toFixed(2),
-    grandTotal: grandTotal.toFixed(2)
+    grandTotal: grandTotal.toFixed(2),
   };
+  // Not stored (no columns) — for the PDF / screen; non-enumerable so `estimate.update(totals)` and
+  // spreads keep writing only the three stored fields
+  const extra = {
+    shippingTotal: shippingTotal.toFixed(2), usesLegacyTrucking: !active.length && shippingTotal > 0,
+    minimumAdjustment: (minInfo && minInfo.minimumApplies ? r2(parseFloat(minInfo.laborDifference) || 0) : 0).toFixed(2),
+    rushAmount: r2(expediteAmount + emergencyAmount).toFixed(2), tripsTotal: r2(opTransportBilled).toFixed(2),
+    discountAmount: r2(discountAmt).toFixed(2),
+  };
+  for (const [k, v] of Object.entries(extra)) Object.defineProperty(out, k, { value: v, enumerable: false });
+  return out;
+}
+
+/**
+ * Dual pricing "Option B — labor only" (customer supplies material), worked out by the same engine as
+ * Option A and the invoice: each line without its material, then the labor minimum, expedite, trips,
+ * discount cap, tax and shipping (round 15, U4 — it used to add up labor alone and quote far below what
+ * the invoice charges).
+ */
+async function computeOptionB(parts, estimate) {
+  const { partBreakdown } = require('../services/pricing');
+  const plainP = (p) => (p && p.get ? p.get({ plain: true }) : { ...p });
+  const SERVICE = ['fab_service', 'shop_rate', 'rush_service'];
+  const partsB = (parts || []).map(plainP).map(p => {
+    if (SERVICE.includes(p.partType)) return p;
+    if (p.materialSource === 'customer_supplied' || p.materialSource === 'customer') return p;
+    const qty = parseInt(p.quantity) || 1;
+    const { matEach } = partBreakdown(p);
+    const line = Math.max(0, Math.round(((parseFloat(p.partTotal) || 0) - matEach * qty) * 100) / 100);
+    return { ...p, partTotal: line.toFixed(2), materialTotal: 0, materialUnitCost: 0 };
+  });
+  const t = await calculateEstimateTotalsWithMinimums(partsB, estimate);
+  return { partsSubtotal: t.partsSubtotal, minimumAdjustment: t.minimumAdjustment, rushAmount: t.rushAmount, tripsTotal: t.tripsTotal,
+    shippingTotal: t.shippingTotal, discountAmount: t.discountAmount, taxAmount: t.taxAmount, grandTotal: t.grandTotal };
 }
 
 // Async wrapper that loads labor minimums and applies them
-async function calculateEstimateTotalsWithMinimums(parts, estimate) {
+async function calculateEstimateTotalsWithMinimums(parts, estimate, { transaction } = {}) {
   const laborMinimums = await loadLaborMinimums();
   const minInfo = getMinimumInfo(parts, estimate.minimumOverride, laborMinimums);
-  // Coerce taxExempt to boolean (SQLite stores as 0/1)
-  const taxExempt = estimate.taxExempt === true || estimate.taxExempt === 1 || estimate.taxExempt === '1' || estimate.taxExempt === 'true';
+  // Coerce taxExempt to boolean (SQLite stores as 0/1); a resale / exempt client is exempt too, as on
+  // the invoice, so the stored total matches what the page and the invoice show (T47)
+  const taxExempt = estimate.taxExempt === true || estimate.taxExempt === 1 || estimate.taxExempt === '1' || estimate.taxExempt === 'true'
+    || await isClientTaxExempt(estimate.clientName, estimate.clientId);
+  const charges = estimate.id ? await ShipmentCharge.findAll({ where: { estimateId: estimate.id }, transaction }).catch(() => []) : [];
   return calculateEstimateTotals(
     parts, estimate.truckingCost, estimate.taxRate, taxExempt,
-    estimate.discountPercent, estimate.discountAmount, minInfo, estimate.opTransports
+    estimate.discountPercent, estimate.discountAmount, minInfo, estimate.opTransports, charges
   );
 }
 
@@ -771,6 +695,8 @@ router.post('/:id/mark-declined', async (req, res, next) => {
     if (!isEstimatorCaller(req)) return res.status(403).json({ error: { message: 'Estimator access required' } });
     const estimate = await Estimate.findByPk(req.params.id);
     if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
+    // an estimate already on a work order can't be declined (R32)
+    if (estimate.workOrderId) return res.status(409).json({ error: { message: 'This estimate is already on a work order, so it can\'t be marked declined.' } });
     await estimate.update({ status: 'declined' });
     res.json({ data: { id: estimate.id, status: 'declined' } });
   } catch (error) { next(error); }
@@ -816,6 +742,15 @@ router.post('/:id/reminder-restore', async (req, res, next) => {
 router.buildQuoteDigest = buildQuoteDigest;
 router.getUnsentDrafts = getUnsentDrafts;
 router.QUOTE_STALE_DAYS = QUOTE_STALE_DAYS;
+// Recompute and store an estimate's totals (used by the work-order "reorder" copy, round 14)
+router.recalcEstimateTotals = async function recalcEstimateTotals(estimateId) {
+  const est = await Estimate.findByPk(estimateId);
+  if (!est) return null;
+  const parts = await EstimatePart.findAll({ where: { estimateId } });
+  const totals = await calculateEstimateTotalsWithMinimums(parts, est);
+  await est.update(totals);
+  return totals;
+};
 
 router.get('/', async (req, res, next) => {
   try {
@@ -851,12 +786,16 @@ router.get('/', async (req, res, next) => {
     }
 
     // API key client scoping — restrict to key's allowed client
-    if (req.apiKey && req.apiKey.clientName) {
-      where.clientName = { [Op.iLike]: `%${req.apiKey.clientName}%` };
+    if (require('../services/keyScope').isPortalKey(req)) {
+      // exact client (by id or exact name) — never a partial name match (R25)
+      delete where.clientName; delete where.clientId;
+      where[Op.and] = [...(where[Op.and] || []), await require('../services/keyScope').scopeWhere(req, 'Estimate')];
       // Portal: if no explicit status/archived param, show all non-voided
       if (!status && !archived) {
         delete where.status;
       }
+      // …but never drafts or trashed estimates (N2): those haven't been sent to the customer
+      where[Op.and].push({ status: { [Op.notIn]: ['draft'] } }, { trashedAt: null });
     }
 
     const estimates = await Estimate.findAndCountAll({
@@ -879,18 +818,21 @@ router.get('/', async (req, res, next) => {
     for (const name of clientNames) {
       clientExemptMap[name] = await isClientTaxExempt(name);
     }
+    const listCharges = new Map();
+    {
+      const ids = estimates.rows.map(e => e.id);
+      const rows = ids.length ? await ShipmentCharge.findAll({ where: { estimateId: ids } }).catch(() => []) : [];
+      for (const c of rows) { if (!listCharges.has(c.estimateId)) listCharges.set(c.estimateId, []); listCharges.get(c.estimateId).push(c); }
+    }
     for (const estimate of estimates.rows) {
       let isExempt = estimate.taxExempt === true || estimate.taxExempt === 1 || estimate.taxExempt === '1' || estimate.taxExempt === 'true';
-      // Also check client record directly
-      if (!isExempt && clientExemptMap[estimate.clientName]) {
-        isExempt = true;
-        // Fix the DB (fire-and-forget)
-        Estimate.update({ taxExempt: true, taxExemptReason: 'Resale' }, { where: { id: estimate.id } }).catch(() => {});
-      }
+      // A resale / exempt client is exempt by itself (shown, never written back on a read — T47)
+      if (!isExempt && clientExemptMap[estimate.clientName]) isExempt = true;
       const minInfo = getMinimumInfo(estimate.parts, estimate.minimumOverride, laborMinimums);
       const totals = calculateEstimateTotals(
         estimate.parts, estimate.truckingCost, estimate.taxRate, isExempt,
-        estimate.discountPercent, estimate.discountAmount, minInfo
+        estimate.discountPercent, estimate.discountAmount, minInfo, estimate.opTransports,   // trips too (N4)
+        listCharges.get(estimate.id) || []   // shipping charges too (U11)
       );
       // Check if totals changed before overwriting
       const storedGT = parseFloat(estimate.grandTotal) || 0;
@@ -901,7 +843,7 @@ router.get('/', async (req, res, next) => {
       estimate.grandTotal = totals.grandTotal;
       // Persist if different (fire-and-forget)
       if (needsUpdate) {
-        Estimate.update(totals, { where: { id: estimate.id } }).catch(() => {});
+        Estimate.update({ partsSubtotal: totals.partsSubtotal, taxAmount: totals.taxAmount, grandTotal: totals.grandTotal }, { where: { id: estimate.id } }).catch(() => {});
       }
     }
 
@@ -961,7 +903,7 @@ router.get('/:id', async (req, res, next) => {
 
     // API key client scoping
     if (req.apiKey && req.apiKey.clientName) {
-      if (!estimate.clientName || !estimate.clientName.toLowerCase().includes(req.apiKey.clientName.toLowerCase())) {
+      if (!(await portalCanSee(req, estimate))) {
         return res.status(403).json({ error: { message: 'Access denied' } });
       }
     }
@@ -988,6 +930,20 @@ router.get('/:id', async (req, res, next) => {
         return p;
       });
     }
+
+    // Stored totals kept current (e.g. a shipping charge changed elsewhere) — the page shows them as is
+    try {
+      const fresh = await calculateEstimateTotalsWithMinimums(estimate.parts || [], estimate);
+      if (Math.abs((parseFloat(estimate.grandTotal) || 0) - parseFloat(fresh.grandTotal)) > 0.005
+          || Math.abs((parseFloat(estimate.taxAmount) || 0) - parseFloat(fresh.taxAmount)) > 0.005) {
+        await Estimate.update({ partsSubtotal: fresh.partsSubtotal, taxAmount: fresh.taxAmount, grandTotal: fresh.grandTotal }, { where: { id: estimate.id } });
+      }
+      Object.assign(estimateData, { partsSubtotal: fresh.partsSubtotal, taxAmount: fresh.taxAmount, grandTotal: fresh.grandTotal, shippingTotal: fresh.shippingTotal });
+    } catch (e) { console.warn('[estimate] totals check failed:', e.message); }
+
+    // Dual pricing Option B from the server's engine (U4); the page shows it as is
+    try { estimateData.optionB = await computeOptionB(estimate.parts || [], estimate); }
+    catch (e) { estimateData.optionB = null; console.warn('[estimate] option B failed:', e.message); }
 
     const responseData = req.apiKey?.clientName && !req.apiKey?.deviceName
       ? stripEstimatePricing(estimateData)
@@ -1107,25 +1063,40 @@ router.put('/:id', async (req, res, next) => {
       'useCustomTax', 'customTaxReason', 'truckingDescription', 'truckingCost', 'status',
       'taxExempt', 'taxExemptCertNumber', 'taxExemptReason',
       'discountPercent', 'discountAmount', 'discountReason',
-      'minimumOverride', 'minimumOverrideReason', 'opTransports', 'workflowStage', 'pricingQuotedNeedsEntry'];
+      'minimumOverride', 'minimumOverrideReason', 'opTransports', 'workflowStage', 'pricingQuotedNeedsEntry',
+      'showDualPricing'];   // the "Show dual pricing" box was never saved (R32)
     
     fields.forEach(field => {
       if (req.body[field] !== undefined) {
         updates[field] = req.body[field];
       }
     });
+    // An estimate that became a work order stays converted — a stale screen can't move it back (R32)
+    if (updates.status !== undefined && updates.status !== estimate.status && estimate.workOrderId
+        && ['accepted', 'converted'].includes(estimate.status) && !['accepted', 'converted'].includes(updates.status)) {
+      return res.status(409).json({ error: { message: `This estimate is already on a work order, so it can't be set back to "${updates.status}". Unlink it from the work order first.` } });
+    }
 
     // Sanitize numeric/decimal fields: an empty string into a DECIMAL column throws and fails the WHOLE save
     // (which made the estimate silently refuse to save anything, including notes). Convert '' -> null/skip.
     const numericFields = ['taxRate', 'truckingCost', 'discountPercent', 'discountAmount'];
+    // V2: a cleared discount ("" or null) is stored as null and a cleared trucking amount as 0 —
+    // "" used to be ignored, so a discount could never be removed or switched between % and $
+    for (const nf of ['discountPercent', 'discountAmount']) {
+      if (nf in updates && (updates[nf] === '' || updates[nf] === null)) updates[nf] = null;
+    }
+    if ('truckingCost' in updates && (updates.truckingCost === '' || updates.truckingCost === null)) updates.truckingCost = 0;
     for (const nf of numericFields) {
-      if (updates[nf] === '' || updates[nf] === undefined) {
-        delete updates[nf]; // don't overwrite with an invalid/blank value
+      if (updates[nf] === '' || updates[nf] === undefined || (updates[nf] === null && nf === 'taxRate')) {
+        delete updates[nf]; // don't overwrite with an invalid/blank value (a null tax rate would make tax $0)
       } else if (updates[nf] !== null) {
         const n = parseFloat(updates[nf]);
         if (isNaN(n)) delete updates[nf]; else updates[nf] = n;
       }
     }
+    // V2: the discount is either a percent or an amount — setting one clears the other
+    if (parseFloat(updates.discountPercent) > 0 && !('discountAmount' in updates)) updates.discountAmount = null;
+    if (parseFloat(updates.discountAmount) > 0 && !('discountPercent' in updates)) updates.discountPercent = null;
 
     // Sanitize DATE fields: an empty string or "Invalid date" into a date column throws and fails the whole
     // save (this was the "Save failed / not saved" cause). Empty -> null; invalid -> skip.
@@ -1278,6 +1249,26 @@ router.delete('/:id/permanent', async (req, res, next) => {
 
     if (!estimate) {
       return res.status(404).json({ error: { message: 'Estimate not found' } });
+    }
+
+    // Open material POs / deliveries would be left active and tied to nothing (U24): release them first
+    {
+      const { Op } = require('sequelize');
+      const [activePos, dels] = await Promise.all([
+        // W19: only POs / deliveries not on a work order — ones on the converted order belong to it
+        PONumber.findAll({ where: { estimateId: estimate.id, workOrderId: null, status: 'active' }, attributes: ['poNumber', 'inboundOrderId'] }),
+        InboundOrder.findAll({ where: { estimateId: estimate.id, workOrderId: null, [Op.or]: [{ status: null }, { status: { [Op.notIn]: ['received', 'cancelled'] } }] }, attributes: ['purchaseOrderNumber'] }),
+      ]);
+      // V28: POs stay 'active' after receiving — one is open only while it has no delivery, or its
+      // delivery isn't received/cancelled yet
+      const linkedIds = activePos.map(p => p.inboundOrderId).filter(Boolean);
+      const doneIds = new Set(linkedIds.length ? (await InboundOrder.findAll({ where: { id: { [Op.in]: linkedIds }, status: { [Op.in]: ['received', 'cancelled'] } }, attributes: ['id'] })).map(d => String(d.id)) : []);
+      const pos = activePos.filter(p => !p.inboundOrderId || !doneIds.has(String(p.inboundOrderId)));
+      if (pos.length || dels.length) {
+        const nums = [...new Set([...pos.map(p => `PO${p.poNumber}`), ...dels.map(d => d.purchaseOrderNumber)])];
+        return res.status(409).json({ error: { code: 'ESTIMATE_HAS_OPEN_POS', message:
+          `Estimate ${estimate.estimateNumber || ''} still has material on order (${nums.join(', ')}). Release those POs first (PO Numbers → Release), then delete the estimate.` } });
+      }
     }
 
     // Snapshotted with its parts and files by the undo hooks (Admin → Deleted Items → Undo).
@@ -1630,60 +1621,7 @@ router.get('/:id/parts/:partId/files/:fileId/view', async (req, res, next) => {
   }
 });
 
-// GET /api/estimates/:id/parts/:partId/files/:fileId/debug - Debug file URL resolution
-router.get('/:id/parts/:partId/files/:fileId/debug', async (req, res, next) => {
-  try {
-    const file = await EstimatePartFile.findOne({
-      where: { id: req.params.fileId, partId: req.params.partId }
-    });
-    if (!file) return res.status(404).json({ error: 'File not found in DB' });
-
-    const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
-    const pubId = file.cloudinaryId;
-    const ext = path.extname(file.originalName || file.filename || '').toLowerCase() || '.pdf';
-    const versionMatch = file.url?.match(/\/v(\d+)\//);
-    const version = versionMatch ? `/v${versionMatch[1]}` : '';
-
-    const urlsToTest = [];
-    if (file.url) urlsToTest.push({ label: 'stored', url: file.url });
-    if (pubId && cloudName) {
-      urlsToTest.push({ label: 'raw+ver+ext', url: `https://res.cloudinary.com/${cloudName}/raw/upload${version}/${pubId}${ext}` });
-      urlsToTest.push({ label: 'raw+ver', url: `https://res.cloudinary.com/${cloudName}/raw/upload${version}/${pubId}` });
-      urlsToTest.push({ label: 'image+ver+ext', url: `https://res.cloudinary.com/${cloudName}/image/upload${version}/${pubId}${ext}` });
-      urlsToTest.push({ label: 'image+ver', url: `https://res.cloudinary.com/${cloudName}/image/upload${version}/${pubId}` });
-      if (version) {
-        urlsToTest.push({ label: 'raw+ext', url: `https://res.cloudinary.com/${cloudName}/raw/upload/${pubId}${ext}` });
-        urlsToTest.push({ label: 'image+ext', url: `https://res.cloudinary.com/${cloudName}/image/upload/${pubId}${ext}` });
-      }
-    }
-
-    // Test each URL with HEAD request
-    const results = [];
-    for (const { label, url } of urlsToTest) {
-      const status = await new Promise(resolve => {
-        const lib = url.startsWith('https') ? https : http;
-        const request = lib.request(url, { method: 'HEAD' }, resp => {
-          resp.resume();
-          resolve(resp.statusCode);
-        });
-        request.on('error', () => resolve('error'));
-        request.setTimeout(5000, () => { request.destroy(); resolve('timeout'); });
-        request.end();
-      });
-      results.push({ label, url: url.substring(0, 150), status });
-    }
-
-    res.json({
-      file: { id: file.id, cloudinaryId: pubId, storedUrl: file.url, originalName: file.originalName, mimeType: file.mimeType },
-      cloudName,
-      ext,
-      version,
-      results
-    });
-  } catch (error) {
-    next(error);
-  }
-});
+// (Removed in round 9: a debug route that made outbound requests and returned private download links.)
 
 // GET /api/estimates/:id/parts/:partId/files/:fileId/download - Stream file from storage
 // Note: This route uses flexible auth — allows unauthenticated access for Cloudinary files
@@ -1838,6 +1776,18 @@ router.delete('/:id/parts/:partId/files/:fileId', async (req, res, next) => {
   }
 });
 
+// PATCH /:id/files/:fileId/portal - Show / hide an estimate-level file on the client portal (round 11:
+// the portal shows only files explicitly published — N2)
+router.patch('/:id/files/:fileId/portal', async (req, res, next) => {
+  try {
+    const file = await EstimateFile.findOne({ where: { id: req.params.fileId, estimateId: req.params.id } });
+    if (!file) return res.status(404).json({ error: { message: 'File not found' } });
+    const newVal = req.body.portalVisible !== undefined ? !!req.body.portalVisible : !file.portalVisible;
+    await file.update({ portalVisible: newVal });
+    res.json({ data: file.toJSON(), message: `File ${newVal ? 'visible' : 'hidden'} on client portal` });
+  } catch (error) { next(error); }
+});
+
 // PATCH /:id/parts/:partId/files/:fileId/portal - Toggle portal visibility for estimate file
 router.patch('/:id/parts/:partId/files/:fileId/portal', async (req, res, next) => {
   try {
@@ -1888,12 +1838,18 @@ router.post('/:id/order-material', async (req, res, next) => {
       return res.status(400).json({ error: { message: 'At least one part must be selected' } });
     }
 
-    // Get selected parts
-    const selectedParts = estimate.parts.filter(p => partIds.includes(p.id));
-    
+    // Lock and re-read the selected parts so the same material can't be ordered twice at once (R19)
+    const selectedParts = await EstimatePart.findAll({
+      where: { id: partIds, estimateId: estimate.id }, order: [['id', 'ASC']], transaction, lock: transaction.LOCK.UPDATE });
+
     if (selectedParts.length === 0) {
       await transaction.rollback();
       return res.status(400).json({ error: { message: 'No valid parts selected' } });
+    }
+    const alreadyOrdered = selectedParts.filter(p => p.materialOrdered || p.materialPurchaseOrderNumber);
+    if (alreadyOrdered.length) {
+      await transaction.rollback();
+      return res.status(409).json({ error: { code: 'ALREADY_ORDERED', message: alreadyOrdered.map(p => `Part ${p.partNumber} was already ordered${p.materialPurchaseOrderNumber ? ` on ${p.materialPurchaseOrderNumber}` : ''}`).join('; ') + '. Refresh the page.' } });
     }
 
     // Group parts by supplier
@@ -2066,10 +2022,10 @@ router.get('/:id/files/:fileId/signed-url', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'File not found' } });
     }
 
-    // API key client scoping
+    // API key client scoping — a portal key gets only files marked visible on the portal (N2)
     if (req.apiKey && req.apiKey.clientName) {
       const estimate = await Estimate.findByPk(req.params.id);
-      if (!estimate || !estimate.clientName || !estimate.clientName.toLowerCase().includes(req.apiKey.clientName.toLowerCase())) {
+      if (!(await portalCanSee(req, estimate)) || (require('../services/keyScope').isPortalKey(req) && file.portalVisible !== true)) {
         return res.status(403).json({ error: { message: 'Access denied' } });
       }
     }
@@ -2097,10 +2053,10 @@ router.get('/:id/files/:fileId/download', async (req, res, next) => {
       return res.status(404).json({ error: { message: 'File not found' } });
     }
 
-    // API key client scoping
+    // API key client scoping — a portal key gets only files marked visible on the portal (N2)
     if (req.apiKey && req.apiKey.clientName) {
       const estimate = await Estimate.findByPk(req.params.id);
-      if (!estimate || !estimate.clientName || !estimate.clientName.toLowerCase().includes(req.apiKey.clientName.toLowerCase())) {
+      if (!(await portalCanSee(req, estimate)) || (require('../services/keyScope').isPortalKey(req) && file.portalVisible !== true)) {
         return res.status(403).json({ error: { message: 'Access denied' } });
       }
     }
@@ -2277,12 +2233,9 @@ router.post('/:id/convert', async (req, res, next) => {
     let drNumber;
     if (allMaterialOnHand) {
       if (customDRNumber) {
-        const existingDR = await DRNumber.findOne({ where: { drNumber: customDRNumber }, transaction });
-        if (existingDR) {
-          await transaction.rollback();
-          return res.status(400).json({ error: { message: `DR-${customDRNumber} already exists` } });
-        }
-        drNumber = customDRNumber;
+        // under the DR lock, with the jump guard (round 12, N14)
+        try { drNumber = await reserveCustomDRNumber(require('../models'), transaction, customDRNumber); }
+        catch (reserveErr) { await transaction.rollback(); return res.status(reserveErr.status || 400).json({ error: { message: reserveErr.message } }); }
       } else {
         drNumber = await getNextDRNumber(transaction);
       }
@@ -2399,92 +2352,70 @@ router.post('/:id/duplicate', async (req, res, next) => {
     }
 
     const { notes } = req.body;
+    const copy = require('../services/duplicateCopy');
+    const models = require('../models');
 
-    // Generate new estimate number
+    // Generate new estimate number (before the transaction — the counter has its own connection)
     const estimateNumber = await require('../services/docNumbers').nextDocNumber('EST');
 
-    // Create new estimate
-    const newEstimate = await Estimate.create({
-      estimateNumber,
-      clientName: original.clientName,
-      contactName: original.contactName,
-      contactEmail: original.contactEmail,
-      contactPhone: original.contactPhone,
-      projectDescription: original.projectDescription,
-      notes: notes || original.notes,
-      internalNotes: `Duplicated from ${original.estimateNumber}. ${original.internalNotes || ''}`,
-      taxRate: original.taxRate,
-      truckingDescription: original.truckingDescription,
-      truckingCost: original.truckingCost,
-      status: 'draft'
+    // Everything priced is copied — trips, discount, minimum override, tax, client id, shipping
+    // charges, outside processing — so a repeat quote comes out the same (audit T20). What belongs
+    // to the source's life (number, status, dates, link to its order, e-mail/RFQ thread) is not.
+    const SKIP = new Set(['id', 'estimateNumber', 'status', 'workflowStage', 'createdAt', 'updatedAt', 'sentAt', 'reminderDismissedAt',
+      'reminderSnoozeUntil', 'acceptedAt', 'archivedAt', 'workOrderId', 'drNumber', 'emailLink', 'scannedEmailId', 'rfqVendorId',
+      'rfqThreadId', 'rfqGmailAccountId', 'rfqSentAt', 'trashedAt', 'trashedBy', 'customerReference', 'validUntil',
+      'partsSubtotal', 'taxAmount', 'grandTotal', 'notes', 'internalNotes', 'opTransports']);
+    const o = original.toJSON();
+    const header = {};
+    for (const k of Object.keys(Estimate.rawAttributes)) if (!SKIP.has(k) && o[k] !== undefined) header[k] = o[k];
+
+    const result = await sequelize.transaction(async (t) => {
+      const newEstimate = await Estimate.create({
+        ...header,
+        estimateNumber,
+        notes: notes || original.notes,
+        internalNotes: `Duplicated from ${original.estimateNumber}. ${original.internalNotes || ''}`,
+        opTransports: copy.freshEntries(o.opTransports),
+        status: 'draft'
+      }, { transaction: t });
+
+      const idMap = {};
+      for (const origPart of original.parts) {
+        const partData = copy.partForCopy(origPart, EstimatePart, { estimateId: newEstimate.id });
+        if (!['plate_roll', 'shaped_plate', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'].includes(partData.partType)) {
+          const totals = calculatePartTotals(partData);
+          Object.assign(partData, totals);
+        }
+        const newPart = await EstimatePart.create(partData, { transaction: t });
+        idMap[origPart.id] = newPart.id;
+        // Copy part files (prints, STEP, DXF) — point to same Cloudinary/S3 resource
+        for (const origFile of (origPart.files || [])) {
+          await EstimatePartFile.create({
+            partId: newPart.id,
+            filename: origFile.filename,
+            originalName: origFile.originalName,
+            mimeType: origFile.mimeType,
+            size: origFile.size,
+            url: origFile.url,
+            cloudinaryId: origFile.cloudinaryId,
+            fileType: origFile.fileType,
+            fileLastModified: origFile.fileLastModified,
+            portalVisible: false
+          }, { transaction: t });
+        }
+      }
+      await copy.remapServiceLinks(EstimatePart, original.parts, idMap, { transaction: t });
+      await copy.copyChargesToEstimate(models, { estimateId: original.id }, newEstimate.id, { transaction: t });
+
+      // Recalculate totals
+      const parts = await EstimatePart.findAll({ where: { estimateId: newEstimate.id }, transaction: t });
+      const estimateTotals = await calculateEstimateTotalsWithMinimums(parts, newEstimate, { transaction: t });
+      await newEstimate.update(estimateTotals, { transaction: t });
+      return newEstimate;
     });
 
-    // Copy parts
-    for (const origPart of original.parts) {
-      const partData = {
-        estimateId: newEstimate.id,
-        partNumber: origPart.partNumber,
-        partType: origPart.partType,
-        clientPartNumber: origPart.clientPartNumber,
-        quantity: origPart.quantity,
-        materialDescription: origPart.materialDescription,
-        supplierName: origPart.supplierName,
-        vendorEstimateNumber: origPart.vendorEstimateNumber,
-        materialUnitCost: origPart.materialUnitCost,
-        materialMarkupPercent: origPart.materialMarkupPercent,
-        rollingCost: origPart.rollingCost,
-        otherServicesCost: origPart.otherServicesCost,
-        otherServicesMarkupPercent: origPart.otherServicesMarkupPercent,
-        material: origPart.material,
-        thickness: origPart.thickness,
-        width: origPart.width,
-        length: origPart.length,
-        outerDiameter: origPart.outerDiameter,
-        wallThickness: origPart.wallThickness,
-        sectionSize: origPart.sectionSize,
-        rollType: origPart.rollType,
-        radius: origPart.radius,
-        diameter: origPart.diameter,
-        arcDegrees: origPart.arcDegrees,
-        flangeOut: origPart.flangeOut,
-        specialInstructions: origPart.specialInstructions,
-        materialSource: origPart.materialSource,
-        materialTotal: origPart.materialTotal,
-        laborTotal: origPart.laborTotal,
-        partTotal: origPart.partTotal,
-        formData: origPart.formData,
-        cutFileReference: origPart.cutFileReference
-      };
-
-      if (!['plate_roll', 'shaped_plate', 'angle_roll', 'flat_stock', 'pipe_roll', 'tube_roll', 'flat_bar', 'channel_roll', 'beam_roll', 'tee_bar', 'press_brake', 'cone_roll', 'fab_service', 'shop_rate'].includes(partData.partType)) {
-        const totals = calculatePartTotals(partData);
-        Object.assign(partData, totals);
-      }
-      const newPart = await EstimatePart.create(partData);
-      // Copy part files (prints, STEP, DXF) — point to same Cloudinary/S3 resource
-      for (const origFile of (origPart.files || [])) {
-        await EstimatePartFile.create({
-          partId: newPart.id,
-          filename: origFile.filename,
-          originalName: origFile.originalName,
-          mimeType: origFile.mimeType,
-          size: origFile.size,
-          url: origFile.url,
-          cloudinaryId: origFile.cloudinaryId,
-          fileType: origFile.fileType,
-          fileLastModified: origFile.fileLastModified,
-          portalVisible: false
-        });
-      }
-    }
-
-    // Recalculate totals
-    const parts = await EstimatePart.findAll({ where: { estimateId: newEstimate.id } });
-    const estimateTotals = await calculateEstimateTotalsWithMinimums(parts, newEstimate);
-    await newEstimate.update(estimateTotals);
-
     // Reload with parts
-    const createdEstimate = await Estimate.findByPk(newEstimate.id, {
+    const createdEstimate = await Estimate.findByPk(result.id, {
       include: [{ model: EstimatePart, as: 'parts' }]
     });
 
@@ -2492,9 +2423,9 @@ router.post('/:id/duplicate', async (req, res, next) => {
     await logActivity(
       'created',
       'estimate',
-      newEstimate.id,
+      result.id,
       estimateNumber,
-      newEstimate.clientName,
+      result.clientName,
       `Estimate ${estimateNumber} created (duplicated from ${original.estimateNumber})`,
       { duplicatedFrom: original.estimateNumber }
     );
@@ -2547,7 +2478,7 @@ router.get('/:id/pdf', async (req, res, next) => {
 
     // API key client scoping
     if (req.apiKey && req.apiKey.clientName) {
-      if (!estimate.clientName || !estimate.clientName.toLowerCase().includes(req.apiKey.clientName.toLowerCase())) {
+      if (!(await portalCanSee(req, estimate))) {
         return res.status(403).json({ error: { message: 'Access denied' } });
       }
     }
@@ -2557,11 +2488,7 @@ router.get('/:id/pdf', async (req, res, next) => {
     
     // Also check the Client record directly - this is the authoritative source
     if (!isTaxExempt) {
-      isTaxExempt = await isClientTaxExempt(estimate.clientName);
-      if (isTaxExempt) {
-        // Fix the DB while we're at it
-        await estimate.update({ taxExempt: true, taxExemptReason: 'Resale' });
-      }
+      isTaxExempt = await isClientTaxExempt(estimate.clientName, estimate.clientId);   // not written back (T47)
     }
     estimate.taxExempt = isTaxExempt;
 
@@ -3117,7 +3044,8 @@ router.get('/:id/pdf', async (req, res, next) => {
     const shipChargesTotal = estShipCharges.reduce((sum, c) => sum + chargeBilled(c), 0);
     const hasShipCharges = estShipCharges.length > 0 && shipChargesTotal > 0;
     // Shipping & Handling is a non-taxed add-on (same treatment trucking had).
-    const grandTotalWithShipping = (parseFloat(estimate.grandTotal) || 0) + shipChargesTotal;
+    // estimate.grandTotal already includes Shipping & Handling (or the old trucking amount) — U11
+    const grandTotalWithShipping = parseFloat(estimate.grandTotal) || 0;
 
     if (hasShipCharges) {
       if (yPos > 660) { doc.addPage(); yPos = 50; }
@@ -3191,7 +3119,10 @@ router.get('/:id/pdf', async (req, res, next) => {
       }
     }
     // Use recalculated value; fall back to stored if calculation gives 0
-    const subtotalDisplay = displaySubtotal > 0 ? displaySubtotal : (parseFloat(estimate.partsSubtotal) || 0);
+    // The estimate's own calculated subtotal (lines + minimum + rush + trips) — the same figure the total
+    // is built from, so the printed rows add up (round 13; the line-by-line recount used the rolling base
+    // labor of outside-processed parts)
+    const subtotalDisplay = (parseFloat(estimate.partsSubtotal) || 0) > 0 ? parseFloat(estimate.partsSubtotal) : displaySubtotal;
 
     // Subtotal
     doc.fontSize(10).fillColor(grayColor).text('Subtotal:', 350, yPos, { lineBreak: false });
@@ -3205,9 +3136,9 @@ router.get('/:id/pdf', async (req, res, next) => {
       const discountDisplay = discPct > 0 
         ? `Discount (${discPct}%):` 
         : 'Discount:';
-      const discountValue = discPct > 0
-        ? (parseFloat(estimate.partsSubtotal) || 0) * discPct / 100
-        : discAmt;
+      const discountValue = Math.min(discPct > 0
+        ? Math.round((parseFloat(estimate.partsSubtotal) || 0) * Math.min(100, discPct) / 100 * 100) / 100
+        : discAmt, Math.max(0, parseFloat(estimate.partsSubtotal) || 0));   // capped like the total (T7)
       doc.fillColor('#c62828').text(discountDisplay, 350, yPos, { lineBreak: false });
       doc.text(`-${formatCurrency(discountValue)}`, 480, yPos, { align: 'right', width: 82, lineBreak: false });
       doc.fillColor(darkColor);
@@ -3274,29 +3205,9 @@ router.get('/:id/pdf', async (req, res, next) => {
     if (estimate.showDualPricing) {
       if (yPos > 640) { doc.addPage(); yPos = 50; }
       
-      // Calculate labor-only total
-      let laborOnlySubtotal = 0;
-      for (const part of sortedParts) {
-        if (['fab_service', 'shop_rate', 'rush_service'].includes(part.partType)) {
-          laborOnlySubtotal += parseFloat(part.partTotal) || 0;
-        } else {
-          const qty = parseInt(part.quantity) || 1;
-          const labEach = parseFloat(part.laborTotal) || 0;
-          const opCost = parseFloat(part.outsideProcessingCost) || 0;
-          const opMarkup = parseFloat(part.outsideProcessingMarkupPercent) || 0;
-          const opEach = Math.round(opCost * (1 + opMarkup / 100) * 100) / 100;
-          const opTransport = parseFloat(part.outsideProcessingTransportCost) || 0;
-          const opTransportMarkup = parseFloat(part.outsideProcessingTransportMarkupPercent) || 0;
-          const opTransportEach = Math.round(opTransport * (1 + opTransportMarkup / 100) * 100) / 100;
-          laborOnlySubtotal += (labEach + opEach + opTransportEach) * qty;
-        }
-      }
-      const discPct = parseFloat(estimate.discountPercent) || 0;
-      const discAmt = parseFloat(estimate.discountAmount) || 0;
-      const laborDiscount = discPct > 0 ? laborOnlySubtotal * (discPct / 100) : discAmt;
-      const laborAfterDiscount = laborOnlySubtotal - laborDiscount;
-      const laborTax = estimate.taxExempt ? 0 : laborAfterDiscount * (parseFloat(estimate.taxRate) / 100);
-      const laborOnlyTotal = laborAfterDiscount + laborTax + (hasShipCharges ? shipChargesTotal : (parseFloat(estimate.truckingCost) || 0));
+      // Labor-only total from the shared engine (minimum, expedite, trips, discount cap — U4)
+      const optB = await computeOptionB(estimate.parts || sortedParts, estimate);
+      const laborOnlyTotal = parseFloat(optB.grandTotal) || 0;
 
       doc.strokeColor('#1565c0').lineWidth(1.5).moveTo(50, yPos).lineTo(562, yPos).stroke();
       yPos += 12;
@@ -3426,6 +3337,9 @@ router.get('/:id/pdf', async (req, res, next) => {
 
 // POST /api/estimates/:id/convert-to-workorder - Convert estimate to work order
 router.post('/:id/convert-to-workorder', async (req, res, next) => {
+  // Numbered before the DR lock (audit T13); a failed convert just skips one WO number for the day
+  let orderNumber;
+  try { orderNumber = await require('../services/docNumbers').nextDocNumber('WO'); } catch (e) { return next(e); }
   const transaction = await sequelize.transaction();
   let committed = false;
   
@@ -3471,9 +3385,13 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
     }
 
     // Create DR number record
+    // with its estimate and client (U46: these were left NULL)
     const drRecord = await DRNumber.create({
       drNumber,
-      status: 'active'
+      status: 'active',
+      estimateId: estimate.id,
+      clientName: estimate.clientName || null,
+      clientId: estimate.clientId || null
     }, { transaction });
 
     // Generate order number
@@ -3481,7 +3399,8 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
     const year = date.getFullYear().toString().slice(-2);
     const month = (date.getMonth() + 1).toString().padStart(2, '0');
     const day = date.getDate().toString().padStart(2, '0');
-    const orderNumber = await require('../services/docNumbers').nextDocNumber('WO');
+    // orderNumber is taken before the transaction (the counter uses its own connection; asking for it
+    // while holding the DR lock starved the pool under load — audit T13)
 
     // Create work order from estimate using shared utility
     const { buildWorkOrderFromEstimate, buildWorkOrderPartFromEstimate } = require('../services/pricing');
@@ -3503,79 +3422,9 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
     // Update DR record with work order ID
     await drRecord.update({ workOrderId: workOrder.id }, { transaction });
 
-    // Create work order parts from estimate parts using shared utility
-    const estimateToWoPartIdMap = {};
-    let displayNums = {};
-    try {
-      displayNums = (computeDisplayNumbers(estimate.parts || []) || {}).display || {};
-    } catch (e) { displayNums = {}; }
-    for (const estimatePart of estimate.parts) {
-      try {
-        const partData = buildWorkOrderPartFromEstimate(estimatePart);
-        partData.workOrderId = workOrder.id;
-
-        // Auto-fill lot number as <DR number>-<production number>. This only ever existed in
-        // the unused /convert handler, so converted work orders have never actually received
-        // lot numbers.
-        if (!partData.lotNumber || !String(partData.lotNumber).trim()) {
-          if (drNumber) partData.lotNumber = `${drNumber}-${displayNums[estimatePart.id] || estimatePart.partNumber}`;
-        }
-        
-        console.log(`[convert] Part #${partData.partNumber} (${partData.partType}): labor=${partData.laborTotal}, material=${partData.materialTotal}, total=${partData.partTotal}`);
-
-        const workOrderPart = await WorkOrderPart.create(partData, { transaction });
-
-        // Track estimate part ID → work order part ID mapping
-        estimateToWoPartIdMap[estimatePart.id] = workOrderPart.id;
-
-        // Copy part files to work order part files
-        if (estimatePart.files && estimatePart.files.length > 0) {
-          for (const file of estimatePart.files) {
-            // Normalize estimate fileType values to work order values
-            let fileType = file.fileType || 'other';
-            const ext = (file.originalName || file.filename || '').toLowerCase();
-            if (ext.endsWith('.pdf') || fileType === 'drawing' || fileType === 'print') {
-              fileType = 'pdf_print';
-            } else if (ext.endsWith('.stp') || ext.endsWith('.step') || fileType === 'step_file') {
-              fileType = 'step_file';
-            } else if (fileType === 'specification') {
-              fileType = 'other';
-            }
-            
-            await WorkOrderPartFile.create({
-              workOrderPartId: workOrderPart.id,
-              filename: file.filename,
-              originalName: file.originalName,
-              mimeType: file.mimeType,
-              size: file.size,
-              url: file.url,
-              cloudinaryId: file.cloudinaryId,
-              fileType
-            }, { transaction });
-          }
-        }
-      } catch (partErr) {
-        console.error(`Failed to create WO part #${estimatePart.partNumber} (type: ${estimatePart.partType}):`, partErr.message);
-        if (partErr.errors) partErr.errors.forEach(e => console.error(`  Validation: ${e.path} - ${e.message}`));
-        throw new Error(`Failed on part #${estimatePart.partNumber} (${estimatePart.partType}): ${partErr.message}`);
-      }
-    }
-
-    // Second pass: remap _linkedPartId in formData for service parts
-    // The estimate's _linkedPartId points to estimate part IDs - we need to update to WO part IDs
-    for (const estimatePart of estimate.parts) {
-      const fd = estimatePart.formData && typeof estimatePart.formData === 'object' ? estimatePart.formData : {};
-      if (fd._linkedPartId && estimateToWoPartIdMap[fd._linkedPartId]) {
-        const woPartId = estimateToWoPartIdMap[estimatePart.id];
-        const newLinkedId = estimateToWoPartIdMap[fd._linkedPartId];
-        const updatedFormData = { ...fd, _linkedPartId: newLinkedId };
-        await WorkOrderPart.update(
-          { formData: updatedFormData },
-          { where: { id: woPartId }, transaction }
-        );
-        console.log(`[convert] Remapped _linkedPartId for part #${estimatePart.partNumber}: ${fd._linkedPartId} → ${newLinkedId}`);
-      }
-    }
+    // Parts, part files, lot numbers and service-line links — the one copy Link uses too (R9)
+    await require('../services/estimateCopy').copyEstimateParts(require('../models'), estimate, workOrder,
+      { transaction, drNumber, log: (m) => console.log('[convert] ' + m) });
 
     // Update estimate status - use 'accepted' and link to work order
     const statusUpdates = {
@@ -3587,27 +3436,9 @@ router.post('/:id/convert-to-workorder', async (req, res, next) => {
     await estimate.update(statusUpdates, { transaction });
 
     // Copy shipment charges from estimate to work order
-    const estimateCharges = await ShipmentCharge.findAll({ where: { estimateId: estimate.id } });
-    for (const sc of estimateCharges) {
-      await ShipmentCharge.create({
-        workOrderId: workOrder.id,
-        sortOrder: sc.sortOrder,
-        carrierType: sc.carrierType,
-        vendorId: sc.vendorId,
-        vendorName: sc.vendorName,
-        pickupLocation: sc.pickupLocation,
-        pickupIsShop: sc.pickupIsShop,
-        dropoffLocation: sc.dropoffLocation,
-        dropoffIsShop: sc.dropoffIsShop,
-        shippingCost: sc.shippingCost,
-        shippingMarkup: sc.shippingMarkup,
-        materialsCost: sc.materialsCost,
-        materialsMarkup: sc.materialsMarkup,
-        notes: sc.notes,
-        distanceMiles: sc.distanceMiles,
-        durationMinutes: sc.durationMinutes,
-      }, { transaction });
-    }
+    await require('../services/estimateCopy').copyEstimateCharges(require('../models'), estimate, workOrder, { transaction });
+    // The estimate's material deliveries and POs belong to the new order too (U21)
+    await require('../services/EstimateLinkService').attachEstimateOrders(require('../models'), estimate.id, workOrder.id, transaction);
 
     await transaction.commit();
     committed = true;
@@ -4234,12 +4065,30 @@ router.get('/:id/ai-parse-status/:jobId', async (req, res) => {
 
 // POST /api/estimates/:id/parts/:partId/outside-processing-po - Generate outside processing PO
 router.post('/:id/parts/:partId/outside-processing-po', async (req, res, next) => {
+  // One at a time per estimate, never a second PO for a part that has one (round 13, T14 — four clicks
+  // made four POs and left three orphaned)
   try {
+    return await require('../services/poNumbers').withOrderPOLock('est:' + req.params.id, () => createEstimateOPPO(req, res));
+  } catch (error) {
+    if (error.status === 409) return res.status(409).json({ error: { message: error.message } });
+    next(error);
+  }
+});
+
+async function createEstimateOPPO(req, res) {
+  {
     const estimate = await Estimate.findByPk(req.params.id);
     if (!estimate) return res.status(404).json({ error: { message: 'Estimate not found' } });
 
-    const part = await EstimatePart.findByPk(req.params.partId);
+    const part = await EstimatePart.findOne({ where: { id: req.params.partId, estimateId: estimate.id } });
     if (!part) return res.status(404).json({ error: { message: 'Part not found' } });
+    // A part that already has a PO gets that PO again (to reprint / resend), never a new number
+    let existingPO = part.outsideProcessingPONumber || null;
+    if (existingPO) {   // only a PO that still exists and isn't void is reused
+      const n = parseInt(String(existingPO).replace(/\D/g, ''), 10);
+      const row = n ? await require('../models').PONumber.findOne({ where: { poNumber: n } }) : null;
+      if (!row || row.status === 'void') existingPO = null;
+    }
 
     if (!part.outsideProcessingVendorId) {
       return res.status(400).json({ error: { message: 'No vendor set for outside processing on this part' } });
@@ -4251,11 +4100,11 @@ router.post('/:id/parts/:partId/outside-processing-po', async (req, res, next) =
 
     // Reserve from the shared, locked PO sequence and record it (audit H11). Previously this took a
     // number from the material counter without recording it, and could reset the counter to 1002.
-    const poNumber = await require('../services/poNumbers').reserveStandalone('OP', {
+    const poNumber = existingPO || await require('../services/poNumbers').reserveStandalone('OP', {
       estimateId: estimate.id, clientName: estimate.clientName, supplier: vendor.name, vendorId: vendor.id });
 
     // Save PO number on part
-    await part.update({
+    if (!existingPO) await part.update({
       outsideProcessingPONumber: poNumber,
       outsideProcessingPOSentAt: new Date()
     });
@@ -4289,15 +4138,12 @@ router.post('/:id/parts/:partId/outside-processing-po', async (req, res, next) =
 
     console.log(`[OutsidePO] Generated ${poNumber} for ${vendor.name}: ${materialDesc}`);
 
-    res.json({
+    return res.json({
       data: { poNumber, poDetails, vendorEmail: vendor.contactEmail },
       message: `Outside processing PO ${poNumber} generated for ${vendor.name}`
     });
-  } catch (error) {
-    console.error('[OutsidePO] Error:', error.message);
-    next(error);
   }
-});
+}
 
 // POST /api/estimates/:id/parts/:partId/outside-processing-email - Email outside processing PO to vendor
 router.post('/:id/parts/:partId/outside-processing-email', async (req, res, next) => {
@@ -4422,6 +4268,8 @@ router.post('/:id/shipment-charges', async (req, res, next) => {
       distanceMiles: (req.body.distanceMiles != null && req.body.distanceMiles !== '') ? parseFloat(req.body.distanceMiles) : null,
       durationMinutes: (req.body.durationMinutes != null && req.body.durationMinutes !== '') ? parseInt(req.body.durationMinutes) : null,
     });
+    // the stored estimate total includes shipping charges (U11) — keep it current (review of round 15)
+    try { await router.recalcEstimateTotals(req.params.id); } catch (e) { console.warn('[estimate] totals refresh failed:', e.message); }
     const result = await ShipmentCharge.findByPk(charge.id, { include: [{ model: Vendor, as: 'vendor', attributes: ['id', 'name'] }] });
     res.json({ data: result });
   } catch (error) { next(error); }
@@ -4447,6 +4295,8 @@ router.put('/:id/shipment-charges/:chargeId', async (req, res, next) => {
       distanceMiles: req.body.distanceMiles !== undefined ? ((req.body.distanceMiles === '' || req.body.distanceMiles == null) ? null : parseFloat(req.body.distanceMiles)) : charge.distanceMiles,
       durationMinutes: req.body.durationMinutes !== undefined ? ((req.body.durationMinutes === '' || req.body.durationMinutes == null) ? null : parseInt(req.body.durationMinutes)) : charge.durationMinutes,
     });
+    // the stored estimate total includes shipping charges (U11) — keep it current (review of round 15)
+    try { await router.recalcEstimateTotals(req.params.id); } catch (e) { console.warn('[estimate] totals refresh failed:', e.message); }
     const result = await ShipmentCharge.findByPk(charge.id, { include: [{ model: Vendor, as: 'vendor', attributes: ['id', 'name'] }] });
     res.json({ data: result });
   } catch (error) { next(error); }
@@ -4457,6 +4307,7 @@ router.delete('/:id/shipment-charges/:chargeId', async (req, res, next) => {
     const charge = await ShipmentCharge.findOne({ where: { id: req.params.chargeId, estimateId: req.params.id } });
     if (!charge) return res.status(404).json({ error: { message: 'Shipment charge not found' } });
     await charge.destroy();
+    try { await router.recalcEstimateTotals(req.params.id); } catch (e) { console.warn('[estimate] totals refresh failed:', e.message); }
     res.json({ data: { deleted: true } });
   } catch (error) { next(error); }
 });
